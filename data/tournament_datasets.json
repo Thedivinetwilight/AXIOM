@@ -1,0 +1,6 @@
+[
+  {"csv":"sample.csv","symbol":"DEMO","timeframe":"1D"},
+  {"csv":"sample_alt.csv","symbol":"ALT","timeframe":"1D"},
+  {"csv":"sample_1h.csv","symbol":"DEMO","timeframe":"1h"},
+  {"csv":"sample_alt_1h.csv","symbol":"ALT","timeframe":"1h"}
+]

@@ -1,0 +1,5 @@
+{
+  "weights": {"return":1.0,"sharpe":1.0,"sortino":0.5,"profit_factor":0.5,
+    "drawdown":2.0,"low_trades":1.0,"instability":1.0,"volatility":0.5,"costs":1.0},
+  "minimum_trades":10
+}

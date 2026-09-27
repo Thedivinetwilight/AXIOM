@@ -1,0 +1,13 @@
+[project]
+name = "arena"
+version = "3.0.5"
+requires-python = ">=3.11"
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+[tool.ruff]
+line-length = 100
+
+[tool.setuptools.packages.find]
+include = ["app*", "desktop*"]
+exclude = ["app.tests*", "tests*"]

@@ -1,0 +1,5 @@
+{
+  "moving_average": {"fast_period": [10,20], "slow_period": [30,50]},
+  "rsi": {"period": [14], "lower": [20,30,35], "upper": [70,80]},
+  "bollinger": {"period": [20,50], "std_dev": [2.0,2.5]}
+}

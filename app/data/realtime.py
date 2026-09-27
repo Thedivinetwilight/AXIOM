@@ -1,0 +1,163 @@
+"""Read-only completed-candle streams with heartbeat and bounded reconnect backoff."""
+
+import asyncio
+from datetime import datetime, timezone
+import json
+import logging
+import random
+import re
+from urllib.parse import urlsplit
+from app.data.models import Candle, TIMEFRAMES
+from app.data.provider import WebSocketProvider
+
+logger = logging.getLogger("bot.market")
+
+
+class ReplayStream(WebSocketProvider):
+    def __init__(self, candles, delay=0.0):
+        if delay < 0:
+            raise ValueError("Replay delay cannot be negative")
+        self.candles, self.delay, self.closed = candles, delay, False
+        self.status, self.last_message = "DISCONNECTED", None
+
+    async def stream(self, symbols, timeframe):
+        self.status = "CONNECTED"
+        try:
+            for candle in self.candles:
+                if self.closed:
+                    break
+                if candle.symbol in symbols:
+                    await asyncio.sleep(self.delay)
+                    self.last_message = candle.available_at(timeframe).isoformat()
+                    yield candle
+        finally:
+            self.status = "DISCONNECTED"
+
+    async def close(self):
+        self.closed, self.status = True, "DISCONNECTED"
+
+
+class JSONWebSocketStream(WebSocketProvider):
+    """Generic WSS data protocol documented in README; no order messages.
+
+    Auth is optional Bearer header, never placed into URLs/logs. Implement decode()
+    and subscription() to integrate a different read-only provider protocol.
+    """
+
+    def __init__(self, url: str, token: str = "", *, max_backoff=60.0):
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "wss"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+        ):
+            raise ValueError("Use a WSS data URL without embedded credentials/query secrets")
+        self._url, self._token, self.max_backoff = url, token, max_backoff
+        self.closed = False
+        self.status, self.last_message = "DISCONNECTED", None
+        self._socket = None
+
+    def subscription(self, symbols, timeframe):
+        return {"type": "subscribe", "symbols": symbols, "timeframe": timeframe}
+
+    def decode(self, payload, timeframe):
+        if payload.get("type") == "heartbeat":
+            return None
+        if payload.get("closed") is not True:
+            return None
+        if payload.get("timeframe") != timeframe:
+            raise ValueError("Stream timeframe mismatch")
+        return Candle.from_dict(payload["candle"])
+
+    async def stream(self, symbols, timeframe):
+        from websockets.asyncio.client import connect
+        from websockets.exceptions import ConnectionClosed, InvalidStatus
+
+        if timeframe not in TIMEFRAMES or not symbols:
+            raise ValueError("Invalid stream subscription")
+        attempts = 0
+        try:
+            while not self.closed:
+                self.status = "CONNECTING" if attempts == 0 else "RECONNECTING"
+                try:
+                    headers = {"Authorization": f"Bearer {self._token}"} if self._token else None
+                    async with connect(
+                        self._url,
+                        additional_headers=headers,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        open_timeout=20,
+                        close_timeout=5,
+                        max_size=1_048_576,
+                    ) as socket:
+                        self._socket, self.status = socket, "CONNECTED"
+                        await socket.send(json.dumps(self.subscription(symbols, timeframe)))
+                        logger.info("stream_connected")
+                        while not self.closed:
+                            # Traffic-independent liveness (important for daily candles).
+                            try:
+                                message = await asyncio.wait_for(socket.recv(), timeout=45)
+                            except TimeoutError:
+                                pong = await socket.ping()
+                                await asyncio.wait_for(pong, timeout=20)
+                                continue
+                            payload = json.loads(message)
+                            self.last_message = datetime.now(timezone.utc).isoformat()
+                            bar = self.decode(payload, timeframe)
+                            attempts = 0
+                            if bar is not None:
+                                if bar.symbol not in symbols:
+                                    raise ValueError("Unsubscribed stream symbol")
+                                yield bar
+                except (OSError, TimeoutError, ConnectionClosed, InvalidStatus) as exc:
+                    attempts += 1
+                    self.status = "RECONNECTING"
+                    logger.warning("stream_reconnect", extra={"error": type(exc).__name__})
+                    if not self.closed:
+                        await asyncio.sleep(
+                            min(self.max_backoff, 2 ** min(attempts, 6)) + random.random()
+                        )
+                finally:
+                    self._socket = None
+        finally:
+            self.status = "DISCONNECTED"
+
+    async def close(self):
+        self.closed = True
+        if self._socket:
+            await self._socket.close()
+        self.status = "DISCONNECTED"
+
+
+class BinanceStream(JSONWebSocketStream):
+    """Public crypto spot kline stream; no exchange account or API key required."""
+
+    def __init__(self):
+        super().__init__("wss://stream.binance.com:9443/ws")
+
+    def subscription(self, symbols, timeframe):
+        if any(not re.fullmatch(r"[A-Z0-9]{4,24}", symbol) for symbol in symbols):
+            raise ValueError("Binance requires uppercase crypto symbols, e.g. BTCUSDT")
+        interval = "1d" if timeframe == "1D" else timeframe
+        return {
+            "method": "SUBSCRIBE",
+            "params": [f"{s.lower()}@kline_{interval}" for s in symbols],
+            "id": 1,
+        }
+
+    def decode(self, payload, timeframe):
+        if "code" in payload:
+            raise ValueError("Market stream subscription rejected")
+        kline = payload.get("k", {})
+        if not kline.get("x"):
+            return None
+        expected = "1d" if timeframe == "1D" else timeframe
+        if kline.get("i") != expected:
+            raise ValueError("Stream timeframe mismatch")
+        return Candle(
+            datetime.fromtimestamp(kline["t"] / 1000, timezone.utc),
+            *(float(kline[key]) for key in ("o", "h", "l", "c", "v")),
+            payload["s"],
+        )
