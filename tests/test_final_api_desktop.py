@@ -151,16 +151,18 @@ class TestDesktopViewModels:
 
 
 class TestDesktopContract:
-    def test_app_defines_exactly_13_pages(self):
+    def test_app_defines_exactly_14_pages(self):
+        """13 original pages + the dedicated Kronos FORECAST page."""
         from pathlib import Path
 
         source = (Path(__file__).resolve().parents[1] / "desktop" / "app.py").read_text()
         start = source.index("PAGES = [")
         end = source.index("]", start)
         pages = source[start:end].count(",") + 1
-        assert pages == 13
+        assert pages == 14
         for required in ("Command Center", "Research Lab", "Reports",
-                         "Market Intelligence", "Learning", "Settings"):
+                         "Market Intelligence", "Learning", "Settings",
+                         "Forecast"):
             assert required in source[start:end]
 
     def test_client_has_final_read_methods(self):
