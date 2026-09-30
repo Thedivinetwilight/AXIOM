@@ -9,7 +9,7 @@ Find your symptom in the index, work the entry top to bottom. Do not skip **WHAT
 in a trading system, an unnecessary edit is often more expensive than the original fault.
 
 **Verification:** commands and outputs marked *verified* were executed on Linux / Python 3.11.2
-against commit `60113ce`. Entries requiring Upstox credentials are marked **UNVERIFIED — no live
+against commit `99fe847`. Entries requiring Upstox credentials are marked **UNVERIFIED — no live
 provider response was observed while writing this**; their logic is transcribed from source.
 
 ---
@@ -1254,8 +1254,12 @@ git status --porcelain                                         # what did the ru
 - Passes per-file, fails in the suite → cross-file pollution; bisect by file.
 - `git status` showing new `trading_bot.db` / `data/*` after a run → a test is writing to the
   default relative path.
-- Verified baseline at commit `60113ce`: **850 passed, 10 skipped**. A different total is your
-  signal — record your own baseline before changing anything.
+- Verified baselines at commit `99fe847`: **852 passed, 10 skipped** with `requirements.txt`
+  alone; **854 passed, 8 skipped** once `requirements-kronos.txt` is installed; **860 passed,
+  2 skipped** with `AXIOM_KRONOS_SOURCE` also set. **The total depends on installed
+  dependencies** — installing `numpy` or `torch` un-skips tests via `pytest.importorskip`.
+  Compare against a baseline taken in the *same* environment, and read skip reasons with
+  `python -m pytest -rs -q` before treating a changed total as a regression.
 
 **FIX**
 Make the test isolate itself — use `tmp_path` for any database, and `monkeypatch.setenv` (which

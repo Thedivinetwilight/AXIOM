@@ -5,7 +5,7 @@ Full explanations live in `FULL_TROUBLESHOOTING_GUIDE.md`; symptom-by-symptom fi
 `ERROR_DIAGNOSTIC_PLAYBOOK.md`.
 
 **Verification note:** the exit codes and outputs quoted in this flowchart were produced by
-running the commands on Linux / Python 3.11.2 against commit `60113ce`. PowerShell forms are
+running the commands on Linux / Python 3.11.2 against commit `99fe847`. PowerShell forms are
 given for convenience but were **not** executed on Windows.
 
 ---

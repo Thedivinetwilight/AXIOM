@@ -44,7 +44,9 @@ could **not** be executed in the environment used to write this guide, it is mar
 
 ## 1. Verification status of this document
 
-Run against commit `60113ce` on branch `arena/01a0ecfa-axiom`, Linux, Python 3.11.2.
+Run against commit `99fe847` on branch `arena/01a0ecfa-axiom`, Linux, Python 3.11.2.
+The documented source (`app/`, `desktop/`, `axiom/`) is byte-identical to `60113ce`, where the
+commands were first executed; only documentation and tests changed since.
 
 ### Verified by execution here
 
@@ -63,7 +65,7 @@ Run against commit `60113ce` on branch `arena/01a0ecfa-axiom`, Linux, Python 3.1
 | `monitor` reports DB health | `python -m app monitor` | exit 0, `"database_ok": true`, `"alerts": []` |
 | `initialize` is offline-safe | `python -m app initialize` | exit 0, `UNIVERSE_SYNC_UNAVAILABLE` recorded, `"ok": true` |
 | `run.py` exposes 7 research modes | `python run.py --help` | exit 0 |
-| Full test suite | `python -m pytest` | **850 passed, 10 skipped** |
+| Full test suite | `python -m pytest` | **852 passed, 10 skipped** (see §15.2 — the count depends on which dependency sets are installed) |
 
 ### NOT verified — do not treat as working
 
@@ -1365,12 +1367,32 @@ python -m pytest -x --lf            # rerun only last failures
 
 ### 15.2 Verified baseline
 
-```
-850 passed, 10 skipped in 71.06s
-```
+All three were run at commit `99fe847`, Linux, Python 3.11.2. **Record your own baseline before
+changing anything** — a count that moves is the signal.
 
-Run at commit `60113ce`, Linux, Python 3.11.2, with `requirements.txt` installed. **Record your
-own baseline before changing anything** — a count that moves is the signal.
+| Installed | Command | Result |
+| --- | --- | --- |
+| `requirements.txt` only | `python -m pytest` | **852 passed, 10 skipped** |
+| + `requirements-kronos.txt` | `python -m pytest` | **854 passed, 8 skipped** |
+| + `AXIOM_KRONOS_SOURCE=<checkout>` | `AXIOM_KRONOS_SOURCE=… python -m pytest` | **860 passed, 2 skipped** |
+
+**The total is a function of your installed dependencies, not a fixed constant.** This is the
+single most common source of a false "I broke something" alarm in this suite:
+
+- Installing `numpy` un-skips `tests/test_kronos_runtime.py:721`
+  (`pytest.importorskip("numpy")`); installing `torch` un-skips line 991
+  (`pytest.importorskip("torch")`). That is the 852 → 854 step.
+- Setting `AXIOM_KRONOS_SOURCE` to a real Kronos checkout un-skips six more, gated on
+  *"needs a real Kronos checkout"* / *"set AXIOM_KRONOS_SOURCE to a Kronos checkout to run this"*
+  (`tests/test_kronos_runtime.py` lines 328, 345, 822, 849, 895, 927). That is the 854 → 860 step.
+
+The two skips that remain even in the fullest configuration are both honest capability skips, not
+failures: `tests/test_kronos_runtime.py:977` (*"CUDA is not available on this machine"*) and
+`tests/test_v2_universe.py:81` (*"public instrument file unreachable"* — a pre-existing
+network/TLS skip).
+
+So **compare your run against a baseline taken in the same environment**, and read skip reasons
+with `python -m pytest -rs -q` before treating a changed total as a regression.
 
 ### 15.3 Tests by area
 

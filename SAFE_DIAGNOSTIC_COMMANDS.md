@@ -11,7 +11,7 @@ The only commands that *can* mutate are gathered in the last section and are lab
 **MUTATING — do not run casually**.
 
 **Verification:** every POSIX command below was executed on Linux / Python 3.11.2 against commit
-`60113ce`; outputs shown are real. PowerShell equivalents are provided but were **not** executed
+`99fe847`; outputs shown are real. PowerShell equivalents are provided but were **not** executed
 on Windows. Commands needing Upstox credentials are marked **NEEDS CREDENTIALS** and were
 **not** run here.
 
@@ -462,7 +462,18 @@ python -m pytest -rs -q                               # show skip reasons
 python -m pytest -x --lf                              # rerun last failures only
 ```
 
-Verified baseline at `60113ce`: **850 passed, 10 skipped** in ~71 s.
+Verified baselines at `99fe847` — **the total depends on what you have installed**, so record
+your own before changing anything:
+
+| Installed | Result |
+| --- | --- |
+| `requirements.txt` only | **852 passed, 10 skipped** |
+| + `requirements-kronos.txt` | **854 passed, 8 skipped** |
+| + `AXIOM_KRONOS_SOURCE=<checkout>` | **860 passed, 2 skipped** |
+
+The two skips that survive even the fullest configuration are CUDA absence
+(`tests/test_kronos_runtime.py:977`) and a pre-existing network-blocked instrument download
+(`tests/test_v2_universe.py:81`). Read skip reasons with `python -m pytest -rs -q`.
 
 ---
 
