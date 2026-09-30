@@ -140,6 +140,53 @@ class TestForecastProvenance:
         assert StubKronosBackend.kind == "stub"
         assert UpstreamKronosBackend.kind == "upstream"
 
+    def test_a_forecast_cannot_disguise_its_origin(self):
+        """Provenance is ENFORCED, not merely defaulted.
+
+        The other tests in this class check that a well-formed object carries the
+        right origin. This one checks the guard in ``__post_init__`` actually
+        rejects a wrong one — without it, a caller could relabel model output as
+        an observation and every downstream "is this real data?" check would lie.
+        """
+        from axiom.models import (DataProvenance, ForecastCandle, ForecastSnapshot,
+                                  KronosConfig)
+
+        stamp = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        for bad in ("OBSERVED", "MARKET_DATA", "", "kronos_forecast", None):
+            with pytest.raises(ValueError, match="origin must be"):
+                ForecastCandle(stamp, 1.0, 2.0, 0.5, 1.5, 10.0, origin=bad)
+
+        config = KronosConfig(enabled=True, backend="stub", pred_len=1)
+        candle = ForecastCandle(stamp, 1.0, 2.0, 0.5, 1.5, 10.0)
+        provenance = DataProvenance(source="test", provider="replay",
+                                    instrument="DEMO", timeframe="1h", bars=1)
+        with pytest.raises(ValueError, match="origin must be"):
+            ForecastSnapshot(
+                instrument="DEMO", timeframe="1h", generated_at=stamp,
+                candles=(candle,), config=config, provenance=provenance,
+                origin="OBSERVED",
+            )
+
+    def test_serialized_forecasts_keep_their_origin(self):
+        """to_dict carries provenance, and there is no from_dict to drop it."""
+        from axiom.models import (DataProvenance, ForecastCandle, ForecastSnapshot,
+                                  KronosConfig)
+
+        stamp = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        candle = ForecastCandle(stamp, 1.0, 2.0, 0.5, 1.5, 10.0)
+        assert candle.to_dict()["origin"] == FORECAST_ORIGIN
+
+        snapshot = ForecastSnapshot(
+            instrument="DEMO", timeframe="1h", generated_at=stamp,
+            candles=(candle,),
+            config=KronosConfig(enabled=True, backend="stub", pred_len=1),
+            provenance=DataProvenance(source="test", provider="replay",
+                                      instrument="DEMO", timeframe="1h", bars=1),
+        )
+        assert snapshot.to_dict()["origin"] == FORECAST_ORIGIN
+        # No deserialization path exists, so no round-trip can silently strip it.
+        assert not hasattr(ForecastSnapshot, "from_dict")
+
 
 class TestNoFabricatedData:
     def test_market_layer_contains_no_random_generation(self):
