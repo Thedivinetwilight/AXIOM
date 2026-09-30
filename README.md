@@ -1144,3 +1144,59 @@ curl http://127.0.0.1:8000/health
 Tests cover both successful paths and safe failures, including future-data isolation, final-candle nonexecution, liquidity limits, fee/P&L reconciliation, stop gaps and ambiguity, calendar closures, SQLite rollback/restart, exclusive ownership, protected API routes, replay parity, mocked download caching, WSS reconnect/authentication/heartbeats, and malformed/future data rejection.
 
 **Keep REAL MONEY disabled. Evaluate assumptions, not only scores.**
+
+---
+
+## 16. AXIOM Kronos forecasting subsystem (desktop)
+
+Full details: **`KRONOS_INTEGRATION.md`**. Off by default — Kronos does nothing
+unless `AXIOM_KRONOS_ENABLED=true`.
+
+[Kronos](https://github.com/shiyu-coder/Kronos) is a financial time-series
+foundation model. In this repository it is a **forecasting subsystem only**, in a
+new top-level package `axiom/` plus a `Forecast` page in the desktop terminal.
+Arena 3.0.5 (`app/`) is untouched: `git diff 0314db2 -- app/` is empty.
+
+```
+REAL MARKET DATA → MarketDataProvider → validation → closed-candle gate
+   → [IPC] AXIOM-Kronos process (PyTorch, Kronos, tokenizer/model)
+   → forecast validation → ForecastStore → MARKETS overlay / FORECAST panel / research
+```
+
+What it is not: it never places orders, never changes risk limits, never enables
+LIVE trading, and never writes into Arena decisions, risk, account or strategy
+state. Its IPC surface is exactly `ping · load · status · forecast · shutdown`.
+Every predicted value is labelled `Forecast …` with `origin=KRONOS_FORECAST`;
+observed data keeps `origin=MARKET_OBSERVED`. Sample dispersion is reported as
+dispersion, never as calibrated probability.
+
+```bash
+# Base runtime — unchanged, and it never imports torch/pandas/Qt.
+pip install -r requirements.txt
+python -m pytest -q
+
+# Kronos runtime — a SEPARATE dependency set (only the Kronos process needs it).
+desktop\run_kronos_windows.bat          # Windows: .venv-kronos + AXIOM_KRONOS_SOURCE
+pip install -r requirements-kronos.txt  # elsewhere
+
+# Weights are downloaded into %LOCALAPPDATA%\AXIOM\models\kronos and verified by
+# SHA-256 before loading. They are never committed (see .gitignore).
+python tools/build_windows_executables.py   # AXIOM.exe + AXIOM-Kronos.exe
+```
+
+Configuration lives in `AXIOM_KRONOS.env.example` (separate from Arena's `.env`
+on purpose). Initial settings: `NeoQuasar/Kronos-small` +
+`NeoQuasar/Kronos-Tokenizer-base`, lookback 400, pred_len 120, max_context 512,
+T 1.0, top_k 0, top_p 0.9, sample_paths 1, device auto, update_on_closed_bar true
+— with `max_context` validated against the published context length of the model
+rather than assumed, and tokenizer/model pairing checked before inference.
+
+Tests: `tests/test_kronos_*.py` (8 modules) cover valid/invalid OHLCV, NaN/Inf,
+duplicate and unordered timestamps, gaps, wrong timeframe, insufficient history,
+model loading, tokenizer/model mismatch, forecast shape and validation, CPU
+inference against the real Kronos implementation (when `AXIOM_KRONOS_SOURCE` and
+PyTorch are present), GPU where supported, GUI responsiveness, Arena polling
+continuing during inference, Kronos failure isolation, clean worker shutdown,
+cache correctness, model revision tracking, no future leakage, no fabricated
+data, no trading capability, and graceful degradation when Kronos is disabled or
+unavailable.

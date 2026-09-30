@@ -1,0 +1,23 @@
+# AXIOM-Kronos runtime dependencies — a SEPARATE set from the base AXIOM/Arena
+# runtime (requirements.txt). Only the AXIOM-Kronos process needs these; the
+# GUI process, the Arena worker and the test suite never import them.
+#
+#   python -m venv .venv-kronos
+#   .venv-kronos\Scripts\pip install -r requirements-kronos.txt
+#
+# Kronos itself is not published on PyPI: clone the upstream implementation and
+# point the runtime at it (see KRONOS_INTEGRATION.md).
+#
+#   git clone https://github.com/shiyu-coder/Kronos %LOCALAPPDATA%\AXIOM\kronos
+#   setx AXIOM_KRONOS_SOURCE "%LOCALAPPDATA%\AXIOM\Kronos"
+
+# Numerics / tensors
+torch>=2.0
+numpy>=1.26
+pandas>=2.2
+
+# Kronos model requirements (https://github.com/shiyu-coder/Kronos)
+einops>=0.8
+safetensors>=0.4
+huggingface_hub>=0.24
+tqdm>=4.66

@@ -1,5 +1,6 @@
 .env
 .venv/
+.venv-kronos/
 __pycache__/
 .pytest_cache/
 *.db
@@ -10,3 +11,13 @@ data/cache/
 results/*
 !results/.gitkeep
 *.paper.lock
+
+# Kronos model weights are runtime artefacts: downloaded into
+# %LOCALAPPDATA%\AXIOM\models\kronos and verified by SHA-256 — never committed.
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+models/
+.cache/axiom/
