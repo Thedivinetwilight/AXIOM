@@ -124,6 +124,21 @@ class TestProtocolBoundaryStrictness:
         with pytest.raises(ProtocolError, match="has no timezone offset"):
             decode_timestamps(["2024-01-01T00:00:00"])
 
+    def test_future_timestamps_must_be_a_non_empty_list(self):
+        """An empty horizon is a protocol error, not a zero-length forecast.
+
+        Found by mutation: dropping the ``or not rows`` half of this check left the
+        whole suite green. An empty list would otherwise pass through and yield a
+        forecast with no candles, which fails somewhere far downstream with a much
+        less useful message. A non-list is refused for the same reason.
+        """
+        with pytest.raises(ProtocolError, match="non-empty list"):
+            decode_timestamps([])
+        with pytest.raises(ProtocolError, match="non-empty list"):
+            decode_timestamps("2024-01-01T00:00:00Z")
+        with pytest.raises(ProtocolError, match="non-empty list"):
+            decode_timestamps(None)
+
     def test_an_unparseable_timestamp_names_the_field(self):
         rows = [["yesterday", 1.0, 2.0, 0.5, 1.5, 10.0, "DEMO"]]
         with pytest.raises(ProtocolError, match="bar timestamp is not an ISO-8601"):
@@ -177,6 +192,36 @@ class TestChildRuntime:
         assert "not ready" in refused.error
         # Still alive and usable afterwards.
         assert child.handle(KronosRequest("load", "2")).ok is True
+
+    def test_an_unconfigured_child_blames_the_request_it_was_actually_given(self):
+        """A forecast on a child with no config must not be reported as a bad 'load'.
+
+        ``_ensure_runtime`` is shared by ``load`` and ``forecast``. Its refusal
+        used to hardcode "'load'", so a caller who only ever sent 'forecast' was
+        told it had supplied no configuration "with 'load'" — pointing at a
+        request it never made. The message has to name the real request kind and
+        say what to do instead, otherwise the operator debugs the wrong call.
+        """
+        child = ChildRuntime(None)  # no default config at all
+
+        forecast = child.handle(KronosRequest("forecast", "f1", {
+            "bars": encode_bars(window(64)),
+            "future_timestamps": encode_timestamps(stamps(8)),
+        }))
+        assert forecast.ok is False
+        assert "'forecast' before 'load'" in forecast.error
+        assert "Send 'load' first" in forecast.error
+        assert "supplied with 'load'" not in forecast.error
+
+        # The genuine 'load' case keeps its original, accurate wording.
+        load = child.handle(KronosRequest("load", "l1", {}))
+        assert load.ok is False
+        assert load.error == "no Kronos configuration supplied with 'load'"
+
+        # Both refusals left the child alive; a real config still works.
+        recovered = child.handle(
+            KronosRequest("load", "l2", {"config": config().to_dict()}))
+        assert recovered.ok is True, recovered.error
 
 
 class TestChildSurvivesHostileStdin:

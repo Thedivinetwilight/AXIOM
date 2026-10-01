@@ -77,11 +77,16 @@ class ChildRuntime:
     def _state(self) -> str:
         return self.runtime.status.state.value if self.runtime else KronosState.DISABLED.value
 
-    def _ensure_runtime(self, payload: dict[str, Any]) -> KronosRuntime:
+    def _ensure_runtime(self, payload: dict[str, Any], *, kind: str = "load") -> KronosRuntime:
         if self.runtime is None:
             config_payload = payload.get("config") or {}
             if not config_payload and self.default_config is None:
-                raise ValueError("no Kronos configuration supplied with 'load'")
+                if kind == "load":
+                    raise ValueError("no Kronos configuration supplied with 'load'")
+                raise ValueError(
+                    f"'{kind}' before 'load': the Kronos runtime is not configured. "
+                    "Send 'load' first, or include a 'config' with this request."
+                )
             config = (
                 self.default_config
                 if not config_payload
@@ -91,7 +96,7 @@ class ChildRuntime:
         return self.runtime
 
     def _load(self, request: KronosRequest) -> KronosResponse:
-        runtime = self._ensure_runtime(request.payload)
+        runtime = self._ensure_runtime(request.payload, kind="load")
         status = runtime.load()
         return KronosResponse(
             request.request_id,
@@ -112,7 +117,7 @@ class ChildRuntime:
         )
 
     def _forecast(self, request: KronosRequest) -> KronosResponse:
-        runtime = self._ensure_runtime(request.payload)
+        runtime = self._ensure_runtime(request.payload, kind="forecast")
         payload = request.payload
         bars = decode_bars(payload.get("bars"))
         future_timestamps = decode_timestamps(payload.get("future_timestamps"))
