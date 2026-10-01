@@ -65,7 +65,7 @@ commands were first executed; only documentation and tests changed since.
 | `monitor` reports DB health | `python -m app monitor` | exit 0, `"database_ok": true`, `"alerts": []` |
 | `initialize` is offline-safe | `python -m app initialize` | exit 0, `UNIVERSE_SYNC_UNAVAILABLE` recorded, `"ok": true` |
 | `run.py` exposes 7 research modes | `python run.py --help` | exit 0 |
-| Full test suite | `python -m pytest` | **864 passed, 10 skipped** with `requirements.txt` alone — see §15.2, the count depends on which dependency sets are installed |
+| Full test suite | `python -m pytest` | **882 passed, 10 skipped** with `requirements.txt` alone — see §15.2, the count depends on which dependency sets are installed |
 
 ### NOT verified — do not treat as working
 
@@ -1372,11 +1372,11 @@ changing anything** — a count that moves is the signal.
 
 | Installed | Command | Result |
 | --- | --- | --- |
-| `requirements.txt` only | `python -m pytest` | **864 passed, 10 skipped** |
-| + `requirements-kronos.txt` | `python -m pytest` | **866 passed, 8 skipped** |
-| + `AXIOM_KRONOS_SOURCE=<checkout>` | `AXIOM_KRONOS_SOURCE=… python -m pytest` | **872 passed, 2 skipped** |
+| `requirements.txt` only | `python -m pytest` | **882 passed, 10 skipped** |
+| + `requirements-kronos.txt` | `python -m pytest` | **884 passed, 8 skipped** |
+| + `AXIOM_KRONOS_SOURCE=<checkout>` | `AXIOM_KRONOS_SOURCE=… python -m pytest` | **890 passed, 2 skipped** |
 
-All three sum to the same 874 collected tests — the skips migrate, no test appears or disappears.
+All three sum to the same 892 collected tests — the skips migrate, no test appears or disappears.
 
 **The total is a function of your installed dependencies, not a fixed constant.** This is the
 single most common source of a false "I broke something" alarm in this suite:

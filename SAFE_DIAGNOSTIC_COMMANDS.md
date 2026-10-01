@@ -467,11 +467,11 @@ your own before changing anything:
 
 | Installed | Result |
 | --- | --- |
-| `requirements.txt` only | **864 passed, 10 skipped** |
-| + `requirements-kronos.txt` | **866 passed, 8 skipped** |
-| + `AXIOM_KRONOS_SOURCE=<checkout>` | **872 passed, 2 skipped** |
+| `requirements.txt` only | **882 passed, 10 skipped** |
+| + `requirements-kronos.txt` | **884 passed, 8 skipped** |
+| + `AXIOM_KRONOS_SOURCE=<checkout>` | **890 passed, 2 skipped** |
 
-All three sum to the same 874 collected tests.
+All three sum to the same 892 collected tests.
 
 The two skips that survive even the fullest configuration are CUDA absence
 (CUDA absence, `tests/test_kronos_runtime.py:977`) and a pre-existing network-blocked
