@@ -415,6 +415,25 @@ class TestModelCache:
         monkeypatch.setenv("AXIOM_MODEL_CACHE", str(tmp_path / "weights"))
         assert default_cache_root() == tmp_path / "weights"
 
+    def test_a_tilde_in_the_override_is_expanded(self, monkeypatch, tmp_path):
+        """AXIOM_MODEL_CACHE=~/weights must not create a literal '~' folder.
+
+        Without expanduser() the cache would be created at '<cwd>/~/weights',
+        which is a real directory named '~' rather than the user's home.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("AXIOM_MODEL_CACHE", "~/axiom-weights")
+        assert default_cache_root() == tmp_path / "axiom-weights"
+
+    def test_a_tilde_in_xdg_cache_home_is_expanded(self, monkeypatch, tmp_path):
+        from axiom.kronos.model_cache import cache_root_for
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = cache_root_for(
+            override=None, os_name="posix", platform="linux",
+            localappdata=None, xdg_cache_home="~/.cache-axiom", home=tmp_path)
+        assert root == tmp_path / ".cache-axiom" / "AXIOM" / "models" / "kronos"
+
     def test_record_and_verify_round_trip(self, tmp_path):
         cache = ModelCache(tmp_path)
         weights = tmp_path / "model.safetensors"

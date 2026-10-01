@@ -298,7 +298,12 @@ class TestFailClosed:
         state["auth_mode"] = "bad"
         stream = io_string()
         handler = logging.StreamHandler(stream)
-        logger = logging.getLogger("bot.broker.sandbox")
+        # Must match the logger app/brokers/sandbox.py actually creates.  This
+        # test previously attached to "bot.broker.sandbox", which no module
+        # uses, so the stream stayed empty and the final assertion could not
+        # fail no matter what the broker logged.  Attaching to the real logger
+        # is what makes the leak check meaningful.
+        logger = logging.getLogger("bot.sandbox")
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
         try:
@@ -312,6 +317,77 @@ class TestFailClosed:
         finally:
             logger.removeHandler(handler)
         assert "SECRET-TOKEN" not in stream.getvalue()
+
+
+class TestConstructionGuards:
+    """The constructor is the last gate before a sandbox token is used.
+
+    Every assertion here runs with no network access: these are the checks
+    that must refuse a misconfiguration before a single request is made.
+    """
+
+    def test_blank_token_is_refused_before_any_http_call(self):
+        for bad in ("", "   ", "\t\n"):
+            with pytest.raises(ValueError) as excinfo:
+                UpstoxSandboxBroker(bad, INSTRUMENT)
+            # The message must name the variable the operator has to set.
+            assert "UPSTOX_SANDBOX_ACCESS_TOKEN" in str(excinfo.value)
+
+    def test_non_string_token_is_refused(self):
+        for bad in (None, 12345, b"token"):
+            with pytest.raises(ValueError):
+                UpstoxSandboxBroker(bad, INSTRUMENT)
+
+    def test_non_http_scheme_is_refused(self):
+        for bad in ("ftp://api.upstox.com", "api.upstox.com", "file:///tmp/x"):
+            with pytest.raises(ValueError) as excinfo:
+                UpstoxSandboxBroker("tok", INSTRUMENT, base_url=bad)
+            assert "http" in str(excinfo.value)
+
+    def test_live_looking_host_is_flagged_for_review(self):
+        records = self._capture(
+            lambda: UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://live-trading.example.com"))
+        assert any("SANDBOX_BASE_URL_REVIEW" in line for line in records)
+
+    def test_a_sandbox_url_containing_the_word_live_is_not_flagged(self):
+        records = self._capture(
+            lambda: UpstoxSandboxBroker(
+                "tok", INSTRUMENT,
+                base_url="https://sandbox-live-test.example.com"))
+        assert not any("SANDBOX_BASE_URL_REVIEW" in line for line in records)
+
+    def test_the_token_is_never_in_the_repr(self):
+        broker = UpstoxSandboxBroker("SECRET-TOKEN", INSTRUMENT)
+        assert "SECRET-TOKEN" not in repr(broker)
+        assert "live=False" in repr(broker), "repr must keep stating live is off"
+
+    def test_base_and_history_urls_are_normalised(self):
+        broker = UpstoxSandboxBroker(
+            "tok", INSTRUMENT,
+            base_url="https://api-hft.upstox.com///",
+            history_url="https://api.upstox.com/v2/order/history/")
+        assert broker._base_url == "https://api-hft.upstox.com"
+        assert broker.history_endpoint == "https://api.upstox.com/v2/order/history"
+
+    def test_a_fresh_broker_is_available_until_rejected(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert broker.available is True
+        assert broker.request_count == 0
+
+    @staticmethod
+    def _capture(action) -> list[str]:
+        """Run ``action``; return the lines the broker's real logger emitted."""
+        stream = io_string()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("bot.sandbox")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            action()
+        finally:
+            logger.removeHandler(handler)
+        return [line for line in stream.getvalue().splitlines() if line.strip()]
 
 
 class TestEmergencyStop:

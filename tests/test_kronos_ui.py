@@ -292,6 +292,42 @@ class TestController:
             controller.shutdown()
 
 
+class TestDesktopStartup:
+    """Startup smoke tests that need no display and no Qt libraries."""
+
+    def test_missing_pyside6_exits_with_a_fix_hint(self, monkeypatch, capsys):
+        """Without Qt the desktop app must print a fix and exit, not traceback.
+
+        A ``None`` entry in ``sys.modules`` makes the deferred from-import
+        raise ``ImportError`` exactly as an absent Qt install would, so this is
+        deterministic whether or not PySide6 is importable on the host.
+        """
+        import sys
+
+        from desktop import app as desktop_app
+
+        monkeypatch.setitem(sys.modules, "PySide6.QtCore", None)
+        assert desktop_app.main() == 2
+        out = capsys.readouterr().out
+        assert "PySide6 is required" in out
+        assert "requirements-desktop.txt" in out
+
+    def test_the_windows_launchers_reference_files_that_exist(self):
+        """Guards against the .bat launchers drifting from the repo layout."""
+        root = DESKTOP_APP.parents[1]
+        for bat in ("desktop/run_windows.bat", "desktop/run_kronos_windows.bat"):
+            text = (root / bat).read_text(encoding="utf-8")
+            assert "python -m desktop" in text, f"{bat} no longer starts the app"
+        for req in ("requirements-desktop.txt", "requirements-kronos.txt"):
+            assert (root / req).exists(), f"{req} referenced by the launchers is gone"
+
+    def test_the_kronos_launcher_pins_the_expected_python(self):
+        root = DESKTOP_APP.parents[1]
+        text = (root / "desktop" / "run_kronos_windows.bat").read_text(encoding="utf-8")
+        assert "py -3.11" in text, "Kronos needs an explicit interpreter version"
+        assert "AXIOM_KRONOS_SOURCE" in text
+
+
 class TestDesktopWiring:
     def test_forecast_page_is_registered(self):
         source = DESKTOP_APP.read_text()
