@@ -1254,9 +1254,9 @@ git status --porcelain                                         # what did the ru
 - Passes per-file, fails in the suite → cross-file pollution; bisect by file.
 - `git status` showing new `trading_bot.db` / `data/*` after a run → a test is writing to the
   default relative path.
-- Verified baselines: **882 passed, 10 skipped** with `requirements.txt` alone; **884 passed,
-  8 skipped** once `requirements-kronos.txt` is installed; **890 passed, 2 skipped** with
-  `AXIOM_KRONOS_SOURCE` also set. All three sum to 892 collected tests. **The total depends on
+- Verified baselines: **882 passed, 15 skipped** with `requirements.txt` alone; **884 passed,
+  13 skipped** once `requirements-kronos.txt` is installed; **895 passed, 2 skipped** with
+  `AXIOM_KRONOS_SOURCE` also set. All three sum to 897 collected tests. **The total depends on
   installed dependencies** — installing `numpy` or `torch` un-skips tests via
   `pytest.importorskip`.
   Compare against a baseline taken in the *same* environment, and read skip reasons with

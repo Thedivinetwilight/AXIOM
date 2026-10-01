@@ -65,7 +65,7 @@ commands were first executed; only documentation and tests changed since.
 | `monitor` reports DB health | `python -m app monitor` | exit 0, `"database_ok": true`, `"alerts": []` |
 | `initialize` is offline-safe | `python -m app initialize` | exit 0, `UNIVERSE_SYNC_UNAVAILABLE` recorded, `"ok": true` |
 | `run.py` exposes 7 research modes | `python run.py --help` | exit 0 |
-| Full test suite | `python -m pytest` | **882 passed, 10 skipped** with `requirements.txt` alone — see §15.2, the count depends on which dependency sets are installed |
+| Full test suite | `python -m pytest` | **882 passed, 15 skipped** with `requirements.txt` alone — see §15.2, the count depends on which dependency sets are installed |
 
 ### NOT verified — do not treat as working
 
@@ -1372,11 +1372,11 @@ changing anything** — a count that moves is the signal.
 
 | Installed | Command | Result |
 | --- | --- | --- |
-| `requirements.txt` only | `python -m pytest` | **882 passed, 10 skipped** |
-| + `requirements-kronos.txt` | `python -m pytest` | **884 passed, 8 skipped** |
-| + `AXIOM_KRONOS_SOURCE=<checkout>` | `AXIOM_KRONOS_SOURCE=… python -m pytest` | **890 passed, 2 skipped** |
+| `requirements.txt` only | `python -m pytest` | **882 passed, 15 skipped** |
+| + `requirements-kronos.txt` | `python -m pytest` | **884 passed, 13 skipped** |
+| + `AXIOM_KRONOS_SOURCE=<checkout>` | `AXIOM_KRONOS_SOURCE=… python -m pytest` | **895 passed, 2 skipped** |
 
-All three sum to the same 892 collected tests — the skips migrate, no test appears or disappears.
+All three sum to the same 897 collected tests — the skips migrate, no test appears or disappears.
 
 **The total is a function of your installed dependencies, not a fixed constant.** This is the
 single most common source of a false "I broke something" alarm in this suite:
@@ -1385,12 +1385,12 @@ single most common source of a false "I broke something" alarm in this suite:
   (`pytest.importorskip("numpy")` in `TestSampling::test_percentile_matches_numpy_default_method`);
   installing `torch` un-skips line 1149 (`pytest.importorskip("torch")` in
   `TestGpuInference::test_cuda_request_without_cuda_is_refused`). That is the 882 → 884 step.
-- Seven further tests are gated on a real Kronos checkout — *"needs a real Kronos checkout"* /
+- Twelve further tests are gated on a real Kronos checkout — *"needs a real Kronos checkout"* /
   *"set AXIOM_KRONOS_SOURCE to a Kronos checkout to run this"* — at
-  `tests/test_kronos_runtime.py` lines **328, 345, 980, 1007, 1053, 1085 and 1131**. Setting
-  `AXIOM_KRONOS_SOURCE` makes **six** of them pass; the seventh (line 1131,
-  `TestGpuInference::test_gpu_inference_where_supported`) then reaches line 1135 and skips on
-  CUDA absence instead. That is the 884 → 890 step (+6, not +7).
+  `tests/test_kronos_runtime.py` lines **328, 345, 980, 1007, 1053, 1085, 1131, 1202, 1247,
+  1261, 1274 and 1314**. Setting `AXIOM_KRONOS_SOURCE` makes **eleven** of them pass; the
+  twelfth (line 1131, `TestGpuInference::test_gpu_inference_where_supported`) then reaches line
+  1135 and skips on CUDA absence instead. That is the 884 → 895 step (+11, not +12).
 
 The two skips that remain even in the fullest configuration are both honest capability skips, not
 failures: `tests/test_kronos_runtime.py:1135` (*"CUDA is not available on this machine"*) and

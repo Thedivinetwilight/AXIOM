@@ -20,8 +20,8 @@ not listed under *Verified* is **unverified** and must not be assumed to work.
 
 | Claim | Evidence |
 | --- | --- |
-| Full test suite passes from clean caches | `python -m pytest -q` → **884 passed, 8 skipped** |
-| Same, with the real Kronos code path enabled | `AXIOM_KRONOS_SOURCE=<checkout>` → **890 passed, 2 skipped** |
+| Full test suite passes from clean caches | `python -m pytest -q` → **884 passed, 13 skipped** |
+| Same, with the real Kronos code path enabled | `AXIOM_KRONOS_SOURCE=<checkout>` → **895 passed, 2 skipped** |
 | Arena 3.0.5 is untouched | `git diff --stat 0314db2 HEAD -- app/` is empty; Arena-only suite unchanged at **545 passed, 1 skipped** |
 | Real upstream Kronos *code* runs end to end on CPU | `KronosPredictor` driven through `UpstreamKronosBackend` with the real architecture (small dims, random weights) |
 | Upstream averages its samples | `inspect.getsource(auto_regressive_inference)` contains `np.mean(preds, axis=1)`; `predict()` returns exactly `pred_len` rows for `sample_count` 1 and 5 |
@@ -387,8 +387,8 @@ on a real machine.
 ## 11. Tests
 
 ```
-python -m pytest -q                                  # 884 passed, 8 skipped
-AXIOM_KRONOS_SOURCE=<checkout> python -m pytest -q   # 890 passed, 2 skipped
+python -m pytest -q                                  # 884 passed, 13 skipped
+AXIOM_KRONOS_SOURCE=<checkout> python -m pytest -q   # 895 passed, 2 skipped
 ```
 
 The Kronos subsystem adds 9 modules (~286 tests). The remaining 545 are the
