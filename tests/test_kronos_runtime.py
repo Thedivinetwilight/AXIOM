@@ -37,7 +37,7 @@ from axiom.kronos.samples import (
     summarize_paths,
 )
 from axiom.market.provider import MarketDataBar
-from axiom.models import KronosConfig, KronosState, KronosStatus
+from axiom.models import FORECAST_ORIGIN, KronosConfig, KronosState, KronosStatus
 
 UTC = timezone.utc
 
@@ -1156,3 +1156,168 @@ class TestGpuInference:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         with pytest.raises(KronosRuntimeUnavailable, match="CUDA is not available"):
             resolve_device("cuda:0")
+
+
+# --- validated market data -> REAL upstream Kronos -> structured result ------
+
+
+def _validated_forecast(backend, config, window, stamps, instrument="DEMO"):
+    """The production order: validate the window, and only then touch the model.
+
+    Mirrors ForecastPipeline.run, which validates before inference so invalid
+    data can never reach Kronos.
+    """
+    from axiom.market.validation import require_valid, validate_market_data
+
+    quality = validate_market_data(
+        window, "1h", min_history=config.min_history, expected_instrument=instrument
+    )
+    require_valid(quality)
+    return quality, backend.forecast(window, stamps, config)
+
+
+class TestValidatedChainIntoRealKronos:
+    """market fixture -> preprocessing -> real KronosPredictor -> ForecastSnapshot.
+
+    ``stubbed_download`` replaces only the Hugging Face *download*. The
+    tokenizer, the model and ``KronosPredictor`` are the genuine upstream
+    classes from ``AXIOM_KRONOS_SOURCE``, instantiated with tiny random
+    weights. So the integration boundary is exercised for real, while the
+    numbers are meaningless. Inference with real pretrained weights is NOT
+    verified by this suite and must not be reported as passing.
+    """
+
+    CONFIG = dict(
+        enabled=True, backend="upstream", lookback=32, pred_len=4,
+        max_context=64, sample_paths=3, device="cpu", min_history=8,
+        model_id="NeoQuasar/Kronos-custom",
+    )
+
+    def _loaded(self, stubbed_download, tmp_path):
+        config = KronosConfig(**self.CONFIG)
+        backend = UpstreamKronosBackend()
+        info = backend.load(config, cache=ModelCache(tmp_path))
+        return config, backend, info
+
+    def test_a_validated_window_produces_a_real_upstream_forecast(
+        self, stubbed_download, tmp_path
+    ):
+        from axiom.forecast.validation import build_forecast_candles, validate_forecast
+        from axiom.models import DataProvenance, ForecastSnapshot
+
+        config, backend, info = self._loaded(stubbed_download, tmp_path)
+        window = bars(32)
+        stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
+
+        quality, inference = _validated_forecast(backend, config, window, stamps)
+        assert quality.ok, quality.errors
+        assert quality.bars == 32
+
+        # The predictor that ran is the upstream one, from a real checkout.
+        # kronos_source is the imported module's __file__, so it must exist and
+        # live inside the configured checkout.
+        assert inference.backend == "upstream"
+        assert info.kronos_source, "the upstream source location must be recorded"
+        source_path = Path(info.kronos_source)
+        assert source_path.is_file(), source_path
+        assert str(source_path).startswith(os.environ["AXIOM_KRONOS_SOURCE"])
+
+        check = validate_forecast(inference, stamps, config)
+        assert check.ok, check.errors
+
+        candles = build_forecast_candles(inference.paths, stamps)
+        summary = summarize_paths(inference.close_paths())
+        snapshot = ForecastSnapshot(
+            instrument="DEMO", timeframe="1h",
+            generated_at=datetime(2024, 6, 1, tzinfo=UTC),
+            candles=candles, config=config,
+            provenance=DataProvenance(source="test", provider="replay",
+                                      instrument="DEMO", timeframe="1h", bars=32),
+            data_quality=quality,
+            model_id=info.model_id, model_revision=info.model_revision,
+            device=info.device, backend=inference.backend,
+            last_closed_timestamp=window[-1].timestamp,
+            last_actual_close=window[-1].close,
+            uncertainty=summary, latency_ms=inference.latency_ms,
+        )
+        assert snapshot.origin == FORECAST_ORIGIN
+        assert snapshot.data_quality.ok
+        assert len(snapshot.candles) == 4
+
+    def test_forecast_timestamps_survive_the_whole_chain(
+        self, stubbed_download, tmp_path
+    ):
+        """Requirement: predicted bars must carry the requested future stamps."""
+        from axiom.forecast.validation import build_forecast_candles
+
+        config, backend, _ = self._loaded(stubbed_download, tmp_path)
+        window = bars(32)
+        stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
+
+        _, inference = _validated_forecast(backend, config, window, stamps)
+        candles = build_forecast_candles(inference.paths, stamps)
+        assert [c.timestamp for c in candles] == stamps
+
+    def test_no_input_bar_is_at_or_after_the_first_predicted_step(
+        self, stubbed_download, tmp_path
+    ):
+        """Requirement 6: the prediction input must never contain future data."""
+        config, backend, _ = self._loaded(stubbed_download, tmp_path)
+        window = bars(32)
+        stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
+
+        _, inference = _validated_forecast(backend, config, window, stamps)
+        assert max(bar.timestamp for bar in window) < stamps[0]
+        assert all(step["close"] == step["close"] for path in inference.paths
+                   for step in path)  # no NaN slipped through
+
+    def test_invalid_market_data_never_reaches_the_predictor(
+        self, stubbed_download, tmp_path
+    ):
+        """The validation gate is what stands between bad data and the model."""
+        config, backend, _ = self._loaded(stubbed_download, tmp_path)
+        good = bars(32)
+        stamps = future(4, start=good[-1].timestamp + timedelta(hours=1))
+
+        calls = []
+        real_predict = backend.predictor.predict
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs)
+            return real_predict(*args, **kwargs)
+
+        backend.predictor.predict = spy
+
+        # Non-monotonic timestamps.
+        shuffled = good[:16] + good[16:][::-1]
+        with pytest.raises(ValueError):
+            _validated_forecast(backend, config, shuffled, stamps)
+
+        # Duplicate timestamps.
+        duplicated = good + [good[-1]]
+        with pytest.raises(ValueError):
+            _validated_forecast(backend, config, duplicated,
+                                future(4, start=good[-1].timestamp + timedelta(hours=2)))
+
+        # NaN in a price.
+        corrupt = list(good)
+        object.__setattr__(corrupt[5], "close", float("nan"))
+        with pytest.raises(ValueError):
+            _validated_forecast(backend, config, corrupt, stamps)
+
+        # Insufficient lookback.
+        with pytest.raises(ValueError):
+            _validated_forecast(backend, config, good[:3], stamps)
+
+        assert calls == [], "the predictor must not run on a rejected window"
+
+    def test_model_identity_and_device_are_tracked(self, stubbed_download, tmp_path):
+        """Requirement 4: model/tokenizer/version/device must be reported."""
+        config, backend, info = self._loaded(stubbed_download, tmp_path)
+        payload = info.to_dict()
+        assert payload["model_id"] == "NeoQuasar/Kronos-custom"
+        assert payload["tokenizer_id"] == config.tokenizer_id
+        assert payload["device"] == "cpu"
+        assert payload["backend"] == "upstream"
+        assert payload["torch_version"]
+        assert payload["max_context"] == 64
