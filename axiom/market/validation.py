@@ -56,7 +56,12 @@ def validate_market_data(
             errors.append(f"{where}: non-finite OHLCV (NaN/Inf) {values!r}")
             continue
         if bar.timestamp.tzinfo is None or bar.timestamp.utcoffset() is None:
+            # `continue` like the non-finite guard above: this function is
+            # documented as returning a verdict and never raising, but the
+            # spacing arithmetic below subtracts timestamps, and mixing a naive
+            # stamp with an aware one raises TypeError. Record and move on.
             errors.append(f"{where}: timestamp is not timezone-aware")
+            continue
         if expected_instrument and bar.instrument != expected_instrument:
             errors.append(
                 f"{where}: instrument {bar.instrument!r} != requested "

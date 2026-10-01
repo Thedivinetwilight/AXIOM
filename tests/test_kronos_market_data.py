@@ -188,6 +188,63 @@ class TestMarketDataValidation:
         validate_market_data(bars, "1h", min_history=2)
         assert [b.to_dict() for b in bars] == snapshot
 
+    def test_an_unsupported_timeframe_is_a_data_error_not_a_silent_pass(self):
+        """An unknown timeframe must fail closed before any bar is inspected.
+
+        Found by mutation: neutralising this check left the suite green. Without it
+        an unrecognized timeframe would fall through to the spacing logic and be
+        judged against whatever step it happened to resolve to — or raise a
+        KeyError — instead of reporting the real problem.
+        """
+        for bad in ("2h", "1w", "", "1H"):
+            quality = validate_market_data(window(3), bad, min_history=2)
+            assert quality.state is DataQualityState.DATA_ERROR, bad
+            assert any("unsupported timeframe" in e for e in quality.errors), bad
+            assert quality.bars == 0, bad
+
+    def test_a_non_positive_price_is_rejected(self):
+        """Zero or negative prices are invalid; the guard covers all four OHLC fields.
+
+        Found by mutation: neutralising this check left the suite green. The check is
+        min(open, high, low, close) <= 0, so it must catch a bad value in ANY of the
+        four, not just the close.
+        """
+        bars = window(4)
+        cases = [
+            MarketDataBar(bars[1].timestamp, 0.0, 101.0, 99.0, 100.0, 10.0, "DEMO"),
+            MarketDataBar(bars[1].timestamp, 100.0, 101.0, 99.0, 0.0, 10.0, "DEMO"),
+            MarketDataBar(bars[1].timestamp, 100.0, 101.0, -1.0, 100.0, 10.0, "DEMO"),
+        ]
+        for broken in cases:
+            quality = validate_market_data([bars[0], broken] + bars[2:], "1h",
+                                           min_history=2)
+            assert quality.state is DataQualityState.DATA_ERROR, broken
+            assert any("price must be > 0" in e for e in quality.errors), broken
+
+    def test_a_naive_timestamp_is_rejected_even_if_it_reaches_the_validator(self):
+        """Defense in depth: the validator re-checks awareness itself.
+
+        Found by mutation: neutralising this check left the suite green. Normally
+        ``MarketDataBar.__post_init__`` calls ``require_aware_utc``, so a naive stamp
+        cannot be constructed — which is exactly why the validator's own check had no
+        coverage. It still matters: a bar that reaches this function by any route that
+        bypasses the constructor (a future deserialization path, a hand-built stub)
+        must not be accepted, because a naive/aware comparison raises TypeError deep
+        inside the pipeline.
+
+        The naive stamp is forced in with ``object.__setattr__`` precisely to simulate
+        a bar that skipped constructor validation.
+        """
+        bars = window(3)
+        naive = bars[1]
+        object.__setattr__(naive, "timestamp",
+                           naive.timestamp.replace(tzinfo=None))
+        assert naive.timestamp.tzinfo is None  # the constructor was bypassed
+
+        quality = validate_market_data(bars, "1h", min_history=2)
+        assert quality.state is DataQualityState.DATA_ERROR
+        assert any("not timezone-aware" in e for e in quality.errors)
+
 
 class TestReplayProvider:
     def test_replays_the_repository_fixture_deterministically(self):
