@@ -1381,20 +1381,24 @@ All three sum to the same 892 collected tests — the skips migrate, no test app
 **The total is a function of your installed dependencies, not a fixed constant.** This is the
 single most common source of a false "I broke something" alarm in this suite:
 
-- Installing `numpy` un-skips `tests/test_kronos_runtime.py:721`
-  (`pytest.importorskip("numpy")`, reason *"could not import 'numpy'"*); installing `torch`
-  un-skips line 991 (`pytest.importorskip("torch")`). That is the 861 → 863 step.
+- Installing `numpy` un-skips `tests/test_kronos_runtime.py:879`
+  (`pytest.importorskip("numpy")` in `TestSampling::test_percentile_matches_numpy_default_method`);
+  installing `torch` un-skips line 1149 (`pytest.importorskip("torch")` in
+  `TestGpuInference::test_cuda_request_without_cuda_is_refused`). That is the 882 → 884 step.
 - Seven further tests are gated on a real Kronos checkout — *"needs a real Kronos checkout"* /
   *"set AXIOM_KRONOS_SOURCE to a Kronos checkout to run this"* — at
-  `tests/test_kronos_runtime.py` lines **328, 345, 822, 849, 895, 927 and 973**. Setting
-  `AXIOM_KRONOS_SOURCE` makes **six** of them pass; the seventh (line 973,
-  `TestGpuInference::test_gpu_inference_where_supported`) then reaches line 977 and skips on
-  CUDA absence instead. That is the 863 → 869 step (+6, not +7).
+  `tests/test_kronos_runtime.py` lines **328, 345, 980, 1007, 1053, 1085 and 1131**. Setting
+  `AXIOM_KRONOS_SOURCE` makes **six** of them pass; the seventh (line 1131,
+  `TestGpuInference::test_gpu_inference_where_supported`) then reaches line 1135 and skips on
+  CUDA absence instead. That is the 884 → 890 step (+6, not +7).
 
 The two skips that remain even in the fullest configuration are both honest capability skips, not
-failures: `tests/test_kronos_runtime.py:977` (*"CUDA is not available on this machine"*) and
+failures: `tests/test_kronos_runtime.py:1135` (*"CUDA is not available on this machine"*) and
 `tests/test_v2_universe.py:81` (*"public instrument file unreachable"* — a pre-existing
 network/TLS skip).
+
+> These line numbers move whenever a test is added above them. Re-derive them with
+> `python -m pytest -q -rs` rather than trusting this table; the *test names* are stable.
 
 So **compare your run against a baseline taken in the same environment**, and read skip reasons
 with `python -m pytest -rs -q` before treating a changed total as a regression.

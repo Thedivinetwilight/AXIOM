@@ -474,8 +474,12 @@ your own before changing anything:
 All three sum to the same 892 collected tests.
 
 The two skips that survive even the fullest configuration are CUDA absence
-(CUDA absence, `tests/test_kronos_runtime.py:977`) and a pre-existing network-blocked
-instrument download (`tests/test_v2_universe.py:81`). Read skip reasons with `python -m pytest -rs -q`.
+(`tests/test_kronos_runtime.py:1135`, `TestGpuInference::test_gpu_inference_where_supported`)
+and a pre-existing network-blocked instrument download (`tests/test_v2_universe.py:81`).
+Read skip reasons with `python -m pytest -rs -q`.
+
+Skip line numbers move when tests are added above them — re-derive them with `-rs`, and trust the
+test *names*, which are stable.
 
 ---
 
