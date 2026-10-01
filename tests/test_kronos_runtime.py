@@ -453,6 +453,47 @@ class TestModelCache:
         report = cache.verify("m", "r", expected_sha256="0" * 64)
         assert not report.ok
 
+    def test_a_truncated_file_reports_the_size_mismatch(self, tmp_path):
+        """Size and digest are reported separately; truncation names itself.
+
+        Found by mutation: neutralising the size check left the suite green, because
+        SHA-256 also fires on any content change — so the size check can never be the
+        sole detector. It is still worth pinning: 'recorded 16 bytes, found 5' tells an
+        operator the file was truncated, whereas a bare digest mismatch does not
+        distinguish truncation from tampering.
+        """
+        cache = ModelCache(tmp_path)
+        weights = tmp_path / "model.safetensors"
+        weights.write_bytes(b"original-payload")
+        cache.record("m", "r", weights)
+        weights.write_bytes(b"short")
+        report = cache.verify("m", "r")
+        assert not report.ok
+        assert any("size mismatch" in p and "recorded 16 bytes, found 5" in p
+                   for p in report.problems), report.problems
+        # Both signals are present: size is diagnostic, SHA-256 is authoritative.
+        assert any("SHA-256 mismatch" in p for p in report.problems)
+
+    def test_untracked_weights_with_a_configured_digest_is_a_problem(self, tmp_path):
+        """A configured digest with nothing cached must be a PROBLEM, not a note.
+
+        Found by mutation: dropping this branch left the suite green. Without it the
+        untracked case falls into the informational branch and reports 'integrity will
+        be recorded after download' — reassuring wording for an operator who explicitly
+        pinned a digest and is getting no verification at all. ``ok`` is False either
+        way, so the danger is a misread, not a bypass.
+        """
+        report = ModelCache(tmp_path).verify(
+            "NeoQuasar/Kronos-small", "rev", expected_sha256="0" * 64)
+        assert not report.ok
+        assert any("no cached weights" in p for p in report.problems), report.problems
+        assert report.notes == (), "must not be softened into a note"
+
+        # Contrast: with no digest configured the same state IS only informational.
+        plain = ModelCache(tmp_path).verify("NeoQuasar/Kronos-small", "rev")
+        assert plain.problems == ()
+        assert any("not tracked" in n for n in plain.notes)
+
     def test_untracked_model_is_a_note_not_a_failure(self, tmp_path):
         report = ModelCache(tmp_path).verify("NeoQuasar/Kronos-small", "")
         assert report.problems == ()
@@ -523,6 +564,29 @@ class TestModelCachePathConfinement:
         report = ModelCache(root).verify("NeoQuasar/Kronos-small", "planted")
         assert not report.ok
         assert any("outside the model cache" in p for p in report.problems)
+
+    def test_a_home_relative_manifest_path_is_expanded_then_refused(self, tmp_path):
+        """``~`` is expanded before the confinement check, so it cannot hide inside.
+
+        Found by mutation: dropping ``.expanduser()`` left the suite green. Both forms
+        fail closed, but for different reasons — unexpanded, ``~/planted.bin`` resolves
+        to ``<cache>/~/planted.bin``, i.e. INSIDE the cache root, where it passes
+        confinement and is then reported merely as a missing file. Expanded, it resolves
+        to a real path outside the cache and is correctly refused as an escape. Only the
+        expanded form tells the operator that a manifest tried to point outside.
+        """
+        root = tmp_path / "cache"
+        root.mkdir()
+        planted = tmp_path / "planted.bin"
+        planted.write_bytes(b"attacker controlled weights")
+        self._tamper(root, planted, "~/planted.bin")
+
+        with pytest.raises(ValueError, match="outside the model cache"):
+            ModelCache(root).resolve_within_root("~/planted.bin")
+
+        report = ModelCache(root).verify("NeoQuasar/Kronos-small", "planted")
+        assert not report.ok
+        assert any("outside the model cache" in p for p in report.problems), report.problems
 
     def test_a_tampered_manifest_blocks_the_load(self, tmp_path):
         """The runtime must refuse, not quietly load the planted file."""
@@ -644,6 +708,81 @@ class TestForecastShapeAndValidation:
         check = validate_forecast(inference, future(6), config)
         assert not check.ok
         assert any("non-finite" in error for error in check.errors)
+
+    def test_an_empty_trajectory_is_rejected_outright(self):
+        """No paths at all is a hard failure, not an empty-but-valid forecast.
+
+        Found by mutation: replacing this early return with a passing result left
+        the whole suite green, so nothing pinned it. An empty trajectory means the
+        backend produced nothing; letting it through would hand the pipeline a
+        forecast with zero candles to assemble.
+        """
+        from axiom.forecast.validation import validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        check = validate_forecast(KronosInference((), 1.0, "stub"), future(6), config)
+        assert not check.ok
+        assert check.errors == ("model returned no trajectory",)
+
+    def test_a_horizon_that_disagrees_with_the_config_is_rejected(self):
+        """The timestamp count is checked independently of the path step count.
+
+        Found by mutation: neutralising this check left the suite green. Without
+        it a caller could pass the wrong number of future timestamps and still get
+        a 'valid' forecast whenever the paths happened to match that wrong number.
+        """
+        from axiom.forecast.validation import validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        # Five timestamps and a five-step path: internally consistent, but the
+        # config asked for six. Only this check catches it.
+        check = validate_forecast(
+            KronosInference((make_path(5),), 1.0, "stub"), future(5), config)
+        assert not check.ok
+        assert any("expected 6 future timestamps, got 5" in e for e in check.errors)
+
+    def test_non_increasing_timestamps_are_rejected(self):
+        """Forecast timestamps must advance; a flat or backwards step is invalid.
+
+        Found by mutation: neutralising this check left the suite green. The
+        calendar is the only legitimate source of these stamps, so a repeated or
+        reversed one means something upstream is wrong.
+        """
+        from axiom.forecast.validation import validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=3, sample_paths=1, lookback=40)
+        origin = datetime(2024, 3, 1, tzinfo=UTC)
+        for bad_stamps in (
+            [origin, origin, origin + timedelta(hours=1)],              # repeated
+            [origin, origin + timedelta(hours=1), origin],              # backwards
+        ):
+            check = validate_forecast(
+                KronosInference((make_path(3),), 1.0, "stub"), bad_stamps, config)
+            assert not check.ok, bad_stamps
+            assert any("strictly increasing" in e for e in check.errors), bad_stamps
+
+    def test_a_step_missing_a_field_is_rejected(self):
+        """Every step must carry all five OHLCV fields.
+
+        Found by mutation: neutralising this check left the suite green. The guard
+        also short-circuits the rest of the per-step checks, so without it a
+        missing key would surface later as a confusing KeyError instead.
+        """
+        from axiom.forecast.validation import FORECAST_FIELDS, validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        path = list(make_path(6))
+        del path[2]["high"]
+        check = validate_forecast(
+            KronosInference((tuple(path),), 1.0, "stub"), future(6), config)
+        assert not check.ok
+        assert any("step 2 is missing high" in e for e in check.errors)
+        # Sanity: the field list the guard walks is the documented OHLCV set.
+        assert FORECAST_FIELDS == ("open", "high", "low", "close", "volume")
 
     def test_structural_oddities_are_warnings_never_repairs(self):
         from axiom.forecast.validation import validate_forecast
