@@ -35,11 +35,36 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
 logger = logging.getLogger("bot.sandbox")
+
+#: Hosts this broker is permitted to send an order to.
+#:
+#: ``PLACE_PATH`` / ``CANCEL_PATH`` / ``MODIFY_PATH`` are real order-mutating
+#: endpoints, and ``base_url`` is operator-supplied via
+#: ``UPSTOX_SANDBOX_BASE_URL``. A single typo there must not be able to reach a
+#: production host, so anything outside this set is refused at construction
+#: rather than logged and allowed to proceed.
+SANDBOX_ALLOWED_HOSTS = frozenset({
+    "api-sandbox.upstox.com",  # documented Upstox sandbox order host
+    "api-hft.upstox.com",      # documented V3 order host (the shipped default)
+})
+
+#: Hosts that must never receive an order, even if explicitly allow-listed.
+#: This is a second, non-overridable gate: the order APIs are the dangerous
+#: surface, so no caller — including a test — may opt a production host in.
+SANDBOX_FORBIDDEN_HOSTS = frozenset({
+    "api.upstox.com",          # production API host; sandbox tokens 401 here
+})
+
+
+def host_of(url: str) -> str:
+    """Lowercased hostname of ``url`` ("" when it cannot be determined)."""
+    return (urlparse(url).hostname or "").lower()
 
 
 class SandboxAuthError(RuntimeError):
@@ -196,9 +221,24 @@ class UpstoxSandboxBroker:
             raise ValueError("A sandbox access token is required (UPSTOX_SANDBOX_ACCESS_TOKEN)")
         if base_url.split(":")[0] not in {"https", "http"}:
             raise ValueError("Sandbox base URL must be http(s)")
-        if "live" in base_url.lower() and "sandbox" not in base_url.lower():
-            # Guard against ever pointing this class at a live-looking host.
-            logger.warning("SANDBOX_BASE_URL_REVIEW", extra={"base_url": base_url})
+        host = host_of(base_url)
+        if host in SANDBOX_FORBIDDEN_HOSTS:
+            # Non-overridable: a production host must never receive an order
+            # from this class, whatever the configuration says.
+            raise ValueError(
+                f"Sandbox base URL host {host!r} is a production Upstox host and "
+                "is refused by UpstoxSandboxBroker; this class places orders and "
+                "must only ever point at a sandbox host"
+            )
+        if host not in SANDBOX_ALLOWED_HOSTS:
+            # Previously this only logged SANDBOX_BASE_URL_REVIEW and continued,
+            # which meant a typo in UPSTOX_SANDBOX_BASE_URL could aim a real
+            # POST /v3/order/place at an arbitrary host. Refuse instead.
+            raise ValueError(
+                f"Sandbox base URL host {host!r} is not a recognised sandbox host. "
+                f"Permitted hosts: {', '.join(sorted(SANDBOX_ALLOWED_HOSTS))}. "
+                "Set UPSTOX_SANDBOX_BASE_URL to one of them."
+            )
         self._token = access_token
         self.instrument_key = instrument_key
         # 3.0.1: authoritative symbol → instrument_key resolution. The broker

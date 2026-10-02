@@ -13,10 +13,13 @@ import httpx
 import pytest
 
 from app.brokers.sandbox import (
+    SANDBOX_ALLOWED_HOSTS,
+    SANDBOX_FORBIDDEN_HOSTS,
     SandboxAuthError,
     SandboxOrderState,
     SandboxRequestError,
     UpstoxSandboxBroker,
+    host_of,
 )
 from app.config.settings import Settings
 from app.database.database import Database
@@ -344,18 +347,63 @@ class TestConstructionGuards:
                 UpstoxSandboxBroker("tok", INSTRUMENT, base_url=bad)
             assert "http" in str(excinfo.value)
 
-    def test_live_looking_host_is_flagged_for_review(self):
-        records = self._capture(
-            lambda: UpstoxSandboxBroker(
-                "tok", INSTRUMENT, base_url="https://live-trading.example.com"))
-        assert any("SANDBOX_BASE_URL_REVIEW" in line for line in records)
+    # --- host allow-list ---------------------------------------------------
+    # This class holds real order-mutating endpoints (POST /v3/order/place,
+    # DELETE /v3/order/cancel, PUT /v3/order/modify) and base_url is
+    # operator-supplied. An unrecognised host used to be logged and allowed to
+    # proceed; it is now refused at construction.
 
-    def test_a_sandbox_url_containing_the_word_live_is_not_flagged(self):
-        records = self._capture(
-            lambda: UpstoxSandboxBroker(
-                "tok", INSTRUMENT,
-                base_url="https://sandbox-live-test.example.com"))
-        assert not any("SANDBOX_BASE_URL_REVIEW" in line for line in records)
+    def test_a_live_looking_host_is_refused_not_merely_logged(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://live-trading.example.com")
+        assert "not a recognised sandbox host" in str(excinfo.value)
+
+    def test_an_arbitrary_host_is_refused(self):
+        for bad in ("https://evil.example.com", "https://sandbox-live-test.example.com",
+                    "https://attacker.test"):
+            with pytest.raises(ValueError):
+                UpstoxSandboxBroker("tok", INSTRUMENT, base_url=bad)
+
+    def test_the_production_host_is_refused_with_its_own_message(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://api.upstox.com")
+        assert "production Upstox host" in str(excinfo.value)
+
+    def test_the_production_host_is_refused_even_with_a_path(self):
+        with pytest.raises(ValueError):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://api.upstox.com/v3/order")
+
+    def test_the_refusal_names_the_permitted_hosts(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://nope.example.com")
+        message = str(excinfo.value)
+        for host in SANDBOX_ALLOWED_HOSTS:
+            assert host in message
+
+    def test_both_sandbox_hosts_are_accepted(self):
+        for host in sorted(SANDBOX_ALLOWED_HOSTS):
+            broker = UpstoxSandboxBroker("tok", INSTRUMENT, base_url=f"https://{host}")
+            assert broker._base_url == f"https://{host}"
+
+    def test_the_default_base_url_is_accepted(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert host_of(broker._base_url) in SANDBOX_ALLOWED_HOSTS
+
+    def test_the_allow_list_contains_no_production_host(self):
+        assert not (SANDBOX_ALLOWED_HOSTS & SANDBOX_FORBIDDEN_HOSTS)
+        assert "api.upstox.com" not in SANDBOX_ALLOWED_HOSTS
+
+    def test_host_of_normalises_case_and_ignores_path(self):
+        assert host_of("https://API-Sandbox.Upstox.COM/v3/order/place") == \
+            "api-sandbox.upstox.com"
+        assert host_of("not a url") == ""
+
+    def test_a_broker_is_never_constructed_for_a_refused_host(self):
+        """The guard must fire before any state is created."""
+        with pytest.raises(ValueError):
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://api.upstox.com")
 
     def test_the_token_is_never_in_the_repr(self):
         broker = UpstoxSandboxBroker("SECRET-TOKEN", INSTRUMENT)
