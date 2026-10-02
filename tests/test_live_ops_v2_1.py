@@ -1028,16 +1028,44 @@ class TestOpsCli:
         payload = json.loads(capsys.readouterr().out)
         assert payload["was_already_halted"] is True
 
-    def test_halt_reports_a_broken_configuration_without_crashing(self, capsys, monkeypatch):
+    def test_halt_still_halts_when_the_configuration_is_rejected(
+            self, tmp_path, capsys, monkeypatch):
+        """Halting is the safe direction: a rejected config must not block it."""
         from app import __main__ as cli
 
         def boom():
             raise ValueError("BROKER=UPSTOX_LIVE requires ALL of: MODE=LIVE")
 
         monkeypatch.setattr(cli, "_load_settings", boom)
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/halt.db")
+        code = cli.cmd_live_halt(type("A", (), {"reason": "broken config"})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0 and payload["halted"] is True
+        assert payload["configuration_rejected"] is True
+        assert "rejected" in payload["config_reason"]
+        # and the stop really is persisted in the database the env pointed at
+        from app.database.database import Database
+        from app.database.repository import Repository
+
+        database = Database(f"sqlite:///{tmp_path}/halt.db")
+        assert (Repository(database).get_engine_state("emergency_stop")
+                or {}).get("stopped") is True
+        database.close()
+
+    def test_halt_reports_when_even_the_state_database_is_unusable(
+            self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        def boom():
+            raise ValueError("nope")
+
+        monkeypatch.setattr(cli, "_load_settings", boom)
+        # a directory path can never be opened as a database
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}")
         code = cli.cmd_live_halt(type("A", (), {"reason": ""})())
         payload = json.loads(capsys.readouterr().out)
         assert code == 2 and payload["halted"] is False
+        assert "could not be opened" in payload["reason"]
 
     def test_resume_refuses_when_not_armed(self, tmp_path, capsys, monkeypatch):
         from app import __main__ as cli
@@ -1457,3 +1485,83 @@ class TestAuditIntegrity:
         report = integrity_report(repository, live=True)
         assert report["ok"] is True
         database.close()
+
+
+class TestLiveDrill:
+    """The drill proves each rail fires — offline, and honestly."""
+
+    def test_the_drill_passes_every_step(self, tmp_path):
+        from app.live.drill import run_drill
+
+        report = run_drill(database_url=f"sqlite:///{tmp_path}/drill.db")
+        failed = [step["name"] for step in report["steps"] if not step["ok"]]
+        assert report["ok"] is True, f"failed steps: {failed}"
+        assert len(report["steps"]) == 11
+        names = {step["name"] for step in report["steps"]}
+        assert {"four_switch_gate", "host_inversion_guard", "token_guard_lifecycle",
+                "canary_ramp", "entries_gated_exits_free",
+                "breach_triggers_emergency_stop", "stuck_order_escalates_and_cancels",
+                "audit_integrity_detects_corruption",
+                "alerts_durable_and_scrubbed", "halt_works_with_a_broken_config",
+                "no_live_host_contacted"} == names
+        # every step carries evidence, not just a verdict
+        assert all(step["evidence"] for step in report["steps"])
+        json.dumps(report, default=str)
+
+    def test_the_drill_never_touches_a_live_host(self, tmp_path):
+        from app.live.drill import run_drill
+
+        report = run_drill(database_url=f"sqlite:///{tmp_path}/drill.db")
+        step = next(s for s in report["steps"] if s["name"] == "no_live_host_contacted")
+        assert step["ok"] is True and step["evidence"]["offending"] == []
+
+    def test_a_temporary_database_is_removed_only_when_the_drill_is_clean(
+            self, monkeypatch, tmp_path):
+        from app.live import drill
+
+        temporary = tmp_path / "throwaway"
+        temporary.mkdir()
+
+        def fake_mkdtemp(prefix=""):
+            return str(temporary)
+
+        monkeypatch.setattr(drill.tempfile, "mkdtemp", fake_mkdtemp)
+        report = drill.run_drill()
+        assert report["ok"] is True and report["temporary_database"] is True
+        assert report.get("temporary_database_removed") is True
+        assert not temporary.exists()
+
+    def test_a_failing_step_is_reported_and_its_database_kept(
+            self, monkeypatch, tmp_path):
+        from app.live import drill
+
+        temporary = tmp_path / "throwaway-fail"
+        temporary.mkdir()
+        monkeypatch.setattr(drill.tempfile, "mkdtemp", lambda prefix="": str(temporary))
+
+        def broken(ctx):
+            raise RuntimeError("rail did not fire")
+
+        monkeypatch.setattr(drill, "STEPS", (broken,))
+        report = drill.run_drill()
+        assert report["ok"] is False and report["failed"] == ["broken"]
+        assert report["steps"][0]["evidence"]["error_type"] == "RuntimeError"
+        assert "did not fire" in report["steps"][0]["detail"]
+        # the evidence database is deliberately left behind for inspection
+        assert temporary.exists() and not report.get("temporary_database_removed")
+
+    def test_the_cli_reports_success_and_failure_exit_codes(self, tmp_path, capsys,
+                                                            monkeypatch):
+        from app import __main__ as cli
+        from app.live import drill
+
+        args = type("A", (), {"database_url": f"sqlite:///{tmp_path}/drill.db"})()
+        assert cli.cmd_live_drill(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+
+        monkeypatch.setattr(drill, "STEPS", (
+            lambda ctx: (_ for _ in ()).throw(RuntimeError("nope")),))
+        assert cli.cmd_live_drill(args) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False

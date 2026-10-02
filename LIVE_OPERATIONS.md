@@ -121,6 +121,20 @@ clean. An **ERROR** in either family means do not go live; a **WARNING** is an a
 - Ctrl-C the engine (reconciles, then exits), or
 - the exchange/broker terminal itself — always the final authority.
 
+**Fire drill (run this before the first live order, and after changing any rail).**
+```bash
+python -m app live-drill          # 11 steps, all offline, no orders, no network
+```
+Proves each rail actually fires and prints the recorded evidence: the four-switch gate
+refuses a partial opt-in; each broker refuses the other mode's host; the TokenGuard blocks
+an unverified credential *and* blocks it again once stale; the canary shrinks an oversized
+entry, survives a restart and then releases; a stale credential blocks a new entry but never
+an exit; a daily-loss breach triggers the persisted stop; a stuck order warns at 5 minutes
+and is auto-cancelled when enabled; audit integrity catches injected corruption; alerts are
+durable and secret-shaped keys are redacted; `live-halt` still halts while the configuration
+is rejected. It writes to a throwaway database (removed when the drill is clean, kept when a
+step fails so you can inspect the evidence) and it never contacts a network.
+
 **Reading the state of the world.**
 ```bash
 python -m app live-status            # mode, stops, token, canary, breaches, findings, alerts
@@ -146,6 +160,9 @@ These are operational decisions, not code gaps:
 - **Token refresh.** The daily OAuth dance needs your client id/secret and a redirect URI;
   automating it is a deployment choice (cron + `python -m app upstox-login`) and a security
   decision (where the token lives). The rails tell you loudly when you must re-run it.
+- **Placing a drill order.** `live-drill` is a *tabletop* exercise: it proves the rails fire
+  without sending anything to a broker. A real end-to-end order rehearsal is available
+  separately (`python -m app sandbox-test --place-order`) and requires the explicit flag.
 - **Auto-cancelling stuck orders by default.** `LIVE_AUTO_CANCEL_STUCK` exists but ships off:
   cancelling a working order is an action with market consequences, so the default is to
   page a human. Enable it only once you trust the stuck-order threshold on your own feed.
@@ -170,6 +187,8 @@ These are operational decisions, not code gaps:
   (guards never block exits, a blocked entry never reaches the broker, a breach triggers the
   persisted stop, auto-cancel only when enabled and failures are recorded, and an engine
   with `live_ops=None` behaves exactly as before).
+- `live-drill` is exercised by tests too, including the failure path: a broken step is
+  reported with its evidence and its database is deliberately kept.
 - Full suite: see `README.md` for the current count · `tools/security_scan.py`: CLEAN.
 - No test contacts a network; the webhook is exercised with an httpx mock transport.
 - Real-money end-to-end execution remains **not attempted** (no live credentials here).

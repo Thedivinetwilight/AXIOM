@@ -585,23 +585,45 @@ def cmd_live_halt(args) -> int:
     has no live opt-in. It does NOT cancel broker-side orders (the engine does
     that when it is running); it stops this system from opening anything new.
     """
+    import os
     from datetime import datetime, timezone
 
     payload: dict = {"scope": "LIVE HALT (persisted emergency stop)"}
+    settings, config_error = None, ""
     try:
         settings = _load_settings()
     except ValueError as exc:
-        payload.update(ok=False, halted=False,
-                       reason=f"configuration rejected: {exc}")
-        print(json.dumps(payload, indent=2))
-        return 2
-    try:
-        database, repository = _open_ops_repository(settings)
-    except Exception as exc:
-        payload.update(ok=False, halted=False,
-                       reason=f"cannot open DATABASE_URL: {type(exc).__name__}")
-        print(json.dumps(payload, indent=2))
-        return 2
+        # Halting is the safe direction: a rejected configuration must not be
+        # able to prevent a halt. Fall back to the raw environment so the one
+        # thing we still need (where the state lives) is available. Settings
+        # has already run load_dotenv by this point, so .env values are set.
+        config_error = f"configuration rejected: {exc}"
+        payload.update(configuration_rejected=True, config_reason=config_error,
+                       database_url_source="raw DATABASE_URL (Settings rejected)")
+        database_url = os.environ.get("DATABASE_URL", "").strip() \
+            or "sqlite:///trading_bot.db"
+        database, repository = None, None
+        try:
+            from app.database.database import Database
+            from app.database.repository import Repository
+
+            database = Database(database_url)
+            repository = Repository(database)
+        except Exception as exc:  # pragma: no cover - only a broken path lands here
+            payload.update(ok=False, halted=False,
+                           reason=f"{config_error}; and the state database "
+                                  f"({database_url}) could not be opened: "
+                                  f"{type(exc).__name__}")
+            print(json.dumps(payload, indent=2))
+            return 2
+    else:
+        try:
+            database, repository = _open_ops_repository(settings)
+        except Exception as exc:
+            payload.update(ok=False, halted=False,
+                           reason=f"cannot open DATABASE_URL: {type(exc).__name__}")
+            print(json.dumps(payload, indent=2))
+            return 2
     try:
         already = bool((repository.get_engine_state("emergency_stop") or {})
                        .get("stopped"))
@@ -614,6 +636,9 @@ def cmd_live_halt(args) -> int:
                        reason=args.reason or "manual halt via CLI",
                        note="a running engine observes this and cancels working "
                             "orders; broker-side positions are NOT auto-closed")
+        if config_error:
+            payload["reason"] = f"{args.reason or 'manual halt via CLI'} " \
+                                f"(while: {config_error})"
     finally:
         database.close()
     print(json.dumps(payload, indent=2))
@@ -657,6 +682,19 @@ def cmd_live_resume(args) -> int:
         database.close()
     print(json.dumps(payload, indent=2))
     return 0
+
+
+def cmd_live_drill(args) -> int:
+    """Exercise every L-ops rail offline and report the recorded evidence.
+
+    Nothing here places, modifies or cancels an order and nothing touches the
+    network. Run it after changing the rails, before trusting them.
+    """
+    from app.live.drill import run_drill
+
+    report = run_drill(database_url=args.database_url or None)
+    print(json.dumps(report, indent=2, default=str))
+    return 0 if report.get("ok") else 1
 
 
 def cmd_live_status(args) -> int:
@@ -1431,6 +1469,14 @@ def parser() -> argparse.ArgumentParser:
     lstatus.add_argument("--audit", action="store_true",
                          help="also recompute PnL from the audit trail")
     lstatus.set_defaults(func=cmd_live_status)
+
+    drill = sub.add_parser(
+        "live-drill",
+        help="offline fire drill for the safety rails (no network, no orders)")
+    drill.add_argument("--database-url", default="",
+                       help="scratch database to drill against (default: a "
+                            "throwaway temporary one)")
+    drill.set_defaults(func=cmd_live_drill)
 
     stest = sub.add_parser("sandbox-test", help="verify SANDBOX credentials (read-only probe)")
     stest.add_argument("--instrument", default="NSE_EQ|INE002A01018")
