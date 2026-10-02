@@ -515,7 +515,22 @@ def cmd_sandbox_test(args) -> int:
     """
     import os
 
-    token = os.getenv("UPSTOX_SANDBOX_ACCESS_TOKEN", "")
+    # Settings MUST be loaded before the token is read: Settings.from_env()
+    # is what calls load_dotenv(), so reading os.environ first silently misses
+    # a token supplied only via .env. Read the token from Settings rather than
+    # the environment so there is exactly one credential path.
+    try:
+        settings = _load_settings()
+    except ValueError as exc:
+        print(json.dumps({
+            "scope": "REAL UPSTOX SANDBOX TEST",
+            "performed": False,
+            "reason": f"configuration rejected before any request: {exc}",
+        }, indent=2))
+        return 2
+
+    token = settings.upstox_sandbox_access_token or os.getenv(
+        "UPSTOX_SANDBOX_ACCESS_TOKEN", "")
     if not token.strip():
         print(json.dumps({
             "scope": "REAL UPSTOX SANDBOX TEST",
@@ -525,7 +540,6 @@ def cmd_sandbox_test(args) -> int:
         return 3
     from app.brokers.sandbox import SandboxAuthError, SandboxRequestError, UpstoxSandboxBroker
 
-    settings = _load_settings()
     broker = UpstoxSandboxBroker(
         token,
         args.instrument,
