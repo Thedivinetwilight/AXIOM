@@ -34,6 +34,9 @@ the sandbox broker refuses live hosts. See LIVE_TRADING_ENABLEMENT.md.
 
 Commands:
   live-preflight  LIVE readiness check (read-only; never places an order).
+  live-status     live-ops snapshot from recorded state (read-only).
+  live-halt       set the persisted EMERGENCY STOP (always permitted).
+  live-resume     clear the persisted EMERGENCY STOP (armed sessions only).
 """
 
 import argparse
@@ -563,6 +566,163 @@ def cmd_engine(args) -> int:
         return 0
     finally:
         database.close()
+
+
+def _open_ops_repository(settings):
+    """Open the configured database for an ops command (caller must close)."""
+    from app.database.database import Database
+    from app.database.repository import Repository
+
+    database = Database(settings.database_url)
+    return database, Repository(database)
+
+
+def cmd_live_halt(args) -> int:
+    """Set the persisted EMERGENCY STOP from the terminal.
+
+    Deliberately always permitted: halting is the safe direction, so it must
+    work even when configuration is broken, the engine is down, or the caller
+    has no live opt-in. It does NOT cancel broker-side orders (the engine does
+    that when it is running); it stops this system from opening anything new.
+    """
+    from datetime import datetime, timezone
+
+    payload: dict = {"scope": "LIVE HALT (persisted emergency stop)"}
+    try:
+        settings = _load_settings()
+    except ValueError as exc:
+        payload.update(ok=False, halted=False,
+                       reason=f"configuration rejected: {exc}")
+        print(json.dumps(payload, indent=2))
+        return 2
+    try:
+        database, repository = _open_ops_repository(settings)
+    except Exception as exc:
+        payload.update(ok=False, halted=False,
+                       reason=f"cannot open DATABASE_URL: {type(exc).__name__}")
+        print(json.dumps(payload, indent=2))
+        return 2
+    try:
+        already = bool((repository.get_engine_state("emergency_stop") or {})
+                       .get("stopped"))
+        repository.set_engine_state("emergency_stop", {
+            "stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
+            "reason": args.reason or "manual halt via CLI"})
+        repository.record_system_event("EMERGENCY_STOP", {
+            "reason": args.reason or "manual halt via CLI", "source": "CLI"})
+        payload.update(ok=True, halted=True, was_already_halted=already,
+                       reason=args.reason or "manual halt via CLI",
+                       note="a running engine observes this and cancels working "
+                            "orders; broker-side positions are NOT auto-closed")
+    finally:
+        database.close()
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_live_resume(args) -> int:
+    """Clear the persisted emergency stop. Requires the live opt-in to be valid.
+
+    Resuming is the dangerous direction, so unlike ``live-halt`` this refuses to
+    act on an invalid configuration — a half-configured .env must not be able to
+    re-arm trading.
+    """
+    payload: dict = {"scope": "LIVE RESUME (clear persisted emergency stop)"}
+    try:
+        settings = _load_settings()
+    except ValueError as exc:
+        payload.update(ok=False, resumed=False,
+                       reason=f"configuration rejected; refusing to resume: {exc}")
+        print(json.dumps(payload, indent=2))
+        return 2
+    if not args.allow_non_live and not (
+            settings.broker.upper() == "UPSTOX_LIVE"
+            and bool(settings.live_trading)):
+        payload.update(
+            ok=False, resumed=False,
+            reason="BROKER is not an armed UPSTOX_LIVE session; pass "
+                   "--allow-non-live only if you intentionally cleared the live "
+                   "configuration")
+        print(json.dumps(payload, indent=2))
+        return 2
+    database, repository = _open_ops_repository(settings)
+    try:
+        was = bool((repository.get_engine_state("emergency_stop") or {}).get("stopped"))
+        repository.set_engine_state("emergency_stop", {"stopped": False})
+        repository.record_system_event("ENGINE_RESUME", {"source": "CLI"})
+        payload.update(ok=True, resumed=True, was_halted=was,
+                       note="new entries are allowed again; hard risk limits and "
+                            "L-ops guards still apply")
+    finally:
+        database.close()
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_live_status(args) -> int:
+    """Print the live-operations snapshot from RECORDED state (read-only).
+
+    Works while the engine is stopped or crashed — that is exactly when an
+    operator needs it — because everything is read from the database.
+    """
+    from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+    from app.live.alerts import recent_alerts
+    from app.live.guards import CanaryGuard, TokenGuard
+    from app.live.watchdog import BreachMonitor, LiveWatchdog
+
+    settings = _load_settings()
+    database, repository = _open_ops_repository(settings)
+    try:
+        broker_mode = settings.broker.upper()
+        live = bool(settings.live_trading) and broker_mode == "UPSTOX_LIVE"
+        token = TokenGuard(repository,
+                           max_age_hours=settings.live_token_max_age_hours,
+                           warn_minutes=settings.live_token_warn_minutes)
+        canary = CanaryGuard(repository,
+                             max_notional=settings.live_canary_max_notional,
+                             first_orders=settings.live_canary_orders)
+        watchdog = LiveWatchdog(repository, token_guard=token,
+                                stuck_order_minutes=settings.live_stuck_order_minutes,
+                                reconcile_silence_minutes=(
+                                    settings.live_reconcile_silence_minutes))
+        equity = repository.get_engine_state("live_equity") or {}
+        payload = {
+            "scope": "LIVE STATUS (read-only)",
+            "mode": settings.mode.upper(),
+            "live_trading": live,
+            "broker": broker_mode,
+            "order_host": settings.upstox_live_base_url if live else None,
+            "order_host_is_documented_live": (
+                host_of(settings.upstox_live_base_url) in LIVE_ORDER_HOSTS
+                if live else None),
+            "emergency_stop": bool(
+                (repository.get_engine_state("emergency_stop") or {}).get("stopped")),
+            "last_reconcile_at": repository.get_engine_state("last_reconcile_at"),
+            "open_orders": (len(repository.open_live_orders()) if live
+                            else len(repository.open_sandbox_orders())),
+            "token": token.status(),
+            "canary": canary.status(),
+            "breaches": BreachMonitor(
+                repository, max_daily_loss=settings.max_daily_loss,
+                max_equity_drawdown=settings.live_max_equity_drawdown,
+                auto_stop=settings.live_auto_stop_on_breach).status(),
+            "equity": equity,
+            "findings": [f.to_dict() for f in watchdog.inspect()],
+            "alerts": recent_alerts(repository, limit=10),
+        }
+        if args.audit:
+            # Report BOTH trails: an operator auditing a discrepancy should not
+            # have to remember which mode is currently configured.
+            from app.live.pnl import replay_fills
+
+            payload["audit_replay"] = {
+                "live": replay_fills(repository, live=True).to_dict(),
+                "sandbox": replay_fills(repository, live=False).to_dict(),
+            }
+    finally:
+        database.close()
+    print(json.dumps(payload, indent=2, default=str))
+    return 0
 
 
 def cmd_live_preflight(args) -> int:
@@ -1251,6 +1411,26 @@ def parser() -> argparse.ArgumentParser:
         help="LIVE readiness check (read-only; never places an order)")
     pre.add_argument("--instrument", default="NSE_EQ|INE002A01018")
     pre.set_defaults(func=cmd_live_preflight)
+
+    halt = sub.add_parser(
+        "live-halt",
+        help="set the persisted EMERGENCY STOP (always permitted)")
+    halt.add_argument("--reason", default="")
+    halt.set_defaults(func=cmd_live_halt)
+
+    resume = sub.add_parser(
+        "live-resume",
+        help="clear the persisted EMERGENCY STOP (requires an armed live session)")
+    resume.add_argument("--allow-non-live", action="store_true",
+                        help="also clear when the live opt-in is NOT configured")
+    resume.set_defaults(func=cmd_live_resume)
+
+    lstatus = sub.add_parser(
+        "live-status",
+        help="print the live-ops snapshot from recorded state (read-only)")
+    lstatus.add_argument("--audit", action="store_true",
+                         help="also recompute PnL from the audit trail")
+    lstatus.set_defaults(func=cmd_live_status)
 
     stest = sub.add_parser("sandbox-test", help="verify SANDBOX credentials (read-only probe)")
     stest.add_argument("--instrument", default="NSE_EQ|INE002A01018")

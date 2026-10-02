@@ -854,3 +854,270 @@ class TestApiSurfaces:
                               headers={"Authorization": "Bearer t"}).text
         assert 'id="alerts"' in page
         assert "Alerts &amp; Live Ops" in page
+
+
+class TestAuditReplay:
+    """Independently recomputed PnL from the audit trail (second opinion)."""
+
+    def _repo_with_fills(self, tmp_path, fills, live=True):
+        repository, database = repo(tmp_path, "pnl.db")
+        record_order = (repository.record_live_order if live
+                        else repository.record_sandbox_order)
+        record_transition = (repository.record_live_transition if live
+                             else repository.record_sandbox_transition)
+        r = record_order
+        t = record_transition
+        for index, (side, qty, price) in enumerate(fills):
+            order_id = f"ord-{index}"
+            r({"id": order_id, "symbol": "RELIANCE", "side": side,
+               "quantity": qty, "price": price, "order_type": "MARKET",
+               "status": "FILLED", "tag": "t", "created_ts": f"2026-10-02T09:{index:02d}:00+00:00"})
+            t(order_id, f"child-{index}", "FILLED", qty, price,
+              f"2026-10-02T09:{index:02d}:00+00:00", {"ok": True})
+        return repository, database
+
+    def test_buy_then_sell_realizes_the_difference(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = self._repo_with_fills(
+            tmp_path, [("BUY", 10, 100.0), ("SELL", 10, 110.0)])
+        result = replay_fills(repository, live=True)
+        assert result.realized_pnl == pytest.approx(100.0)
+        assert result.buys == 1 and result.sells == 1
+        assert result.turnover == pytest.approx(2100.0)
+        assert result.open_positions == {}
+        assert result.per_symbol["RELIANCE"]["realized"] == pytest.approx(100.0)
+        database.close()
+
+    def test_partial_fills_of_one_child_use_the_incremental_basis(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = repo(tmp_path, "partial.db")
+        repository.record_live_order({
+            "id": "o1", "symbol": "S", "side": "BUY", "quantity": 10,
+            "price": 100.0, "status": "FILLED", "tag": "t",
+            "created_ts": "2026-10-02T09:00:00+00:00"})
+        # one child fills 5 @ 100 then 5 more @ 110 → average 105
+        repository.record_live_transition("o1", "c1", "PARTIALLY_FILLED", 5, 100.0,
+                                          "2026-10-02T09:00:00+00:00", {})
+        repository.record_live_transition("o1", "c1", "FILLED", 10, 105.0,
+                                          "2026-10-02T09:01:00+00:00", {})
+        result = replay_fills(repository, live=True)
+        # deltas: 5 @ 100 and 5 @ 110 → average cost 105
+        assert result.turnover == pytest.approx(1050.0)
+        assert result.open_positions["S"]["average_price"] == pytest.approx(105.0)
+        assert result.fills[1]["price"] == pytest.approx(110.0)
+        database.close()
+
+    def test_partial_then_cancelled_child_keeps_its_credit(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = repo(tmp_path, "cancel.db")
+        repository.record_live_order({
+            "id": "o1", "symbol": "S", "side": "BUY", "quantity": 10,
+            "price": 100.0, "status": "CANCELLED", "tag": "t",
+            "created_ts": "2026-10-02T09:00:00+00:00"})
+        repository.record_live_transition("o1", "c1", "PARTIALLY_FILLED", 4, 100.0,
+                                          "2026-10-02T09:00:00+00:00", {})
+        repository.record_live_transition("o1", "c1", "CANCELLED", 4, 100.0,
+                                          "2026-10-02T09:01:00+00:00", {})
+        result = replay_fills(repository, live=True)
+        assert result.fills[0]["quantity"] == 4      # exactly the executed part
+        assert result.open_positions["S"]["quantity"] == 4
+        database.close()
+
+    def test_sandbox_and_live_trails_are_never_mixed(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = repo(tmp_path, "mixed.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 1,
+            "price": 100.0, "status": "FILLED", "created_ts": "t0"})
+        repository.record_live_transition("live-1", "c", "FILLED", 1, 100.0, "t0", {})
+        repository.record_sandbox_order({
+            "id": "sbox-1", "symbol": "S", "side": "BUY", "quantity": 5,
+            "price": 50.0, "status": "FILLED", "created_ts": "t0"})
+        repository.record_sandbox_transition("sbox-1", "c", "FILLED", 5, 50.0, "t0", {})
+
+        live_only = replay_fills(repository, live=True)
+        sandbox_only = replay_fills(repository, live=False)
+        assert live_only.turnover == pytest.approx(100.0)
+        assert sandbox_only.turnover == pytest.approx(250.0)
+        database.close()
+
+    def test_ledger_comparison_passes_within_tolerance(self, tmp_path):
+        from app.live.pnl import compare_with_ledger, replay_fills
+
+        repository, database = self._repo_with_fills(
+            tmp_path, [("BUY", 10, 100.0), ("SELL", 10, 110.0)])
+
+        class Ledger:
+            realized_pnl = 100.5   # small timing/rounding difference
+
+        result = replay_fills(repository, live=True)
+        comparison = compare_with_ledger(result, Ledger(), tolerance=1.0)
+        assert comparison["match"] is True
+        database.close()
+
+    def test_ledger_comparison_fails_on_a_real_divergence(self, tmp_path):
+        from app.live.pnl import compare_with_ledger, replay_fills
+
+        repository, database = self._repo_with_fills(
+            tmp_path, [("BUY", 10, 100.0), ("SELL", 10, 110.0)])
+
+        class Ledger:
+            realized_pnl = 250.0   # the two implementations disagree
+
+        result = replay_fills(repository, live=True)
+        comparison = compare_with_ledger(result, Ledger(), tolerance=1.0)
+        assert comparison["match"] is False
+        assert "disagree" in comparison["explanation"]
+        assert comparison["difference"] == pytest.approx(150.0)
+        database.close()
+
+    def test_replay_of_an_empty_trail_is_zero_and_serialisable(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = repo(tmp_path, "empty.db")
+        result = replay_fills(repository, live=True)
+        assert result.fills == [] and result.realized_pnl == 0.0
+        json.dumps(result.to_dict())
+        database.close()
+
+    def test_cumulative_realized_series_tracks_only_sells(self, tmp_path):
+        from app.live.pnl import replay_fills
+
+        repository, database = self._repo_with_fills(tmp_path, [
+            ("BUY", 10, 100.0), ("SELL", 5, 110.0), ("SELL", 5, 120.0)])
+        result = replay_fills(repository, live=True)
+        series = result.realized_series()
+        assert [round(value, 2) for _, value in series] == [50.0, 150.0]
+        database.close()
+
+
+class TestOpsCli:
+    """Halt must always work; resume must refuse to re-arm a broken config."""
+
+    def _settings(self, tmp_path, **kwargs):
+        base = dict(api_token="t", database_url=f"sqlite:///{tmp_path}/cli.db")
+        base.update(kwargs)
+        return Settings(**base)
+
+    def test_halt_is_permitted_with_default_paper_settings(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path)
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        code = cli.cmd_live_halt(type("A", (), {"reason": "test halt"})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0 and payload["halted"] is True
+        assert payload["was_already_halted"] is False
+        # and it really is persisted
+        database, repository = cli._open_ops_repository(settings)
+        assert repository.get_engine_state("emergency_stop")["stopped"] is True
+        database.close()
+
+    def test_halt_is_idempotent(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path)
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        cli.cmd_live_halt(type("A", (), {"reason": "first"})())
+        capsys.readouterr()
+        cli.cmd_live_halt(type("A", (), {"reason": "second"})())
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["was_already_halted"] is True
+
+    def test_halt_reports_a_broken_configuration_without_crashing(self, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        def boom():
+            raise ValueError("BROKER=UPSTOX_LIVE requires ALL of: MODE=LIVE")
+
+        monkeypatch.setattr(cli, "_load_settings", boom)
+        code = cli.cmd_live_halt(type("A", (), {"reason": ""})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 2 and payload["halted"] is False
+
+    def test_resume_refuses_when_not_armed(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path)
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        code = cli.cmd_live_resume(type("A", (), {"allow_non_live": False})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 2 and payload["resumed"] is False
+        assert "not an armed UPSTOX_LIVE session" in payload["reason"]
+
+    def test_resume_clears_the_flag_when_armed(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(
+            tmp_path, broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+            live_confirm="I-ACCEPT-REAL-MONEY-RISK",
+            upstox_live_access_token="t", max_position_value=10_000,
+            max_open_positions=1, max_daily_loss=500, max_trades_per_day=3)
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        cli.cmd_live_halt(type("A", (), {"reason": "armed halt"})())
+        capsys.readouterr()
+        code = cli.cmd_live_resume(type("A", (), {"allow_non_live": False})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0 and payload["resumed"] is True
+        assert payload["was_halted"] is True
+        database, repository = cli._open_ops_repository(settings)
+        assert repository.get_engine_state("emergency_stop")["stopped"] is False
+        database.close()
+
+    def test_resume_refuses_an_invalid_configuration(self, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        def boom():
+            raise ValueError("BROKER=UPSTOX_LIVE (real money) requires ALL of: ...")
+
+        monkeypatch.setattr(cli, "_load_settings", boom)
+        code = cli.cmd_live_resume(type("A", (), {"allow_non_live": True})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 2 and payload["resumed"] is False
+        assert "refusing to resume" in payload["reason"]
+
+    def test_status_prints_the_snapshot_and_never_the_token(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path, upstox_live_access_token="SECRET-TOK")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        code = cli.cmd_live_status(type("A", (), {"audit": False})())
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert code == 0 and payload["scope"].startswith("LIVE STATUS")
+        assert "SECRET-TOK" not in out
+        assert payload["token"]["decision"]["allowed"] is False
+
+    def test_status_can_include_the_audit_replay(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path)
+        database, repository = cli._open_ops_repository(settings)
+        repository.record_live_order({
+            "id": "o1", "symbol": "S", "side": "BUY", "quantity": 1,
+            "price": 100.0, "status": "FILLED", "created_ts": "t0"})
+        repository.record_live_transition("o1", "c", "FILLED", 1, 100.0, "t0", {})
+        database.close()
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        cli.cmd_live_status(type("A", (), {"audit": True})())
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["audit_replay"]["live"]["turnover"] == pytest.approx(100.0)
+        assert payload["audit_replay"]["sandbox"]["turnover"] == 0.0
+
+    def test_status_reports_open_orders_from_the_right_table(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        settings = self._settings(tmp_path)
+        database, repository = cli._open_ops_repository(settings)
+        repository.record_sandbox_order({
+            "id": "sbox-1", "symbol": "S", "side": "BUY", "quantity": 1,
+            "price": 1.0, "status": "OPEN", "created_ts": "t0"})
+        database.close()
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        cli.cmd_live_status(type("A", (), {"audit": False})())
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["open_orders"] == 1
