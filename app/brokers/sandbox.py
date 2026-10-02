@@ -350,7 +350,9 @@ class UpstoxSandboxBroker:
                 if attempt < attempts:
                     _time.sleep(0.05)  # bounded, tests stay fast
                     continue
-                raise SandboxRequestError("Sandbox API unreachable (network error)")
+                raise SandboxRequestError(
+                    f"{self.MODE} API unreachable (network error) at "
+                    f"{host_of(url) or 'configured host'}")
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt < attempts:
                     _time.sleep(0.05)

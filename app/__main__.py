@@ -497,6 +497,25 @@ def cmd_engine(args) -> int:
     from app.maintenance.final_jobs import build_maintenance_jobs
     from app.maintenance.scheduler import MaintenanceScheduler
 
+    # V2.1 L-ops: safety rails for real-money sessions. Built only for the live
+    # broker so paper/sandbox behaviour is untouched; the engine treats
+    # live_ops=None as "no operational layer".
+    live_ops = None
+    if broker_mode == "UPSTOX_LIVE":
+        from app.live.ops import LiveOperations
+
+        live_ops = LiveOperations.from_settings(settings, repository, broker)
+        ops_status = live_ops.status()
+        print(json.dumps({
+            "ok": True,
+            "live_ops": {
+                "canary": ops_status["canary"],
+                "token": ops_status["token"]["decision"],
+                "breaches": ops_status["breaches"],
+                "alerts": ops_status["alerts"],
+            },
+        }, indent=2, default=str), flush=True)
+
     event_engine = EventDrivenDecisionEngine(
         move_threshold=settings.event_move_threshold,
         volume_spike=settings.event_volume_spike)
@@ -528,6 +547,7 @@ def cmd_engine(args) -> int:
         pause_gate=pause_gate,
         maintenance_scheduler=scheduler,
         strategy_source=strategy_source,
+        live_ops=live_ops,
         instrument_keys=instrument_keys,
         market_timezone=settings.market_timezone,
         stop_loss=float(settings.stop_loss or 0.0),
@@ -594,15 +614,35 @@ def cmd_live_preflight(args) -> int:
             "max_daily_loss": settings.max_daily_loss,
             "max_trades_per_day": settings.max_trades_per_day,
         },
-        warnings=[
-            "static IP registration is mandatory for order APIs (SEBI/NSE, in "
-            "force since 2025-10-01)",
-            "use a DEDICATED DATABASE_URL for live so sandbox/live audit rows "
-            "and engine state can never mix",
-            "tokens expire daily; automate refresh or the engine stops at the "
-            "next expiry",
-        ],
     )
+    # V2.1: the same checks the engine and the API rely on, run offline.
+    from app.config.hosts import host_of as _host_of
+    from app.live.preflight import run_checks, summarize
+
+    # Settings has already accepted the live opt-in, so the checks below are
+    # the operational-readiness layer (canary, drawdown cap, alerts, freshness).
+    repository = None
+    database = None
+    try:
+        from app.database.database import Database
+        from app.database.repository import Repository
+
+        database = Database(settings.database_url)
+        repository = Repository(database)
+        report = summarize(run_checks(settings, repository=repository))
+    except Exception as exc:  # a broken DB must not masquerade as "ready"
+        report = {"ok": False, "errors": [
+            {"name": "database", "severity": "ERROR",
+             "detail": f"could not open DATABASE_URL: {type(exc).__name__}"}],
+            "warnings": [], "checks": []}
+    payload["readiness"] = {
+        "ok": report["ok"],
+        "errors": [c["detail"] for c in report["errors"]],
+        "warnings": [c["detail"] for c in report["warnings"]],
+        "checks": report["checks"],
+    }
+    payload["order_host_is_documented_live"] = _host_of(
+        settings.upstox_live_base_url) in LIVE_ORDER_HOSTS
     if not token.strip():
         payload.update(credential_checked=False, reason="no live token configured")
         print(json.dumps(payload, indent=2))
@@ -627,6 +667,16 @@ def cmd_live_preflight(args) -> int:
         )
         if verdict["class"] == "unexpected":
             payload["unexpected_probe_response"] = True
+        if verdict["credential_accepted"] and repository is not None:
+            # This is what unblocks NEW ENTRIES in the engine's TokenGuard.
+            from app.live.guards import TokenGuard
+
+            state = TokenGuard(
+                repository,
+                max_age_hours=settings.live_token_max_age_hours,
+                warn_minutes=settings.live_token_warn_minutes,
+            ).record_verified(source="live-preflight")
+            payload["verification_recorded"] = state
     except SandboxAuthError:
         payload.update(credential_checked=True, credential_accepted=False,
                        probe="credential rejected (401/403)")
@@ -634,6 +684,8 @@ def cmd_live_preflight(args) -> int:
         payload.update(credential_checked=True, credential_accepted=False,
                        probe=str(exc))
     print(json.dumps(payload, indent=2, default=str))
+    if database is not None:
+        database.close()
     return 0 if payload.get("credential_accepted") else 1
 
 

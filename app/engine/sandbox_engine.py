@@ -66,6 +66,7 @@ class SandboxEngine:
                  event_engine=None, pause_gate=None, monitor=None,
                  maintenance_scheduler=None, strategy_source=None,
                  allocator=None, instrument_keys=None,
+                 live_ops=None,
                  market_timezone: str = "Asia/Kolkata",
                  stop_loss: float | None = 0.0,
                  take_profit: float | None = 0.0,
@@ -95,6 +96,9 @@ class SandboxEngine:
         self.processed = 0
         self.submitted = 0
         self.rejected_by_risk = 0
+        # V2.1 L-ops: optional live safety rails (guards/watchdog/breaches).
+        # None = the paper/sandbox behaviour is byte-for-byte unchanged.
+        self.live_ops = live_ops
         self.signals: dict = {}
         self.regime: str | None = None
         self._history: list = []
@@ -122,6 +126,8 @@ class SandboxEngine:
 
         self.intent_journal = SubmissionJournal(repository) \
             if repository is not None else None
+        if live_ops is not None:
+            live_ops.attach_journal(self.intent_journal)
         self.daily = DailyRiskAccount(repository, market_timezone) \
             if repository is not None else None
         # authoritative symbol → instrument key resolution.
@@ -345,6 +351,7 @@ class SandboxEngine:
                             self.maintenance_scheduler.run_due()
                         except Exception:  # maintenance must never kill the loop
                             logger.exception("maintenance job failed")
+                    self._ops_tick()
                     self.process_candle(candle)
                     if max_candles is not None and self.processed >= max_candles:
                         break
@@ -358,6 +365,35 @@ class SandboxEngine:
             if self.state == "RUNNING":
                 self.state = "STOPPED"
         return self.status()
+
+    def _ops_tick(self, *, now=None) -> None:
+        """Observe operational health and escalate breaches (V2.1 L-ops).
+
+        Runs every loop iteration — including when the market is closed —
+        because the failures worth catching (a stuck order, an auth fail,
+        reconciliation going quiet) happen precisely while nothing is being
+        traded. Never raises: an operations check must not break the loop.
+        """
+        if self.live_ops is None:
+            return
+        now = now or datetime.now(timezone.utc)
+        try:
+            self.live_ops.observe(now=now)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops observe failed")
+        try:
+            equity = self.broker.ledger.equity()
+            realized_today = (self.daily.realized_pnl if self.daily is not None
+                              else self._last_realized)
+            breach = self.live_ops.breach(
+                realized_today=realized_today, equity=equity,
+                peak_equity=self._peak_equity or None)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops breach check failed")
+            breach = None
+        if breach and breach.get("stop") and not self._check_emergency():
+            self.emergency_stop(
+                reason=f"AUTO_STOP {breach['kind']}: {breach['message']}")
 
     def process_candle(self, candle) -> None:
         metrics = self.provider.metrics()
@@ -888,6 +924,29 @@ class SandboxEngine:
             logger.warning("INSTRUMENT_IDENTITY_MISSING",
                            extra={"symbol": candle.symbol, "side": side})
             return
+        # V2.1 L-ops: operational guards gate NEW ENTRIES only. Exits and
+        # protective stops are never blocked by an operational rail.
+        if self.live_ops is not None:
+            decision = self.live_ops.guard_entry(
+                side=side, quantity=quantity, price=price)
+            if not decision.allowed:
+                self.rejected_by_risk += 1
+                self.repository.record_system_event("ENTRY_GUARD_BLOCKED", {
+                    "reason": decision.reason, "side": side,
+                    "quantity": quantity, "price": price,
+                    "symbol": candle.symbol, "intent_reason": reason,
+                    "ts": candle.timestamp.isoformat()})
+                logger.warning("ENTRY_GUARD_BLOCKED",
+                               extra={"reason": decision.reason[:120]})
+                return
+            if decision.adjusted_quantity is not None:
+                self.repository.record_system_event("ENTRY_GUARD_REDUCED", {
+                    "reason": decision.reason, "side": side,
+                    "from_quantity": quantity,
+                    "to_quantity": decision.adjusted_quantity,
+                    "price": price, "symbol": candle.symbol,
+                    "ts": candle.timestamp.isoformat()})
+                quantity = decision.adjusted_quantity
         # full decision observability (3.0.1): reconstructable end-to-end
         self.repository.record_system_event("DECISION", {
             "ts": candle.timestamp.isoformat(),
@@ -921,6 +980,8 @@ class SandboxEngine:
         self.repository.set_engine_state("processed_signals", sorted(processed)[-2000:])
         self.submitted += 1
         if side == "BUY":
+            if self.live_ops is not None:
+                self.live_ops.record_submitted_entry(quantity=quantity, price=price)
             if self.daily is not None:
                 self.daily.register_trade()
             else:
@@ -928,6 +989,10 @@ class SandboxEngine:
 
     def reconcile(self) -> list[dict]:
         fills = self.broker.reconcile() if hasattr(self.broker, "reconcile") else []
+        # L-ops liveness stamp: silence here is a silent 24/7 failure mode
+        self.repository.set_engine_state(
+            "last_reconcile_at", {"ts": datetime.now(timezone.utc).isoformat(),
+                                  "fills": len(fills)})
         for fill in fills:
             if fill["side"] == "SELL":
                 realized_delta = self.broker.ledger.realized_pnl - self._last_realized
@@ -1032,6 +1097,7 @@ class SandboxEngine:
             "unresolved_intents": (
                 len(self.intent_journal.unresolved()) if self.intent_journal else 0),
             "recovery": self._recovery_report,
+            "live_ops": self.live_ops.status() if self.live_ops is not None else None,
         }
 
 

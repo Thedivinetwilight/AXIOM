@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.auth import authenticate, loopback_or_bearer
+from app.live.alerts import recent_alerts
 
 router = APIRouter()
 
@@ -39,6 +40,45 @@ def _paper_view(request: Request) -> dict:
             last_price=None,
         )
     return view
+
+
+def _live_ops_view(request: Request, repository) -> dict | None:
+    """Guards/canary/token/breach snapshot from recorded state (never raises)."""
+    if repository is None:
+        return None
+    try:
+        settings = request.app.state.settings
+        from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+        from app.live.guards import CanaryGuard, TokenGuard
+        from app.live.watchdog import BreachMonitor
+
+        live = (bool(settings.live_trading)
+                and (settings.broker or "").upper() == "UPSTOX_LIVE")
+        view = {
+            "live_trading": live,
+            "order_host": settings.upstox_live_base_url if live else None,
+            "order_host_is_documented_live": (
+                host_of(settings.upstox_live_base_url) in LIVE_ORDER_HOSTS
+                if live else None),
+            "token": TokenGuard(
+                repository,
+                max_age_hours=settings.live_token_max_age_hours,
+                warn_minutes=settings.live_token_warn_minutes).status(),
+            "canary": CanaryGuard(
+                repository,
+                max_notional=settings.live_canary_max_notional,
+                first_orders=settings.live_canary_orders).status(),
+            "breaches": BreachMonitor(
+                repository, max_daily_loss=settings.max_daily_loss,
+                max_equity_drawdown=settings.live_max_equity_drawdown,
+                auto_stop=settings.live_auto_stop_on_breach).status(),
+            "last_reconcile_at": repository.get_engine_state(
+                "last_reconcile_at"),
+            "open_live_orders": len(repository.open_live_orders()),
+        }
+        return view
+    except Exception:
+        return None
 
 
 def _sandbox_view(request: Request, *, live: bool = False) -> dict:
@@ -149,6 +189,10 @@ async def dashboard_data(request: Request):
         "emergency_reason": emergency.get("reason"),
         "model_version": promoted,
         "system_events": repository.list_system_events(limit=15) if repository else [],
+        # V2.1 L-ops: alerts + the operational rails, visible even when the
+        # engine process is stopped or has crashed.
+        "alerts": recent_alerts(repository, limit=10),
+        "live_ops": _live_ops_view(request, repository),
         "market_events": market_events,
         "quality_events": quality_events[:8],
         "market_context": cross_ctx if isinstance(cross_ctx, dict) else (cross_ctx.__dict__ if cross_ctx and hasattr(cross_ctx, "__dict__") else None),
@@ -254,8 +298,10 @@ border-radius:8px;cursor:pointer;font-size:14px}
 <section><h2>Market Context (3.0.5)</h2><table id="market_context"></table></section>
 <section><h2>Execution (3.0.5)</h2><table id="execution"></table></section>
 <section><h2>Strategy Health (3.0.5)</h2><table id="health"></table></section>
+<section><h2>Alerts &amp; Live Ops (V2.1)</h2><table id="alerts"></table></section>
 </main><script>
 const token = sessionStorage.getItem('arena_token') || prompt('API token:');
+    const esc = (s) => String(s ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,300);
 if (token) sessionStorage.setItem('arena_token', token);
 const H = {'Authorization':'Bearer ' + token};
 async function tick(){
@@ -289,8 +335,42 @@ async function tick(){
       + row('Mode', d.broker_mode);
     document.getElementById('events').innerHTML = (d.system_events||[]).slice(0,8).map(e=>
       '<tr><td>'+e.ts.slice(11,19)+'</td><td>'+e.kind+'</td></tr>').join('');
+    // Alerts + operational rails (V2.1 L-ops)
+    (() => {
+      const lo = d.live_ops || null;
+      const rows = [];
+      if (lo) {
+        const tk = lo.token || {}, ca = lo.canary || {};
+        rows.push('<tr><td><b>Execution</b></td><td>'
+          + (lo.live_trading ? '<span class="neg">LIVE — REAL MONEY</span>' : 'not live')
+          + ' · reconcile: ' + (lo.last_reconcile_at ? String(lo.last_reconcile_at.ts).slice(11,19) : 'never') + '</td></tr>');
+        rows.push('<tr><td>Token</td><td>'
+          + ((tk.decision && tk.decision.reason) || '—')
+          + (tk.expires_in_minutes != null ? ' · expires in ' + tk.expires_in_minutes + ' min' : '')
+          + '</td></tr>');
+        if (ca.enabled) rows.push('<tr><td>Canary</td><td>'
+          + (ca.submitted||0) + '/' + ca.first_orders + ' entries · cap ' + ca.max_notional
+          + ' · ' + (ca.complete ? 'complete' : ca.remaining + ' remaining') + '</td></tr>');
+        if (lo.breaches) rows.push('<tr><td>Kill switches</td><td>daily loss '
+          + lo.breaches.max_daily_loss + ' · drawdown '
+          + (lo.breaches.max_equity_drawdown || 'off')
+          + ' · auto-stop ' + (lo.breaches.auto_stop ? 'ON' : 'OFF') + '</td></tr>');
+        rows.push('<tr><td>Open live orders</td><td>' + (lo.open_live_orders||0) + '</td></tr>');
+      }
+      const al = d.alerts || [];
+      if (al.length === 0) {
+        rows.push('<tr><td>No alerts recorded</td></tr>');
+      } else {
+        rows.push('<tr><th>When</th><th>Severity / alert</th></tr>');
+        for (const a of al.slice(0,8)) {
+          rows.push('<tr><td>' + esc(a.ts).slice(11,19) + '</td><td>'
+            + esc(a.severity) + ' · <b>' + esc(a.kind) + '</b><br><small>'
+            + esc(a.message) + '</small></td></tr>');
+        }
+      }
+      document.getElementById('alerts').innerHTML = rows.join('');
+    })();
     // Market Events panel — EVENT, WHY IT MAY MATTER, AFFECTED MARKET, CONFIDENCE, ARENA RESPONSE, ACTION TAKEN, RESULT
-    const esc = (s) => String(s ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0,300);
     const me = d.market_events || [];
     if (me.length === 0) {
       document.getElementById('market_events').innerHTML = '<tr><td>No market events recorded</td></tr>';

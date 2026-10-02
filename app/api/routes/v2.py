@@ -289,3 +289,64 @@ async def report(request: Request, period: str = "weekly",
     if format == "pdf":
         return Response(content=report.pdf(), media_type="application/pdf")
     return Response(content=report.markdown(), media_type="text/markdown")
+
+
+@router.get("/alerts")
+async def alerts(request: Request, limit: int = 50):
+    """Operational alerts from the durable sink (V2.1 L-ops).
+
+    Read-only and additive: alerts are recorded by the engine's AlertRouter in
+    ``system_events`` (kind ALERT), so this endpoint works even while no engine
+    process is running. ``limit`` is clamped to keep the response bounded.
+    """
+    from app.live.alerts import recent_alerts
+
+    bounded = max(1, min(int(limit), 500))
+    return {
+        "alerts": recent_alerts(_repo(request), limit=bounded),
+        "source": "system_events/ALERT",
+        "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
+    }
+
+
+@router.get("/live/status")
+async def live_status(request: Request):
+    """Live-operations snapshot: mode, guards, canary, token, breaches.
+
+    Deliberately derived from RECORDED state (engine_state + settings) rather
+    than from a running engine object, so it is accurate for a stopped or
+    crashed engine too — which is exactly when an operator looks at it.
+    """
+    from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+    from app.live.guards import CanaryGuard, TokenGuard
+    from app.live.watchdog import BreachMonitor
+
+    settings = request.app.state.settings
+    repository = _repo(request)
+    broker_mode = (settings.broker or "").upper()
+    live = bool(settings.live_trading) and broker_mode == "UPSTOX_LIVE"
+    token = TokenGuard(
+        repository, max_age_hours=settings.live_token_max_age_hours,
+        warn_minutes=settings.live_token_warn_minutes)
+    canary = CanaryGuard(
+        repository, max_notional=settings.live_canary_max_notional,
+        first_orders=settings.live_canary_orders)
+    breaches = BreachMonitor(
+        repository, max_daily_loss=settings.max_daily_loss,
+        max_equity_drawdown=settings.live_max_equity_drawdown,
+        auto_stop=settings.live_auto_stop_on_breach)
+    host = host_of(settings.upstox_live_base_url)
+    return {
+        "mode": (settings.mode or "PAPER").upper(),
+        "live_trading": live,
+        "broker": broker_mode,
+        "order_host": settings.upstox_live_base_url if live else None,
+        "order_host_is_documented_live": host in LIVE_ORDER_HOSTS if live else None,
+        "token": token.status(),
+        "canary": canary.status(),
+        "breaches": breaches.status(),
+        "last_reconcile_at": repository.get_engine_state("last_reconcile_at"),
+        "emergency_stop": bool(
+            (repository.get_engine_state("emergency_stop") or {}).get("stopped")),
+        "open_live_orders": len(repository.open_live_orders()) if live else 0,
+    }

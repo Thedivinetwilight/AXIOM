@@ -146,6 +146,35 @@ class Settings:
     live_order_tag: str = "arena-live"
     live_algo_name: str = ""  # optional X-Algo-Name for exchange-approved algos
     live_confirm: str = field(default="", repr=False)  # must equal LIVE_CONFIRM_PHRASE
+    # --- V2.1 (Arena L-ops): live operations safety rails -------------------
+    # ALL of these act on NEW ENTRIES only. Exits and protective stops are
+    # never blocked by an operational guard (a guard must not trap the account
+    # in a position); see app/live/.
+    # Canary ramp: while the first ``live_canary_orders`` live entries have not
+    # been placed, an entry is capped to ``live_canary_max_notional`` (0 = off).
+    live_canary_max_notional: float = 0.0
+    live_canary_orders: int = 10
+    # Token freshness: Upstox access tokens expire daily. The engine refuses
+    # NEW ENTRIES when the last verified credential is older than this many
+    # hours, and warns this many minutes before that (0 disables the check).
+    live_token_max_age_hours: float = 20.0
+    live_token_warn_minutes: int = 120
+    # Watchdog: an order left working for longer than this raises an alert.
+    live_stuck_order_minutes: int = 5
+    # Reconciliation silence (no successful reconcile) longer than this raises
+    # an alert.
+    live_reconcile_silence_minutes: int = 10
+    # Auto-stop: when a live breach is detected (daily loss / equity drawdown)
+    # the engine triggers the persisted EMERGENCY STOP itself. Fail-closed
+    # default is ON for live mode.
+    live_auto_stop_on_breach: bool = True
+    # Equity drawdown kill switch (fraction of peak equity, 0 = disabled).
+    live_max_equity_drawdown: float = 0.0
+    # --- Alerts (any mode; the durable sink is always the system_events table) --
+    # Optional HTTP POST sink for CRITICAL/WARNING alerts. Empty = disabled.
+    alert_webhook_url: str = field(default="", repr=False)
+    alert_min_severity: str = "WARNING"  # INFO | WARNING | CRITICAL
+    alert_dedup_seconds: int = 300  # identical alerts are collapsed in this window
     # Hard risk limits (outside any learning system; 0 = unlimited/disabled).
     max_position_value: float = 0.0
     max_open_positions: int = 0
@@ -225,6 +254,38 @@ class Settings:
             raise ValueError("SANDBOX_PRODUCT must be I, D or MTF (documented V3 values)")
         if self.live_product not in {"I", "D", "MTF"}:
             raise ValueError("LIVE_PRODUCT must be I, D or MTF (documented V3 values)")
+        # V2.1 L-ops: operational rails that can silently do nothing are worse
+        # than an explicit refusal, so malformed values fail closed here.
+        if self.live_canary_max_notional < 0:
+            raise ValueError("LIVE_CANARY_MAX_NOTIONAL cannot be negative")
+        if self.live_canary_orders < 0:
+            raise ValueError("LIVE_CANARY_ORDERS cannot be negative")
+        if self.live_canary_max_notional > 0 and self.live_canary_orders <= 0:
+            raise ValueError(
+                "LIVE_CANARY_MAX_NOTIONAL is set but LIVE_CANARY_ORDERS=0: the "
+                "canary would never end; set LIVE_CANARY_ORDERS>0 or unset the "
+                "canary")
+        if self.live_token_max_age_hours < 0 or self.live_token_max_age_hours > 24:
+            raise ValueError("LIVE_TOKEN_MAX_AGE_HOURS must be 0..24 (0 disables)")
+        if self.live_token_warn_minutes < 0 or self.live_token_warn_minutes > 1440:
+            raise ValueError("LIVE_TOKEN_WARN_MINUTES must be 0..1440")
+        if self.live_stuck_order_minutes <= 0:
+            raise ValueError("LIVE_STUCK_ORDER_MINUTES must be > 0")
+        if self.live_reconcile_silence_minutes <= 0:
+            raise ValueError("LIVE_RECONCILE_SILENCE_MINUTES must be > 0")
+        if not 0 <= self.live_max_equity_drawdown < 1:
+            raise ValueError("LIVE_MAX_EQUITY_DRAWDOWN must be 0..<1 (0 disables)")
+        if self.alert_min_severity.upper() not in {"INFO", "WARNING", "CRITICAL"}:
+            raise ValueError("ALERT_MIN_SEVERITY must be INFO, WARNING or CRITICAL")
+        if self.alert_dedup_seconds < 0:
+            raise ValueError("ALERT_DEDUP_SECONDS cannot be negative")
+        if self.alert_webhook_url and not self.alert_webhook_url.startswith(
+                ("http://", "https://")):
+            raise ValueError("ALERT_WEBHOOK_URL must be an http(s) URL or empty")
+        if self.alert_webhook_url and host_of(self.alert_webhook_url) in (
+                LIVE_ORDER_HOSTS | SANDBOX_ORDER_HOSTS):
+            raise ValueError(
+                "ALERT_WEBHOOK_URL must not point at a trading host")
         for name in ("max_position_value", "max_daily_loss"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name.upper()} cannot be negative")
