@@ -409,3 +409,23 @@ status code. Blanking the default therefore breaks `sandbox-test` outright, so
 the default must stay and the guard belongs in the broker.
 
 Left undone deliberately rather than shipped half-applied.
+
+### 5c. Two implementation traps found while attempting the guard
+
+1. **Argument order.** Several test constructions are single-line with
+   positional args first — `UpstoxSandboxBroker("tok", INSTRUMENT, transport=...)`.
+   Inserting `history_url=` immediately after the opening paren puts a keyword
+   argument before positionals and is a `SyntaxError` at collection time, which
+   aborts the whole run rather than failing one test. Any scripted insertion
+   must go last, before the closing paren.
+2. **Mock routing differs per file.** `test_v3_0_2_hardening.py:79` matches
+   history by *path* (`/v2/order/history`), so a host change is invisible to it.
+   `test_v1_separation.py:31` and `test_v1_engine.py:37` match by *host*, and
+   `test_v1_separation.py:65` asserts the exact host set — all three need
+   updating together.
+
+The cleaner shape this points to: `upstox_sandbox_order_history_url` currently
+does double duty — broker reconciliation *and* the `sandbox-test` credential
+probe (`app/__main__.py:562`). Splitting those into two settings would let the
+broker default to a sandbox host without breaking the diagnostic, and would
+reduce the test churn to the two host-matched files.
