@@ -486,6 +486,11 @@ class SandboxEngine:
 
         triggers = triggers or []
         if signal == Signal.HOLD:
+            logger.debug(
+                "SIGNAL_NOT_AN_ORDER",
+                extra={"reason": "HOLD", "symbol": candle.symbol,
+                       "price": candle.close, "processed": self.processed},
+            )
             return
         params = dict(self.strategy.parameters)
         self.journal.record_signal(
@@ -500,6 +505,13 @@ class SandboxEngine:
             if ledger.position_quantity > 0:
                 self._submit("SELL", ledger.position_quantity, candle.close, candle,
                              reason="STRATEGY_EXIT")
+            else:
+                logger.info(
+                    "SIGNAL_NOT_AN_ORDER",
+                    extra={"reason": "EXIT_WITH_NO_POSITION",
+                           "signal": signal.value, "symbol": candle.symbol,
+                           "price": candle.close, "processed": self.processed},
+                )
             return
         # --- BUY: size FIRST, then gate the EXACT final quantity (3.0.1) -----
         # 3.0.2: with a strategy source, entries require an ELIGIBLE router
