@@ -378,3 +378,34 @@ Live trading is not step 7. It is not on this list.
 - Sandbox diagnostics use `GET` only.
 - Arena source is not modified by any probe; the probes live outside the repo.
 - `.env` is gitignored and must never be committed.
+
+### 5b. Scoping the fix (measured, two attempts)
+
+The correct shape is known: stop the broker sending a sandbox credential to a
+non-sandbox history host, and take the honest unresolved path instead. The
+ordering matters — the guard must test `self.available` FIRST and re-raise, or
+it bypasses `_request`'s own `if not self.available: raise` and silently masks
+fail-closed. With that ordering, verified behaviour was:
+
+```
+1) credential reached production host: False
+   broker still available          : True
+   order endpoint works            : True
+2) fail-closed preserved          : Sandbox broker disabled after an auth failure
+```
+
+So the guard itself is sound. What makes it a refactor rather than a patch is
+blast radius: **26 tests in 4 files** construct brokers on the shipped
+production history default and rely on reconciliation reaching it —
+`test_v3_0_2_hardening.py` (12), `test_v3_0_1_execution_safety.py` (9),
+`test_v1_separation.py` (4), `test_v1_engine.py` (1). Each needs its broker
+pointed at a sandbox history host and its mock taught to route that host, the
+way `tests/test_v1_sandbox.py` was updated.
+
+Note also that `upstox_sandbox_order_history_url` is load-bearing for the
+diagnostic, not just for reconciliation: `app/__main__.py:562` issues
+`GET <history_url>?order_id=0` and derives the credential verdict from the
+status code. Blanking the default therefore breaks `sandbox-test` outright, so
+the default must stay and the guard belongs in the broker.
+
+Left undone deliberately rather than shipped half-applied.
