@@ -38,12 +38,44 @@ if broker == "LIVE":
 
 Only `LOCAL_PAPER` and `UPSTOX_SANDBOX` are accepted (line 160).
 
-**c) There is no live broker implementation.**
+**c) There is no live broker implementation — and the placeholder is
+deliberately non-operational.**
 
-The only broker class in the project is `UpstoxSandboxBroker`
-(`app/brokers/sandbox.py:173`). A grep for any live broker or live order path
-returns nothing but the module docstring, which states at line 26 that
-"there is no live order path in this project".
+The project contains four broker classes, and none can place a live order:
+
+| Class | Location | Status |
+|---|---|---|
+| `BrokerInterface` | `app/paper_trading/broker.py:18` | Abstract base — cannot be instantiated |
+| `PaperBroker` | `app/paper_trading/broker.py:40` | The only functional broker; simulated fills |
+| `UpstoxSandboxBroker` | `app/brokers/sandbox.py:173` | Sandbox orders only; never a live host |
+| `FutureRealBroker` | `app/paper_trading/broker.py:33` | **Non-operational marker** |
+
+`FutureRealBroker` is blocked twice over. Its constructor raises:
+
+```python
+# app/paper_trading/broker.py:36-37
+def __init__(self, *args, **kwargs):
+    raise RuntimeError("Real-money trading is not implemented or permitted")
+```
+
+and it is *also* still abstract, so instantiating it fails before that line is
+even reached. Verified empirically:
+
+```
+>>> FutureRealBroker()
+TypeError: Can't instantiate abstract class FutureRealBroker with abstract
+methods cancel_order, get_balance, get_order, get_orders, get_positions,
+place_order
+```
+
+It contains no HTTP client, no order URL, and no SDK import — there is no
+network path in the file at all. Its only references in the codebase are two
+tests asserting it stays broken
+(`tests/test_execution.py:145`, `tests/test_upstox_live.py:587`,
+`test_real_broker_remains_non_operational`).
+
+The module docstring at `app/paper_trading/broker.py:1` states it plainly:
+"Paper is the only implemented broker. No SDK or real order URL exists."
 
 ### What this means practically
 
