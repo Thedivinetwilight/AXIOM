@@ -44,7 +44,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         title="Arena",
         version=__version__,
         lifespan=lifespan,
-        description="Research and simulated orders only. Real-money routing is absent.",
+        description=("Research, simulation, sandbox orders, and gated real-money "
+                     "routing. Execution mode is reported truthfully by /health."),
         docs_url="/docs",
         redoc_url=None,
     )

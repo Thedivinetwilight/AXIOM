@@ -40,8 +40,12 @@ event-driven engine with a persisted execution pause, reality-gap/anomaly/
 system monitoring with scheduled database backups, an NL command center over
 recorded data, daily/weekly/monthly reports with attribution, and a
 **PySide6 desktop application** (13 pages — see "Desktop application" below).
-LIVE trading remains gated OFF by design (`MODE=PAPER`, `LIVE_TRADING=false`;
-`BROKER=LIVE` raises). Verification status: **491 tests passed / 0 failed**;
+LIVE (real-money) trading is **OFF by default** and gated behind a
+four-switch opt-in (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE`
++ `LIVE_CONFIRM`) **and** explicit non-zero hard risk limits; see
+[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The bare alias
+`BROKER=LIVE` still raises, and the sandbox broker refuses live order hosts.
+Verification status: **983 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See
@@ -50,8 +54,17 @@ source and API contracts verified); authenticated Upstox sandbox/feed flows
 ```text
 MODE=PAPER
 LIVE_TRADING=false
-REAL MONEY = DISABLED
+BROKER=LOCAL_PAPER
+REAL MONEY = DISABLED (default)
 ```
+
+**V2 host-classification fix (2026-10-02).** V1 labelled `api-hft.upstox.com`
+— Upstox's *live* order host — as a sandbox host and shipped it as the
+sandbox default, so a live token placed real orders while the broker, the
+audit tables, the dashboard and the reports all said "sandbox". The sandbox
+default is now `api-sandbox.upstox.com`, the live host is refused by the
+sandbox broker, and real-money routing goes through `UpstoxLiveBroker`
+(live audit tables, truthful `mode`/`live` labels, preflight command).
 
 Backtests, validation, and paper trading are simulations. **Historical results are not guarantees of future performance.** A high research score identifies a **selected candidate**, not a strategy guaranteed to make money. Sample prices are explicitly **synthetic**, not actual prices for RELIANCE, any exchange-listed stock, or a cryptocurrency.
 
@@ -227,8 +240,9 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
-- **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
-  (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
+- **Security**: paper by default; real money requires the four-switch opt-in
+  plus non-zero risk limits, and the sandbox broker refuses live hosts
+  (`BROKER=LIVE` alone raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth
   unchanged (Bearer token, all v2 pages 401 without it).
 - **Performance**: bounded reads everywhere hot (scanner lookback window,
@@ -1143,7 +1157,9 @@ curl http://127.0.0.1:8000/health
 
 Tests cover both successful paths and safe failures, including future-data isolation, final-candle nonexecution, liquidity limits, fee/P&L reconciliation, stop gaps and ambiguity, calendar closures, SQLite rollback/restart, exclusive ownership, protected API routes, replay parity, mocked download caching, WSS reconnect/authentication/heartbeats, and malformed/future data rejection.
 
-**Keep REAL MONEY disabled. Evaluate assumptions, not only scores.**
+**Treat real money as a separate deployment: paper/sandbox first, then the
+gated live path — with non-zero risk limits and the preflight command.
+Evaluate assumptions, not only scores.**
 
 ---
 

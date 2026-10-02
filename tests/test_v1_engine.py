@@ -170,7 +170,8 @@ class TestRiskGate:
         engine.process_candle(candle(100.0, 15))
         status = engine.status()
         assert status["live_trading"] is False
-        assert status["mode"] == "PAPER/SANDBOX"
+        assert status["mode"] == "UPSTOX_SANDBOX"
+        assert status["engine"] == "sandbox"
 
 
 class TestFullLoop:

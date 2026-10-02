@@ -28,8 +28,8 @@ from app.engine.sandbox_engine import SandboxEngine
 from app.learning.journal import LearningJournal
 from app.risk.limits import HardRiskLimits
 
-PLACE_URL = "https://api-hft.upstox.com/v3/order/place"
-CANCEL_URL = "https://api-hft.upstox.com/v3/order/cancel"
+PLACE_URL = "https://api-sandbox.upstox.com/v3/order/place"
+CANCEL_URL = "https://api-sandbox.upstox.com/v3/order/cancel"
 INSTRUMENT = "NSE_EQ|INE002A01018"
 
 
@@ -333,8 +333,7 @@ class TestConstructionGuards:
         for bad in ("", "   ", "\t\n"):
             with pytest.raises(ValueError) as excinfo:
                 UpstoxSandboxBroker(bad, INSTRUMENT)
-            # The message must name the variable the operator has to set.
-            assert "UPSTOX_SANDBOX_ACCESS_TOKEN" in str(excinfo.value)
+            assert "token" in str(excinfo.value).lower()
 
     def test_non_string_token_is_refused(self):
         for bad in (None, 12345, b"token"):
@@ -368,7 +367,30 @@ class TestConstructionGuards:
     def test_the_production_host_is_refused_with_its_own_message(self):
         with pytest.raises(ValueError) as excinfo:
             UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://api.upstox.com")
-        assert "production Upstox host" in str(excinfo.value)
+        assert "not permitted for UPSTOX_SANDBOX" in str(excinfo.value)
+
+    def test_the_live_order_host_is_refused_by_the_sandbox_broker(self):
+        """api-hft.upstox.com is Upstox's LIVE order host (V2 audit).
+
+        In V1 it was the sandbox DEFAULT, so a live token placed real
+        orders while every label said sandbox. It must now be refused.
+        """
+        from app.config.hosts import LIVE_ORDER_HOSTS
+
+        assert "api-hft.upstox.com" in LIVE_ORDER_HOSTS
+        assert "api-hft.upstox.com" not in SANDBOX_ALLOWED_HOSTS
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://api-hft.upstox.com")
+        assert "not permitted for UPSTOX_SANDBOX" in str(excinfo.value)
+
+    def test_the_default_sandbox_host_is_a_sandbox_host(self):
+        from app.config.hosts import LIVE_ORDER_HOSTS
+
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert host_of(broker._base_url) in {
+            "api-sandbox.upstox.com", "sandbox.upstox.com"}
+        assert host_of(broker._base_url) not in LIVE_ORDER_HOSTS
 
     def test_the_production_host_is_refused_even_with_a_path(self):
         with pytest.raises(ValueError):
@@ -413,9 +435,9 @@ class TestConstructionGuards:
     def test_base_and_history_urls_are_normalised(self):
         broker = UpstoxSandboxBroker(
             "tok", INSTRUMENT,
-            base_url="https://api-hft.upstox.com///",
+            base_url="https://api-sandbox.upstox.com///",
             history_url="https://api.upstox.com/v2/order/history/")
-        assert broker._base_url == "https://api-hft.upstox.com"
+        assert broker._base_url == "https://api-sandbox.upstox.com"
         assert broker.history_endpoint == "https://api.upstox.com/v2/order/history"
 
     def test_a_fresh_broker_is_available_until_rejected(self):

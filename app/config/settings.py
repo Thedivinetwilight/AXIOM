@@ -1,4 +1,19 @@
-"""Environment configuration. There is deliberately no real-trading configuration."""
+"""Environment configuration, including the gated real-money (LIVE) mode.
+
+Real-money routing is OFF by default and requires FOUR independent switches to
+agree (V2 live-hardening, see LIVE_TRADING_ENABLEMENT.md):
+
+    MODE=LIVE  +  LIVE_TRADING=true  +  BROKER=UPSTOX_LIVE  +  LIVE_CONFIRM=<phrase>
+
+and, additionally, explicit NON-ZERO hard risk limits (``0`` means "unlimited"
+and is refused in live mode). Any single missing switch raises at startup, so a
+stale ``.env``, a typo or a leftover shell export cannot move real money.
+
+``MODE=PAPER`` / ``LIVE_TRADING=false`` remain the defaults and the only
+permitted combination for every other broker. Broker hosts are classified in
+``app/config/hosts.py``; the sandbox broker can never be pointed at a live
+order host.
+"""
 
 import os
 import types
@@ -6,7 +21,22 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
 
+from app.config.hosts import (
+    DEFAULT_LIVE_BASE_URL,
+    DEFAULT_ORDER_HISTORY_URL,
+    DEFAULT_SANDBOX_BASE_URL,
+    FORBIDDEN_IN_LIVE,
+    FORBIDDEN_IN_SANDBOX,
+    LIVE_ORDER_HOSTS,
+    SANDBOX_ORDER_HOSTS,
+    host_of,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
+
+#: Exact phrase required in LIVE_CONFIRM before real money can be routed. It is
+#: deliberately long and awkward: it must never be guessable from a template.
+LIVE_CONFIRM_PHRASE = "I-ACCEPT-REAL-MONEY-RISK"
 
 
 def _unwrap_optional(annotation):
@@ -88,7 +118,8 @@ class Settings:
     market_data_token: str = field(default="", repr=False)
     data_ws_url: str = field(default="", repr=False)
     data_source: str = "replay"
-    # V0.6.1 real market DATA (read-only Upstox feed). No real-trading config exists.
+    # V0.6.1 real market DATA (read-only Upstox feed). Execution config for
+    # real money lives in the V2 LIVE block further down (four-switch gated).
     market_data_provider: str = "upstox"
     market_data_symbols: str = ""
     market_data_timeframe: str = ""
@@ -96,12 +127,25 @@ class Settings:
     market_data_access_token: str = field(default="", repr=False)
     market_data_authorize_url: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
     # --- V1 (Arena): explicit broker modes + sandbox + hard risk limits ---
-    broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX (LIVE is not enabled)
+    broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX | UPSTOX_LIVE (gated)
     upstox_sandbox_access_token: str = field(default="", repr=False)
-    upstox_sandbox_base_url: str = "https://api-hft.upstox.com"
-    upstox_sandbox_order_history_url: str = "https://api.upstox.com/v2/order/history"
+    # Sandbox order host. This MUST stay a sandbox host: api-hft.upstox.com is
+    # the live order host and is refused by the sandbox broker.
+    upstox_sandbox_base_url: str = DEFAULT_SANDBOX_BASE_URL
+    upstox_sandbox_order_history_url: str = DEFAULT_ORDER_HISTORY_URL
     sandbox_product: str = "I"  # intraday product per documented V3 order API
     sandbox_order_tag: str = "arena-v1"
+    # --- V2 (Arena LIVE): real-money routing, gated by four switches ---
+    # Nothing here is active unless MODE=LIVE + LIVE_TRADING=true +
+    # BROKER=UPSTOX_LIVE + LIVE_CONFIRM (phrase) all agree AND every hard risk
+    # limit is explicitly non-zero.
+    upstox_live_access_token: str = field(default="", repr=False)
+    upstox_live_base_url: str = DEFAULT_LIVE_BASE_URL
+    upstox_live_order_history_url: str = DEFAULT_ORDER_HISTORY_URL
+    live_product: str = "I"  # documented V3 product values: I | D | MTF
+    live_order_tag: str = "arena-live"
+    live_algo_name: str = ""  # optional X-Algo-Name for exchange-approved algos
+    live_confirm: str = field(default="", repr=False)  # must equal LIVE_CONFIRM_PHRASE
     # Hard risk limits (outside any learning system; 0 = unlimited/disabled).
     max_position_value: float = 0.0
     max_open_positions: int = 0
@@ -142,8 +186,25 @@ class Settings:
     hot_path_max_latency_ms: float = 100.0
 
     def __post_init__(self):
-        if self.mode.upper() != "PAPER" or self.live_trading:
+        # V1 broker modes: paper, documented Upstox SANDBOX orders, and the
+        # V2 gated real-money mode. The live host/token pair is validated only
+        # for BROKER=UPSTOX_LIVE; every other broker stays paper/sandbox.
+        broker = self.broker.upper()
+        if broker == "LIVE":
+            # Legacy alias kept fail-closed: the name alone is never enough.
+            raise ValueError(
+                "LIVE trading is not enabled under the alias BROKER=LIVE; "
+                "real-money routing requires BROKER=UPSTOX_LIVE together with "
+                "MODE=LIVE, LIVE_TRADING=true, LIVE_CONFIRM and non-zero risk "
+                "limits (see LIVE_TRADING_ENABLEMENT.md)"
+            )
+        if broker == "UPSTOX_LIVE":
+            self._validate_live_mode()
+        elif self.mode.upper() != "PAPER" or self.live_trading:
             raise ValueError("Only MODE=PAPER and LIVE_TRADING=false are permitted")
+        if broker not in {"LOCAL_PAPER", "UPSTOX_SANDBOX", "UPSTOX_LIVE"}:
+            raise ValueError(
+                "BROKER must be LOCAL_PAPER, UPSTOX_SANDBOX or UPSTOX_LIVE")
         if not self.database_url.startswith("sqlite:///"):
             raise ValueError("Only SQLite is supported")
         from app.backtesting.costs import ExecutionConfig
@@ -153,18 +214,17 @@ class Settings:
             raise ValueError("Unknown market calendar")
         if self.data_source not in {"replay", "binance", "generic", "upstox"}:
             raise ValueError("Unknown data source")
-        # V1 broker modes: paper and documented Upstox SANDBOX orders only.
-        broker = self.broker.upper()
-        if broker == "LIVE":
-            raise ValueError("LIVE trading is not enabled in V1")
-        if broker not in {"LOCAL_PAPER", "UPSTOX_SANDBOX"}:
-            raise ValueError("BROKER must be LOCAL_PAPER or UPSTOX_SANDBOX")
-        if broker == "UPSTOX_SANDBOX" and not self.upstox_sandbox_access_token.strip():
-            raise ValueError(
-                "BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN in the environment"
-            )
+        if broker == "UPSTOX_SANDBOX":
+            self._validate_sandbox_host()
+            if not self.upstox_sandbox_access_token.strip():
+                raise ValueError(
+                    "BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN "
+                    "in the environment"
+                )
         if self.sandbox_product not in {"I", "D", "MTF"}:
             raise ValueError("SANDBOX_PRODUCT must be I, D or MTF (documented V3 values)")
+        if self.live_product not in {"I", "D", "MTF"}:
+            raise ValueError("LIVE_PRODUCT must be I, D or MTF (documented V3 values)")
         for name in ("max_position_value", "max_daily_loss"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name.upper()} cannot be negative")
@@ -214,6 +274,57 @@ class Settings:
                         "MARKET_DATA_SYMBOLS must be comma-separated Upstox instrument "
                         "keys, e.g. NSE_EQ|INE002A01018"
                     )
+
+    def _validate_sandbox_host(self) -> None:
+        """The sandbox broker must never be pointed at a live order host."""
+        host = host_of(self.upstox_sandbox_base_url)
+        if host in FORBIDDEN_IN_SANDBOX:
+            raise ValueError(
+                f"UPSTOX_SANDBOX_BASE_URL host {host!r} is not a sandbox host "
+                f"(sandbox hosts: {', '.join(sorted(SANDBOX_ORDER_HOSTS))}); "
+                "refusing to configure a sandbox broker against a live/order host"
+            )
+
+    def _validate_live_mode(self) -> None:
+        """All four locks + non-zero risk limits, or refuse to start.
+
+        Fails closed with a single message naming every missing switch, so a
+        half-configured live mode can never boot "successfully" and then place
+        real orders.
+        """
+        missing: list[str] = []
+        if self.mode.upper() != "LIVE":
+            missing.append("MODE=LIVE")
+        if self.live_trading is not True:
+            missing.append("LIVE_TRADING=true")
+        if self.live_confirm.strip() != LIVE_CONFIRM_PHRASE:
+            missing.append(f"LIVE_CONFIRM={LIVE_CONFIRM_PHRASE}")
+        if not self.upstox_live_access_token.strip():
+            missing.append("UPSTOX_LIVE_ACCESS_TOKEN")
+        # 0 means "unlimited/disabled" everywhere else; in live mode every
+        # hard limit must be explicit, so a runaway loop cannot be unbounded.
+        for name in ("max_position_value", "max_daily_loss"):
+            if not float(getattr(self, name)) > 0:
+                missing.append(f"{name.upper()}>0 (0 = unlimited, refused in live)")
+        for name in ("max_open_positions", "max_trades_per_day"):
+            if not int(getattr(self, name)) > 0:
+                missing.append(f"{name.upper()}>0 (0 = unlimited, refused in live)")
+        if missing:
+            raise ValueError(
+                "BROKER=UPSTOX_LIVE (real money) requires ALL of: "
+                + "; ".join(missing)
+            )
+        host = host_of(self.upstox_live_base_url)
+        if host not in LIVE_ORDER_HOSTS:
+            raise ValueError(
+                f"UPSTOX_LIVE_BASE_URL host {host!r} is not the documented live "
+                f"order host ({', '.join(sorted(LIVE_ORDER_HOSTS))})"
+            )
+        if host in FORBIDDEN_IN_LIVE:
+            raise ValueError(
+                f"UPSTOX_LIVE_BASE_URL host {host!r} is a sandbox/auth host and "
+                "cannot route real orders"
+            )
 
     def market_data_symbol_list(self) -> list[str]:
         """Comma-separated MARKET_DATA_SYMBOLS → instrument key list."""

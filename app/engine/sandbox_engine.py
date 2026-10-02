@@ -1,4 +1,12 @@
-"""24/7 trading engine for the Upstox SANDBOX mode (V1).
+"""24/7 trading engine for the Upstox execution modes (V1 sandbox, V2 gated LIVE).
+
+The mode is the BROKER's own identity: an UpstoxSandboxBroker routes to a
+sandbox host and records sandbox audit rows; an UpstoxLiveBroker routes to the
+documented live order host and records LIVE audit rows. Real money is reachable
+ONLY when Settings accepted the four-switch opt-in (MODE=LIVE,
+LIVE_TRADING=true, BROKER=UPSTOX_LIVE, LIVE_CONFIRM) plus explicit non-zero
+hard risk limits — see LIVE_TRADING_ENABLEMENT.md. The engine itself can never
+enable live trading, alter risk limits, or pick a host.
 
 Pipeline per completed candle (market OPEN only, provider gate respected):
 
@@ -165,7 +173,8 @@ class SandboxEngine:
             self.scanner_funnel = None
         # durable account recovery BEFORE anything can trade
         if repository is not None:
-            self._recovery_report = recover_ledger_state(broker.ledger, repository)
+            self._recovery_report = recover_ledger_state(
+                broker.ledger, repository, live=bool(getattr(broker, "LIVE", False)))
             if self._recovery_report.get("orders_replayed"):
                 logger.warning("LEDGER_RECOVERED",
                                extra={"orders": self._recovery_report["orders_replayed"]})
@@ -208,7 +217,10 @@ class SandboxEngine:
         restored = 0
         if self.repository is None or not hasattr(self.broker, "orders"):
             return restored
-        for record in self.repository.open_sandbox_orders():
+        open_orders = (self.repository.open_live_orders()
+                       if getattr(self.broker, "LIVE", False)
+                       else self.repository.open_sandbox_orders())
+        for record in open_orders:
             intent_id = record.get("intent_id")
             if not intent_id or intent_id in self.broker.orders:
                 continue
@@ -260,7 +272,9 @@ class SandboxEngine:
             self.broker.orders[intent_id] = state
             restored += 1
         if restored:
-            logger.info("SANDBOX_ORDERS_RESTORED", extra={"count": restored})
+            logger.info(
+                "LIVE_ORDERS_RESTORED" if getattr(self.broker, "LIVE", False)
+                else "SANDBOX_ORDERS_RESTORED", extra={"count": restored})
         return restored
 
     def _surface_unresolved_intents(self):
@@ -957,8 +971,9 @@ class SandboxEngine:
         equity = self.broker.ledger.equity()
         self._peak_equity = max(self._peak_equity, equity)
         drawdown = (self._peak_equity - equity) / self._peak_equity if self._peak_equity > 0 else 0.0
+        from app.engine.state import equity_state_key
         self.repository.set_engine_state(
-            "sandbox_equity",
+            equity_state_key(bool(getattr(self.broker, "LIVE", False))),
             {"equity": equity, "peak": self._peak_equity, "drawdown": drawdown,
              "ts": datetime.now(timezone.utc).isoformat()},
         )
@@ -993,10 +1008,10 @@ class SandboxEngine:
 
     def status(self) -> dict:
         return {
-            "engine": "sandbox",
+            "engine": "live" if getattr(self.broker, "LIVE", False) else "sandbox",
             "state": self.state,
-            "mode": "PAPER/SANDBOX",
-            "live_trading": False,
+            "mode": getattr(self.broker, "mode", "LOCAL_PAPER"),
+            "live_trading": bool(getattr(self.broker, "LIVE", False)),
             "processed": self.processed,
             "submitted": self.submitted,
             "rejected_by_risk": self.rejected_by_risk,

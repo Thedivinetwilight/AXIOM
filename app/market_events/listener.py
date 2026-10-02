@@ -83,7 +83,8 @@ class MarketEventListener:
     def _market_context(self) -> dict:
         """Current Arena market/strategy context (from repository, not invented)."""
         try:
-            equity = self.repository.get_engine_state("sandbox_equity") or {}
+            from app.engine.state import read_equity_state
+            equity = read_equity_state(self.repository)
             active = self.repository.get_engine_state("active_strategy") or {}
             snapshots = self.repository.list_daily_snapshots(limit=5)
             return {

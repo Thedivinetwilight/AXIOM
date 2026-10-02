@@ -270,8 +270,11 @@ def main() -> int:
                         "Backend/token are configured via environment:\n"
                         "ARENA_BACKEND_URL, ARENA_API_TOKEN.\n"
                         "The desktop app is a viewer + emergency stop only; risk "
-                        "limits and execution modes live in the Arena core (.env). "
-                        "LIVE trading is disabled in the core."))
+                        "limits and execution modes live in the Arena core (.env).\n"
+                        "Real-money routing is OFF by default and requires the "
+                        "four-switch opt-in (MODE=LIVE, LIVE_TRADING=true, "
+                        "BROKER=UPSTOX_LIVE, LIVE_CONFIRM) plus non-zero risk "
+                        "limits. Check /health for the ACTUAL mode."))
                     layout.addWidget(self.texts["Settings"])
                     self.stack.addWidget(page)
                 else:

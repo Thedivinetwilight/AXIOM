@@ -18,7 +18,8 @@ Everything here is CRASH-SAFETY infrastructure for the sandbox engine:
 
 - recover_ledger_state: rebuilds the local ledger (cash, position, average
   entry, realized P&L, fees) by replaying RECORDED fills exactly once.
-  Fills come from the idempotent sandbox_transitions audit rows.
+  Fills come from the idempotent sandbox_transitions audit rows (or
+  live_transitions in live mode: ``live=True``), never from both.
 """
 
 from __future__ import annotations
@@ -202,7 +203,28 @@ class DailyRiskAccount:
         self.repository.set_engine_state(self.KEY, self.state())
 
 
-def recover_ledger_state(ledger, repository) -> dict:
+def equity_state_key(live: bool) -> str:
+    """Engine-state key holding the current equity snapshot for the mode."""
+    return "live_equity" if live else "sandbox_equity"
+
+
+def read_equity_state(repository) -> dict:
+    """Live equity when a live engine recorded it, otherwise sandbox equity.
+
+    Prefers the LIVE snapshot so an operator reading the dashboard or the NL
+    command center can never be shown a stale sandbox equity as the current
+    real-money account state.
+    """
+    if repository is None:
+        return {}
+    for key in ("live_equity", "sandbox_equity"):
+        state = repository.get_engine_state(key)
+        if state:
+            return state
+    return {}
+
+
+def recover_ledger_state(ledger, repository, *, live: bool = False) -> dict:
     """Rebuild ledger account state from RECORDED fills (exact, idempotent).
 
     3.0.3 per-child replay: every recorded transition carries the child
@@ -215,12 +237,17 @@ def recover_ledger_state(ledger, repository) -> dict:
     its credit across restarts. Deterministic: transitions were recorded
     exactly once (per-child identity), so replay can never double-count.
     """
-    orders_by_id = {order["id"]: order
-                    for order in repository.list_sandbox_orders(limit=2000)}
+    if live:
+        orders_by_id = {order["id"]: order
+                        for order in repository.list_live_orders(limit=2000)}
+    else:
+        orders_by_id = {order["id"]: order
+                        for order in repository.list_sandbox_orders(limit=2000)}
+    transition_table = "live_transitions" if live else "sandbox_transitions"
     with repository.db.transaction() as conn:
         rows = conn.execute(
             "SELECT order_id, upstox_order_id, status, filled_quantity, "
-            "average_price, ts, rowid AS rid FROM sandbox_transitions "
+            f"average_price, ts, rowid AS rid FROM {transition_table} "
             "WHERE filled_quantity IS NOT NULL AND filled_quantity > 0 "
             "ORDER BY ts, rowid").fetchall()
     # per child (logical order id + child order id): chronological increments

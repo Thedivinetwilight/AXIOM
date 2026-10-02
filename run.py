@@ -1,4 +1,9 @@
-"""Portable CLI. Defaults to paper replay; cannot select a live-money mode."""
+"""Portable CLI for research, replay and paper trading.
+
+This entry point exposes no broker selection: it always runs the in-process
+PaperBroker. Real-money routing is only reachable through the gated
+``python -m app engine`` path (see LIVE_TRADING_ENABLEMENT.md).
+"""
 
 import argparse
 import asyncio

@@ -31,10 +31,19 @@ class BrokerInterface(ABC):
 
 
 class FutureRealBroker(BrokerInterface):
-    """Non-operational architectural marker. Cannot be instantiated."""
+    """Non-operational architectural marker. Cannot be instantiated.
+
+    Real-money routing is NOT done through this marker: it lives in
+    ``app.brokers.live.UpstoxLiveBroker``, behind the four-switch opt-in in
+    ``app/config/settings.py``. This class stays non-instantiable so the paper
+    package can never be mistaken for an execution path.
+    """
 
     def __init__(self, *args, **kwargs):
-        raise RuntimeError("Real-money trading is not implemented or permitted")
+        raise RuntimeError(
+            "This marker is not an execution path; real-money routing is "
+            "app/brokers/live.py behind the gated MODE=LIVE + LIVE_TRADING=true "
+            "+ BROKER=UPSTOX_LIVE + LIVE_CONFIRM opt-in")
 
 
 class PaperBroker(BrokerInterface):

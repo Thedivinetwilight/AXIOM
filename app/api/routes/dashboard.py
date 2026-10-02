@@ -41,16 +41,23 @@ def _paper_view(request: Request) -> dict:
     return view
 
 
-def _sandbox_view(request: Request) -> dict:
+def _sandbox_view(request: Request, *, live: bool = False) -> dict:
     repository = request.app.state.repository
     engine = getattr(request.app.state, "sandbox_engine", None)
     broker = getattr(request.app.state, "sandbox_broker", None)
-    orders = repository.list_sandbox_orders(limit=25) if repository else []
-    equity_state = (repository.get_engine_state("sandbox_equity") or {}) if repository else {}
+    from app.engine.state import read_equity_state
+
+    if live:
+        orders = repository.list_live_orders(limit=25) if repository else []
+    else:
+        orders = repository.list_sandbox_orders(limit=25) if repository else []
+    equity_state = read_equity_state(repository) if repository else {}
     view = {
-        "pipeline": "UPSTOX_SANDBOX",
+        "pipeline": "UPSTOX_LIVE" if live else "UPSTOX_SANDBOX",
         "state": engine.status()["state"] if engine else "IDLE",
         "sandbox_orders": orders,
+        # Live orders are additionally exposed under their true name.
+        "live_orders": orders if live else None,
         "open_orders": len([o for o in orders if o["status"] in {"SUBMITTED", "OPEN", "PARTIALLY_FILLED"}]),
         "ledger": broker.ledger.snapshot() if broker else equity_state.get("ledger"),
         "equity": equity_state.get("equity"),
@@ -79,9 +86,13 @@ async def dashboard_data(request: Request):
     settings = request.app.state.settings
     repository = request.app.state.repository
     broker_mode = settings.broker.upper()
+    live = bool(settings.live_trading) and broker_mode == "UPSTOX_LIVE"
     emergency = (repository.get_engine_state("emergency_stop") or {}) if repository else {}
     promoted = repository.promoted_version("momentum") if repository else None
-    view = _sandbox_view(request) if broker_mode == "UPSTOX_SANDBOX" else _paper_view(request)
+    if broker_mode in {"UPSTOX_SANDBOX", "UPSTOX_LIVE"}:
+        view = _sandbox_view(request, live=live)
+    else:
+        view = _paper_view(request)
     # Market Events — additive, never exposes secrets, never renders untrusted HTML
     try:
         market_events = repository.list_market_events(limit=10) if repository else []
@@ -124,11 +135,16 @@ async def dashboard_data(request: Request):
         health = None
     data = {
         "version": __version__,
-        "mode": "PAPER",
-        "live_trading": False,
-        "live_enabled": "NOT ENABLED IN V1",
+        "mode": settings.mode.upper(),
+        "live_trading": live,
+        "live_enabled": ("ENABLED — REAL MONEY" if live
+                         else "disabled" if broker_mode == "LOCAL_PAPER"
+                         else "not enabled (sandbox orders only)"),
         "broker_mode": broker_mode,
-        "display": f"{broker_mode} — PAPER/SANDBOX ONLY",
+        "display": (f"{broker_mode} — LIVE / REAL MONEY" if live
+                    else f"{broker_mode} — SANDBOX ORDERS ONLY"
+                    if broker_mode == "UPSTOX_SANDBOX"
+                    else f"{broker_mode} — SIMULATED (PAPER)"),
         "emergency_stop": bool(emergency.get("stopped")),
         "emergency_reason": emergency.get("reason"),
         "model_version": promoted,
@@ -183,9 +199,26 @@ async def dashboard(request: Request):
     rendered into it — the page JS asks the operator for the token (kept in
     sessionStorage, never in URLs) and sends it as an Authorization header on
     every protected call. Remote (non-loopback) clients still need the token
-    to load the page at all."""
+    to load the page at all.
 
-    return HTMLResponse("""<!doctype html><html lang="en"><meta charset="utf-8">
+    The mode badges are rendered SERVER-SIDE from Settings (so the truthful
+    state is visible even with JavaScript disabled) and then refreshed by the
+    page's polling loop."""
+
+    settings = request.app.state.settings
+    broker_mode = settings.broker.upper()
+    live = bool(settings.live_trading) and broker_mode == "UPSTOX_LIVE"
+    if live:
+        mode_badge, live_badge, live_class = (
+            f"{broker_mode} · LIVE — REAL MONEY", "ENABLED — REAL MONEY", "badge warn")
+    elif broker_mode == "UPSTOX_SANDBOX":
+        mode_badge, live_badge, live_class = (
+            f"{broker_mode} · SANDBOX ORDERS", "disabled (sandbox orders only)", "badge warn")
+    else:
+        mode_badge, live_badge, live_class = (
+            f"{broker_mode} · SIMULATED (PAPER)", "disabled", "badge warn")
+
+    page = """<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Arena 3.0.5 — Paper/Sandbox Dashboard</title><style>
 body{margin:0;background:#0d1622;color:#e8f1fb;font:15px/1.5 system-ui,sans-serif}
@@ -205,8 +238,8 @@ border-radius:8px;cursor:pointer;font-size:14px}
 .pos{color:#75e7b2}.neg{color:#ff9aa5}
 #err{color:#ff9aa5;font-size:13px}
 </style><header>
-<strong>Arena 3.0.5</strong><span class="badge" id="mode">…</span>
-<span class="badge warn">LIVE: NOT ENABLED IN V1</span>
+<strong>Arena 3.0.5</strong><span class="badge" id="mode">__MODE_BADGE__</span>
+<span class="__LIVE_CLASS__" id="live">LIVE: __LIVE_BADGE__</span>
 <span id="conn" class="badge">…</span>
 <button class="stop" id="stop">EMERGENCY STOP</button><span id="err"></span>
 </header><main>
@@ -231,6 +264,9 @@ async function tick(){
     if(r.status!==200){document.getElementById('err').textContent='auth failed ('+r.status+')';return;}
     const d = await r.json();
     document.getElementById('mode').textContent = d.display;
+    const liveBadge = document.getElementById('live');
+    liveBadge.textContent = 'LIVE: ' + d.live_enabled;
+    liveBadge.className = d.live_trading ? 'badge' : 'badge warn';
     document.getElementById('conn').textContent = 'connection: ' + (d.connection ?? 'n/a')
       + (d.market_status ? ' · market: ' + d.market_status : '');
     const row = (k,v,cls)=>'<tr><td>'+k+'</td><td class="num '+(cls||'')+'">'+v+'</td></tr>';
@@ -293,4 +329,8 @@ document.getElementById('stop').onclick = async () => {
   tick();
 };
 tick(); setInterval(tick, 5000);
-</script>""")
+</script>"""
+    return HTMLResponse(
+        page.replace("__MODE_BADGE__", mode_badge)
+            .replace("__LIVE_CLASS__", live_class)
+            .replace("__LIVE_BADGE__", live_badge))

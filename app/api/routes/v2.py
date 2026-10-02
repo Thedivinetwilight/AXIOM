@@ -16,6 +16,7 @@ from fastapi.responses import Response
 
 from app.reporting.activity import explain_all
 from app.reporting.weekly import WeeklyReport
+from app.engine.state import read_equity_state
 
 router = APIRouter(prefix="/api/v2")
 
@@ -28,7 +29,7 @@ def _repo(request: Request):
 async def overview(request: Request):
     repository = _repo(request)
     settings = request.app.state.settings
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     snapshots = repository.list_daily_snapshots(limit=2)
     return {
         "version": __version__,
@@ -36,8 +37,13 @@ async def overview(request: Request):
             sum(request.app.state.api_latencies) / len(request.app.state.api_latencies), 2),
         "api_requests_observed": len(getattr(request.app.state, "api_latencies", [])),
         "execution_mode": settings.broker.upper(),
-        "live_trading": False,
-        "mode_display": f"{settings.broker.upper()} · LIVE DISABLED",
+        "live_trading": bool(settings.live_trading),
+        "mode_display": (
+            f"{settings.broker.upper()} · LIVE — REAL MONEY"
+            if settings.live_trading else
+            f"{settings.broker.upper()} · "
+            + ("SANDBOX ORDERS" if settings.broker.upper() == "UPSTOX_SANDBOX"
+               else "SIMULATED (PAPER)")),
         "emergency_stop": bool((repository.get_engine_state("emergency_stop") or {}).get("stopped")),
         "equity": equity_state.get("equity"),
         "drawdown": equity_state.get("drawdown"),
@@ -61,7 +67,7 @@ async def trades(request: Request):
 @router.get("/performance")
 async def performance(request: Request):
     repository = _repo(request)
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     snapshots = repository.list_daily_snapshots(limit=400)
     equity_curve = [{"date": row["date"], "equity": row["equity"]}
                     for row in reversed(snapshots) if row["equity"] is not None]
@@ -124,7 +130,7 @@ async def market_data(request: Request):
 async def risk(request: Request):
     repository = _repo(request)
     settings = request.app.state.settings
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     risk_events = [e for e in repository.list_system_events(limit=200)
                    if e["kind"] in {"RISK_REJECT", "EMERGENCY_STOP", "EMERGENCY_STOP_REQUESTED"}]
     limits = {
@@ -180,7 +186,7 @@ async def portfolio(request: Request):
                              "price": broker.ledger.mark
                              or broker.ledger.position_avg_price}])
     else:
-        equity_state = repository.get_engine_state("sandbox_equity") or {}
+        equity_state = read_equity_state(repository)
         snapshot = {"equity": equity_state.get("equity"),
                     "exposure_ratio": None,
                     "note": "no active sandbox broker; recorded state only"}

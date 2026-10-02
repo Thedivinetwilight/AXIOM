@@ -27,8 +27,13 @@ Commands:
   report          Human-readable weekly report (markdown/pdf).
   maintenance     Run due maintenance jobs once (scheduling-aware).
 
-There is no command that can place a real order. MODE=PAPER and
-LIVE_TRADING=false are hard-enforced by Settings for every command.
+Real-money order routing exists but is OFF by default. It requires the
+four-switch opt-in in Settings (MODE=LIVE + LIVE_TRADING=true +
+BROKER=UPSTOX_LIVE + LIVE_CONFIRM) AND explicit non-zero hard risk limits;
+the sandbox broker refuses live hosts. See LIVE_TRADING_ENABLEMENT.md.
+
+Commands:
+  live-preflight  LIVE readiness check (read-only; never places an order).
 """
 
 import argparse
@@ -406,18 +411,22 @@ def cmd_paper_live(args) -> int:
 
 
 def cmd_engine(args) -> int:
-    """24/7 engine: Upstox V3 data → strategies → hard risk → sandbox orders.
+    """24/7 engine: Upstox V3 data → strategies → hard risk → order routing.
 
-    Requires explicit configuration: BROKER=UPSTOX_SANDBOX (plus the sandbox
-    token and DATA_SOURCE=upstox). LOCAL_PAPER users keep the existing paper
-    pipeline (`paper-live`/run.py), which this command refuses to replace.
+    Requires explicit configuration: BROKER=UPSTOX_SANDBOX (sandbox orders) or
+    BROKER=UPSTOX_LIVE (REAL money; requires the full four-switch opt-in plus
+    non-zero hard risk limits in Settings), plus DATA_SOURCE=upstox.
+    LOCAL_PAPER users keep the existing paper pipeline
+    (`paper-live`/run.py), which this command refuses to replace.
     """
     settings = _load_settings()
-    if settings.broker.upper() != "UPSTOX_SANDBOX":
+    broker_mode = settings.broker.upper()
+    if broker_mode not in {"UPSTOX_SANDBOX", "UPSTOX_LIVE"}:
         print(json.dumps({
             "ok": False,
-            "error": "engine requires explicit BROKER=UPSTOX_SANDBOX configuration; "
-                     "LOCAL_PAPER continues via 'python -m app paper-live'",
+            "error": "engine requires explicit BROKER=UPSTOX_SANDBOX or "
+                     "BROKER=UPSTOX_LIVE configuration; LOCAL_PAPER continues "
+                     "via 'python -m app paper-live'",
         }, indent=2))
         return 2
     if (settings.data_source != "upstox"):
@@ -427,6 +436,7 @@ def cmd_engine(args) -> int:
         return 2
 
     from app.backtesting.costs import ExecutionConfig
+    from app.brokers.live import UpstoxLiveBroker
     from app.brokers.sandbox import UpstoxSandboxBroker
     from app.data.factory import stream_provider
     from app.database.database import Database
@@ -440,16 +450,47 @@ def cmd_engine(args) -> int:
     provider = _provider_or_exit(settings)
     database = Database(settings.database_url)
     repository = Repository(database)
-    broker = UpstoxSandboxBroker(
-        settings.upstox_sandbox_access_token,
-        provider._keys[0],
-        base_url=settings.upstox_sandbox_base_url,
-        history_url=settings.upstox_sandbox_order_history_url,
-        product=settings.sandbox_product,
-        tag=settings.sandbox_order_tag,
-        repository=repository,
-        initial_capital=ExecutionConfig(**settings.execution_kwargs()).initial_capital,
-    )
+    initial_capital = ExecutionConfig(**settings.execution_kwargs()).initial_capital
+    if broker_mode == "UPSTOX_LIVE":
+        # Settings has already proven the four locks + non-zero risk limits.
+        # The explicit confirm= below is the fifth, in-code barrier.
+        broker = UpstoxLiveBroker(
+            settings.upstox_live_access_token,
+            provider._keys[0],
+            confirm=settings.live_confirm,
+            base_url=settings.upstox_live_base_url,
+            history_url=settings.upstox_live_order_history_url,
+            product=settings.live_product,
+            tag=settings.live_order_tag,
+            repository=repository,
+            initial_capital=initial_capital,
+            algo_name=settings.live_algo_name,
+        )
+        print(json.dumps({
+            "ok": True,
+            "mode": "LIVE — REAL MONEY",
+            "broker": broker.mode,
+            "order_host": broker._base_url,
+            "product": settings.live_product,
+            "hard_risk_limits": {
+                "max_position_value": settings.max_position_value,
+                "max_open_positions": settings.max_open_positions,
+                "max_daily_loss": settings.max_daily_loss,
+                "max_trades_per_day": settings.max_trades_per_day,
+            },
+            "note": "orders are real; EMERGENCY STOP / Ctrl-C reconciles and stops",
+        }, indent=2), flush=True)
+    else:
+        broker = UpstoxSandboxBroker(
+            settings.upstox_sandbox_access_token,
+            provider._keys[0],
+            base_url=settings.upstox_sandbox_base_url,
+            history_url=settings.upstox_sandbox_order_history_url,
+            product=settings.sandbox_product,
+            tag=settings.sandbox_order_tag,
+            repository=repository,
+            initial_capital=initial_capital,
+        )
     from app.engine.adaptive import RouterStrategySource
     from app.engine.events import EventDrivenDecisionEngine, PauseGate
     from app.learning.calibration import ConfidenceCalibration
@@ -502,6 +543,98 @@ def cmd_engine(args) -> int:
         return 0
     finally:
         database.close()
+
+
+def cmd_live_preflight(args) -> int:
+    """LIVE readiness check — READ-ONLY: places no order, ever.
+
+    Prints the resolved order host, the four locks, the hard risk limits and a
+    static-IP/regulatory reminder, then probes the documented order-history
+    endpoint to classify the credential. Refuses to run at all unless Settings
+    accepted BROKER=UPSTOX_LIVE, so a misconfigured environment reports exactly
+    which switches are missing instead of half-starting a live engine.
+    """
+    import os
+
+    payload: dict = {"scope": "LIVE PREFLIGHT (read-only; no order placed)"}
+    try:
+        settings = _load_settings()
+    except ValueError as exc:
+        payload.update(ok=False, performed=False,
+                       reason=f"configuration rejected before any request: {exc}")
+        print(json.dumps(payload, indent=2))
+        return 2
+    if settings.broker.upper() != "UPSTOX_LIVE":
+        payload.update(ok=False, performed=False,
+                       reason="BROKER is not UPSTOX_LIVE; live preflight not applicable",
+                       broker=settings.broker.upper())
+        print(json.dumps(payload, indent=2))
+        return 2
+
+    from app.brokers.live import UpstoxLiveBroker
+    from app.brokers.sandbox import SandboxAuthError, SandboxRequestError, \
+        classify_history_probe
+    from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+
+    token = settings.upstox_live_access_token or os.getenv(
+        "UPSTOX_LIVE_ACCESS_TOKEN", "")
+    payload.update(
+        ok=True, performed=True,
+        broker=settings.broker.upper(),
+        mode=settings.mode.upper(),
+        live_trading=bool(settings.live_trading),
+        order_host=settings.upstox_live_base_url,
+        order_host_is_documented_live=host_of(settings.upstox_live_base_url)
+        in LIVE_ORDER_HOSTS,
+        history_host=settings.upstox_live_order_history_url,
+        database_url=settings.database_url,
+        hard_risk_limits={
+            "max_position_value": settings.max_position_value,
+            "max_open_positions": settings.max_open_positions,
+            "max_daily_loss": settings.max_daily_loss,
+            "max_trades_per_day": settings.max_trades_per_day,
+        },
+        warnings=[
+            "static IP registration is mandatory for order APIs (SEBI/NSE, in "
+            "force since 2025-10-01)",
+            "use a DEDICATED DATABASE_URL for live so sandbox/live audit rows "
+            "and engine state can never mix",
+            "tokens expire daily; automate refresh or the engine stops at the "
+            "next expiry",
+        ],
+    )
+    if not token.strip():
+        payload.update(credential_checked=False, reason="no live token configured")
+        print(json.dumps(payload, indent=2))
+        return 3
+    try:
+        broker = UpstoxLiveBroker(
+            token, args.instrument, confirm=settings.live_confirm,
+            base_url=settings.upstox_live_base_url,
+            history_url=settings.upstox_live_order_history_url,
+            product=settings.live_product, tag=settings.live_order_tag,
+            algo_name=settings.live_algo_name,
+        )
+        response = broker._request(
+            "GET", settings.upstox_live_order_history_url,
+            params={"order_id": "0"})
+        verdict = classify_history_probe(response)
+        payload.update(
+            credential_checked=True,
+            credential_accepted=verdict["credential_accepted"],
+            probe=f"HTTP {verdict['http_status']} {verdict['class']} "
+                  f"codes={verdict.get('codes', [])}",
+        )
+        if verdict["class"] == "unexpected":
+            payload["unexpected_probe_response"] = True
+    except SandboxAuthError:
+        payload.update(credential_checked=True, credential_accepted=False,
+                       probe="credential rejected (401/403)")
+    except SandboxRequestError as exc:
+        payload.update(credential_checked=True, credential_accepted=False,
+                       probe=str(exc))
+    print(json.dumps(payload, indent=2, default=str))
+    return 0 if payload.get("credential_accepted") else 1
 
 
 def cmd_sandbox_test(args) -> int:
@@ -1026,8 +1159,9 @@ def parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(
         prog="python -m app",
-        description=f"Arena {__version__} — PAPER ONLY trading research "
-                    "(real-money order routing is absent)")
+        description=f"Arena {__version__} — trading research platform. "
+                    "PAPER by default; LIVE=real money is gated behind the "
+                    "four-switch opt-in (see LIVE_TRADING_ENABLEMENT.md).")
     p.add_argument("--version", action="version",
                    version=f"Arena {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1053,10 +1187,18 @@ def parser() -> argparse.ArgumentParser:
     login = sub.add_parser("upstox-login", help="OAuth login helper; stores token in gitignored .env")
     login.set_defaults(func=cmd_upstox_login)
 
-    engine = sub.add_parser("engine", help="24/7 engine (requires BROKER=UPSTOX_SANDBOX + DATA_SOURCE=upstox)")
+    engine = sub.add_parser(
+        "engine",
+        help="24/7 engine (requires BROKER=UPSTOX_SANDBOX or UPSTOX_LIVE + DATA_SOURCE=upstox)")
     engine.add_argument("--max-candles", type=int, default=None,
                         help="bound the run for tests/verification (default: unlimited)")
     engine.set_defaults(func=cmd_engine)
+
+    pre = sub.add_parser(
+        "live-preflight",
+        help="LIVE readiness check (read-only; never places an order)")
+    pre.add_argument("--instrument", default="NSE_EQ|INE002A01018")
+    pre.set_defaults(func=cmd_live_preflight)
 
     stest = sub.add_parser("sandbox-test", help="verify SANDBOX credentials (read-only probe)")
     stest.add_argument("--instrument", default="NSE_EQ|INE002A01018")
