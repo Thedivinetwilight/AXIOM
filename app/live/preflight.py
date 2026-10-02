@@ -42,8 +42,24 @@ def _check(name: str, ok: bool, severity: str, detail: str) -> Check:
     return Check(name=name, ok=bool(ok), severity=severity, detail=detail)
 
 
+def _unavailable(name: str, why: str) -> Check:
+    """A recorded-state check that could not run is NOT a pass.
+
+    It is reported as ``ok=False`` with severity ``INFO``: it never fails the
+    verdict on its own, but it can never be mistaken for "verified clean".
+    """
+    return Check(name=name, ok=False, severity=INFO,
+                 detail=f"not checked: {why}")
+
+
 def run_checks(settings, *, repository=None) -> list[Check]:
-    """All offline live-readiness checks, in a stable order."""
+    """All offline live-readiness checks, in a stable order.
+
+    Two families: configuration checks (does this process hold a valid, bounded
+    live opt-in?) and recorded-state checks (is the database telling us the last
+    session shut down cleanly?). Every check that cannot run is reported as a
+    failure, never as a silent pass.
+    """
     checks: list[Check] = []
     broker = (getattr(settings, "broker", "") or "").upper()
     mode = (getattr(settings, "mode", "") or "").upper()
@@ -164,7 +180,115 @@ def run_checks(settings, *, repository=None) -> list[Check]:
         else "DATABASE_URL is not live-specific; live and sandbox engine state "
              "would share one file (audit rows stay separate either way)"))
 
-    # 13. regulatory reminder (never a pass/fail on our side)
+    # 13. audit-trail integrity for the table this mode will use
+    live_table = broker == "UPSTOX_LIVE"
+    integrity = {"ok": True, "problems": 0, "orders": 0, "fills": 0}
+    if repository is not None:
+        from app.live.pnl import integrity_report
+
+        try:
+            integrity = integrity_report(repository, live=live_table)
+        except Exception as exc:  # a check that cannot run is reported as a failure, never as clean
+            integrity = {"ok": False, "problems": 1, "orders": 0, "fills": 0,
+                         "error": type(exc).__name__}
+    scope = "live" if live_table else "sandbox"
+    if repository is None:
+        checks.append(_unavailable("audit_trail_integrity", "no database"))
+    else:
+        checks.append(_check(
+            "audit_trail_integrity", bool(integrity.get("ok")), ERROR if live_table else WARNING,
+        (f"{scope} audit trail is internally consistent "
+         f"({integrity.get('orders', 0)} orders, {integrity.get('fills', 0)} fill rows)"
+         if integrity.get("ok") else
+         f"{scope} audit trail has {integrity.get('problems')} integrity problem(s) "
+         f"(orphan fills {len(integrity.get('orphan_fills', []))}, missing fills "
+         f"{len(integrity.get('missing_fills', []))}, quantity mismatches "
+         f"{len(integrity.get('quantity_mismatch', []))}) — reconcile before trading")))
+
+    # 14. the persisted emergency stop must be clear
+    if repository is None:
+        checks.append(_unavailable("emergency_stop_clear", "no database"))
+    else:
+        try:
+            stopped = bool((repository.get_engine_state("emergency_stop") or {})
+                           .get("stopped"))
+        except Exception as exc:
+            stopped, problem = False, type(exc).__name__
+        else:
+            problem = ""
+        checks.append(_check(
+            "emergency_stop_clear", not stopped and not problem, ERROR,
+            "no persisted EMERGENCY STOP" if not stopped and not problem
+            else (f"a persisted EMERGENCY STOP is set: the engine will refuse to "
+                  "trade until 'python -m app live-resume' clears it" if stopped
+                  else f"the emergency-stop state could not be read ({problem})")))
+
+    # 15. working orders and unresolved intents left over from the last run
+    open_orders = 0
+    unresolved = 0
+    if repository is not None:
+        try:
+            open_orders = len(repository.open_live_orders() if live_table
+                              else repository.open_sandbox_orders())
+        except Exception:
+            open_orders = 0
+        try:
+            from app.engine.state import SubmissionJournal
+
+            unresolved = len(SubmissionJournal(repository).unresolved())
+        except Exception:
+            unresolved = -1  # a check that cannot run must not report "clean"
+    if repository is None:
+        checks.append(_unavailable("no_open_orders_left", "no database"))
+        checks.append(_unavailable("no_unresolved_intents", "no database"))
+    else:
+        checks.append(_check(
+            "no_open_orders_left", open_orders == 0, WARNING,
+            "no working orders recorded" if open_orders == 0
+            else f"{open_orders} working order(s) recorded: the engine will "
+                 "reconcile them at startup — never run two engines against one "
+                 "account"))
+        checks.append(_check(
+            "no_unresolved_intents", unresolved == 0, ERROR,
+            "no unresolved submission intents" if unresolved == 0
+            else (f"{unresolved} unresolved intent(s): the remote outcome is "
+                  "genuinely unknown; reconcile manually before trading"
+                  if unresolved > 0 else "the intent journal could not be read")))
+
+    # 16. reconciliation liveness (only meaningful once the engine has stamped)
+    if repository is None:
+        checks.append(_unavailable("reconciliation_live", "no database"))
+    else:
+        last = repository.get_engine_state("last_reconcile_at")
+        stamp = None
+        if isinstance(last, dict):
+            stamp = last.get("ts")
+        elif last:
+            stamp = last
+        if not stamp:
+            checks.append(_check(
+                "reconciliation_live", True, INFO,
+                "no reconciliation recorded yet (fresh or unused database)"))
+        else:
+            from datetime import datetime, timezone
+
+            try:
+                parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                parsed = None
+            silence_min = int(getattr(
+                settings, "live_reconcile_silence_minutes", 10) or 10)
+            age_min = ((datetime.now(timezone.utc) - parsed).total_seconds() / 60.0
+                       if parsed else None)
+            checks.append(_check(
+                "reconciliation_live", age_min is not None and age_min < silence_min,
+                WARNING,
+                f"last reconciliation {age_min:.1f} min ago" if age_min is not None
+                else "last reconciliation timestamp is unreadable"))
+
+    # 17. regulatory reminder (never a pass/fail on our side)
     checks.append(_check(
         "static_ip_registered", True, INFO,
         "Order APIs must originate from a static IP registered with Upstox "

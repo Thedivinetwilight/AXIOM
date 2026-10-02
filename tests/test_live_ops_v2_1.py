@@ -1301,3 +1301,159 @@ class TestStuckOrderEscalation:
         events = [event["kind"] for event in repository.list_system_events(limit=50)]
         assert "STUCK_ORDER_AUTO_CANCEL_FAILED" in events
         database.close()
+
+
+class TestReadinessRecordedState:
+    """Readiness must also judge the RECORDED state a fresh engine will inherit."""
+
+    def _settings(self, tmp_path, **kwargs):
+        base = dict(broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+                    live_confirm="I-ACCEPT-REAL-MONEY-RISK",
+                    upstox_live_access_token="t", max_position_value=10_000,
+                    max_open_positions=1, max_daily_loss=500, max_trades_per_day=3,
+                    data_source="upstox", market_calendar="nse-session",
+                    database_url=f"sqlite:///{tmp_path}/live.db")
+        base.update(kwargs)
+        return Settings(**base)
+
+    def _named(self, checks, name):
+        return next(check for check in checks if check.name == name)
+
+    def test_a_clean_environment_passes_every_recorded_state_check(self, tmp_path):
+        repository, database = repo(tmp_path, "clean.db")
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        for name in ("audit_trail_integrity", "emergency_stop_clear",
+                     "no_open_orders_left", "no_unresolved_intents",
+                     "reconciliation_live"):
+            assert self._named(checks, name).ok is True, name
+        database.close()
+
+    def test_a_persisted_emergency_stop_is_an_error(self, tmp_path):
+        repository, database = repo(tmp_path, "stopped.db")
+        repository.set_engine_state("emergency_stop", {"stopped": True,
+                                                       "reason": "test"})
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        check = self._named(checks, "emergency_stop_clear")
+        assert check.ok is False and check.severity == "ERROR"
+        assert "live-resume" in check.detail
+        database.close()
+
+    def test_working_orders_are_a_warning_not_an_error(self, tmp_path):
+        repository, database = repo(tmp_path, "open.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 1,
+            "price": 1.0, "status": "OPEN", "created_ts": "t0"})
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        check = self._named(checks, "no_open_orders_left")
+        assert check.ok is False and check.severity == "WARNING"
+        assert "never run two engines" in check.detail
+        database.close()
+
+    def test_unresolved_intents_are_an_error(self, tmp_path):
+        from app.engine.state import SubmissionJournal, UNKNOWN
+
+        repository, database = repo(tmp_path, "intents.db")
+        journal = SubmissionJournal(repository)
+        journal.record("intent-1", instrument_key="NSE_EQ|INE1", symbol="S",
+                       side="BUY", quantity=1, price=1.0, strategy="t")
+        journal.mark("intent-1", UNKNOWN)
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        check = self._named(checks, "no_unresolved_intents")
+        assert check.ok is False and check.severity == "ERROR"
+        database.close()
+
+    def test_a_stale_reconciliation_stamp_is_a_warning(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+
+        repository, database = repo(tmp_path, "stale.db")
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        repository.set_engine_state("last_reconcile_at", {"ts": old})
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        check = self._named(checks, "reconciliation_live")
+        assert check.ok is False and check.severity == "WARNING"
+        database.close()
+
+    def test_a_fresh_reconciliation_stamp_passes(self, tmp_path):
+        from datetime import datetime, timezone
+
+        repository, database = repo(tmp_path, "fresh.db")
+        repository.set_engine_state("last_reconcile_at",
+                                    {"ts": datetime.now(timezone.utc).isoformat()})
+        checks = run_checks(self._settings(tmp_path), repository=repository)
+        assert self._named(checks, "reconciliation_live").ok is True
+        database.close()
+
+    def test_a_missing_database_never_reads_as_verified(self, tmp_path):
+        """Recorded-state checks without a repository must not claim "clean"."""
+        checks = run_checks(self._settings(tmp_path))
+        assert self._named(checks, "four_switch_opt_in").ok is True
+        for name in ("audit_trail_integrity", "emergency_stop_clear",
+                     "no_open_orders_left", "no_unresolved_intents",
+                     "reconciliation_live"):
+            check = self._named(checks, name)
+            assert check.ok is False, name
+            assert check.severity == "INFO", name
+            assert check.detail.startswith("not checked"), name
+
+
+class TestAuditIntegrity:
+    """The audit trail must be internally consistent before it is trusted."""
+
+    def test_a_clean_trail_is_ok(self, tmp_path):
+        from app.live.pnl import integrity_report
+
+        repository, database = repo(tmp_path, "ok.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 5,
+            "price": 10.0, "status": "FILLED", "created_ts": "t0"})
+        repository.record_live_transition("live-1", "c1", "FILLED", 5, 10.0, "t0", {})
+        report = integrity_report(repository, live=True)
+        assert report["ok"] is True and report["problems"] == 0
+        assert report["orders"] == 1 and report["fills"] == 1
+        database.close()
+
+    def test_an_orphan_fill_is_reported(self, tmp_path):
+        from app.live.pnl import integrity_report
+
+        repository, database = repo(tmp_path, "orphan.db")
+        repository.record_live_transition("live-ghost", "c1", "FILLED", 5, 10.0,
+                                          "t0", {})
+        report = integrity_report(repository, live=True)
+        assert report["ok"] is False
+        assert report["orphan_fills"] == ["live-ghost"]
+        database.close()
+
+    def test_a_filled_order_with_no_transitions_is_reported(self, tmp_path):
+        from app.live.pnl import integrity_report
+
+        repository, database = repo(tmp_path, "missing.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 5,
+            "price": 10.0, "status": "FILLED", "created_ts": "t0"})
+        report = integrity_report(repository, live=True)
+        assert report["missing_fills"] == ["live-1"]
+        database.close()
+
+    def test_a_quantity_mismatch_is_reported(self, tmp_path):
+        from app.live.pnl import integrity_report
+
+        repository, database = repo(tmp_path, "mismatch.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 5,
+            "price": 10.0, "status": "FILLED", "created_ts": "t0"})
+        repository.record_live_transition("live-1", "c1", "FILLED", 3, 10.0, "t0", {})
+        report = integrity_report(repository, live=True)
+        assert report["quantity_mismatch"][0]["executed_quantity"] == 3
+        assert report["quantity_mismatch"][0]["order_quantity"] == 5
+        database.close()
+
+    def test_working_orders_are_not_expected_to_have_fills(self, tmp_path):
+        from app.live.pnl import integrity_report
+
+        repository, database = repo(tmp_path, "working.db")
+        repository.record_live_order({
+            "id": "live-1", "symbol": "S", "side": "BUY", "quantity": 5,
+            "price": 10.0, "status": "OPEN", "created_ts": "t0"})
+        report = integrity_report(repository, live=True)
+        assert report["ok"] is True
+        database.close()

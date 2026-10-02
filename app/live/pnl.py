@@ -201,3 +201,59 @@ def compare_with_ledger(replay: ReplayResult, ledger, *, tolerance: float = 1.0,
             "audit replay and ledger agree within tolerance" if abs(delta) <= tolerance
             else "ledger and audit-trail PnL disagree: investigate before trading"),
     }
+
+
+def integrity_report(repository, *, live: bool = True) -> dict:
+    """Internal consistency of the audit trail, using no external calls.
+
+    Three failure modes that would make every downstream number unreliable:
+
+    * **orphan fills** — a transition row whose order row does not exist (the
+      fill cannot be attributed to a side, symbol or size);
+    * **missing fills** — an order recorded as FILLED with no executed
+      transition rows at all (the audit trail lost the execution);
+    * **quantity mismatch** — the largest executed quantity recorded for an
+      order disagrees with the quantity on the order itself.
+
+    ``ok`` is True only when there are no problems. Each list is capped so a
+    broken database cannot produce an unreadable report.
+    """
+    result: dict = {"live": bool(live), "ok": True, "orders": 0, "fills": 0,
+                    "orphan_fills": [], "missing_fills": [],
+                    "quantity_mismatch": [], "problems": 0}
+    if repository is None:
+        return result
+    orders = _order_rows(repository, live)
+    rows = _transition_rows(repository, live)
+    result["orders"], result["fills"] = len(orders), len(rows)
+
+    known_ids = set(orders)
+    orphans: dict[str, int] = {}
+    executed: dict[str, float] = {}
+    for row in rows:
+        order_id = row["order_id"]
+        if order_id not in known_ids:
+            orphans[order_id] = orphans.get(order_id, 0) + 1
+            continue
+        executed[order_id] = max(executed.get(order_id, 0.0),
+                                 float(row["filled_quantity"] or 0))
+
+    missing, mismatched = [], []
+    for order_id, order in orders.items():
+        if str(order.get("status", "")).upper() != "FILLED":
+            continue
+        recorded = float(executed.get(order_id, 0.0))
+        if order_id not in executed:
+            missing.append(order_id)
+            continue
+        quantity = float(order.get("quantity") or 0)
+        if quantity > 0 and abs(recorded - quantity) > 1e-6:
+            mismatched.append({"order_id": order_id, "order_quantity": quantity,
+                               "executed_quantity": recorded})
+
+    result["orphan_fills"] = sorted(orphans)[:25]
+    result["missing_fills"] = missing[:25]
+    result["quantity_mismatch"] = mismatched[:25]
+    result["problems"] = (len(orphans) + len(missing) + len(mismatched))
+    result["ok"] = result["problems"] == 0
+    return result

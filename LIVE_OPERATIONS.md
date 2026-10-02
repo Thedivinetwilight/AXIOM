@@ -84,11 +84,24 @@ to "go full size", and a restart cannot restart the ramp (the counter is persist
 
 **Daily (tokens expire daily).**
 ```bash
-python -m app live-preflight     # must report credential_accepted: true
+python -m app live-preflight     # must report credential_accepted: true, readiness.ok: true
 ```
 This is also what unblocks the TokenGuard. Without it, the engine will (correctly) refuse
 new entries and say so via `ENTRY_BLOCKED_TOKEN`. Exits still work, so an existing position
 is never trapped.
+
+`readiness` has two families of checks:
+
+- **configuration** — the four switches, a documented live order host, a credential, all
+  four hard limits non-zero, canary/drawdown/alert hygiene, the data source and session
+  calendar;
+- **recorded state** — will a fresh engine inherit a clean world? It verifies the audit
+  trail is internally consistent (no orphan fills, no FILLED order without executions, no
+  quantity mismatches), that no persisted EMERGENCY STOP is set, that no working orders or
+  unresolved intents are left over, and that reconciliation was recent.
+
+A recorded-state check that cannot run (no database) is reported as `not checked`, never as
+clean. An **ERROR** in either family means do not go live; a **WARNING** is an accepted gap.
 
 **When an alert fires.**
 1. `GET /api/v2/alerts` or the dashboard panel — read the message and payload.

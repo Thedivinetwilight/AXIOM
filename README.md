@@ -53,7 +53,7 @@ drawdown auto-stop, deduped alerts (durable sink + optional webhook), the
 (halt always works; resume refuses unless the live opt-in is armed), an
 independent audit-trail PnL replay, and `GET /api/v2/alerts` ·
 `GET /api/v2/live/status` — see [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1086 tests passed / 37 skipped**;
+Verification status: **1098 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See
