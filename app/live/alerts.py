@@ -177,23 +177,12 @@ class AlertRouter:
     def _deliver(self, alert: Alert) -> None:
         if not self.webhook_url:
             return
-        try:
-            import httpx
-
-            body = {"title": f"[{self.title}] {alert.severity}",
-                    "kind": alert.kind, "severity": alert.severity,
-                    "message": alert.message, "payload": alert.payload,
-                    "ts": alert.ts}
-            client = self._transport
-            if client is None:
-                with httpx.Client(timeout=5.0) as fresh:
-                    response = fresh.post(self.webhook_url, json=body)
-            else:
-                response = client.post(self.webhook_url, json=body)
-            if getattr(response, "status_code", 0) >= 400:
-                self._delivery_failure(alert, f"HTTP {response.status_code}")
-        except Exception as exc:
-            self._delivery_failure(alert, type(exc).__name__)
+        body = {"title": f"[{self.title}] {alert.severity}",
+                "kind": alert.kind, "severity": alert.severity,
+                "message": alert.message, "payload": alert.payload,
+                "ts": alert.ts}
+        if not self.post_json(body):
+            self._delivery_failure(alert, "webhook POST failed")
 
     def _delivery_failure(self, alert: Alert, reason: str) -> None:
         self.delivery_failures += 1
@@ -306,13 +295,26 @@ class AlertRouter:
 
     def _try_deliver(self, alert: Alert) -> bool:
         """One webhook POST. Returns True on a 2xx/3xx; never raises."""
+        body = {"title": f"[{self.title}] {alert.severity}",
+                "kind": alert.kind, "severity": alert.severity,
+                "message": alert.message, "payload": alert.payload,
+                "ts": alert.ts, "retry": True}
+        if not self.post_json(body):
+            logger.warning("ALERT_RETRY_FAILED", extra={"alert_kind": alert.kind})
+            return False
+        return True
+
+    def post_json(self, body: dict) -> bool:
+        """POST an arbitrary JSON body to the webhook. Never raises.
+
+        Shared by alert delivery and by non-alert payloads (e.g. the ops
+        digest) so there is exactly one tested HTTP path out of the process.
+        """
+        if not self.webhook_url:
+            return False
         try:
             import httpx
 
-            body = {"title": f"[{self.title}] {alert.severity}",
-                    "kind": alert.kind, "severity": alert.severity,
-                    "message": alert.message, "payload": alert.payload,
-                    "ts": alert.ts, "retry": True}
             client = self._transport
             if client is None:
                 with httpx.Client(timeout=5.0) as fresh:
@@ -321,9 +323,8 @@ class AlertRouter:
                 response = client.post(self.webhook_url, json=body)
             return int(getattr(response, "status_code", 0)) < 400
         except Exception as exc:
-            logger.warning("ALERT_RETRY_FAILED",
-                           extra={"alert_kind": alert.kind,
-                                  "error": type(exc).__name__})
+            logger.warning("ALERT_WEBHOOK_POST_FAILED",
+                           extra={"error": type(exc).__name__})
             return False
 
     # -- read side -----------------------------------------------------------

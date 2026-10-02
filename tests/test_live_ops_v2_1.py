@@ -1900,3 +1900,191 @@ class TestAlertDeliveryRetry:
         assert router.delivery_failures == 0
         assert router.status()["pending_retries"] == 0
         database.close()
+
+
+class TestOpsDigest:
+    """One readable artifact per window: alerts, rails, orders, audit PnL."""
+
+    def _populated(self, tmp_path, name="digest.db"):
+        from app.live.alerts import AlertRouter
+
+        repository, database = repo(tmp_path, name)
+        NOW_ISO = datetime.now(timezone.utc).isoformat()
+        AlertRouter(repository, webhook_url="").emit(
+            "STUCK_ORDER", "CRITICAL", "an order is stuck")
+        AlertRouter(repository, webhook_url="", now_fn=lambda: datetime.now(
+            timezone.utc) + timedelta(seconds=1)).emit(
+            "ENTRY_BLOCKED_TOKEN", "CRITICAL", "entry blocked")
+        repository.record_system_event("ENTRY_GUARD_BLOCKED",
+                                       {"reason": "TOKEN_UNVERIFIED"})
+        repository.record_system_event("ENTRY_GUARD_REDUCED",
+                                       {"adjusted_quantity": 3})
+        repository.record_live_order({
+            "id": "live-dig-1", "intent_id": "intent-dig", "symbol": "S",
+            "side": "BUY", "quantity": 10, "price": 100.0,
+            "status": "FILLED", "created_ts": NOW_ISO})
+        repository.record_live_transition("live-dig-1", "child-1", "FILLED", 10,
+                                          100.0, NOW_ISO, {})
+        repository.record_live_order({
+            "id": "live-dig-2", "intent_id": "intent-dig-2", "symbol": "S",
+            "side": "SELL", "quantity": 10, "price": 110.0,
+            "status": "FILLED", "created_ts": NOW_ISO})
+        repository.record_live_transition("live-dig-2", "child-2", "FILLED", 10,
+                                          110.0, NOW_ISO, {})
+        repository.set_engine_state("emergency_stop",
+                                    {"stopped": True, "reason": "AUTO_STOP X"})
+        repository.record_system_event("EMERGENCY_STOP", {"reason": "AUTO_STOP X"})
+        return repository, database
+
+    def test_the_digest_folds_the_window(self, tmp_path):
+        from app.live.digest import build_digest
+
+        repository, database = self._populated(tmp_path)
+        digest = build_digest(repository, hours=24, live=True)
+        assert digest["alerts"]["total"] == 2
+        assert digest["alerts"]["by_severity"] == {"CRITICAL": 2}
+        assert digest["alerts"]["unacknowledged_critical"] == 2
+        assert digest["guard_actions"] == {"blocked": 1, "reduced": 1}
+        assert digest["stops"]["count"] == 1
+        assert digest["orders"]["by_status"] == {"FILLED": 2}
+        assert digest["pnl"]["realized_pre_fee"] == pytest.approx(100.0)
+        assert digest["pnl"]["fills_total"] == 2
+        assert digest["audit_integrity"]["ok"] is True
+        assert digest["headline"]["stops"] == 1
+        database.close()
+
+    def test_the_window_excludes_older_events(self, tmp_path):
+        from app.live.digest import build_digest
+
+        repository, database = self._populated(tmp_path, "window.db")
+        now = datetime.now(timezone.utc)
+        # a one-second window starting "now" sees none of the events above
+        digest = build_digest(repository, hours=1 / 3600, live=True,
+                              now=now - timedelta(minutes=5))
+        assert digest["alerts"]["total"] == 0
+        assert digest["guard_actions"] == {"blocked": 0, "reduced": 0}
+        assert digest["headline"]["stops"] == 0
+        database.close()
+
+    def test_an_acknowledged_critical_is_no_longer_unacknowledged(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+        from app.live.digest import build_digest
+
+        repository, database = self._populated(tmp_path, "ack-digest.db")
+        acks = AlertAcknowledgements(repository)
+        for alert in recent_alerts(repository, limit=10):
+            acks.acknowledge(alert["id"], by="ops")
+        digest = build_digest(repository, hours=24, live=True)
+        assert digest["alerts"]["unacknowledged_critical"] == 0
+        assert digest["acks"]["recorded"] == 2
+        database.close()
+
+    def test_the_sandbox_trail_is_used_for_a_sandbox_digest(self, tmp_path):
+        from app.live.digest import build_digest
+
+        repository, database = self._populated(tmp_path, "mixed-digest.db")
+        digest = build_digest(repository, hours=24, live=False)
+        assert digest["mode"] == "sandbox"
+        assert digest["pnl"]["realized_pre_fee"] == 0.0
+        assert "sandbox_transitions" in digest["pnl"]["source"]
+        database.close()
+
+    def test_markdown_renders_the_headline_numbers(self, tmp_path):
+        from app.live.digest import build_digest, digest_markdown
+
+        repository, database = self._populated(tmp_path, "md.db")
+        text = digest_markdown(build_digest(repository, hours=24, live=True))
+        assert "# LIVE OPS DIGEST (live)" in text
+        assert "Unacknowledged CRITICAL alerts: **2**" in text
+        assert "Audit trail consistent: **True**" in text
+        assert "Realized PnL (pre-fee, audit trail): **100.0**" in text
+        database.close()
+
+    def test_an_empty_database_still_produces_a_valid_digest(self, tmp_path):
+        from app.live.digest import build_digest, digest_markdown
+
+        repository, database = repo(tmp_path, "empty-digest.db")
+        digest = build_digest(repository, hours=24)
+        assert digest["headline"]["critical_unacknowledged"] == 0
+        assert digest["audit_integrity"]["ok"] is True
+        assert digest_markdown(digest).startswith("# LIVE OPS DIGEST")
+        json.dumps(digest, default=str)
+        database.close()
+
+    def test_posting_reports_honestly_when_there_is_no_webhook(self, tmp_path):
+        from app.live.alerts import AlertRouter
+        from app.live.digest import build_digest, post_digest
+
+        repository, database = self._populated(tmp_path, "nopost.db")
+        result = post_digest(AlertRouter(repository, webhook_url=""),
+                             build_digest(repository))
+        assert result["posted"] is False
+        assert "no ALERT_WEBHOOK_URL" in result["reason"]
+        database.close()
+
+    def test_posting_uses_the_tested_webhook_path(self, tmp_path):
+        import httpx
+
+        from app.live.alerts import AlertRouter
+        from app.live.digest import build_digest, post_digest
+
+        repository, database = self._populated(tmp_path, "post.db")
+        seen = []
+
+        class Capture(httpx.BaseTransport):
+            def handle_request(self, request):
+                seen.append(json.loads(request.content.decode()))
+                return httpx.Response(200)
+
+        router = AlertRouter(repository, webhook_url="https://ops.example/hook",
+                             transport=httpx.Client(transport=Capture()))
+        result = post_digest(router, build_digest(repository, hours=24))
+        assert result["posted"] is True
+        assert seen[0]["kind"] == "OPS_DIGEST"
+        assert seen[0]["payload"]["headline"]["stops"] == 1
+        database.close()
+
+    def test_a_failed_post_is_reported_not_raised(self, tmp_path):
+        import httpx
+
+        from app.live.alerts import AlertRouter
+        from app.live.digest import build_digest, post_digest
+
+        repository, database = self._populated(tmp_path, "badpost.db")
+
+        class Boom(httpx.BaseTransport):
+            def handle_request(self, request):
+                raise httpx.ConnectError("down")
+
+        router = AlertRouter(repository, webhook_url="https://ops.example/hook",
+                             transport=httpx.Client(transport=Boom()))
+        result = post_digest(router, build_digest(repository))
+        assert result["posted"] is False and "failed" in result["reason"]
+        database.close()
+
+    def test_the_cli_prints_json_markdown_and_writes_a_file(
+            self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        self._populated(tmp_path, "cli-digest.db")
+        settings = Settings(api_token="t",
+                            database_url=f"sqlite:///{tmp_path}/cli-digest.db")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+
+        def args(**kwargs):
+            base = dict(hours=24.0, post=False, markdown=False, out="")
+            base.update(kwargs)
+            return type("A", (), base)()
+
+        assert cli.cmd_live_digest(args()) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["headline"]["stops"] == 1
+
+        target = tmp_path / "digest.md"
+        assert cli.cmd_live_digest(args(markdown=True, out=str(target))) == 0
+        assert "LIVE OPS DIGEST" in capsys.readouterr().out
+        assert "LIVE OPS DIGEST" in target.read_text()
+
+        assert cli.cmd_live_digest(args(post=True)) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["post"]["posted"] is False  # no webhook configured

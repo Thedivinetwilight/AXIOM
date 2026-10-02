@@ -85,6 +85,14 @@ to "go full size", and a restart cannot restart the ramp (the counter is persist
 
 ## 4. Operating procedures
 
+**Daily review (30 seconds).**
+```bash
+python -m app live-digest --hours 24 --markdown
+```
+Read the headline block: if "Entries blocked by a rail" is climbing, the rails are working —
+look at why (usually the token). If "Unacknowledged CRITICAL alerts" is non-zero, someone
+has not looked yet. If "Audit trail consistent" is False, stop and reconcile before trading.
+
 **Daily (tokens expire daily).**
 ```bash
 python -m app live-preflight     # must report credential_accepted: true, readiness.ok: true
@@ -146,6 +154,7 @@ step fails so you can inspect the evidence) and it never contacts a network.
 
 **Reading the state of the world.**
 ```bash
+python -m app live-digest --hours 24 --markdown   # what actually happened, in one page
 python -m app live-status            # mode, stops, token, canary, breaches, findings, alerts
 python -m app live-status --audit    # … plus PnL recomputed from the audit trail alone
 python -m app live-resume            # clear the stop (refuses unless the live opt-in is armed)
@@ -155,6 +164,12 @@ python -m app live-resume            # clear the stop (refuses unless the live o
 *pre-fee* realized PnL next to the engine ledger's own figure; a difference beyond the
 tolerance is flagged as a disagreement about money and should be investigated before
 trusting either number.
+
+`live-digest` folds a window (default 24 h) into one artifact: alerts by kind/severity,
+unacknowledged CRITICALs, entries blocked/reduced by the rails, stops and their reasons,
+orders by status, the audit-trail PnL and the integrity verdict. Add `--post` to send it to
+`ALERT_WEBHOOK_URL` (through the same retrying HTTP path the alerts use) and `--out FILE`
+to keep a copy; it is read-only either way.
 
 **Sizing sanity.** `MAX_POSITION_VALUE` is per-order notional; `MAX_OPEN_POSITIONS` counts
 open positions; `MAX_DAILY_LOSS` is a realized-loss amount; `MAX_TRADES_PER_DAY` counts

@@ -56,10 +56,10 @@ unless the live opt-in is armed), a whole-system readiness verdict in
 would inherit), an offline `live-drill` fire drill for the rails themselves, an
 independent audit-trail PnL replay, bounded webhook delivery retries, alert
 acknowledgement (`live-ack`, so an unattended CRITICAL becomes an incident of
-its own), and `GET /api/v2/alerts` ·
+its own), a read-only ops digest (`live-digest`), and `GET /api/v2/alerts` ·
 `POST /api/v2/alerts/ack` · `GET /api/v2/live/status` — see
 [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1123 tests passed / 37 skipped**;
+Verification status: **1133 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See

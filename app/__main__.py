@@ -684,6 +684,34 @@ def cmd_live_resume(args) -> int:
     return 0
 
 
+def cmd_live_digest(args) -> int:
+    """Print (and optionally post) a read-only roll-up of recorded state."""
+    from app.live.alerts import AlertRouter
+    from app.live.digest import build_digest, digest_markdown, post_digest
+
+    settings = _load_settings()
+    database, repository = _open_ops_repository(settings)
+    try:
+        live = (settings.broker.upper() == "UPSTOX_LIVE")
+        digest = build_digest(repository, hours=args.hours, live=live)
+        if args.post:
+            digest["post"] = post_digest(
+                AlertRouter(repository, webhook_url=settings.alert_webhook_url),
+                digest)
+        output = (digest_markdown(digest) if args.markdown
+                  else json.dumps(digest, indent=2, default=str))
+    finally:
+        database.close()
+    print(output)
+    if args.out:
+        from pathlib import Path as _Path
+
+        _Path(args.out).write_text(
+            digest_markdown(digest) if args.markdown else
+            json.dumps(digest, indent=2, default=str))
+    return 0
+
+
 def cmd_live_drill(args) -> int:
     """Exercise every L-ops rail offline and report the recorded evidence.
 
@@ -1503,6 +1531,19 @@ def parser() -> argparse.ArgumentParser:
     lstatus.add_argument("--audit", action="store_true",
                          help="also recompute PnL from the audit trail")
     lstatus.set_defaults(func=cmd_live_status)
+
+    digest = sub.add_parser(
+        "live-digest",
+        help="read-only roll-up of alerts, rails, orders and audit-trail PnL")
+    digest.add_argument("--hours", type=float, default=24.0,
+                        help="window in hours (default 24)")
+    digest.add_argument("--post", action="store_true",
+                        help="also POST it to ALERT_WEBHOOK_URL if configured")
+    digest.add_argument("--markdown", action="store_true",
+                        help="print human-readable markdown instead of JSON")
+    digest.add_argument("--out", default="",
+                        help="also write the report to this path")
+    digest.set_defaults(func=cmd_live_digest)
 
     ack = sub.add_parser(
         "live-ack",
