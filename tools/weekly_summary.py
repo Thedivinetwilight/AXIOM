@@ -19,10 +19,9 @@ never silently dropped or assumed profitable.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,11 +34,11 @@ def _parse_ts(value) -> datetime | None:
     # milliseconds, so the numeric case must be tested after coercion.
     text = str(value).strip()
     if text.lstrip("-").isdigit():
-        return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(int(text) / 1000, tz=UTC)
     try:
         text = text.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(text)
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -72,7 +71,7 @@ def _pair_round_trips(orders, cost_rate: float):
     unmatched: list[dict] = []
     errors: list[str] = []
 
-    for order in sorted(orders, key=lambda o: _parse_ts(o.get("created_ts")) or datetime.min.replace(tzinfo=timezone.utc)):
+    for order in sorted(orders, key=lambda o: _parse_ts(o.get("created_ts")) or datetime.min.replace(tzinfo=UTC)):
         symbol = order.get("symbol") or "?"
         side = (order.get("side") or "").upper()
         status = (order.get("status") or "").upper()
@@ -145,7 +144,7 @@ def main(argv=None) -> int:
         print(f"database not found: {args.db}")
         return 2
 
-    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    since = datetime.now(UTC) - timedelta(days=args.days)
     orders = _load_orders(args.db, since, args.limit)
 
     print(f"window : last {args.days} days (since {since:%Y-%m-%d %H:%M} UTC)")
@@ -171,7 +170,7 @@ def main(argv=None) -> int:
 
         cumulative = []
         running = 0.0
-        for trade in sorted(closed, key=lambda t: t["exit_ts"] or datetime.min.replace(tzinfo=timezone.utc)):
+        for trade in sorted(closed, key=lambda t: t["exit_ts"] or datetime.min.replace(tzinfo=UTC)):
             running += trade["net"]
             cumulative.append(running)
         drawdown, peak = _max_drawdown(cumulative)
