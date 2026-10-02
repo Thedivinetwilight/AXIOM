@@ -128,3 +128,53 @@ class TestSandboxTestReadsTokenAfterSettingsLoad:
         args = argparse.Namespace(instrument="NSE_EQ|INE002A01018", place_order=False)
         assert cli.cmd_sandbox_test(args) == 2
         assert "configuration rejected" in capsys.readouterr().out
+
+
+class TestLocalPaperNeverConstructsTheSandboxBroker:
+    """The one-week paper test runs BROKER=LOCAL_PAPER with DATA_SOURCE=upstox.
+    Upstox is then a MARKET DATA source only; no order-mutating broker may exist.
+    """
+
+    def _with_sentinel(self, monkeypatch):
+        import app.brokers.sandbox as sbx
+        hits = []
+
+        def _sentinel(*a, **k):
+            hits.append(k.get("base_url") or (a[1] if len(a) > 1 else "?"))
+            raise AssertionError("UpstoxSandboxBroker must never be constructed")
+
+        monkeypatch.setattr(sbx, "UpstoxSandboxBroker", _sentinel)
+        return hits
+
+    def test_engine_refuses_local_paper_before_any_broker_exists(self, monkeypatch, capsys):
+        import app.__main__ as cli
+        hits = self._with_sentinel(monkeypatch)
+        settings = dataclasses.replace(
+            Settings(), broker="LOCAL_PAPER", data_source="upstox")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+
+        args = argparse.Namespace(instrument="NSE_EQ|INE002A01018", place_order=False)
+        assert cli.cmd_engine(args) == 2
+        assert hits == [], "sandbox broker was constructed in LOCAL_PAPER mode"
+        assert "UPSTOX_SANDBOX" in capsys.readouterr().out
+
+    def test_local_paper_with_upstox_data_is_a_valid_configuration(self, monkeypatch):
+        """The intended one-week setup must not be rejected by Settings."""
+        for k, v in {"BROKER": "LOCAL_PAPER", "DATA_SOURCE": "upstox",
+                     "MODE": "PAPER", "LIVE_TRADING": "false",
+                     "DEFAULT_TIMEFRAME": "1m",
+                     "MARKET_DATA_TIMEFRAME": "1m"}.items():
+            monkeypatch.setenv(k, v)
+        s = Settings.from_env()
+        assert s.broker == "LOCAL_PAPER"
+        assert s.data_source == "upstox"
+        assert s.live_trading is False
+
+    def test_sandbox_broker_still_requires_its_explicit_mode(self, monkeypatch):
+        """Switching to LOCAL_PAPER must not make the sandbox broker reachable."""
+        monkeypatch.setenv("BROKER", "LOCAL_PAPER")
+        monkeypatch.delenv("UPSTOX_SANDBOX_ACCESS_TOKEN", raising=False)
+        assert Settings.from_env().broker == "LOCAL_PAPER"
+        monkeypatch.setenv("BROKER", "UPSTOX_SANDBOX")
+        with pytest.raises(ValueError):
+            Settings.from_env()
