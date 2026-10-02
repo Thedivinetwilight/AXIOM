@@ -1496,13 +1496,14 @@ class TestLiveDrill:
         report = run_drill(database_url=f"sqlite:///{tmp_path}/drill.db")
         failed = [step["name"] for step in report["steps"] if not step["ok"]]
         assert report["ok"] is True, f"failed steps: {failed}"
-        assert len(report["steps"]) == 11
+        assert len(report["steps"]) == 12
         names = {step["name"] for step in report["steps"]}
         assert {"four_switch_gate", "host_inversion_guard", "token_guard_lifecycle",
                 "canary_ramp", "entries_gated_exits_free",
                 "breach_triggers_emergency_stop", "stuck_order_escalates_and_cancels",
                 "audit_integrity_detects_corruption",
-                "alerts_durable_and_scrubbed", "halt_works_with_a_broken_config",
+                "alerts_durable_and_scrubbed", "unacknowledged_alert_escalates",
+                "halt_works_with_a_broken_config",
                 "no_live_host_contacted"} == names
         # every step carries evidence, not just a verdict
         assert all(step["evidence"] for step in report["steps"])
@@ -1565,3 +1566,215 @@ class TestLiveDrill:
         assert cli.cmd_live_drill(args) == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["ok"] is False
+
+
+class TestAlertAcknowledgement:
+    """An alarm nobody acknowledged is an open incident, not a closed one."""
+
+    def _alerts(self, tmp_path, name="ack.db"):
+        from app.live.alerts import AlertRouter
+
+        repository, database = repo(tmp_path, name)
+        router = AlertRouter(repository, webhook_url="")
+        router.emit("STUCK_ORDER", "CRITICAL", "order is stuck")
+        return repository, database
+
+    def _ids(self, repository):
+        from app.live.alerts import recent_alerts
+
+        return recent_alerts(repository, limit=50)
+
+    def test_acknowledging_marks_the_alert_and_records_it(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements, recent_alerts
+
+        repository, database = self._alerts(tmp_path)
+        alert_id = recent_alerts(repository, limit=1)[0]["id"]
+        result = AlertAcknowledgements(repository).acknowledge(
+            alert_id, by="ops", note="checked the broker terminal")
+        assert result["ok"] is True and result["already"] is False
+        listed = recent_alerts(repository, limit=1)[0]
+        assert listed["acknowledged"] is True
+        assert listed["acknowledged_by"] == "ops"
+        assert listed["acknowledged_at"]
+        events = [e["kind"] for e in repository.list_system_events(limit=50)]
+        assert "ALERT_ACKNOWLEDGED" in events
+        database.close()
+
+    def test_acknowledging_twice_is_idempotent(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements, recent_alerts
+
+        repository, database = self._alerts(tmp_path)
+        alert_id = recent_alerts(repository, limit=1)[0]["id"]
+        acks = AlertAcknowledgements(repository)
+        first = acks.acknowledge(alert_id, by="ops")
+        second = acks.acknowledge(alert_id, by="someone else")
+        assert first["already"] is False and second["already"] is True
+        assert recent_alerts(repository, limit=1)[0]["acknowledged_by"] == "ops"
+        database.close()
+
+    def test_an_empty_id_is_refused_not_silently_accepted(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+
+        repository, database = repo(tmp_path, "empty-id.db")
+        result = AlertAcknowledgements(repository).acknowledge("")
+        assert result["ok"] is False and "empty id" in result["reason"]
+        database.close()
+
+    def test_outstanding_critical_respects_the_age_threshold(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+
+        repository, database = self._alerts(tmp_path)
+        acks = AlertAcknowledgements(repository)
+        now = datetime.now(timezone.utc)
+        assert acks.outstanding_critical(older_than_minutes=15, now=now) == []
+        later = now + timedelta(minutes=20)
+        outstanding = acks.outstanding_critical(older_than_minutes=15, now=later)
+        assert len(outstanding) == 1 and outstanding[0]["kind"] == "STUCK_ORDER"
+        assert outstanding[0]["age_minutes"] == pytest.approx(20, abs=0.5)
+        database.close()
+
+    def test_acknowledgement_clears_the_outstanding_list(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+
+        repository, database = self._alerts(tmp_path)
+        acks = AlertAcknowledgements(repository)
+        later = datetime.now(timezone.utc) + timedelta(minutes=20)
+        acks.acknowledge(acks.outstanding_critical(
+            older_than_minutes=15, now=later)[0]["id"])
+        assert acks.outstanding_critical(older_than_minutes=15, now=later) == []
+        database.close()
+
+    def test_a_warning_never_becomes_an_outstanding_critical(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements, AlertRouter
+
+        repository, database = repo(tmp_path, "warn.db")
+        AlertRouter(repository, webhook_url="").emit("SLOW", "WARNING", "just slow")
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        assert AlertAcknowledgements(repository).outstanding_critical(
+            older_than_minutes=15, now=later) == []
+        database.close()
+
+    def test_meta_kinds_cannot_feed_themselves(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements, AlertRouter
+
+        repository, database = repo(tmp_path, "meta.db")
+        router = AlertRouter(repository, webhook_url="")
+        router.emit("UNACKNOWLEDGED_ALERT", "CRITICAL", "meta")
+        router.emit("ALERT_DELIVERY_FAILURE", "CRITICAL", "meta")
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        assert AlertAcknowledgements(repository).outstanding_critical(
+            older_than_minutes=15, now=later) == []
+        database.close()
+
+    def test_acknowledge_kind_clears_every_instance_of_one_issue(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements, AlertRouter
+
+        repository, database = repo(tmp_path, "kind.db")
+        router = AlertRouter(repository, webhook_url="")
+        # two identical CRITICALs would be deduped into one row, so use two
+        # distinct kinds: acknowledging one kind must leave the other alone.
+        router.emit("STUCK_ORDER", "CRITICAL", "one")
+        router.emit("BROKER_DISABLED", "CRITICAL", "other")
+        result = AlertAcknowledgements(repository).acknowledge_kind("STUCK_ORDER")
+        assert result["acknowledged"] == 1
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        remaining = AlertAcknowledgements(repository).outstanding_critical(
+            older_than_minutes=15, now=later)
+        assert [item["kind"] for item in remaining] == ["BROKER_DISABLED"]
+        database.close()
+
+    def test_the_acknowledgement_store_is_bounded(self, tmp_path):
+        from app.live.alerts import (ACK_KEY, MAX_ACKNOWLEDGEMENTS,
+                                     AlertAcknowledgements)
+
+        repository, database = repo(tmp_path, "bounded.db")
+        state = {f"id-{i}": {"ts": f"2026-01-01T00:00:{i:02d}+00:00", "by": "x"}
+                 for i in range(MAX_ACKNOWLEDGEMENTS + 50)}
+        repository.set_engine_state(ACK_KEY, state)
+        AlertAcknowledgements(repository).acknowledge("newest", by="ops")
+        stored = repository.get_engine_state(ACK_KEY, {})
+        assert len(stored) <= MAX_ACKNOWLEDGEMENTS + 1
+        assert "newest" in stored
+        database.close()
+
+    def test_the_watchdog_reports_an_unattended_critical(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+        from app.live.watchdog import LiveWatchdog
+
+        repository, database = self._alerts(tmp_path)
+        watchdog = LiveWatchdog(repository, acknowledgements=(
+            AlertAcknowledgements(repository)),
+            unacked_critical_minutes=15)
+        later = datetime.now(timezone.utc) + timedelta(minutes=20)
+        findings = watchdog.check_unacknowledged_critical(now=later)
+        assert len(findings) == 1
+        assert findings[0].kind == "UNACKNOWLEDGED_ALERT"
+        assert findings[0].severity == "CRITICAL"
+        assert "live-ack --id" in findings[0].payload["how_to_acknowledge"]
+        # and it surfaces through the aggregate the engine actually calls
+        kinds = {finding.kind for finding in watchdog.inspect(now=later)}
+        assert "UNACKNOWLEDGED_ALERT" in kinds
+        database.close()
+
+    def test_the_watchdog_never_reports_when_disabled(self, tmp_path):
+        from app.live.alerts import AlertAcknowledgements
+        from app.live.watchdog import LiveWatchdog
+
+        repository, database = self._alerts(tmp_path)
+        watchdog = LiveWatchdog(repository, acknowledgements=(
+            AlertAcknowledgements(repository)), unacked_critical_minutes=0)
+        later = datetime.now(timezone.utc) + timedelta(hours=5)
+        assert watchdog.check_unacknowledged_critical(now=later) == []
+        database.close()
+
+    def test_the_cli_lists_and_acknowledges(self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+
+        repository, database = self._alerts(tmp_path, "cli-ack.db")
+        settings = Settings(api_token="t",
+                            database_url=f"sqlite:///{tmp_path}/cli-ack.db")
+        database.close()
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+
+        cli.cmd_live_ack(type("A", (), {"id": [], "kind": "", "all": False,
+                                        "by": "", "note": ""})())
+        listed = json.loads(capsys.readouterr().out)
+        assert len(listed["outstanding_critical"]) == 1  # nothing acknowledged yet
+        assert "hint" in listed
+
+        cli.cmd_live_ack(type("A", (), {"id": [], "kind": "STUCK_ORDER",
+                                        "all": False, "by": "ops",
+                                        "note": "checked"})())
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True and payload["acknowledged"] == 1
+        assert payload["status"]["recorded"] == 1
+
+    def test_the_api_exposes_and_updates_acknowledgement(self, tmp_path):
+        from app.api.server import create_app
+        from app.live.alerts import AlertRouter
+        from fastapi.testclient import TestClient
+
+        settings = Settings(
+            api_token="t", database_url=f"sqlite:///{tmp_path}/api-ack.db")
+        headers = {"Authorization": "Bearer t"}
+        with TestClient(create_app(settings, data_dir=tmp_path)) as client:
+            AlertRouter(client.app.state.repository, webhook_url="").emit(
+                "STUCK_ORDER", "CRITICAL", "stuck")
+            listed = client.get("/api/v2/alerts", headers=headers).json()
+            assert listed["unacknowledged_critical"] == 1
+            alert_id = listed["alerts"][0]["id"]
+
+            response = client.post("/api/v2/alerts/ack",
+                                   json={"ids": [alert_id], "by": "api-test"},
+                                   headers=headers)
+            body = response.json()
+            assert response.status_code == 200 and body["acknowledged"] == 1
+            after = client.get("/api/v2/alerts", headers=headers).json()
+            assert after["unacknowledged_critical"] == 0
+            assert after["alerts"][0]["acknowledged"] is True
+
+            nothing = client.post("/api/v2/alerts/ack", json={}, headers=headers)
+            assert nothing.json()["ok"] is False
+            # the ack surface is authenticated like every other v2 route
+            assert client.post("/api/v2/alerts/ack", json={"all": True}
+                               ).status_code in (401, 403)

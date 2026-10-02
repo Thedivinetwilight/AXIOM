@@ -75,6 +75,10 @@ def _live_ops_view(request: Request, repository) -> dict | None:
             "last_reconcile_at": repository.get_engine_state(
                 "last_reconcile_at"),
             "open_live_orders": len(repository.open_live_orders()),
+            # an alarm nobody has acknowledged is an open incident (V2.1)
+            "unacknowledged_critical": sum(
+                1 for alert in recent_alerts(repository, limit=200)
+                if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
         }
         return view
     except Exception:
@@ -356,6 +360,9 @@ async function tick(){
           + (lo.breaches.max_equity_drawdown || 'off')
           + ' · auto-stop ' + (lo.breaches.auto_stop ? 'ON' : 'OFF') + '</td></tr>');
         rows.push('<tr><td>Open live orders</td><td>' + (lo.open_live_orders||0) + '</td></tr>');
+        rows.push('<tr><td>Unacknowledged CRITICAL alerts</td><td>'
+          + '<b>' + (lo.unacknowledged_critical||0) + '</b>'
+          + ' <small>(live-ack --all)</small></td></tr>');
       }
       const al = d.alerts || [];
       if (al.length === 0) {
@@ -363,9 +370,11 @@ async function tick(){
       } else {
         rows.push('<tr><th>When</th><th>Severity / alert</th></tr>');
         for (const a of al.slice(0,8)) {
+          const unacked = (a.severity === 'CRITICAL' && !a.acknowledged);
           rows.push('<tr><td>' + esc(a.ts).slice(11,19) + '</td><td>'
-            + esc(a.severity) + ' · <b>' + esc(a.kind) + '</b><br><small>'
-            + esc(a.message) + '</small></td></tr>');
+            + esc(a.severity) + ' · <b>' + esc(a.kind) + '</b>'
+            + (unacked ? ' <b>[UNACKNOWLEDGED]</b>' : '')
+            + '<br><small>' + esc(a.message) + '</small></td></tr>');
         }
       }
       document.getElementById('alerts').innerHTML = rows.join('');

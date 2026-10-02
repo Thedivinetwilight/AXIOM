@@ -16,6 +16,7 @@ each rail actually fires, and reports the recorded evidence for every step:
   engine cancels it and records `STUCK_ORDER_AUTO_CANCEL`;
 * audit-trail integrity detects injected corruption (the check is not vacuous);
 * alerts are durable and secret-shaped keys are redacted before storage;
+* an unattended CRITICAL alert escalates, and acknowledging it clears that;
 * `live-halt` still halts when the configuration itself is rejected.
 
 Nothing here places, modifies or cancels a real order; the only broker used is
@@ -370,6 +371,38 @@ def _step_alerts_durable_and_scrubbed(ctx: _Context) -> Step:
          "redaction_present": "[redacted]" in blob})
 
 
+def _step_unacknowledged_alert(ctx: _Context) -> Step:
+    """A CRITICAL nobody acknowledged must become an incident of its own."""
+    from app.live.alerts import AlertAcknowledgements
+    from app.live.watchdog import LiveWatchdog
+
+    acks = AlertAcknowledgements(ctx.repository)
+    # a CRITICAL recorded 30 minutes ago and never acknowledged
+    ctx.repository.record_system_event(
+        "ALERT", {"kind": "DRILL_CRITICAL", "severity": "CRITICAL",
+                  "message": "drill: unattended critical"},
+        ts=(datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat())
+    watchdog = LiveWatchdog(ctx.repository, acknowledgements=acks,
+                            unacked_critical_minutes=15)
+    findings = [finding for finding in watchdog.check_unacknowledged_critical()
+                if finding.payload.get("alert_kind") == "DRILL_CRITICAL"]
+    escalated = bool(findings) and findings[0].severity == "CRITICAL"
+    acknowledged = "not attempted"
+    cleared = False
+    if findings:
+        alert_id = findings[0].payload["alert_id"]
+        acknowledged = acks.acknowledge(alert_id, by="drill", note="fire drill")["ok"]
+        cleared = not [finding for finding in
+                       watchdog.check_unacknowledged_critical()
+                       if finding.payload.get("alert_kind") == "DRILL_CRITICAL"]
+    ok = escalated and acknowledged is True and cleared
+    return Step(
+        "unacknowledged_alert_escalates", ok,
+        "an unattended CRITICAL is escalated and acknowledging it clears it"
+        if ok else "an unattended CRITICAL was not escalated, or ack did not clear it",
+        {"escalated": escalated, "acknowledged": acknowledged, "cleared": cleared})
+
+
 def _step_halt_with_broken_config(ctx: _Context) -> Step:
     from app import __main__ as cli
 
@@ -427,6 +460,7 @@ STEPS = (
     _step_stuck_order,
     _step_audit_integrity,
     _step_alerts_durable_and_scrubbed,
+    _step_unacknowledged_alert,
     _step_halt_with_broken_config,
     _step_no_live_host,
 )

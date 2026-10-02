@@ -213,22 +213,155 @@ class AlertRouter:
                 "dedup_seconds": self.dedup_seconds}
 
 
-def recent_alerts(repository, limit: int = 50) -> list[dict]:
-    """Alerts from the durable sink, newest first (dashboard/report helper)."""
+def recent_alerts(repository, limit: int = 50, *, acknowledgements=None) -> list[dict]:
+    """Alerts from the durable sink, newest first (dashboard/report helper).
+
+    Each alert carries its durable ``id`` and whether a human has acknowledged
+    it, so every consumer (CLI, API, dashboard) can distinguish "an alarm fired"
+    from "an alarm is still unattended".
+    """
     if repository is None:
         return []
     try:
         events = repository.list_system_events(limit=max(limit * 4, 200))
     except Exception:
         return []
+    if acknowledgements is None:
+        acknowledgements = AlertAcknowledgements(repository)
+    state = acknowledgements._load()
     alerts = []
     for event in events:
         if event.get("kind") != AlertRouter.EVENT_KIND:
             continue
         payload = event.get("payload") or {}
-        alerts.append({"ts": event.get("ts"), "kind": payload.get("kind", "?"),
+        event_id = event.get("id")
+        ack = state.get(event_id) or {}
+        alerts.append({"id": event_id, "ts": event.get("ts"),
+                       "kind": payload.get("kind", "?"),
                        "severity": payload.get("severity", "INFO"),
-                       "message": payload.get("message", "")})
+                       "message": payload.get("message", ""),
+                       "acknowledged": bool(ack),
+                       "acknowledged_at": ack.get("ts"),
+                       "acknowledged_by": ack.get("by")})
         if len(alerts) >= limit:
             break
     return alerts
+
+
+# -- acknowledgement ---------------------------------------------------------
+#
+# An alarm nobody acknowledged is not a control: the dedup window will happily
+# keep a CRITICAL alert quiet while it is still true. Acknowledgement state is
+# persisted in ``engine_state`` (bounded, survives restarts, no schema change)
+# and is keyed by the durable ``system_events`` row id, so it can never drift
+# from the alert it refers to.
+
+ACK_KEY = "alert_acknowledgements"
+MAX_ACKNOWLEDGEMENTS = 2000
+
+#: Alert kinds that must never be treated as "an alert needing acknowledgement":
+#: they are the notifications ABOUT alerts, so counting them would cascade.
+META_KINDS = frozenset({"UNACKNOWLEDGED_ALERT", "ALERT_DELIVERY_FAILURE"})
+
+
+class AlertAcknowledgements:
+    """Durable record of which alerts a human has seen."""
+
+    def __init__(self, repository, *, now_fn=None):
+        self.repository = repository
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+
+    def _load(self) -> dict:
+        if self.repository is None:
+            return {}
+        state = self.repository.get_engine_state(ACK_KEY, {}) or {}
+        return state if isinstance(state, dict) else {}
+
+    def _save(self, state: dict) -> None:
+        if self.repository is None:
+            return
+        if len(state) > MAX_ACKNOWLEDGEMENTS:
+            ordered = sorted(state.items(), key=lambda kv: kv[1].get("ts", ""))
+            for key, _ in ordered[: len(state) - MAX_ACKNOWLEDGEMENTS]:
+                state.pop(key, None)
+        self.repository.set_engine_state(ACK_KEY, state)
+
+    def acknowledge(self, event_id: str, *, by: str = "operator",
+                    note: str = "") -> dict:
+        """Acknowledge one alert by its durable id. Idempotent."""
+        event_id = str(event_id or "").strip()
+        if not event_id:
+            return {"ok": False, "reason": "an empty id cannot be acknowledged"}
+        state = self._load()
+        existing = state.get(event_id)
+        if existing:
+            return {"ok": True, "id": event_id, "already": True, **existing}
+        entry = {"ts": self._now().isoformat(), "by": str(by or "operator"),
+                 "note": str(note or "")}
+        state[event_id] = entry
+        self._save(state)
+        if self.repository is not None:
+            try:
+                self.repository.record_system_event(
+                    "ALERT_ACKNOWLEDGED", {"alert_id": event_id, **entry})
+            except Exception as exc:  # an audit failure must not undo the ack
+                logger.error("ALERT_ACK_AUDIT_FAILURE",
+                             extra={"error_type": type(exc).__name__})
+        return {"ok": True, "id": event_id, "already": False, **entry}
+
+    def acknowledge_many(self, event_ids, **kwargs) -> dict:
+        results = [self.acknowledge(event_id, **kwargs) for event_id in event_ids]
+        return {"ok": all(item.get("ok") for item in results),
+                "acknowledged": sum(1 for item in results if item.get("ok")),
+                "results": results}
+
+    def acknowledge_kind(self, kind: str, *, limit: int = 200, **kwargs) -> dict:
+        """Acknowledge every outstanding alert of one kind (e.g. a known issue)."""
+        ids = [alert["id"] for alert in recent_alerts(self.repository, limit=limit)
+               if alert["kind"] == kind and alert.get("id")]
+        if not ids:
+            return {"ok": True, "acknowledged": 0, "ids": []}
+        return self.acknowledge_many(ids, **kwargs)
+
+    def status(self) -> dict:
+        state = self._load()
+        return {"recorded": len(state), "latest": sorted(
+            ({"id": key, **value} for key, value in state.items()),
+            key=lambda item: item.get("ts", ""), reverse=True)[:10]}
+
+    def is_acknowledged(self, event_id: str) -> bool:
+        return str(event_id or "") in self._load()
+
+    def outstanding_critical(self, *, older_than_minutes: int = 15,
+                             limit: int = 200, now=None) -> list[dict]:
+        """CRITICAL alerts recorded more than ``older_than_minutes`` ago that no
+        human has acknowledged (0 minutes = every outstanding CRITICAL alert)."""
+        if older_than_minutes < 0:
+            return []
+        now = now or self._now()
+        cutoff = now - timedelta(minutes=float(older_than_minutes))
+        state = self._load()
+        outstanding = []
+        for alert in recent_alerts(self.repository, limit=limit):
+            if alert["kind"] in META_KINDS or alert["severity"] != "CRITICAL":
+                continue
+            if not alert.get("id") or alert["id"] in state:
+                continue
+            ts = _parse_ts(alert.get("ts"))
+            if ts is None or ts > cutoff:
+                continue
+            outstanding.append({
+                "id": alert["id"], "kind": alert["kind"],
+                "message": alert["message"], "ts": alert["ts"],
+                "age_minutes": round((now - ts).total_seconds() / 60.0, 1)})
+        return outstanding
+
+
+def _parse_ts(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

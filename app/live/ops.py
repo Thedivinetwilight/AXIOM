@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.live.alerts import AlertRouter
+from app.live.alerts import AlertAcknowledgements, AlertRouter
 from app.live.guards import CanaryGuard, GuardDecision, TokenGuard
 from app.live.watchdog import BreachMonitor, LiveWatchdog
 
@@ -28,6 +28,7 @@ class LiveOperations:
                  canary: CanaryGuard | None = None,
                  watchdog: LiveWatchdog | None = None,
                  breaches: BreachMonitor | None = None,
+                 acknowledgements: AlertAcknowledgements | None = None,
                  auto_cancel_stuck: bool = False,
                  now_fn=None):
         self.repository = repository
@@ -37,6 +38,7 @@ class LiveOperations:
         self.canary = canary
         self.watchdog = watchdog
         self.breaches = breaches
+        self.acknowledgements = acknowledgements
         #: when True the ENGINE (not this observer) cancels findings the
         #: watchdog has escalated to CRITICAL. Off unless explicitly enabled.
         self.auto_cancel_stuck = bool(auto_cancel_stuck)
@@ -68,8 +70,12 @@ class LiveOperations:
             max_notional=getattr(settings, "live_canary_max_notional", 0.0),
             first_orders=getattr(settings, "live_canary_orders", 10),
             now_fn=now_fn)
+        acknowledgements = AlertAcknowledgements(repository, now_fn=now_fn)
         watchdog = LiveWatchdog(
             repository, broker=broker, token_guard=token_guard,
+            acknowledgements=acknowledgements,
+            unacked_critical_minutes=getattr(
+                settings, "live_unacked_critical_minutes", 15),
             stuck_order_minutes=getattr(settings, "live_stuck_order_minutes", 5),
             stuck_order_escalate_minutes=getattr(
                 settings, "live_stuck_order_escalate_minutes", 15),
@@ -83,6 +89,7 @@ class LiveOperations:
             auto_stop=getattr(settings, "live_auto_stop_on_breach", True))
         ops = cls(repository, broker=broker, alerts=alerts, token_guard=token_guard,
                   canary=canary, watchdog=watchdog, breaches=breaches,
+                  acknowledgements=acknowledgements,
                   auto_cancel_stuck=getattr(settings, "live_auto_cancel_stuck", False),
                   now_fn=now_fn)
         # the watchdog needs the journal, which the engine owns; the engine
@@ -195,5 +202,7 @@ class LiveOperations:
             if self.token_guard else None,
             "breaches": self.breaches.status() if self.breaches else None,
             "auto_cancel_stuck": self.auto_cancel_stuck,
+            "acks": (self.acknowledgements.status()
+                     if self.acknowledgements else None),
             "alerts": self.alerts.status() if self.alerts else None,
         }

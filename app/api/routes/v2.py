@@ -297,16 +297,61 @@ async def alerts(request: Request, limit: int = 50):
 
     Read-only and additive: alerts are recorded by the engine's AlertRouter in
     ``system_events`` (kind ALERT), so this endpoint works even while no engine
-    process is running. ``limit`` is clamped to keep the response bounded.
+    process is running. ``limit`` is clamped to keep the response bounded. Each
+    alert carries its durable ``id`` and whether a human has acknowledged it —
+    an acknowledged alarm and an unattended one are very different states.
     """
     from app.live.alerts import recent_alerts
 
+    repository = _repo(request)
     bounded = max(1, min(int(limit), 500))
+    listed = recent_alerts(repository, limit=bounded)
     return {
-        "alerts": recent_alerts(_repo(request), limit=bounded),
+        "alerts": listed,
         "source": "system_events/ALERT",
         "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
+        "unacknowledged_critical": sum(
+            1 for alert in listed
+            if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
     }
+
+
+@router.post("/alerts/ack")
+async def acknowledge_alerts(request: Request):
+    """Acknowledge alerts (local bookkeeping ONLY).
+
+    Writes nothing but acknowledgement state in ``engine_state``; it cannot
+    place, modify or cancel an order and cannot change a risk limit or a
+    switch. Body: ``{"ids": ["..."]}``, ``{"kind": "STUCK_ORDER"}`` or
+    ``{"all": true}``, with optional ``by`` and ``note``.
+    """
+    from app.live.alerts import AlertAcknowledgements, recent_alerts
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    repository = _repo(request)
+    acks = AlertAcknowledgements(repository)
+    by = str(body.get("by") or "api")
+    note = str(body.get("note") or "")
+    if body.get("ids"):
+        result = acks.acknowledge_many(
+            [str(item) for item in body["ids"]], by=by, note=note)
+    elif body.get("kind"):
+        result = acks.acknowledge_kind(str(body["kind"]), by=by, note=note)
+    elif body.get("all"):
+        ids = [alert["id"] for alert in recent_alerts(repository, limit=500)
+               if alert.get("id")]
+        result = acks.acknowledge_many(ids, by=by, note=note)
+    else:
+        result = {"ok": False,
+                  "reason": "provide 'ids', 'kind' or 'all' — nothing to do"}
+    result["status"] = acks.status()
+    return result
 
 
 @router.get("/live/status")

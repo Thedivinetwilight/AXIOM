@@ -57,15 +57,19 @@ class LiveWatchdog:
     """Observation-only checks over durable state. Never raises to the caller."""
 
     def __init__(self, repository, *, broker=None, token_guard=None,
+                 acknowledgements=None,
                  stuck_order_minutes: int = 5,
                  stuck_order_escalate_minutes: int = 15,
+                 unacked_critical_minutes: int = 15,
                  reconcile_silence_minutes: int = 10, now_fn=None):
         self.repository = repository
         self.broker = broker
         self.token_guard = token_guard
+        self.acknowledgements = acknowledgements
         self.stuck_order_minutes = int(stuck_order_minutes)
         self.stuck_order_escalate_minutes = max(
             int(stuck_order_escalate_minutes), int(stuck_order_minutes))
+        self.unacked_critical_minutes = int(unacked_critical_minutes)
         self.reconcile_silence_minutes = int(reconcile_silence_minutes)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
 
@@ -173,6 +177,32 @@ class LiveWatchdog:
                 {"age_minutes": round(age_min, 1)})]
         return []
 
+    def check_unacknowledged_critical(self, *, now: datetime | None = None) -> list[Finding]:
+        """A CRITICAL alert nobody has acknowledged is still an open incident.
+
+        Silence after a critical alert is indistinguishable from a fix, so the
+        obligation to look at it is enforced here. ``0`` disables the check;
+        meta-kinds (the notifications about alerts) are never counted, so this
+        can never feed itself.
+        """
+        if not self.unacked_critical_minutes or self.acknowledgements is None:
+            return []
+        now = now or self._now()
+        try:
+            outstanding = self.acknowledgements.outstanding_critical(
+                older_than_minutes=self.unacked_critical_minutes, now=now)
+        except Exception:
+            return []
+        return [Finding(
+            "UNACKNOWLEDGED_ALERT", CRITICAL,
+            f"CRITICAL alert {item['kind']} from {item['age_minutes']:.0f} min ago "
+            "has not been acknowledged",
+            {"alert_id": item["id"], "alert_kind": item["kind"],
+             "age_minutes": item["age_minutes"], "message": item["message"][:200],
+             "how_to_acknowledge": "python -m app live-ack --id "
+                                   f"{item['id']}"})
+            for item in outstanding]
+
     def check_token(self, *, now: datetime | None = None) -> list[Finding]:
         if self.token_guard is None:
             return []
@@ -202,7 +232,8 @@ class LiveWatchdog:
                       self.check_stuck_orders,
                       self.check_unresolved_intents,
                       self.check_reconcile_liveness,
-                      self.check_token):
+                      self.check_token,
+                      self.check_unacknowledged_critical):
             try:
                 findings.extend(check(now=now))
             except Exception:

@@ -697,6 +697,40 @@ def cmd_live_drill(args) -> int:
     return 0 if report.get("ok") else 1
 
 
+def cmd_live_ack(args) -> int:
+    """Acknowledge alerts so an unattended CRITICAL is visible as such.
+
+    Acknowledgement changes only local alert bookkeeping: it cannot place,
+    cancel or modify an order and it cannot change a risk limit.
+    """
+    from app.live.alerts import AlertAcknowledgements, recent_alerts
+
+    settings = _load_settings()
+    database, repository = _open_ops_repository(settings)
+    try:
+        acks = AlertAcknowledgements(repository)
+        by = args.by or "operator"
+        if args.id:
+            result = acks.acknowledge_many(args.id, by=by, note=args.note)
+        elif args.kind:
+            result = acks.acknowledge_kind(args.kind, by=by, note=args.note)
+        elif args.all:
+            ids = [alert["id"] for alert in recent_alerts(repository, limit=500)
+                   if alert.get("id")]
+            result = acks.acknowledge_many(ids, by=by, note=args.note)
+        else:
+            outstanding = acks.outstanding_critical(
+                older_than_minutes=0, limit=500)
+            result = {"ok": True, "outstanding_critical": outstanding,
+                      "hint": "pass --id <id> (repeatable), --kind <KIND> or --all"}
+        payload = {"scope": "LIVE ACK (alert acknowledgement)", **result}
+        payload["status"] = acks.status()
+    finally:
+        database.close()
+    print(json.dumps(payload, indent=2, default=str))
+    return 0 if payload.get("ok") else 1
+
+
 def cmd_live_status(args) -> int:
     """Print the live-operations snapshot from RECORDED state (read-only).
 
@@ -1469,6 +1503,19 @@ def parser() -> argparse.ArgumentParser:
     lstatus.add_argument("--audit", action="store_true",
                          help="also recompute PnL from the audit trail")
     lstatus.set_defaults(func=cmd_live_status)
+
+    ack = sub.add_parser(
+        "live-ack",
+        help="acknowledge alerts (local bookkeeping only; no orders, no limits)")
+    ack.add_argument("--id", action="append", default=[],
+                     help="alert id to acknowledge (repeatable)")
+    ack.add_argument("--kind", default="",
+                     help="acknowledge every outstanding alert of this kind")
+    ack.add_argument("--all", action="store_true",
+                     help="acknowledge every recorded alert")
+    ack.add_argument("--by", default="", help="who is acknowledging")
+    ack.add_argument("--note", default="", help="free-text note")
+    ack.set_defaults(func=cmd_live_ack)
 
     drill = sub.add_parser(
         "live-drill",

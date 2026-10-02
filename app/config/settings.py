@@ -170,6 +170,9 @@ class Settings:
     # Reconciliation silence (no successful reconcile) longer than this raises
     # an alert.
     live_reconcile_silence_minutes: int = 10
+    # An unacknowledged CRITICAL alert older than this is itself an incident
+    # (0 disables). Acknowledge with `python -m app live-ack`.
+    live_unacked_critical_minutes: int = 15
     # Auto-stop: when a live breach is detected (daily loss / equity drawdown)
     # the engine triggers the persisted EMERGENCY STOP itself. Fail-closed
     # default is ON for live mode.
@@ -284,6 +287,9 @@ class Settings:
                 "warning it escalates)")
         if self.live_reconcile_silence_minutes <= 0:
             raise ValueError("LIVE_RECONCILE_SILENCE_MINUTES must be > 0")
+        if not 0 <= self.live_unacked_critical_minutes <= 1440:
+            raise ValueError("LIVE_UNACKED_CRITICAL_MINUTES must be 0..1440 "
+                             "(0 disables the acknowledgement check)")
         if not 0 <= self.live_max_equity_drawdown < 1:
             raise ValueError("LIVE_MAX_EQUITY_DRAWDOWN must be 0..<1 (0 disables)")
         if self.alert_min_severity.upper() not in {"INFO", "WARNING", "CRITICAL"}:

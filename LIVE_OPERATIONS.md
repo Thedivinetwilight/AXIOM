@@ -18,6 +18,7 @@ account in a losing position is worse than the risk it prevents. This is asserte
 | Watchdog (`LiveWatchdog`) | "Is the engine actually working?" | 5 min stuck (→ 15 min CRITICAL) / 10 min silence | Alerts: stuck order (WARNING → CRITICAL), disabled broker, unresolved intent, reconcile stall, expiring token |
 | Breach monitor (`BreachMonitor`) | "Is the account past its pain limit?" | daily loss; drawdown off | Daily-loss and peak-equity drawdown breach → auto EMERGENCY STOP |
 | Alerts (`AlertRouter`) | "How would I even find out?" | durable sink on; webhook off | `system_events` (kind `ALERT`) + optional webhook, deduped, secrets scrubbed |
+| Acknowledgements (`AlertAcknowledgements`) | "Did a human actually see it?" | 15 min, then it is an incident | An unattended CRITICAL escalates to `UNACKNOWLEDGED_ALERT`; `live-ack` (or `POST /api/v2/alerts/ack`) clears it |
 
 Two properties worth stating explicitly:
 
@@ -74,7 +75,8 @@ to "go full size", and a restart cannot restart the ramp (the counter is persist
   leaves the order working — never assume a cancel succeeded).
 - **Dashboard:** an "Alerts & Live Ops" panel showing execution mode, reconcile liveness,
   token state, canary progress, kill switches and the last alerts. Rendered from recorded
-  state, so it is accurate even if the engine process died.
+  state, so it is accurate even if the engine process died. Unacknowledged CRITICAL alerts
+  are counted, and each alert row shows whether a human has seen it.
 - **API:** `GET /api/v2/alerts` and `GET /api/v2/live/status` (bearer auth), both additive
   and read-only. Neither can place an order or change a limit.
 
@@ -104,7 +106,12 @@ A recorded-state check that cannot run (no database) is reported as `not checked
 clean. An **ERROR** in either family means do not go live; a **WARNING** is an accepted gap.
 
 **When an alert fires.**
-1. `GET /api/v2/alerts` or the dashboard panel — read the message and payload.
+1. `GET /api/v2/alerts` or the dashboard panel — read the message and payload, then
+   **acknowledge it**: `python -m app live-ack --id <id> --by you --note "checked the
+   terminal"` (or `--kind <KIND>` for a known issue). An alert that stays unacknowledged for
+   `LIVE_UNACKED_CRITICAL_MINUTES` becomes `UNACKNOWLEDGED_ALERT`: the system cannot tell
+   "fixed" from "nobody looked", so it keeps asking. Acknowledgement is local bookkeeping
+   only — it never touches orders, limits or switches.
 2. `STUCK_ORDER` → check `python -m app live-status` (or the API) and the reconciliation
    log; the order is still working and the engine will keep reconciling it. Never resubmit.
    A WARNING is early notice; a CRITICAL that survives auto-cancel needs the broker terminal.
@@ -123,7 +130,7 @@ clean. An **ERROR** in either family means do not go live; a **WARNING** is an a
 
 **Fire drill (run this before the first live order, and after changing any rail).**
 ```bash
-python -m app live-drill          # 11 steps, all offline, no orders, no network
+python -m app live-drill          # 12 steps, all offline, no orders, no network
 ```
 Proves each rail actually fires and prints the recorded evidence: the four-switch gate
 refuses a partial opt-in; each broker refuses the other mode's host; the TokenGuard blocks
@@ -131,8 +138,8 @@ an unverified credential *and* blocks it again once stale; the canary shrinks an
 entry, survives a restart and then releases; a stale credential blocks a new entry but never
 an exit; a daily-loss breach triggers the persisted stop; a stuck order warns at 5 minutes
 and is auto-cancelled when enabled; audit integrity catches injected corruption; alerts are
-durable and secret-shaped keys are redacted; `live-halt` still halts while the configuration
-is rejected. It writes to a throwaway database (removed when the drill is clean, kept when a
+durable and secret-shaped keys are redacted; an unattended CRITICAL escalates and
+acknowledging it clears that; `live-halt` still halts while the configuration is rejected. It writes to a throwaway database (removed when the drill is clean, kept when a
 step fails so you can inspect the evidence) and it never contacts a network.
 
 **Reading the state of the world.**
@@ -187,6 +194,10 @@ These are operational decisions, not code gaps:
   (guards never block exits, a blocked entry never reaches the broker, a breach triggers the
   persisted stop, auto-cancel only when enabled and failures are recorded, and an engine
   with `live_ops=None` behaves exactly as before).
+- Acknowledgement is tested end to end: idempotent ack, bounded store, age threshold,
+  warnings never counted, meta-kinds never feeding back, CLI listing/acking, and the API
+  (`GET /api/v2/alerts` exposes `unacknowledged_critical`; `POST /api/v2/alerts/ack` clears
+  it; both authenticated).
 - `live-drill` is exercised by tests too, including the failure path: a broken step is
   reported with its evidence and its database is deliberately kept.
 - Full suite: see `README.md` for the current count · `tools/security_scan.py`: CLEAN.
