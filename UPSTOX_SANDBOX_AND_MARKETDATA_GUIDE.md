@@ -424,6 +424,21 @@ Left undone deliberately rather than shipped half-applied.
    `test_v1_separation.py:65` asserts the exact host set — all three need
    updating together.
 
+3. **Likely cause of the 28-failure run.** Once the guard blocks history
+   queries, `_child_remote_status` returns `None` — its documented "cannot be
+   determined, never guessed" result. Cancellation confirmation depends on that
+   value: `test_all_children_confirmed_then_cancelled` failed with
+   `assert 'SUBMITTED' == 'CANCELLED'` alongside `SANDBOX_CANCEL_NOT_CONFIRMED`
+   (`app/brokers/sandbox.py:935`). This is not collateral damage from a bad
+   patch — it is the honest consequence of the underlying fact that Upstox's
+   sandbox has **no** order history. Those tests pass today only because their
+   mocks invent a history response the real sandbox can never return. So the
+   guard is correct and the tests are the thing encoding an untrue assumption.
+   Landing it therefore requires rewriting cancellation-confirmation tests to
+   drive confirmation from the place/cancel responses the sandbox *does*
+   return, not from history. That is a behavioural redesign, not test churn,
+   and it was correctly left undone.
+
 The cleaner shape this points to: `upstox_sandbox_order_history_url` currently
 does double duty — broker reconciliation *and* the `sandbox-test` credential
 probe (`app/__main__.py:562`). Splitting those into two settings would let the
