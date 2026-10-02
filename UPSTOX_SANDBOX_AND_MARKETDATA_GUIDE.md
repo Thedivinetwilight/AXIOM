@@ -256,6 +256,62 @@ The correct fix is architectural, not a guard clause:
 Until that exists, `python -m app sandbox-test --place-order` should stay off,
 exactly as you concluded. An order you cannot reconcile is worse than no order.
 
+### 5a. What the shipped code actually does today (measured, not inferred)
+
+The repository has **no** `return []` stopgap. Its real behaviour is different,
+and the difference matters. Reproduced against the shipped defaults with a mock
+transport (sandbox `base_url`, production `history_url`) and one tracked order:
+
+```
+available before: True
+reconcile() raised SandboxAuthError: Sandbox credential rejected (HTTP 401); broker disabled
+available after : False
+history call made: True   -> GET api.upstox.com/v2/order/history
+
+later ORDER call on the valid sandbox host:
+   SandboxAuthError: Sandbox broker disabled after an auth failure
+```
+
+`_request` fails closed **globally, not per endpoint** (`app/brokers/sandbox.py`,
+quoted verbatim):
+
+```python
+        if response.status_code in {401, 403}:
+            self.available = False  # fail closed on auth errors
+            logger.error("SANDBOX_AUTH_FAILURE", extra={"http_status": response.status_code})
+            raise SandboxAuthError(
+```
+
+`self.available = False` is not scoped to the endpoint that failed. `_request`
+opens with `if not self.available: raise SandboxAuthError("Sandbox broker
+disabled after an auth failure")`, so once any single call is rejected, every
+later call is refused too.
+
+So a 401 from the *history* endpoint — which is pointed at a **production** host
+by the shipped default, `upstox_sandbox_order_history_url =
+"https://api.upstox.com/v2/order/history"` (`app/config/settings.py:102`) — permanently
+disables the **entire** broker, including the order endpoints on the perfectly
+valid sandbox host. Reconciliation is what kills order placement, not the
+credential.
+
+Note the shipped defaults are inconsistent with each other: `base_url` is
+`https://api-hft.upstox.com` (line 101) but history is `api.upstox.com` (line 102).
+A sandbox token can never authorise the latter.
+
+Two caveats worth stating precisely:
+
+- `reconcile()` iterates `self.orders`. With **no** tracked order it returns
+  without making any history request at all, so this failure only surfaces once
+  an order has actually been submitted — the worst possible moment to discover it.
+- The host allow-list added in commit `1d34479` covers `base_url` only.
+  **`history_url` is still unvalidated**, so the production default above is
+  still accepted at construction. Closing that is the remaining gap; it needs a
+  decision on what the correct sandbox history endpoint is, which is not
+  documented, so it has not been guessed at here.
+
+This is the concrete reason `--place-order` must stay off: under the shipped
+defaults the first reconciliation attempt disables the broker outright.
+
 ---
 
 ## 6. Common problems and fixes
