@@ -18,6 +18,8 @@ each rail actually fires, and reports the recorded evidence for every step:
 * alerts are durable and secret-shaped keys are redacted before storage;
 * a failed webhook page is queued and delivered on the retry;
 * an unattended CRITICAL alert escalates, and acknowledging it clears that;
+* a second LIVE engine is refused while the first is heartbeating, while a stale
+  lock never blocks a restart;
 * `live-halt` still halts when the configuration itself is rejected.
 
 Nothing here places, modifies or cancels a real order; the only broker used is
@@ -129,6 +131,7 @@ class _Context:
         engine = SandboxEngine.__new__(SandboxEngine)
         engine.repository = self.repository
         engine.broker = self.broker
+        engine.live_lock = None
         engine.daily = None
         engine._last_realized = 0.0
         engine._peak_equity = 0.0
@@ -437,6 +440,36 @@ def _step_unacknowledged_alert(ctx: _Context) -> Step:
         {"escalated": escalated, "acknowledged": acknowledged, "cleared": cleared})
 
 
+def _step_single_engine_lock(ctx: _Context) -> Step:
+    """Two live engines on one account would double every entry."""
+    from app.live.lock import EngineLock
+
+    now = datetime.now(timezone.utc)
+    first = EngineLock(ctx.repository, live=True, owner="drill-engine-a:1")
+    second = EngineLock(ctx.repository, live=True, owner="drill-engine-b:2")
+    third = EngineLock(ctx.repository, live=True, owner="drill-engine-c:3")
+    non_live = EngineLock(ctx.repository, live=False, owner="drill-paper-d:4")
+
+    granted = first.acquire(now=now).granted
+    refused = second.acquire(now=now)
+    forced = second.acquire(now=now, force=True)
+    # after the stale window a crashed engine must never block a restart
+    revived = third.acquire(now=now + timedelta(minutes=30))
+    # and a paper/sandbox engine is never blocked by a live lock
+    paper = non_live.acquire(now=now)
+    first.release()
+    ok = (granted and not refused.granted and "two live engines" in refused.reason
+          and forced.granted and revived.granted and paper.granted)
+    return Step(
+        "single_engine_lock", ok,
+        "a second live engine is refused, force works, and a stale lock never "
+        "blocks a restart" if ok else "the single-engine lock did not hold",
+        {"first": granted, "second_refused": not refused.granted,
+         "refusal_reason": refused.reason[:120], "forced": forced.granted,
+         "stale_lock_allows_restart": revived.granted,
+         "paper_not_blocked": paper.granted})
+
+
 def _step_halt_with_broken_config(ctx: _Context) -> Step:
     from app import __main__ as cli
 
@@ -496,6 +529,7 @@ STEPS = (
     _step_alerts_durable_and_scrubbed,
     _step_alert_retry,
     _step_unacknowledged_alert,
+    _step_single_engine_lock,
     _step_halt_with_broken_config,
     _step_no_live_host,
 )

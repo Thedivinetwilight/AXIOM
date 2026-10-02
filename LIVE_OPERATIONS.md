@@ -20,6 +20,7 @@ account in a losing position is worse than the risk it prevents. This is asserte
 | Alerts (`AlertRouter`) | "How would I even find out?" | durable sink on; webhook off | `system_events` (kind `ALERT`) + optional webhook, deduped, secrets scrubbed |
 | Delivery retries (`ALERT_RETRY_*`) | "What if the page bounced?" | 3 attempts, 60 s backoff | A failed webhook POST is queued and retried on the ops tick; after the cap it is recorded as `ALERT_DELIVERY_ABANDONED` (the durable sink still has it) |
 | Acknowledgements (`AlertAcknowledgements`) | "Did a human actually see it?" | 15 min, then it is an incident | An unattended CRITICAL escalates to `UNACKNOWLEDGED_ALERT`; `live-ack` (or `POST /api/v2/alerts/ack`) clears it |
+| Single-engine lock (`EngineLock`) | "Is anything else trading this account?" | 180 s heartbeat | A LIVE engine refuses to start while another live engine is heartbeating (`ENGINE_REFUSED_DUPLICATE`); a stale heartbeat never blocks a restart; `--force-live-lock` overrides deliberately |
 
 Two properties worth stating explicitly:
 
@@ -52,6 +53,7 @@ ALERT_WEBHOOK_URL=https://your-ops-endpoint/hook   # optional but recommended
 ```bash
 python -m app live-preflight     # verifies the credential AND records freshness
 python -m app engine             # prints the active rails, then trades
+# refuses to start if another LIVE engine is heartbeating on the same database
 ```
 
 The canary ends by itself after `LIVE_CANARY_ORDERS` entries — no operator action is needed
@@ -139,7 +141,7 @@ clean. An **ERROR** in either family means do not go live; a **WARNING** is an a
 
 **Fire drill (run this before the first live order, and after changing any rail).**
 ```bash
-python -m app live-drill          # 13 steps, all offline, no orders, no network
+python -m app live-drill          # 14 steps, all offline, no orders, no network
 ```
 Proves each rail actually fires and prints the recorded evidence: the four-switch gate
 refuses a partial opt-in; each broker refuses the other mode's host; the TokenGuard blocks
@@ -148,8 +150,9 @@ entry, survives a restart and then releases; a stale credential blocks a new ent
 an exit; a daily-loss breach triggers the persisted stop; a stuck order warns at 5 minutes
 and is auto-cancelled when enabled; audit integrity catches injected corruption; alerts are
 durable and secret-shaped keys are redacted; a failed page is retried; an unattended
-CRITICAL escalates and acknowledging it clears that; `live-halt` still halts while the
-configuration is rejected. It writes to a throwaway database (removed when the drill is clean, kept when a
+CRITICAL escalates and acknowledging it clears that; a second LIVE engine is refused while
+the first is heartbeating (and a stale lock does not block a restart); `live-halt` still
+halts while the configuration is rejected. It writes to a throwaway database (removed when the drill is clean, kept when a
 step fails so you can inspect the evidence) and it never contacts a network.
 
 **Reading the state of the world.**
@@ -187,6 +190,9 @@ These are operational decisions, not code gaps:
 - **Placing a drill order.** `live-drill` is a *tabletop* exercise: it proves the rails fire
   without sending anything to a broker. A real end-to-end order rehearsal is available
   separately (`python -m app sandbox-test --place-order`) and requires the explicit flag.
+- **Two live engines.** The lock refuses the second one, but it is a *soft* lock: if you
+  genuinely need to override it (a wedged process on another host), `--force-live-lock` is
+  explicit and recorded in `system_events`. Never override it just to "make it start".
 - **Auto-cancelling stuck orders by default.** `LIVE_AUTO_CANCEL_STUCK` exists but ships off:
   cancelling a working order is an action with market consequences, so the default is to
   page a human. Enable it only once you trust the stuck-order threshold on your own feed.

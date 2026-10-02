@@ -509,6 +509,8 @@ def cmd_engine(args) -> int:
 
         live_ops = LiveOperations.from_settings(settings, repository, broker)
         ops_status = live_ops.status()
+        from app.live.alerts import recent_alerts
+
         print(json.dumps({
             "ok": True,
             "live_ops": {
@@ -516,6 +518,11 @@ def cmd_engine(args) -> int:
                 "token": ops_status["token"]["decision"],
                 "breaches": ops_status["breaches"],
                 "alerts": ops_status["alerts"],
+                "lock": ops_status.get("lock"),
+                "unacknowledged_critical": sum(
+                    1 for alert in recent_alerts(repository, limit=200)
+                    if alert["severity"] == "CRITICAL"
+                    and not alert["acknowledged"]),
             },
         }, indent=2, default=str), flush=True)
 
@@ -557,7 +564,8 @@ def cmd_engine(args) -> int:
         take_profit=float(settings.take_profit or 0.0),
     )
     try:
-        status = engine.run(max_candles=args.max_candles)
+        status = engine.run(max_candles=args.max_candles,
+                            force_lock=bool(getattr(args, "force_live_lock", False)))
         print(json.dumps(status, indent=2, allow_nan=False, default=str))
         return 0 if status["state"] in {"RUNNING", "STOPPED"} else 1
     except KeyboardInterrupt:
@@ -725,6 +733,15 @@ def cmd_live_drill(args) -> int:
     return 0 if report.get("ok") else 1
 
 
+def _lock_status(settings, repository) -> dict:
+    """The single-engine lock view for operators (read-only)."""
+    from app.live.lock import EngineLock
+
+    return EngineLock(repository,
+                      stale_after_seconds=settings.live_lock_stale_seconds,
+                      live=settings.broker.upper() == "UPSTOX_LIVE").status()
+
+
 def cmd_live_ack(args) -> int:
     """Acknowledge alerts so an unattended CRITICAL is visible as such.
 
@@ -809,6 +826,12 @@ def cmd_live_status(args) -> int:
             "equity": equity,
             "findings": [f.to_dict() for f in watchdog.inspect()],
             "alerts": recent_alerts(repository, limit=10),
+            "lock": _lock_status(settings, repository),
+            "unacknowledged_critical": sum(
+                1 for alert in recent_alerts(repository, limit=200)
+                if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
+            "pending_alert_retries": len(
+                repository.get_engine_state("alert_pending_deliveries", []) or []),
         }
         if args.audit:
             # Report BOTH trails: an operator auditing a discrepancy should not
@@ -1502,6 +1525,9 @@ def parser() -> argparse.ArgumentParser:
     engine = sub.add_parser(
         "engine",
         help="24/7 engine (requires BROKER=UPSTOX_SANDBOX or UPSTOX_LIVE + DATA_SOURCE=upstox)")
+    engine.add_argument("--force-live-lock", action="store_true",
+                        help="start even if another LIVE engine is heartbeating "
+                             "(only if you are certain it is dead)")
     engine.add_argument("--max-candles", type=int, default=None,
                         help="bound the run for tests/verification (default: unlimited)")
     engine.set_defaults(func=cmd_engine)

@@ -96,6 +96,14 @@ class SandboxEngine:
         self.processed = 0
         self.submitted = 0
         self.rejected_by_risk = 0
+        # V2.1 L-ops: single-engine lock. Enforced for LIVE engines only;
+        # paper/sandbox runs record it but are never blocked by it.
+        self.live_lock = None
+        if live_ops is not None and hasattr(live_ops, "make_lock"):
+            try:
+                self.live_lock = live_ops.make_lock()
+            except Exception:  # pragma: no cover - a lock must not block start
+                logger.exception("could not construct the engine lock")
         # V2.1 L-ops: optional live safety rails (guards/watchdog/breaches).
         # None = the paper/sandbox behaviour is byte-for-byte unchanged.
         self.live_ops = live_ops
@@ -335,8 +343,25 @@ class SandboxEngine:
 
     # -- main loop -----------------------------------------------------------
 
-    def run(self, *, max_candles: int | None = None):
-        """Consume the provider stream until it ends / max_candles / stop flag."""
+    def run(self, *, max_candles: int | None = None, force_lock: bool = False):
+        """Consume the provider stream until it ends / max_candles / stop flag.
+
+        Refuses to start when another LIVE engine is heartbeating against the
+        same database: two live engines on one account double every entry.
+        """
+        if self.live_lock is not None:
+            decision = self.live_lock.acquire(force=force_lock)
+            if not decision.granted:
+                self.state = "REFUSED_DUPLICATE_ENGINE"
+                self.repository.record_system_event(
+                    "ENGINE_REFUSED_DUPLICATE",
+                    {"reason": decision.reason,
+                     "existing": (decision.existing.to_dict()
+                                  if decision.existing else None)})
+                logger.error("ENGINE_REFUSED_DUPLICATE",
+                             extra={"reason": decision.reason})
+                return {"ok": False, "reason": decision.reason,
+                        "lock": decision.to_dict(), **self.status()}
         self.state = "RUNNING"
         try:
             import asyncio
@@ -364,6 +389,8 @@ class SandboxEngine:
         finally:
             if self.state == "RUNNING":
                 self.state = "STOPPED"
+            if self.live_lock is not None:
+                self.live_lock.release()
         return self.status()
 
     def _ops_tick(self, *, now=None) -> None:
@@ -377,6 +404,10 @@ class SandboxEngine:
         if self.live_ops is None:
             return
         now = now or datetime.now(timezone.utc)
+        live_lock = getattr(self, "live_lock", None)
+        if live_lock is not None:
+            # proving this engine is alive is what makes a stale lock harmless
+            live_lock.heartbeat(now=now)
         try:
             findings = self.live_ops.observe(now=now)
             self._auto_cancel_escalated_stuck_orders(findings)
@@ -1145,6 +1176,8 @@ class SandboxEngine:
                 len(self.intent_journal.unresolved()) if self.intent_journal else 0),
             "recovery": self._recovery_report,
             "live_ops": self.live_ops.status() if self.live_ops is not None else None,
+            "engine_lock": (getattr(self, "live_lock", None).status()
+                            if getattr(self, "live_lock", None) is not None else None),
         }
 
 

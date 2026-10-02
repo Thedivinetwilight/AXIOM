@@ -30,6 +30,7 @@ class LiveOperations:
                  breaches: BreachMonitor | None = None,
                  acknowledgements: AlertAcknowledgements | None = None,
                  auto_cancel_stuck: bool = False,
+                 lock_stale_seconds: int = 180,
                  now_fn=None):
         self.repository = repository
         self.broker = broker
@@ -42,6 +43,8 @@ class LiveOperations:
         #: when True the ENGINE (not this observer) cancels findings the
         #: watchdog has escalated to CRITICAL. Off unless explicitly enabled.
         self.auto_cancel_stuck = bool(auto_cancel_stuck)
+        #: a lock whose heartbeat is older than this is stale (its engine died)
+        self.lock_stale_seconds = max(30, int(lock_stale_seconds))
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         #: counters for the dashboard/status
         self.blocked_entries = 0
@@ -94,10 +97,21 @@ class LiveOperations:
                   canary=canary, watchdog=watchdog, breaches=breaches,
                   acknowledgements=acknowledgements,
                   auto_cancel_stuck=getattr(settings, "live_auto_cancel_stuck", False),
+                  lock_stale_seconds=getattr(
+                      settings, "live_lock_stale_seconds", 180),
                   now_fn=now_fn)
         # the watchdog needs the journal, which the engine owns; the engine
         # attaches it after construction (see SandboxEngine.__init__).
         return ops
+
+    def make_lock(self):
+        """The single-engine lock for this session (live engines enforce it)."""
+        from app.live.lock import EngineLock
+
+        live = bool(getattr(self.broker, "LIVE", False))
+        return EngineLock(self.repository,
+                          stale_after_seconds=self.lock_stale_seconds,
+                          live=live, now_fn=self._now)
 
     def attach_journal(self, journal) -> None:
         """Give the watchdog visibility of unresolved submission intents."""
@@ -218,6 +232,8 @@ class LiveOperations:
             if self.token_guard else None,
             "breaches": self.breaches.status() if self.breaches else None,
             "auto_cancel_stuck": self.auto_cancel_stuck,
+            "lock": (self.make_lock().status() if self.repository is not None
+                     else None),
             "acks": (self.acknowledgements.status()
                      if self.acknowledgements else None),
             "alerts": self.alerts.status() if self.alerts else None,

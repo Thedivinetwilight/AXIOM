@@ -173,6 +173,9 @@ class Settings:
     # An unacknowledged CRITICAL alert older than this is itself an incident
     # (0 disables). Acknowledge with `python -m app live-ack`.
     live_unacked_critical_minutes: int = 15
+    # Single-engine lock: a LIVE engine refuses to start while another live
+    # engine's heartbeat is this fresh (a crashed engine never blocks a restart).
+    live_lock_stale_seconds: int = 180
     # Auto-stop: when a live breach is detected (daily loss / equity drawdown)
     # the engine triggers the persisted EMERGENCY STOP itself. Fail-closed
     # default is ON for live mode.
@@ -291,6 +294,8 @@ class Settings:
                 "warning it escalates)")
         if self.live_reconcile_silence_minutes <= 0:
             raise ValueError("LIVE_RECONCILE_SILENCE_MINUTES must be > 0")
+        if self.live_lock_stale_seconds < 30:
+            raise ValueError("LIVE_LOCK_STALE_SECONDS must be >= 30")
         if not 0 <= self.live_unacked_critical_minutes <= 1440:
             raise ValueError("LIVE_UNACKED_CRITICAL_MINUTES must be 0..1440 "
                              "(0 disables the acknowledgement check)")

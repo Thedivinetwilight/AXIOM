@@ -363,7 +363,9 @@ async def live_status(request: Request):
     crashed engine too — which is exactly when an operator looks at it.
     """
     from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+    from app.live.alerts import recent_alerts
     from app.live.guards import CanaryGuard, TokenGuard
+    from app.live.lock import EngineLock
     from app.live.watchdog import BreachMonitor
 
     settings = request.app.state.settings
@@ -394,4 +396,13 @@ async def live_status(request: Request):
         "emergency_stop": bool(
             (repository.get_engine_state("emergency_stop") or {}).get("stopped")),
         "open_live_orders": len(repository.open_live_orders()) if live else 0,
+        "lock": EngineLock(
+            repository,
+            stale_after_seconds=settings.live_lock_stale_seconds,
+            live=live).status(),
+        "unacknowledged_critical": sum(
+            1 for alert in recent_alerts(repository, limit=200)
+            if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
+        "pending_alert_retries": len(
+            repository.get_engine_state("alert_pending_deliveries", []) or []),
     }

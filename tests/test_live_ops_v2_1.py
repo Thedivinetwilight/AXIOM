@@ -1496,14 +1496,14 @@ class TestLiveDrill:
         report = run_drill(database_url=f"sqlite:///{tmp_path}/drill.db")
         failed = [step["name"] for step in report["steps"] if not step["ok"]]
         assert report["ok"] is True, f"failed steps: {failed}"
-        assert len(report["steps"]) == 13
+        assert len(report["steps"]) == 14
         names = {step["name"] for step in report["steps"]}
         assert {"four_switch_gate", "host_inversion_guard", "token_guard_lifecycle",
                 "canary_ramp", "entries_gated_exits_free",
                 "breach_triggers_emergency_stop", "stuck_order_escalates_and_cancels",
                 "audit_integrity_detects_corruption",
                 "alerts_durable_and_scrubbed", "failed_page_is_retried",
-                "unacknowledged_alert_escalates",
+                "unacknowledged_alert_escalates", "single_engine_lock",
                 "halt_works_with_a_broken_config",
                 "no_live_host_contacted"} == names
         # every step carries evidence, not just a verdict
@@ -2088,3 +2088,173 @@ class TestOpsDigest:
         assert cli.cmd_live_digest(args(post=True)) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["post"]["posted"] is False  # no webhook configured
+
+
+class TestSingleEngineLock:
+    """One account, one live engine: a per-order gate cannot catch this."""
+
+    def _lock(self, tmp_path, name="lock.db", **kwargs):
+        from app.live.lock import EngineLock
+
+        repository, database = repo(tmp_path, name)
+        return EngineLock(repository, **kwargs), repository, database
+
+    def test_a_second_live_engine_is_refused(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1")
+        second = first.__class__(repository, live=True, owner="host-b:2")
+        assert first.acquire(now=now).granted is True
+        decision = second.acquire(now=now)
+        assert decision.granted is False
+        assert "two live engines" in decision.reason
+        assert decision.existing.owner == "host-a:1"
+        database.close()
+
+    def test_heartbeat_keeps_the_lock_alive_and_release_frees_it(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1")
+        second = first.__class__(repository, live=True, owner="host-b:2")
+        first.acquire(now=now)
+        first.heartbeat(now=now + timedelta(minutes=1))
+        assert second.acquire(now=now + timedelta(minutes=1)).granted is False
+        assert first.release() is True
+        assert second.acquire(now=now + timedelta(minutes=1)).granted is True
+        database.close()
+
+    def test_a_stale_lock_never_blocks_a_restart(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1",
+                                                 stale_after_seconds=180)
+        second = first.__class__(repository, live=True, owner="host-b:2",
+                                 stale_after_seconds=180)
+        first.acquire(now=now)                      # then the process dies
+        decision = second.acquire(now=now + timedelta(minutes=5))
+        assert decision.granted is True
+        assert second.status(now=now + timedelta(minutes=5))["owner"] == "host-b:2"
+        database.close()
+
+    def test_force_overrides_a_live_conflict(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1")
+        second = first.__class__(repository, live=True, owner="host-b:2")
+        first.acquire(now=now)
+        assert second.acquire(now=now, force=True).granted is True
+        database.close()
+
+    def test_paper_engines_are_never_blocked(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        live, repository, database = self._lock(tmp_path, name="mixed-lock.db",
+                                                live=True, owner="live:1")
+        live.acquire(now=now)
+        paper = live.__class__(repository, live=False, owner="paper:2")
+        paper.acquire(now=now)          # replaces the lock, but never refuses
+        assert paper.status(now=now)["held"] is True
+        database.close()
+
+    def test_a_foreign_release_is_refused(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, name="release.db",
+                                                 owner="host-a:1")
+        second = first.__class__(repository, live=True, owner="host-b:2")
+        first.acquire(now=now)
+        assert second.release() is False           # never steal someone's lock
+        assert first.status(now=now)["owner"] == "host-a:1"
+        database.close()
+
+    def test_status_reports_the_heartbeat_age(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        lock, repository, database = self._lock(tmp_path, name="status.db",
+                                                owner="host-a:1")
+        lock.acquire(now=now)
+        status = lock.status(now=now + timedelta(seconds=90))
+        assert status["held"] is True and status["stale"] is False
+        assert status["heartbeat_age_seconds"] == pytest.approx(90, abs=1)
+        assert lock.status(now=now + timedelta(hours=2))["stale"] is True
+        database.close()
+
+    def test_the_engine_refuses_to_run_beside_another_live_engine(self, tmp_path):
+        from app.live.lock import EngineLock
+
+        ops, ops_repo, ops_db = TestLiveOperationsFacade()._ops(tmp_path)
+        engine, recording, repository, database, Candle = (
+            TestEngineIntegration()._engine(tmp_path, ops))
+        now = datetime.now(timezone.utc)
+        rival = EngineLock(repository, live=True, owner="rival:999")
+        rival.acquire(now=now)
+        engine.live_lock = EngineLock(repository, live=True, owner="this:1000")
+        result = engine.run(max_candles=1)
+        assert result["ok"] is False
+        assert engine.state == "REFUSED_DUPLICATE_ENGINE"
+        assert "two live engines" in result["reason"]
+        assert recording.submitted == []       # nothing was ever sent
+        kinds = {e["kind"] for e in repository.list_system_events(limit=50)}
+        assert "ENGINE_REFUSED_DUPLICATE" in kinds
+        database.close()
+        ops_db.close()
+
+    def test_the_lock_is_exposed_in_the_engine_status(self, tmp_path):
+        ops, ops_repo, ops_db = TestLiveOperationsFacade()._ops(tmp_path)
+        engine, recording, repository, database, Candle = (
+            TestEngineIntegration()._engine(tmp_path, ops))
+        engine.live_lock = ops.make_lock()
+        engine.live_lock.acquire()
+        status = engine.status()
+        assert status["engine_lock"]["held"] is True
+        assert status["engine_lock"]["owner"]
+        database.close()
+        ops_db.close()
+
+    def test_settings_require_a_sane_staleness_window(self, tmp_path):
+        with pytest.raises(ValueError, match="LIVE_LOCK_STALE_SECONDS"):
+            Settings(api_token="t", database_url=f"sqlite:///{tmp_path}/x.db",
+                     live_lock_stale_seconds=5)
+
+
+class TestLockAndAcksOnTheOperatorSurfaces:
+    """The status surfaces must show the two things that need a human."""
+
+    def _client(self, tmp_path):
+        from app.api.server import create_app
+        from fastapi.testclient import TestClient
+
+        settings = Settings(
+            api_token="t", broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+            live_confirm="I-ACCEPT-REAL-MONEY-RISK", upstox_live_access_token="t",
+            max_position_value=10_000, max_open_positions=1, max_daily_loss=500,
+            max_trades_per_day=3, database_url=f"sqlite:///{tmp_path}/ops-api.db")
+        return TestClient(create_app(settings, data_dir=tmp_path)), settings
+
+    def test_the_api_reports_the_lock_and_the_unacknowledged_count(self, tmp_path):
+        from app.live.alerts import AlertRouter
+        from app.live.lock import EngineLock
+
+        client, settings = self._client(tmp_path)
+        headers = {"Authorization": "Bearer t"}
+        with client:
+            repository = client.app.state.repository
+            EngineLock(repository, live=True, owner="engine-under-test:1").acquire()
+            AlertRouter(repository, webhook_url="").emit(
+                "STUCK_ORDER", "CRITICAL", "unattended")
+            body = client.get("/api/v2/live/status", headers=headers).json()
+        assert body["lock"]["held"] is True
+        assert body["lock"]["owner"] == "engine-under-test:1"
+        assert body["lock"]["stale"] is False
+        assert body["unacknowledged_critical"] == 1
+        assert body["pending_alert_retries"] == 0
+
+    def test_live_status_cli_includes_lock_acks_and_retries(
+            self, tmp_path, capsys, monkeypatch):
+        from app import __main__ as cli
+        from app.live.lock import EngineLock
+
+        settings = Settings(api_token="t",
+                            database_url=f"sqlite:///{tmp_path}/status-cli.db")
+        database, repository = cli._open_ops_repository(settings)
+        EngineLock(repository, live=True, owner="cli-lock:7").acquire()
+        database.close()
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        assert cli.cmd_live_status(type("A", (), {"audit": False})()) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["lock"]["owner"] == "cli-lock:7"
+        assert payload["unacknowledged_critical"] == 0
+        assert payload["pending_alert_retries"] == 0
