@@ -1496,13 +1496,14 @@ class TestLiveDrill:
         report = run_drill(database_url=f"sqlite:///{tmp_path}/drill.db")
         failed = [step["name"] for step in report["steps"] if not step["ok"]]
         assert report["ok"] is True, f"failed steps: {failed}"
-        assert len(report["steps"]) == 12
+        assert len(report["steps"]) == 13
         names = {step["name"] for step in report["steps"]}
         assert {"four_switch_gate", "host_inversion_guard", "token_guard_lifecycle",
                 "canary_ramp", "entries_gated_exits_free",
                 "breach_triggers_emergency_stop", "stuck_order_escalates_and_cancels",
                 "audit_integrity_detects_corruption",
-                "alerts_durable_and_scrubbed", "unacknowledged_alert_escalates",
+                "alerts_durable_and_scrubbed", "failed_page_is_retried",
+                "unacknowledged_alert_escalates",
                 "halt_works_with_a_broken_config",
                 "no_live_host_contacted"} == names
         # every step carries evidence, not just a verdict
@@ -1778,3 +1779,124 @@ class TestAlertAcknowledgement:
             # the ack surface is authenticated like every other v2 route
             assert client.post("/api/v2/alerts/ack", json={"all": True}
                                ).status_code in (401, 403)
+
+
+class TestAlertDeliveryRetry:
+    """A page that failed once must be tried again — bounded and observable."""
+
+    def _flaky(self, outcomes, repository, **kwargs):
+        import httpx
+
+        from app.live.alerts import AlertRouter
+
+        calls = []
+
+        class Flaky(httpx.BaseTransport):
+            def handle_request(self, request):
+                calls.append(request)
+                outcome = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return httpx.Response(outcome)
+
+        router = AlertRouter(
+            repository, webhook_url="https://ops.example/hook",
+            transport=httpx.Client(transport=Flaky()), **kwargs)
+        return router, calls
+
+    def test_a_failed_delivery_is_queued_then_delivered(self, tmp_path):
+        import httpx
+
+        repository, database = repo(tmp_path, "retry.db")
+        router, calls = self._flaky([httpx.ConnectError("down"), 200], repository,
+                                    retry_backoff_seconds=60)
+        router.emit("K", "CRITICAL", "m")
+        assert router.delivery_failures == 1 and router.queued_for_retry == 1
+        assert router.status()["pending_retries"] == 1
+
+        # not due yet
+        early = router.retry_pending(now=datetime.now(timezone.utc))
+        assert early == {"attempted": 0, "delivered": 0, "dropped": 0, "pending": 1}
+
+        # 2 minutes later the backoff has elapsed and the page lands
+        later = datetime.now(timezone.utc) + timedelta(minutes=2)
+        result = router.retry_pending(now=later)
+        assert result["delivered"] == 1 and result["pending"] == 0
+        assert router.retried_deliveries == 1
+        assert len(calls) == 2
+        database.close()
+
+    def test_a_persistently_failing_webhook_is_abandoned_after_the_cap(
+            self, tmp_path):
+        import httpx
+
+        repository, database = repo(tmp_path, "abandon.db")
+        router, _ = self._flaky([httpx.ConnectError("down")], repository,
+                                retry_max_attempts=3, retry_backoff_seconds=1)
+        router.emit("K", "CRITICAL", "m")
+        now = datetime.now(timezone.utc)
+        for _ in range(5):
+            now = now + timedelta(minutes=5)
+            router.retry_pending(now=now)
+        # the queue is empty (bounded) and the abandonment is recorded
+        assert router.status()["pending_retries"] == 0
+        kinds = {e["kind"] for e in repository.list_system_events(limit=100)}
+        assert "ALERT_DELIVERY_ABANDONED" in kinds
+        database.close()
+
+    def test_zero_attempts_disables_retries_entirely(self, tmp_path):
+        import httpx
+
+        repository, database = repo(tmp_path, "no-retry.db")
+        router, calls = self._flaky([httpx.ConnectError("down")], repository,
+                                    retry_max_attempts=0)
+        router.emit("K", "CRITICAL", "m")
+        assert router.status()["pending_retries"] == 0
+        assert router.retry_pending()["attempted"] == 0
+        assert len(calls) == 1  # only the original attempt
+        database.close()
+
+    def test_the_retry_tick_is_wired_into_the_engine(self, tmp_path):
+        """The engine's ops tick is what gives a failed page another chance."""
+        import httpx
+
+        from app.engine.sandbox_engine import SandboxEngine
+        from app.live.ops import LiveOperations
+
+        repository, database = repo(tmp_path, "engine-retry.db")
+        router, calls = self._flaky([httpx.ConnectError("down"), 200], repository,
+                                    retry_backoff_seconds=1)
+        ops = LiveOperations(repository, alerts=router)
+        router.emit("K", "CRITICAL", "m")
+
+        engine = SandboxEngine.__new__(SandboxEngine)
+        engine.repository = repository
+        engine.live_ops = ops
+        later = datetime.now(timezone.utc) + timedelta(minutes=2)
+        result = engine._retry_failed_alerts_once(now=later)
+        assert result["delivered"] == 1
+        assert len(calls) == 2
+        database.close()
+
+    def test_the_queue_is_bounded(self, tmp_path):
+        import httpx
+
+        from app.live.alerts import MAX_PENDING
+
+        repository, database = repo(tmp_path, "bounded-retry.db")
+        router, _ = self._flaky([httpx.ConnectError("down")], repository,
+                                retry_backoff_seconds=3600)
+        for index in range(MAX_PENDING + 20):
+            router.emit(f"K{index}", "CRITICAL", "m")
+        assert router.status()["pending_retries"] <= MAX_PENDING
+        database.close()
+
+    def test_a_recovered_webhook_leaves_no_pending_state(self, tmp_path):
+        import httpx
+
+        repository, database = repo(tmp_path, "recovered.db")
+        router, _ = self._flaky([200], repository, retry_backoff_seconds=1)
+        router.emit("K", "CRITICAL", "m")
+        assert router.delivery_failures == 0
+        assert router.status()["pending_retries"] == 0
+        database.close()

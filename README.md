@@ -54,11 +54,12 @@ drawdown auto-stop, deduped alerts (durable sink + optional webhook), the
 unless the live opt-in is armed), a whole-system readiness verdict in
 `live-preflight` (including audit-trail integrity and the state a fresh engine
 would inherit), an offline `live-drill` fire drill for the rails themselves, an
-independent audit-trail PnL replay, alert acknowledgement (`live-ack`, so an
-unattended CRITICAL becomes an incident of its own), and `GET /api/v2/alerts` ·
+independent audit-trail PnL replay, bounded webhook delivery retries, alert
+acknowledgement (`live-ack`, so an unattended CRITICAL becomes an incident of
+its own), and `GET /api/v2/alerts` ·
 `POST /api/v2/alerts/ack` · `GET /api/v2/live/status` — see
 [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1117 tests passed / 37 skipped**;
+Verification status: **1123 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See

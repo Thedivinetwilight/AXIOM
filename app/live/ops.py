@@ -59,6 +59,9 @@ class LiveOperations:
             webhook_url=getattr(settings, "alert_webhook_url", ""),
             min_severity=getattr(settings, "alert_min_severity", "WARNING"),
             dedup_seconds=getattr(settings, "alert_dedup_seconds", 300),
+            retry_max_attempts=getattr(settings, "alert_retry_attempts", 3),
+            retry_backoff_seconds=getattr(
+                settings, "alert_retry_backoff_seconds", 60),
             transport=transport, now_fn=now_fn)
         token_guard = TokenGuard(
             repository,
@@ -171,6 +174,19 @@ class LiveOperations:
             and finding.get("severity") == "CRITICAL"
             and finding.get("payload", {}).get("order_id")
         }
+
+    def retry_failed_alerts(self, *, now=None, limit: int = 10) -> dict:
+        """Retry pages whose webhook delivery failed (bounded, never raises)."""
+        if self.alerts is None:
+            return {"attempted": 0, "delivered": 0, "dropped": 0, "pending": 0}
+        try:
+            return self.alerts.retry_pending(now=now, limit=limit)
+        except Exception as exc:  # a retry failure must never break the loop
+            from app.live.alerts import logger as _logger
+
+            _logger.error("ALERT_RETRY_TICK_FAILURE",
+                          extra={"error": type(exc).__name__})
+            return {"attempted": 0, "delivered": 0, "dropped": 0, "pending": -1}
 
     def breach(self, *, realized_today: float, equity: float | None = None,
                peak_equity: float | None = None) -> dict | None:

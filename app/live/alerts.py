@@ -82,11 +82,16 @@ class AlertRouter:
 
     def __init__(self, repository, *, webhook_url: str = "",
                  min_severity: str = "WARNING", dedup_seconds: int = 300,
+                 retry_max_attempts: int = 3, retry_backoff_seconds: int = 60,
                  title: str = "Arena", transport=None, now_fn=None):
         self.repository = repository
         self.webhook_url = (webhook_url or "").strip()
         self.min_severity = (min_severity or "WARNING").upper()
         self.dedup_seconds = int(dedup_seconds)
+        # a failed page is retried with exponential backoff, a bounded number of
+        # times (0 attempts = never queue, i.e. the pre-retry behaviour)
+        self.retry_max_attempts = max(0, int(retry_max_attempts))
+        self.retry_backoff_seconds = max(1, int(retry_backoff_seconds))
         self.title = title
         self._transport = transport
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
@@ -95,6 +100,8 @@ class AlertRouter:
         self.emitted = 0
         self.suppressed = 0
         self.delivery_failures = 0
+        self.queued_for_retry = 0
+        self.retried_deliveries = 0
 
     # -- severity ------------------------------------------------------------
 
@@ -202,12 +209,132 @@ class AlertRouter:
                 logger.error("ALERT_DELIVERY_RECORD_FAILURE",
                              extra={"error": type(nested).__name__,
                                     "alert_kind": alert.kind})
+        # A failed page is the failure mode paging exists to prevent, so keep
+        # trying: the alert is queued for a bounded number of attempts. The
+        # durable sink already has it, so nothing is lost if every attempt fails.
+        self._enqueue_retry(alert, reason)
+
+    # -- retry queue ---------------------------------------------------------
+
+    def _pending(self) -> list[dict]:
+        if self.repository is None:
+            return []
+        state = self.repository.get_engine_state(PENDING_KEY, []) or []
+        return state if isinstance(state, list) else []
+
+    def _save_pending(self, pending: list[dict]) -> None:
+        if self.repository is None:
+            return
+        self.repository.set_engine_state(PENDING_KEY, pending[:MAX_PENDING])
+
+    def _enqueue_retry(self, alert: Alert, reason: str) -> None:
+        if (self.repository is None or not self.webhook_url
+                or self.retry_max_attempts <= 0):
+            return
+        try:
+            pending = self._pending()
+            pending.append({
+                "kind": alert.kind, "severity": alert.severity,
+                "message": alert.message, "payload": alert.payload, "ts": alert.ts,
+                "attempts": 1, "last_reason": reason,
+                "last_attempt_ts": self._now().isoformat(),
+                "next_attempt_ts": (self._now() + timedelta(
+                    seconds=self.retry_backoff_seconds)).isoformat(),
+            })
+            self._save_pending(pending)
+            self.queued_for_retry += 1
+        except Exception as exc:  # queueing must never break an alert path
+            logger.error("ALERT_RETRY_ENQUEUE_FAILURE",
+                         extra={"error": type(exc).__name__})
+
+    def retry_pending(self, *, now=None, limit: int = 10) -> dict:
+        """Retry due webhook deliveries. Never raises; never loses the alert.
+
+        Returns a small report so a caller (the engine tick) can record or log
+        it. Attempts are capped: after ``retry_max_attempts`` the alert is
+        dropped from the queue and a final ``ALERT_DELIVERY_FAILURE`` is
+        recorded, because a queue that grows forever is its own outage.
+        """
+        if self.repository is None or not self.webhook_url:
+            return {"attempted": 0, "delivered": 0, "dropped": 0, "pending": 0}
+        now = now or self._now()
+        pending = self._pending()
+        if not pending:
+            return {"attempted": 0, "delivered": 0, "dropped": 0, "pending": 0}
+
+        remaining, attempted, delivered, dropped = [], 0, 0, 0
+        for entry in pending:
+            if attempted >= limit:
+                remaining.append(entry)
+                continue
+            due = _parse_ts(entry.get("next_attempt_ts"))
+            if due is not None and due > now:
+                remaining.append(entry)
+                continue
+            attempts = int(entry.get("attempts", 1))
+            attempted += 1
+            alert = Alert(kind=entry.get("kind", "?"),
+                          severity=entry.get("severity", "WARNING"),
+                          message=entry.get("message", ""),
+                          payload=entry.get("payload") or {},
+                          ts=entry.get("ts", ""))
+            if self._try_deliver(alert):
+                delivered += 1
+                self.retried_deliveries += 1
+                continue
+            if attempts >= self.retry_max_attempts:
+                dropped += 1
+                if self.repository is not None:
+                    try:
+                        self.repository.record_system_event(
+                            "ALERT_DELIVERY_ABANDONED",
+                            {"alert_kind": alert.kind,
+                             "attempts": attempts,
+                             "severity": alert.severity})
+                    except Exception as exc:
+                        logger.error("ALERT_DELIVERY_RECORD_FAILURE",
+                                     extra={"error": type(exc).__name__})
+                continue
+            entry["attempts"] = attempts + 1
+            entry["next_attempt_ts"] = (
+                now + timedelta(seconds=self.retry_backoff_seconds * (2 ** attempts))
+            ).isoformat()
+            remaining.append(entry)
+        self._save_pending(remaining)
+        return {"attempted": attempted, "delivered": delivered,
+                "dropped": dropped, "pending": len(remaining)}
+
+    def _try_deliver(self, alert: Alert) -> bool:
+        """One webhook POST. Returns True on a 2xx/3xx; never raises."""
+        try:
+            import httpx
+
+            body = {"title": f"[{self.title}] {alert.severity}",
+                    "kind": alert.kind, "severity": alert.severity,
+                    "message": alert.message, "payload": alert.payload,
+                    "ts": alert.ts, "retry": True}
+            client = self._transport
+            if client is None:
+                with httpx.Client(timeout=5.0) as fresh:
+                    response = fresh.post(self.webhook_url, json=body)
+            else:
+                response = client.post(self.webhook_url, json=body)
+            return int(getattr(response, "status_code", 0)) < 400
+        except Exception as exc:
+            logger.warning("ALERT_RETRY_FAILED",
+                           extra={"alert_kind": alert.kind,
+                                  "error": type(exc).__name__})
+            return False
 
     # -- read side -----------------------------------------------------------
 
     def status(self) -> dict:
         return {"emitted": self.emitted, "suppressed": self.suppressed,
                 "delivery_failures": self.delivery_failures,
+                "queued_for_retry": self.queued_for_retry,
+                "retried_deliveries": self.retried_deliveries,
+                "pending_retries": len(self._pending()),
+                "retry_max_attempts": self.retry_max_attempts,
                 "webhook_enabled": bool(self.webhook_url),
                 "min_severity": self.min_severity,
                 "dedup_seconds": self.dedup_seconds}
@@ -258,6 +385,10 @@ def recent_alerts(repository, limit: int = 50, *, acknowledgements=None) -> list
 
 ACK_KEY = "alert_acknowledgements"
 MAX_ACKNOWLEDGEMENTS = 2000
+
+#: webhook deliveries that failed and are waiting for a bounded retry
+PENDING_KEY = "alert_pending_deliveries"
+MAX_PENDING = 100
 
 #: Alert kinds that must never be treated as "an alert needing acknowledgement":
 #: they are the notifications ABOUT alerts, so counting them would cascade.

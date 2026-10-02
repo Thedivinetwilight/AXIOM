@@ -184,6 +184,10 @@ class Settings:
     alert_webhook_url: str = field(default="", repr=False)
     alert_min_severity: str = "WARNING"  # INFO | WARNING | CRITICAL
     alert_dedup_seconds: int = 300  # identical alerts are collapsed in this window
+    # A failed webhook POST is retried with exponential backoff this many times
+    # (0 = do not retry). The durable sink already holds the alert either way.
+    alert_retry_attempts: int = 3
+    alert_retry_backoff_seconds: int = 60
     # Hard risk limits (outside any learning system; 0 = unlimited/disabled).
     max_position_value: float = 0.0
     max_open_positions: int = 0
@@ -296,6 +300,10 @@ class Settings:
             raise ValueError("ALERT_MIN_SEVERITY must be INFO, WARNING or CRITICAL")
         if self.alert_dedup_seconds < 0:
             raise ValueError("ALERT_DEDUP_SECONDS cannot be negative")
+        if not 0 <= self.alert_retry_attempts <= 10:
+            raise ValueError("ALERT_RETRY_ATTEMPTS must be 0..10")
+        if self.alert_retry_backoff_seconds <= 0:
+            raise ValueError("ALERT_RETRY_BACKOFF_SECONDS must be > 0")
         if self.alert_webhook_url and not self.alert_webhook_url.startswith(
                 ("http://", "https://")):
             raise ValueError("ALERT_WEBHOOK_URL must be an http(s) URL or empty")

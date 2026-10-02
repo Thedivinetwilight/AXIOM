@@ -380,6 +380,7 @@ class SandboxEngine:
         try:
             findings = self.live_ops.observe(now=now)
             self._auto_cancel_escalated_stuck_orders(findings)
+            self._retry_failed_alerts_once(now=now)
         except Exception:  # pragma: no cover - defensive
             logger.exception("live_ops observe failed")
         try:
@@ -395,6 +396,18 @@ class SandboxEngine:
         if breach and breach.get("stop") and not self._check_emergency():
             self.emergency_stop(
                 reason=f"AUTO_STOP {breach['kind']}: {breach['message']}")
+
+    def _retry_failed_alerts_once(self, *, now=None) -> dict:
+        """Give a failed page another chance on the ops cadence.
+
+        Paging is the one rail that depends on a third party being reachable;
+        a single transient 502 must not be the difference between an operator
+        knowing and not knowing. Bounded by the router's attempt cap.
+        """
+        result = self.live_ops.retry_failed_alerts(now=now)
+        if result.get("delivered") or result.get("dropped"):
+            logger.warning("ALERT_RETRY_TICK", extra={"result": result})
+        return result
 
     def _auto_cancel_escalated_stuck_orders(self, findings) -> list[str]:
         """Cancel orders the watchdog has escalated, when explicitly enabled.

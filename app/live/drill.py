@@ -16,6 +16,7 @@ each rail actually fires, and reports the recorded evidence for every step:
   engine cancels it and records `STUCK_ORDER_AUTO_CANCEL`;
 * audit-trail integrity detects injected corruption (the check is not vacuous);
 * alerts are durable and secret-shaped keys are redacted before storage;
+* a failed webhook page is queued and delivered on the retry;
 * an unattended CRITICAL alert escalates, and acknowledging it clears that;
 * `live-halt` still halts when the configuration itself is rejected.
 
@@ -371,6 +372,39 @@ def _step_alerts_durable_and_scrubbed(ctx: _Context) -> Step:
          "redaction_present": "[redacted]" in blob})
 
 
+def _step_alert_retry(ctx: _Context) -> Step:
+    """A webhook that failed once must be retried, not silently dropped."""
+    import httpx
+
+    from app.live.alerts import AlertRouter
+
+    calls: list[int] = []
+
+    class Flaky(httpx.BaseTransport):
+        def handle_request(self, request):
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ConnectError("drill: simulated outage")
+            return httpx.Response(200)
+
+    router = AlertRouter(
+        ctx.repository, webhook_url="https://drill.invalid/hook",
+        transport=httpx.Client(transport=Flaky()), retry_backoff_seconds=1)
+    ctx.hosts_touched.append("https://drill.invalid")
+    router.emit("DRILL_PAGE", "CRITICAL", "drill page")
+    queued = router.status()["pending_retries"]
+    result = router.retry_pending(
+        now=datetime.now(timezone.utc) + timedelta(minutes=1))
+    ok = (router.delivery_failures == 1 and queued == 1
+          and result["delivered"] == 1 and len(calls) == 2)
+    return Step(
+        "failed_page_is_retried", ok,
+        "a failed webhook delivery is queued, then delivered on the retry"
+        if ok else "a failed webhook delivery was not retried",
+        {"failed_attempts": router.delivery_failures, "queued": queued,
+         "delivered_on_retry": result["delivered"], "total_posts": len(calls)})
+
+
 def _step_unacknowledged_alert(ctx: _Context) -> Step:
     """A CRITICAL nobody acknowledged must become an incident of its own."""
     from app.live.alerts import AlertAcknowledgements
@@ -460,6 +494,7 @@ STEPS = (
     _step_stuck_order,
     _step_audit_integrity,
     _step_alerts_durable_and_scrubbed,
+    _step_alert_retry,
     _step_unacknowledged_alert,
     _step_halt_with_broken_config,
     _step_no_live_host,
