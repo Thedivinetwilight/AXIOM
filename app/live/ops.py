@@ -28,6 +28,7 @@ class LiveOperations:
                  canary: CanaryGuard | None = None,
                  watchdog: LiveWatchdog | None = None,
                  breaches: BreachMonitor | None = None,
+                 auto_cancel_stuck: bool = False,
                  now_fn=None):
         self.repository = repository
         self.broker = broker
@@ -36,6 +37,9 @@ class LiveOperations:
         self.canary = canary
         self.watchdog = watchdog
         self.breaches = breaches
+        #: when True the ENGINE (not this observer) cancels findings the
+        #: watchdog has escalated to CRITICAL. Off unless explicitly enabled.
+        self.auto_cancel_stuck = bool(auto_cancel_stuck)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         #: counters for the dashboard/status
         self.blocked_entries = 0
@@ -67,6 +71,8 @@ class LiveOperations:
         watchdog = LiveWatchdog(
             repository, broker=broker, token_guard=token_guard,
             stuck_order_minutes=getattr(settings, "live_stuck_order_minutes", 5),
+            stuck_order_escalate_minutes=getattr(
+                settings, "live_stuck_order_escalate_minutes", 15),
             reconcile_silence_minutes=getattr(
                 settings, "live_reconcile_silence_minutes", 10),
             now_fn=now_fn)
@@ -76,7 +82,9 @@ class LiveOperations:
             max_equity_drawdown=getattr(settings, "live_max_equity_drawdown", 0.0),
             auto_stop=getattr(settings, "live_auto_stop_on_breach", True))
         ops = cls(repository, broker=broker, alerts=alerts, token_guard=token_guard,
-                  canary=canary, watchdog=watchdog, breaches=breaches, now_fn=now_fn)
+                  canary=canary, watchdog=watchdog, breaches=breaches,
+                  auto_cancel_stuck=getattr(settings, "live_auto_cancel_stuck", False),
+                  now_fn=now_fn)
         # the watchdog needs the journal, which the engine owns; the engine
         # attaches it after construction (see SandboxEngine.__init__).
         return ops
@@ -142,6 +150,21 @@ class LiveOperations:
             findings.append(finding.to_dict())
         return findings
 
+    def escalated_stuck_order_ids(self, findings: list[dict]) -> set[str]:
+        """Audit order ids the watchdog escalated to CRITICAL (decision only).
+
+        Kept here so the *policy* (which findings warrant action) is testable
+        without a broker, while the *action* stays in the engine, which owns
+        order submission and cancellation.
+        """
+        return {
+            str(finding.get("payload", {}).get("order_id"))
+            for finding in findings or []
+            if finding.get("kind") == "STUCK_ORDER"
+            and finding.get("severity") == "CRITICAL"
+            and finding.get("payload", {}).get("order_id")
+        }
+
     def breach(self, *, realized_today: float, equity: float | None = None,
                peak_equity: float | None = None) -> dict | None:
         """Evaluate account-level escalations; returns the breach to act on."""
@@ -171,5 +194,6 @@ class LiveOperations:
             "token": self.token_guard.status(now=self._now())
             if self.token_guard else None,
             "breaches": self.breaches.status() if self.breaches else None,
+            "auto_cancel_stuck": self.auto_cancel_stuck,
             "alerts": self.alerts.status() if self.alerts else None,
         }

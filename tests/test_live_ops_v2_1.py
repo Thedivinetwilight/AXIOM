@@ -1121,3 +1121,183 @@ class TestOpsCli:
         cli.cmd_live_status(type("A", (), {"audit": False})())
         payload = json.loads(capsys.readouterr().out)
         assert payload["open_orders"] == 1
+
+
+class TestStuckOrderEscalation:
+    """A stuck order is a WARNING, then a CRITICAL, then (optionally) cancelled."""
+
+    def _watchdog(self, tmp_path, **kwargs):
+        from app.live.watchdog import LiveWatchdog
+
+        repository, database = repo(tmp_path, "stuck.db")
+        repository.record_live_order({
+            "id": "live-abc", "intent_id": "intent-1", "symbol": "S",
+            "side": "BUY", "quantity": 1, "price": 100.0, "status": "OPEN",
+            "created_ts": "2026-10-02T09:00:00+00:00"})
+        class Live:
+            LIVE = True
+
+        watchdog = LiveWatchdog(repository, broker=Live(), stuck_order_minutes=5,
+                                stuck_order_escalate_minutes=15, **kwargs)
+        return repository, database, watchdog
+
+    def test_just_past_the_threshold_is_a_warning(self, tmp_path):
+        repository, database, watchdog = self._watchdog(tmp_path)
+        findings = watchdog.check_stuck_orders(
+            now=datetime(2026, 10, 2, 9, 6, tzinfo=timezone.utc))
+        assert [f.severity for f in findings] == ["WARNING"]
+        assert findings[0].payload["escalated"] is False
+        assert findings[0].payload["escalate_minutes"] == 15
+        database.close()
+
+    def test_past_the_escalation_window_is_critical(self, tmp_path):
+        repository, database, watchdog = self._watchdog(tmp_path)
+        findings = watchdog.check_stuck_orders(
+            now=datetime(2026, 10, 2, 9, 20, tzinfo=timezone.utc))
+        assert [f.severity for f in findings] == ["CRITICAL"]
+        assert findings[0].payload["escalated"] is True
+        assert "ESCALATED" in findings[0].message
+        database.close()
+
+    def test_a_final_order_is_never_reported(self, tmp_path):
+        repository, database, watchdog = self._watchdog(tmp_path)
+        repository.record_live_transition("live-abc", "c1", "FILLED", 1, 100.0,
+                                          "2026-10-02T09:02:00+00:00", {})
+        findings = watchdog.check_stuck_orders(
+            now=datetime(2026, 10, 2, 9, 30, tzinfo=timezone.utc))
+        assert findings == []
+        database.close()
+
+    def test_escalate_below_stuck_is_clamped_not_inverted(self, tmp_path):
+        from app.live.watchdog import LiveWatchdog
+
+        repository, database = repo(tmp_path, "clamp.db")
+        watchdog = LiveWatchdog(repository, stuck_order_minutes=10,
+                                stuck_order_escalate_minutes=2)
+        assert watchdog.stuck_order_escalate_minutes == 10
+        database.close()
+
+    def test_settings_reject_an_inverted_ladder(self, tmp_path):
+        with pytest.raises(ValueError, match="ESCALATE_MINUTES"):
+            Settings(api_token="t", database_url=f"sqlite:///{tmp_path}/x.db",
+                     live_stuck_order_minutes=20,
+                     live_stuck_order_escalate_minutes=5)
+
+    def test_ops_exposes_the_escalated_ids_only(self):
+        from app.live.ops import LiveOperations
+
+        ops = LiveOperations(None)
+        findings = [
+            {"kind": "STUCK_ORDER", "severity": "WARNING",
+             "payload": {"order_id": "live-warn"}},
+            {"kind": "STUCK_ORDER", "severity": "CRITICAL",
+             "payload": {"order_id": "live-critical"}},
+            {"kind": "RECONCILE_STALLED", "severity": "CRITICAL", "payload": {}},
+        ]
+        assert ops.escalated_stuck_order_ids(findings) == {"live-critical"}
+        assert ops.escalated_stuck_order_ids([]) == set()
+
+    def test_auto_cancel_is_off_by_default(self, tmp_path):
+        from app.live.ops import LiveOperations
+
+        settings = Settings(api_token="t",
+                            database_url=f"sqlite:///{tmp_path}/off.db")
+        ops = LiveOperations.from_settings(settings, None)
+        assert ops.auto_cancel_stuck is False
+
+    def test_engine_does_nothing_when_the_flag_is_off(self, tmp_path):
+        """The default must never cancel anything."""
+        from app.engine.sandbox_engine import SandboxEngine
+
+        repository, database = repo(tmp_path, "engine-off.db")
+        repository.record_live_order({
+            "id": "live-abc", "intent_id": "intent-1", "symbol": "S",
+            "side": "BUY", "quantity": 1, "price": 100.0, "status": "OPEN",
+            "created_ts": "2026-10-02T09:00:00+00:00"})
+
+        class Ops:
+            auto_cancel_stuck = False
+
+            def observe(self, *, now=None):
+                return [{"kind": "STUCK_ORDER", "severity": "CRITICAL",
+                         "payload": {"order_id": "live-abc"}}]
+
+        class Broker:
+            orders = {"intent-1": type("S", (), {"our_id": "live-abc",
+                                                 "status": "OPEN"})()}
+
+        engine = SandboxEngine.__new__(SandboxEngine)
+        engine.repository = repository
+        engine.live_ops = Ops()
+        engine.broker = Broker()
+        cancelled = engine._auto_cancel_escalated_stuck_orders(
+            [{"kind": "STUCK_ORDER", "severity": "CRITICAL",
+              "payload": {"order_id": "live-abc"}}])
+        assert cancelled == []
+        database.close()
+
+    def test_engine_cancels_an_escalated_order_when_enabled(self, tmp_path, caplog):
+        from app.engine.sandbox_engine import SandboxEngine
+        from app.live.ops import LiveOperations
+
+        repository, database = repo(tmp_path, "engine-on.db")
+        repository.record_live_order({
+            "id": "live-abc", "intent_id": "intent-1", "symbol": "S",
+            "side": "BUY", "quantity": 1, "price": 100.0, "status": "OPEN",
+            "created_ts": "2026-10-02T09:00:00+00:00"})
+        ops = LiveOperations.__new__(LiveOperations)
+        ops.auto_cancel_stuck = True
+
+        class Broker:
+            def __init__(self):
+                self.orders = {"intent-1": type(
+                    "S", (), {"our_id": "live-abc", "status": "OPEN"})()}
+                self.cancelled = []
+
+            def cancel(self, intent_id):
+                self.cancelled.append(intent_id)
+                return {"status": "CANCELLED"}
+
+        broker = Broker()
+        engine = SandboxEngine.__new__(SandboxEngine)
+        engine.repository = repository
+        engine.live_ops = ops
+        engine.broker = broker
+        cancelled = engine._auto_cancel_escalated_stuck_orders(
+            [{"kind": "STUCK_ORDER", "severity": "CRITICAL",
+              "payload": {"order_id": "live-abc"}},
+             {"kind": "STUCK_ORDER", "severity": "WARNING",
+              "payload": {"order_id": "live-warn"}}])
+        assert cancelled == ["live-abc"]
+        assert broker.cancelled == ["intent-1"]
+        events = [event["kind"] for event in repository.list_system_events(limit=50)]
+        assert "STUCK_ORDER_AUTO_CANCEL" in events
+        database.close()
+
+    def test_a_failed_auto_cancel_is_recorded_not_swallowed(self, tmp_path):
+        from app.engine.sandbox_engine import SandboxEngine
+        from app.live.ops import LiveOperations
+
+        repository, database = repo(tmp_path, "engine-fail.db")
+        ops = LiveOperations.__new__(LiveOperations)
+        ops.auto_cancel_stuck = True
+
+        class Broker:
+            def __init__(self):
+                self.orders = {"intent-1": type(
+                    "S", (), {"our_id": "live-abc", "status": "OPEN"})()}
+
+            def cancel(self, intent_id):
+                raise RuntimeError("network down")
+
+        engine = SandboxEngine.__new__(SandboxEngine)
+        engine.repository = repository
+        engine.live_ops = ops
+        engine.broker = Broker()
+        cancelled = engine._auto_cancel_escalated_stuck_orders(
+            [{"kind": "STUCK_ORDER", "severity": "CRITICAL",
+              "payload": {"order_id": "live-abc"}}])
+        assert cancelled == []
+        events = [event["kind"] for event in repository.list_system_events(limit=50)]
+        assert "STUCK_ORDER_AUTO_CANCEL_FAILED" in events
+        database.close()

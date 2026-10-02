@@ -15,7 +15,7 @@ account in a losing position is worse than the risk it prevents. This is asserte
 |---|---|---|---|
 | Token freshness (`TokenGuard`) | "Is the credential still good?" | 20 h, warn 120 min | Blocks new entries when unverified/stale; alerts before expiry |
 | Canary ramp (`CanaryGuard`) | "Have we earned full size yet?" | off | Caps the first N entries to a notional ceiling (shrink or refuse) |
-| Watchdog (`LiveWatchdog`) | "Is the engine actually working?" | 5 min stuck / 10 min silence | CRITICAL alerts: stuck order, disabled broker, unresolved intent, reconcile stall, expiring token |
+| Watchdog (`LiveWatchdog`) | "Is the engine actually working?" | 5 min stuck (→ 15 min CRITICAL) / 10 min silence | Alerts: stuck order (WARNING → CRITICAL), disabled broker, unresolved intent, reconcile stall, expiring token |
 | Breach monitor (`BreachMonitor`) | "Is the account past its pain limit?" | daily loss; drawdown off | Daily-loss and peak-equity drawdown breach → auto EMERGENCY STOP |
 | Alerts (`AlertRouter`) | "How would I even find out?" | durable sink on; webhook off | `system_events` (kind `ALERT`) + optional webhook, deduped, secrets scrubbed |
 
@@ -38,6 +38,7 @@ LIVE_MAX_EQUITY_DRAWDOWN=0.05     # stop everything at -5% from peak equity
 LIVE_AUTO_STOP_ON_BREACH=true
 LIVE_TOKEN_MAX_AGE_HOURS=20
 LIVE_STUCK_ORDER_MINUTES=5
+LIVE_STUCK_ORDER_ESCALATE_MINUTES=15
 LIVE_RECONCILE_SILENCE_MINUTES=10
 MAX_POSITION_VALUE=10000
 MAX_OPEN_POSITIONS=1
@@ -64,7 +65,13 @@ to "go full size", and a restart cannot restart the ramp (the counter is persist
   `system_events`, plus an alert. A blocked entry is **not** an error — it is the rail doing
   its job.
 - **Auto stop:** `EMERGENCY_STOP` with reason `AUTO_STOP <KIND>: …`. The stop is persisted
-  and survives restarts; resuming is explicit (`/engine/resume`).
+  and survives restarts; resuming is explicit (`python -m app live-resume` or
+  `/engine/resume`).
+- **Stuck orders:** a working order past `LIVE_STUCK_ORDER_MINUTES` alerts as WARNING; past
+  `LIVE_STUCK_ORDER_ESCALATE_MINUTES` it becomes CRITICAL. With
+  `LIVE_AUTO_CANCEL_STUCK=true` the engine then cancels it and records
+  `STUCK_ORDER_AUTO_CANCEL` (a failed cancel records `STUCK_ORDER_AUTO_CANCEL_FAILED` and
+  leaves the order working — never assume a cancel succeeded).
 - **Dashboard:** an "Alerts & Live Ops" panel showing execution mode, reconcile liveness,
   token state, canary progress, kill switches and the last alerts. Rendered from recorded
   state, so it is accurate even if the engine process died.
@@ -85,8 +92,9 @@ is never trapped.
 
 **When an alert fires.**
 1. `GET /api/v2/alerts` or the dashboard panel — read the message and payload.
-2. `STUCK_ORDER` → check `/api/v2/live/status` and the reconciliation log; the order is
-   still working and the engine will keep reconciling it. Never resubmit.
+2. `STUCK_ORDER` → check `python -m app live-status` (or the API) and the reconciliation
+   log; the order is still working and the engine will keep reconciling it. Never resubmit.
+   A WARNING is early notice; a CRITICAL that survives auto-cancel needs the broker terminal.
 3. `UNRESOLVED_INTENT` → the remote outcome is genuinely unknown. Reconcile manually in the
    Upstox app before doing anything else.
 4. `BROKER_DISABLED` → credential rejected; the broker fails closed. Re-verify, then resume.
@@ -94,9 +102,23 @@ is never trapped.
 6. `DAILY_LOSS_BREACH` / `EQUITY_DRAWDOWN_BREACH` → the engine has already stopped itself.
 
 **Emergency.**
+- `python -m app live-halt --reason "..."` — always permitted, works even if the engine is
+  down or the configuration is broken (halting is the safe direction).
 - Dashboard/desktop `EMERGENCY STOP` (persists, cancels working orders it knows about), or
 - Ctrl-C the engine (reconciles, then exits), or
 - the exchange/broker terminal itself — always the final authority.
+
+**Reading the state of the world.**
+```bash
+python -m app live-status            # mode, stops, token, canary, breaches, findings, alerts
+python -m app live-status --audit    # … plus PnL recomputed from the audit trail alone
+python -m app live-resume            # clear the stop (refuses unless the live opt-in is armed)
+```
+`live-status` reads recorded state, so it works while the engine is stopped or crashed.
+`--audit` replays `live_transitions` + `live_orders` link-by-link and reports a
+*pre-fee* realized PnL next to the engine ledger's own figure; a difference beyond the
+tolerance is flagged as a disagreement about money and should be investigated before
+trusting either number.
 
 **Sizing sanity.** `MAX_POSITION_VALUE` is per-order notional; `MAX_OPEN_POSITIONS` counts
 open positions; `MAX_DAILY_LOSS` is a realized-loss amount; `MAX_TRADES_PER_DAY` counts
@@ -111,6 +133,9 @@ These are operational decisions, not code gaps:
 - **Token refresh.** The daily OAuth dance needs your client id/secret and a redirect URI;
   automating it is a deployment choice (cron + `python -m app upstox-login`) and a security
   decision (where the token lives). The rails tell you loudly when you must re-run it.
+- **Auto-cancelling stuck orders by default.** `LIVE_AUTO_CANCEL_STUCK` exists but ships off:
+  cancelling a working order is an action with market consequences, so the default is to
+  page a human. Enable it only once you trust the stuck-order threshold on your own feed.
 - **Paging.** The webhook is a generic POST; wire it to PagerDuty/Slack/ntfy as you prefer.
   The durable sink is always there if the webhook is not.
 - **Exchange-side kill switch.** Your broker's terminal can always flatten and block; that
@@ -123,12 +148,15 @@ These are operational decisions, not code gaps:
 
 ## 6. Verification status
 
-- `tests/test_live_ops_v2_1.py` — 68 tests: alert dedup/severity/scrubbing/webhook failure,
-  token guard (fresh/stale/unverified/disabled), canary (reduce/refuse/complete/restart),
-  watchdog (stuck order, disabled broker, reconcile stall, token, aggregate resilience),
-  breach monitor, preflight checks, API surfaces, and engine integration (guards never block
-  exits, a blocked entry never reaches the broker, a breach triggers the persisted stop,
-  and an engine with `live_ops=None` behaves exactly as before).
-- Full suite: **1059 passed / 37 skipped** · `tools/security_scan.py`: CLEAN.
+- `tests/test_live_ops_v2_1.py` — alert dedup/severity/scrubbing/webhook failure, token
+  guard (fresh/stale/unverified/disabled), canary (reduce/refuse/complete/restart), watchdog
+  (stuck order + escalation ladder, disabled broker, reconcile stall, token, aggregate
+  resilience), breach monitor, preflight checks, API surfaces, audit-trail replay (including
+  partial/cancelled children and the ledger comparison), the halt/resume/status CLI
+  (halt always permitted; resume refuses an unarmed or broken config), and engine integration
+  (guards never block exits, a blocked entry never reaches the broker, a breach triggers the
+  persisted stop, auto-cancel only when enabled and failures are recorded, and an engine
+  with `live_ops=None` behaves exactly as before).
+- Full suite: see `README.md` for the current count · `tools/security_scan.py`: CLEAN.
 - No test contacts a network; the webhook is exercised with an httpx mock transport.
 - Real-money end-to-end execution remains **not attempted** (no live credentials here).

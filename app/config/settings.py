@@ -159,8 +159,14 @@ class Settings:
     # hours, and warns this many minutes before that (0 disables the check).
     live_token_max_age_hours: float = 20.0
     live_token_warn_minutes: int = 120
-    # Watchdog: an order left working for longer than this raises an alert.
+    # Watchdog: an order left working for longer than this raises an alert
+    # (WARNING), escalating to CRITICAL after live_stuck_order_escalate_minutes.
     live_stuck_order_minutes: int = 5
+    live_stuck_order_escalate_minutes: int = 15
+    # When True the engine cancels orders the watchdog has escalated to
+    # CRITICAL. Off by default: cancelling is an action, and actions need an
+    # explicit opt-in (matching the rest of this section).
+    live_auto_cancel_stuck: bool = False
     # Reconciliation silence (no successful reconcile) longer than this raises
     # an alert.
     live_reconcile_silence_minutes: int = 10
@@ -271,6 +277,11 @@ class Settings:
             raise ValueError("LIVE_TOKEN_WARN_MINUTES must be 0..1440")
         if self.live_stuck_order_minutes <= 0:
             raise ValueError("LIVE_STUCK_ORDER_MINUTES must be > 0")
+        if self.live_stuck_order_escalate_minutes < self.live_stuck_order_minutes:
+            raise ValueError(
+                "LIVE_STUCK_ORDER_ESCALATE_MINUTES must be >= "
+                "LIVE_STUCK_ORDER_MINUTES (an escalation cannot precede the "
+                "warning it escalates)")
         if self.live_reconcile_silence_minutes <= 0:
             raise ValueError("LIVE_RECONCILE_SILENCE_MINUTES must be > 0")
         if not 0 <= self.live_max_equity_drawdown < 1:

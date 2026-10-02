@@ -46,11 +46,14 @@ four-switch opt-in (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE`
 [LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The bare alias
 `BROKER=LIVE` still raises, and the sandbox broker refuses live order hosts.
 **V2.1 (L-ops)** adds the rails around a live session — token-freshness and
-canary entry guards, a stuck-order/reconcile watchdog, daily-loss and
-drawdown auto-stop, deduped alerts (durable sink + optional webhook) and
-`GET /api/v2/alerts` · `GET /api/v2/live/status` — see
-[LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1059 tests passed / 37 skipped**;
+canary entry guards, a stuck-order/reconcile watchdog with a WARNING→CRITICAL
+escalation ladder (optional auto-cancel, off by default), daily-loss and
+drawdown auto-stop, deduped alerts (durable sink + optional webhook), the
+`live-halt` / `live-resume` / `live-status [--audit]` operator commands
+(halt always works; resume refuses unless the live opt-in is armed), an
+independent audit-trail PnL replay, and `GET /api/v2/alerts` ·
+`GET /api/v2/live/status` — see [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
+Verification status: **1086 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See

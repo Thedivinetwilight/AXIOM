@@ -378,7 +378,8 @@ class SandboxEngine:
             return
         now = now or datetime.now(timezone.utc)
         try:
-            self.live_ops.observe(now=now)
+            findings = self.live_ops.observe(now=now)
+            self._auto_cancel_escalated_stuck_orders(findings)
         except Exception:  # pragma: no cover - defensive
             logger.exception("live_ops observe failed")
         try:
@@ -394,6 +395,39 @@ class SandboxEngine:
         if breach and breach.get("stop") and not self._check_emergency():
             self.emergency_stop(
                 reason=f"AUTO_STOP {breach['kind']}: {breach['message']}")
+
+    def _auto_cancel_escalated_stuck_orders(self, findings) -> list[str]:
+        """Cancel orders the watchdog has escalated, when explicitly enabled.
+
+        The watchdog only *reports*; acting is the engine's job (it owns the
+        broker). This runs only when ``LIVE_AUTO_CANCEL_STUCK`` is on — the
+        default is to alert a human, never to cancel silently. Failures are
+        recorded, never swallowed, and a cancel that cannot be confirmed leaves
+        the order working (the broker decides, not this method).
+        """
+        if not getattr(self.live_ops, "auto_cancel_stuck", False) or not findings:
+            return []
+        targets = self.live_ops.escalated_stuck_order_ids(findings)
+        if not targets:
+            return []
+        cancelled: list[str] = []
+        for intent_id, state in list(self.broker.orders.items()):
+            if state.our_id not in targets or state.status in FINAL_STATUSES:
+                continue
+            try:
+                self.broker.cancel(intent_id)
+                cancelled.append(state.our_id)
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL",
+                    {"order": state.our_id, "intent_id": intent_id,
+                     "reason": "escalated by the L-ops watchdog"})
+                logger.warning("STUCK_ORDER_AUTO_CANCEL", extra={"order": state.our_id})
+            except Exception as exc:  # a failed cancel must never be silent
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL_FAILED",
+                    {"order": state.our_id, "error": type(exc).__name__})
+                logger.exception("STUCK_ORDER_AUTO_CANCEL_FAILED")
+        return cancelled
 
     def process_candle(self, candle) -> None:
         metrics = self.provider.metrics()

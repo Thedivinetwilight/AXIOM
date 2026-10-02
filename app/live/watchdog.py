@@ -58,11 +58,14 @@ class LiveWatchdog:
 
     def __init__(self, repository, *, broker=None, token_guard=None,
                  stuck_order_minutes: int = 5,
+                 stuck_order_escalate_minutes: int = 15,
                  reconcile_silence_minutes: int = 10, now_fn=None):
         self.repository = repository
         self.broker = broker
         self.token_guard = token_guard
         self.stuck_order_minutes = int(stuck_order_minutes)
+        self.stuck_order_escalate_minutes = max(
+            int(stuck_order_escalate_minutes), int(stuck_order_minutes))
         self.reconcile_silence_minutes = int(reconcile_silence_minutes)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
 
@@ -82,7 +85,13 @@ class LiveWatchdog:
                 if str(order.get("status", "")).upper() in WORKING_STATUSES]
 
     def check_stuck_orders(self, *, now: datetime | None = None) -> list[Finding]:
-        """Working orders older than the stuck threshold."""
+        """Working orders older than the stuck threshold, on an urgency ladder.
+
+        A working order just past the threshold is worth telling someone about;
+        one that is still unresolved after ``stuck_order_escalate_minutes`` is a
+        genuine operational problem (and the engine may act on CRITICAL findings
+        when auto-cancel is enabled — see ``LIVE_AUTO_CANCEL_STUCK``).
+        """
         now = now or self._now()
         findings: list[Finding] = []
         for order in self._open_orders():
@@ -91,13 +100,18 @@ class LiveWatchdog:
                 continue
             age_min = (now - created).total_seconds() / 60.0
             if age_min >= self.stuck_order_minutes:
+                escalated = age_min >= self.stuck_order_escalate_minutes
                 findings.append(Finding(
-                    "STUCK_ORDER", CRITICAL,
+                    "STUCK_ORDER", CRITICAL if escalated else WARNING,
                     f"order {order.get('id')} ({order.get('symbol')} "
                     f"{order.get('side')}) has been working for "
-                    f"{age_min:.1f} min without reaching a final state",
+                    f"{age_min:.1f} min without reaching a final state"
+                    + (" and has ESCALATED" if escalated else ""),
                     {"order_id": order.get("id"), "status": order.get("status"),
                      "age_minutes": round(age_min, 1),
+                     "escalated": escalated,
+                     "escalate_minutes": self.stuck_order_escalate_minutes,
+                     "intent_id": order.get("intent_id"),
                      "symbol": order.get("symbol"), "side": order.get("side"),
                      "quantity": order.get("quantity")}))
         return findings
