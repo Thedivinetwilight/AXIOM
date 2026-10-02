@@ -52,9 +52,15 @@ def _live_ops_view(request: Request, repository) -> dict | None:
         from app.live.guards import CanaryGuard, TokenGuard
         from app.live.watchdog import BreachMonitor
 
+        from app.live.lock import EngineLock
+
         live = (bool(settings.live_trading)
                 and (settings.broker or "").upper() == "UPSTOX_LIVE")
         view = {
+            "lock": EngineLock(
+                repository,
+                stale_after_seconds=settings.live_lock_stale_seconds,
+                live=live).status(),
             "live_trading": live,
             "order_host": settings.upstox_live_base_url if live else None,
             "order_host_is_documented_live": (
@@ -363,6 +369,15 @@ async function tick(){
         rows.push('<tr><td>Unacknowledged CRITICAL alerts</td><td>'
           + '<b>' + (lo.unacknowledged_critical||0) + '</b>'
           + ' <small>(live-ack --all)</small></td></tr>');
+        if (lo.lock && lo.lock.held) {
+          rows.push('<tr><td>Engine lock</td><td>' + esc(lo.lock.owner || '?')
+            + (lo.lock.stale ? ' <b>(STALE)</b>' : ' (heartbeating)')
+            + ' <small>' + (lo.lock.heartbeat_age_seconds==null ? ''
+                            : esc(String(lo.lock.heartbeat_age_seconds)) + 's ago')
+            + '</small></td></tr>');
+        } else {
+          rows.push('<tr><td>Engine lock</td><td>not held</td></tr>');
+        }
       }
       const al = d.alerts || [];
       if (al.length === 0) {

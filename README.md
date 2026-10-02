@@ -61,7 +61,7 @@ second LIVE engine is refused while the first heartbeats), and
 `GET /api/v2/alerts` ·
 `POST /api/v2/alerts/ack` · `GET /api/v2/live/status` — see
 [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1145 tests passed / 37 skipped**;
+Verification status: **1149 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See

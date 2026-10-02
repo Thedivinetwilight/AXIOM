@@ -557,6 +557,7 @@ class TestPreflightChecks:
                     upstox_live_access_token="t", max_position_value=10_000,
                     max_open_positions=1, max_daily_loss=500, max_trades_per_day=3,
                     data_source="upstox", market_calendar="nse-session",
+                    default_timeframe="5m",
                     database_url="sqlite:///trading_live.db")
         base.update(kwargs)
         return Settings(**base)
@@ -1340,6 +1341,7 @@ class TestReadinessRecordedState:
                     upstox_live_access_token="t", max_position_value=10_000,
                     max_open_positions=1, max_daily_loss=500, max_trades_per_day=3,
                     data_source="upstox", market_calendar="nse-session",
+                    default_timeframe="5m",
                     database_url=f"sqlite:///{tmp_path}/live.db")
         base.update(kwargs)
         return Settings(**base)
@@ -2258,3 +2260,64 @@ class TestLockAndAcksOnTheOperatorSurfaces:
         assert payload["lock"]["owner"] == "cli-lock:7"
         assert payload["unacknowledged_critical"] == 0
         assert payload["pending_alert_retries"] == 0
+
+
+class TestEngineTimeframeCoherence:
+    """The stream provider and the engine must agree — they used not to."""
+
+    def test_one_definition_is_shared_by_both_sides(self, tmp_path):
+        from app.data.factory import engine_timeframe, live_timeframe_error
+
+        for timeframe in ("1m", "5m", "15m", "30m"):
+            settings = Settings(api_token="t",
+                               database_url=f"sqlite:///{tmp_path}/tf.db",
+                                default_timeframe=timeframe)
+            assert engine_timeframe(settings) == timeframe
+            assert live_timeframe_error(settings, "UPSTOX_LIVE") == ""
+
+    def test_a_daily_default_is_refused_on_the_live_path(self, tmp_path):
+        from app.data.factory import engine_timeframe, live_timeframe_error
+
+        settings = Settings(api_token="t",
+                            database_url=f"sqlite:///{tmp_path}/tf-live.db",
+                            default_timeframe="1D")
+        # research/paper still runs (downgraded, as before) …
+        assert engine_timeframe(settings) == "1m"
+        assert live_timeframe_error(settings, "UPSTOX_SANDBOX") == ""
+        # … but the real-money path refuses instead of crashing at startup
+        error = live_timeframe_error(settings, "UPSTOX_LIVE")
+        assert "cannot drive a live engine" in error
+        assert "DEFAULT_TIMEFRAME=1D" in error
+
+    def test_preflight_flags_the_timeframe_before_anyone_starts(self, tmp_path):
+        settings = Settings(
+            broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+            live_confirm="I-ACCEPT-REAL-MONEY-RISK", upstox_live_access_token="t",
+            max_position_value=10_000, max_open_positions=1, max_daily_loss=500,
+            max_trades_per_day=3, data_source="upstox",
+            market_calendar="nse-session", default_timeframe="1D",
+            database_url=f"sqlite:///{tmp_path}/tf-preflight.db")
+        report = summarize(run_checks(settings))
+        names = {check["name"] for check in report["errors"]}
+        assert "engine_timeframe_intraday" in names
+
+    def test_the_live_engine_command_refuses_a_daily_default(self, tmp_path,
+                                                             capsys, monkeypatch):
+        from app import __main__ as cli
+        from app.data.factory import live_timeframe_error
+
+        settings = Settings(
+            broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+            live_confirm="I-ACCEPT-REAL-MONEY-RISK", upstox_live_access_token="t",
+            max_position_value=10_000, max_open_positions=1, max_daily_loss=500,
+            max_trades_per_day=3, data_source="upstox",
+            market_calendar="nse-session", default_timeframe="1D",
+            database_url=f"sqlite:///{tmp_path}/tf-cli.db")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        monkeypatch.setenv("MARKET_DATA_SYMBOLS", "NSE_EQ|INE002A01018")
+        monkeypatch.setenv("MARKET_DATA_ACCESS_TOKEN", "t")
+        code = cli.cmd_engine(type("A", (), {"max_candles": 1,
+                                             "force_live_lock": False})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 2 and payload["ok"] is False
+        assert payload["error"] == live_timeframe_error(settings, "UPSTOX_LIVE")

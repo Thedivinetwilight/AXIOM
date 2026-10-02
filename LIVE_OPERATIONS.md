@@ -31,6 +31,21 @@ Two properties worth stating explicitly:
 
 ---
 
+## 1b. Command cheat-sheet
+
+| Command | What it does | Can it trade? |
+|---|---|---|
+| `python -m app live-preflight` | whole-system readiness: config **and** the state a fresh engine inherits | no (one read-only probe) |
+| `python -m app live-drill` | offline fire drill: proves each rail fires, with evidence | no |
+| `python -m app engine` | runs the engine (refuses a second LIVE engine) | yes, by design |
+| `python -m app live-status [--audit]` | snapshot from recorded state; `--audit` replays both order trails | no |
+| `python -m app live-digest [--hours 24] [--markdown] [--post]` | one-page roll-up of alerts/rails/orders/PnL | no |
+| `python -m app live-ack --id ID \| --kind K \| --all` | acknowledges alerts (local bookkeeping) | no |
+| `python -m app live-halt --reason "..."` | persisted EMERGENCY STOP; works even on a broken config | no (only ever halts) |
+| `python -m app live-resume` | clears the stop; refuses unless the live opt-in is armed | no (only clears a stop) |
+
+---
+
 ## 2. Recommended first live week
 
 ```ini
@@ -106,8 +121,9 @@ is never trapped.
 `readiness` has two families of checks:
 
 - **configuration** — the four switches, a documented live order host, a credential, all
-  four hard limits non-zero, canary/drawdown/alert hygiene, the data source and session
-  calendar;
+  four hard limits non-zero, canary/drawdown/alert hygiene, the data source, the session
+  calendar, and `DEFAULT_TIMEFRAME` (the engine is intraday-only and refuses to start live
+  with a daily default instead of silently downgrading while the stream keeps its timeframe);
 - **recorded state** — will a fresh engine inherit a clean world? It verifies the audit
   trail is internally consistent (no orphan fills, no FILLED order without executions, no
   quantity mismatches), that no persisted EMERGENCY STOP is set, that no working orders or

@@ -437,11 +437,19 @@ def cmd_engine(args) -> int:
                           "error": "engine requires DATA_SOURCE=upstox (real market data)"},
                          indent=2))
         return 2
+    # A live engine is intraday-only; refuse before building anything, rather
+    # than silently downgrading the engine while the stream keeps its timeframe.
+    from app.data.factory import live_timeframe_error
+
+    timeframe_error = live_timeframe_error(settings, broker_mode)
+    if timeframe_error:
+        print(json.dumps({"ok": False, "error": timeframe_error}, indent=2))
+        return 2
 
     from app.backtesting.costs import ExecutionConfig
     from app.brokers.live import UpstoxLiveBroker
     from app.brokers.sandbox import UpstoxSandboxBroker
-    from app.data.factory import stream_provider
+    from app.data.factory import engine_timeframe, stream_provider
     from app.database.database import Database
     from app.database.repository import Repository
     from app.engine.sandbox_engine import SandboxEngine
@@ -552,7 +560,7 @@ def cmd_engine(args) -> int:
         repository=repository,
         risk_limits=HardRiskLimits.from_settings(settings),
         journal=LearningJournal(repository),
-        timeframe=settings.default_timeframe if settings.default_timeframe in {"1m", "5m", "15m", "30m"} else "1m",
+        timeframe=engine_timeframe(settings),
         event_engine=event_engine,
         pause_gate=pause_gate,
         maintenance_scheduler=scheduler,

@@ -105,6 +105,18 @@ def run_checks(settings, *, repository=None) -> list[Check]:
         ("all four limits are non-zero" if not unbounded
          else f"unbounded (0 = unlimited, refused in live): {', '.join(unbounded)}")))
 
+    # 4b. the timeframe the live engine would actually run
+    from app.data.factory import ENGINE_TIMEFRAMES
+
+    timeframe = str(getattr(settings, "default_timeframe", "") or "")
+    checks.append(_check(
+        "engine_timeframe_intraday", timeframe in ENGINE_TIMEFRAMES, ERROR,
+        (f"DEFAULT_TIMEFRAME={timeframe} (the engine and the data stream share "
+         "this value)" if timeframe in ENGINE_TIMEFRAMES else
+         f"DEFAULT_TIMEFRAME={timeframe} cannot drive a live engine (intraday "
+         f"only: {', '.join(ENGINE_TIMEFRAMES)}); the live engine refuses to "
+         "start rather than silently downgrading")))
+
     # 5. canary ramp
     canary_notional = float(getattr(settings, "live_canary_max_notional", 0) or 0)
     canary_orders = int(getattr(settings, "live_canary_orders", 0) or 0)

@@ -105,6 +105,9 @@ class Settings:
     currency: str = "INR"
     market_calendar: str = "continuous"
     default_symbol: str = "DEMO"
+    # The engine is intraday-only (1m/5m/15m/30m). A daily default is fine for
+    # research/replay, but a live engine cannot consume it — see the live-mode
+    # validation below, which refuses instead of silently downgrading.
     default_timeframe: str = "1D"
     commission: float = 0.0005
     slippage: float = 0.0005

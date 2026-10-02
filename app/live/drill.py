@@ -101,6 +101,7 @@ def _settings(**overrides):
         upstox_live_access_token=DRILL_TOKEN,
         max_position_value=10_000, max_open_positions=1, max_daily_loss=500,
         max_trades_per_day=3, data_source="upstox", market_calendar="nse-session",
+        default_timeframe="1m",
     )
     base.update(overrides)
     return Settings(**base)
