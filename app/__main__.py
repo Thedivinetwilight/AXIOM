@@ -1472,6 +1472,16 @@ def cmd_backup(args) -> int:
     settings = _load_settings()
     database, repository = _stack_or_none(settings)
     try:
+        # verify/restore act on a named file; without one the path is None and
+        # Path(None) raises deep inside pathlib. Refuse in plain language here.
+        if args.action in ("verify", "restore") and not args.path:
+            print(json.dumps({
+                "ok": False,
+                "error": f"'backup {args.action}' requires --path <backup file>",
+                "hint": f"backups live in {args.backup_dir}/ "
+                        f"(default: the DATA_DIR backups directory)",
+            }, indent=2))
+            return 1
         from app.database.recovery import RecoveryManager
 
         recovery = RecoveryManager(database, repository,

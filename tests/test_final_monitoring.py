@@ -304,3 +304,46 @@ class TestMaintenanceWiring:
         status = engine.run(max_candles=3)
         assert status["state"] in {"RUNNING", "STOPPED"}
         assert env.list_system_status(limit=1), "system snapshot job ran inline"
+
+
+class TestBackupCliGuard:
+    """`backup verify|restore` act on a named file. Without --path the CLI used
+    to hand None to Path() and die inside pathlib with a TypeError traceback;
+    it must instead refuse in plain language with a non-zero exit code."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        # keep the command away from the developer's real database
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/cli.db")
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+
+    @pytest.mark.parametrize("action", ["verify", "restore"])
+    def test_missing_path_is_refused_clearly(self, action, capsys):
+        from app.__main__ import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main(["backup", action])
+        assert exit_info.value.code == 1, "must fail, not silently succeed"
+        out = capsys.readouterr().out
+        assert "requires --path" in out
+        assert action in out
+        # the old failure mode: an unhandled TypeError escaping to the user
+        assert "Traceback" not in out
+        assert "TypeError" not in out
+
+    def test_missing_path_does_not_create_a_backup(self, tmp_path, capsys):
+        from app.__main__ import main
+
+        backup_dir = tmp_path / "backups"
+        with pytest.raises(SystemExit):
+            main(["backup", "verify", "--backup-dir", str(backup_dir)])
+        assert not list(backup_dir.glob("arena-*.db")), "no file should be written"
+
+    def test_explicit_missing_file_reports_cleanly(self, tmp_path, capsys):
+        from app.__main__ import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main(["backup", "verify", "--path", str(tmp_path / "nope.db")])
+        assert exit_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "missing" in out and "Traceback" not in out
