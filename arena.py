@@ -51,6 +51,10 @@ def _free_port(preferred: int, host: str, tries: int = 25) -> int:
       very error this function exists to prevent. asyncio also disables address
       reuse on Windows, so a plain bind is the accurate test there.
     """
+    if not 0 < preferred < 65536:
+        raise SystemExit(
+            f"--port must be between 1 and 65535 (got {preferred})."
+        )
     for offset in range(tries):
         candidate = preferred + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -199,5 +203,70 @@ def main(argv: list[str] | None = None) -> int:
     return _serve(args.host, port, not args.no_browser, args.setup)
 
 
+def _should_hold_console(argv: list[str], *, frozen: bool, attached: bool) -> bool:
+    """Whether a failed start should wait for a keypress before exiting.
+
+    On Windows a double-clicked .exe owns a console that closes the moment the
+    process exits, so a startup failure — a port it could not bind, a damaged
+    data directory, an unexpected error — reaches the user as a window that
+    flashes and is gone. There is nothing to act on and it looks exactly like
+    "the exe is broken".
+
+    Deliberately narrow: a frozen build, a real terminal, and the server path
+    only. `--cli`/`--run`/`--diagnostics` are commands whose exit code callers
+    (scripts, the feature console, the packaged smoke test) depend on, and a
+    piped run must never stop to wait for input.
+    """
+    if not (frozen and attached):
+        return False
+    if argv and argv[0] in ("--cli", "--run", "--diagnostics"):
+        return False
+    return True
+
+
+def _hold_console_open(reason: str) -> None:
+    """Print why Arena did not start, then wait so the message can be read.
+
+    Only called once `_should_hold_console` has agreed; the caller has already
+    printed the traceback if there is one, so the order on screen is: cause
+    first, then this block, then the window waits.
+    """
+    print()
+    print("  " + "-" * 66)
+    print(f"   Arena did not start: {reason}")
+    print("   Nothing was changed, no data was deleted, no order was placed.")
+    print("   Read the message above, then press Enter to close this window.")
+    print("  " + "-" * 66, flush=True)
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass  # the window is closing anyway; never mask the original error
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # A frozen console build is very likely a double-click. Anything that stops
+    # it from starting must be readable rather than a window that flashes.
+    from app.runtime import is_frozen
+
+    def reader_is_watching() -> bool:
+        return _should_hold_console(sys.argv[1:], frozen=is_frozen(),
+                                    attached=sys.stdin.isatty())
+
+    try:
+        raise SystemExit(main())
+    except SystemExit as exc:
+        code = 0 if exc.code is None else exc.code
+        if code != 0 and reader_is_watching():
+            # Python prints a string code itself; the wait must leave the
+            # message on screen rather than overwriting it.
+            _hold_console_open(
+                code if isinstance(code, str) else f"exit code {code}")
+        raise
+    except Exception as exc:
+        if reader_is_watching():
+            import traceback
+
+            traceback.print_exc()
+            _hold_console_open(f"{type(exc).__name__}: {exc}")
+            raise SystemExit(1)  # already reported; do not print it twice
+        raise

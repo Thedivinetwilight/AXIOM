@@ -123,6 +123,13 @@ browser opens on the setup screen:
   ------------------------------------------------------------------
 ```
 
+> **If Arena cannot start**, the console window stays open and says so
+> (`Arena did not start: …`) instead of flashing and disappearing. Copy that
+> text — it is the first thing anyone helping you will ask for. A failed start
+> changes nothing and places no order. If you ever close the window before
+> reading it, run Arena from a terminal instead: open Command Prompt in the
+> folder holding `Arena.exe` and type `Arena.exe` — the message stays on screen.
+
 **Before entering any credentials, prove it works.** Arm yourself with the
 quickstart at the top of the setup page. In the Arena console window type `Ctrl+C`
 to stop, then run:

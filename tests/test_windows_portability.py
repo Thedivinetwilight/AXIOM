@@ -226,6 +226,31 @@ def test_the_operator_env_survives_a_legacy_code_page(tmp_path):
     assert "issued-token" not in result.stdout
 
 
+def test_a_frozen_startup_failure_waits_instead_of_vanishing():
+    """A double-clicked .exe must not disappear before it can say why.
+
+    Windows closes the console the instant the process exits, so without this
+    a startup failure is a window that flashes and is gone — the most common
+    way a user concludes the executable is broken, with no message to report.
+    """
+    import arena
+
+    should_hold = arena._should_hold_console
+
+    # The case this exists for: a frozen build, a real terminal, no subcommand.
+    assert should_hold([], frozen=True, attached=True) is True
+    assert should_hold(["--port", "9000"], frozen=True, attached=True) is True
+
+    # A piped run (CI, the packaged smoke test) must never wait for input...
+    assert should_hold([], frozen=True, attached=False) is False
+    # ...a source checkout is a developer who has the traceback anyway...
+    assert should_hold([], frozen=False, attached=True) is False
+    # ...and these are scriptable commands whose exit code callers read.
+    for argv in (["--cli", "live-status"], ["--run", "paper"],
+                 ["--diagnostics"]):
+        assert should_hold(argv, frozen=True, attached=True) is False
+
+
 def test_a_saved_setup_file_reloads_under_a_legacy_code_page(tmp_path):
     """The credential screen's .env writer is UTF-8 on both sides.
 

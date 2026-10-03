@@ -102,6 +102,7 @@ def smoke_test(artifact: Path) -> bool:
         [str(artifact), "--no-browser"],
         cwd=str(home),  # deliberately NOT the app folder, to catch CWD bugs
         env=env,
+        stdin=subprocess.DEVNULL,  # a smoke test must never wait for a keypress
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
