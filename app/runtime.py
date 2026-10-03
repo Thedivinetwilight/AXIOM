@@ -19,6 +19,7 @@ overrides the choice, which is also what tests and portable installs use.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -123,6 +124,37 @@ def default_database_path(home: Path | None = None) -> str:
 def default_data_dir(home: Path | None = None) -> str:
     """Absolute data directory for a fresh install, independent of the CWD."""
     return str((Path(home or arena_home()) / "data").resolve())
+
+
+def ensure_utf8_output() -> None:
+    """Make stdout/stderr survive a non-UTF-8 console.
+
+    Windows consoles and pipes default to a legacy code page (cp1252), which
+    cannot encode characters Arena prints routinely — the arrow in a
+    `paper-live` description, the em dash in a banner. Python then raises
+    UnicodeEncodeError at the first such character and the whole command dies,
+    so `python -m app --help` exited 1 on Windows and the packaged launcher
+    would fail before printing its address.
+
+    The streams are reconfigured to UTF-8 with `errors="replace"`: correct
+    output on any modern terminal, and a `?` rather than a crash on an ancient
+    one. Absent streams (pytest capture, a closed pipe) are left alone.
+    """
+    for name, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # pre-3.7-style stream; nothing to configure
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError) as exc:
+            # Not fatal: the stream keeps its original encoding. Recorded
+            # rather than swallowed, because output staying on a legacy code
+            # page is exactly the condition that caused the original crash and
+            # may need to appear in a support log.
+            logging.getLogger("bot.runtime").debug(
+                "stream_reconfigure_skipped",
+                extra={"stream": name, "error": type(exc).__name__},
+            )
 
 
 def describe() -> dict:

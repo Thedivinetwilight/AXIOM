@@ -75,6 +75,9 @@ def _first_run() -> bool:
 
 
 def _print_banner(url: str, setup: bool) -> None:
+    from app.runtime import ensure_utf8_output
+
+    ensure_utf8_output()
     target = f"{url}/setup" if setup else f"{url}/console"
     print()
     print("  " + "-" * 66)

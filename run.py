@@ -153,6 +153,9 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
 
 
 def main(argv=None):
+    from app.runtime import ensure_utf8_output
+
+    ensure_utf8_output()
     args = parser().parse_args(argv)
     settings = Settings.from_env()
     settings = replace(

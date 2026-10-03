@@ -1818,6 +1818,11 @@ def _operator_errors() -> tuple[type[BaseException], ...]:
 
 
 def main(argv=None) -> None:
+    # Windows consoles are not UTF-8 by default; without this the help text
+    # kills the process with UnicodeEncodeError before printing anything.
+    from app.runtime import ensure_utf8_output
+
+    ensure_utf8_output()
     args = parser().parse_args(argv)
     try:
         raise SystemExit(args.func(args))

@@ -27,6 +27,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "packaging" / "arena.spec"
 
 
+def posix(text) -> str:
+    """Compare paths without caring about the separator.
+
+    A sqlite URL must use forward slashes even on Windows
+    (`sqlite:///C:/Users/...`), while `str(Path)` uses backslashes there, so a
+    naive `in` check passes on Linux and fails on Windows for the wrong reason.
+    """
+    return str(text).replace("\\", "/")
+
+
 @pytest.fixture
 def frozen(monkeypatch, tmp_path):
     """Pretend to be a PyInstaller bundle with a per-user data directory."""
@@ -49,7 +59,7 @@ class TestFrozenPaths:
 
         home = runtime.arena_home()
         assert home == frozen
-        assert str(home) != str(ROOT)
+        assert posix(home) != posix(ROOT)
 
     def test_home_is_created_with_the_subdirectories_the_app_needs(self, frozen):
         from app import runtime
@@ -62,9 +72,9 @@ class TestFrozenPaths:
         from app.config.settings import Settings
 
         settings = Settings.from_env()
-        assert str(frozen) in settings.database_url
+        assert posix(frozen) in posix(settings.database_url)
         assert Path(settings.data_dir).is_absolute()
-        assert Path(settings.data_dir) == (frozen / "data").resolve()
+        assert posix(Path(settings.data_dir)) == posix((frozen / "data").resolve())
 
     def test_paths_do_not_depend_on_the_working_directory(self, frozen, monkeypatch):
         """A double-clicked .exe on Windows often starts in C:\\Windows\\System32,
@@ -83,7 +93,7 @@ class TestFrozenPaths:
         second = Settings.from_env().database_url
 
         assert first == second
-        assert str(frozen) in second
+        assert posix(frozen) in posix(second)
 
     def test_an_explicit_setting_still_wins(self, frozen, monkeypatch):
         """The redirection must only apply to values the operator did NOT set."""
@@ -267,6 +277,77 @@ class TestLauncher:
 # --------------------------------------------------------------------------
 # The spec itself
 # --------------------------------------------------------------------------
+
+
+class TestWindowsConsoleEncoding:
+    """Windows consoles and pipes default to a legacy code page (cp1252), which
+    cannot encode characters Arena prints routinely. Python raises
+    UnicodeEncodeError at the first one and the whole command dies — so
+    `python -m app --help` exited 1 on Windows, and the packaged launcher would
+    die before printing its address."""
+
+    def test_entry_points_make_output_utf8_safe(self):
+        for name in ("app/__main__.py", "run.py", "arena.py"):
+            source = (ROOT / name).read_text("utf-8")
+            assert "ensure_utf8_output" in source, f"{name} does not guard its output"
+
+    def test_the_helper_reconfigures_both_streams(self):
+        import inspect
+
+        from app import runtime
+
+        body = inspect.getsource(runtime.ensure_utf8_output)
+        assert "sys.stdout" in body and "sys.stderr" in body
+        assert "reconfigure" in body
+        assert "errors=\"replace\"" in body or "errors='replace'" in body
+
+    def test_the_helper_tolerates_streams_that_cannot_be_reconfigured(self, monkeypatch):
+        """pytest capture objects, closed pipes and detached stdout do not all
+        support reconfigure(). Raising from here would break every command on
+        exactly the platforms this exists to protect."""
+        import io
+        import sys as _sys
+
+        from app import runtime
+
+        class NoReconfigure(io.StringIO):
+            def reconfigure(self, **kwargs):
+                raise ValueError("stream does not support reconfigure")
+
+        class NoAttribute(io.StringIO):
+            # a stream without reconfigure at all (pre-3.7 style object)
+            pass
+
+        monkeypatch.setattr(_sys, "stdout", NoReconfigure())
+        monkeypatch.setattr(_sys, "stderr", NoAttribute())
+        runtime.ensure_utf8_output()  # must not raise
+
+        # and the happy path does call through
+        calls = []
+
+        class Recording(io.StringIO):
+            def reconfigure(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(_sys, "stdout", Recording())
+        monkeypatch.setattr(_sys, "stderr", Recording())
+        runtime.ensure_utf8_output()
+        assert len(calls) == 2
+        assert all(call.get("encoding") == "utf-8" for call in calls)
+        assert all(call.get("errors") == "replace" for call in calls)
+
+    def test_help_survives_a_cp1252_console(self):
+        """The real reproduction: a legacy-encoded console must not kill the
+        CLI. Before the fix this exited 1 with UnicodeEncodeError."""
+        import subprocess
+
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252:strict"
+        result = subprocess.run(
+            [sys.executable, "-m", "app", "--help"],
+            capture_output=True, text=True, timeout=180, cwd=str(ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr[-400:]
 
 
 class TestBuildSpec:
