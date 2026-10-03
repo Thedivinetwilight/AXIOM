@@ -41,6 +41,21 @@ Meanwhile, stages 1 and 2 give you the full experience with no money involved.
 Artifacts are kept for **30 days** after each build, so download the most recent
 one. If you prefer to build it yourself, see §9.
 
+> **If you do not see `Build executable` in that sidebar**, this is why: the
+> workflow lives on a working branch, and GitHub only lists + offers **Run
+> workflow** for a workflow that exists on the repository's *default* branch
+> (`main`). Nothing is broken and every build that has run is still there — open
+> the workflow directly instead:
+>
+> ```
+> https://github.com/Thedivinetwilight/AXIOM/actions/workflows/build-executable.yml
+> ```
+>
+> That page lists the runs for every branch, and the artifacts download from
+> there exactly as in step 6. Merging this work into `main` (a normal pull
+> request) is what makes the sidebar entry and the **Run workflow** button
+> permanent.
+
 > The macOS (`Arena-macos`) and Linux (`Arena-linux-x64`) artifacts are built by
 > the same workflow if you need them.
 
