@@ -32,8 +32,13 @@ on:
       - "packaging/**"
       - "build_exe.py"
       - "arena.py"
+      - "run.py"
       - "requirements.txt"
       - ".github/workflows/build-executable.yml"
+      # The application source is INSIDE the bundle, so a change to it changes
+      # the artifact. Omitting this would leave the newest executable built from
+      # stale code.
+      - "app/**"
     tags:
       - "v*"
 
