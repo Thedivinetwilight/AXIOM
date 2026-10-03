@@ -62,6 +62,37 @@ def _resident_mb() -> float | None:
 
 
 def _memory_used_pct() -> float | None:
+    """Fraction of physical memory in use, or None where it cannot be read.
+
+    Linux is read from /proc/meminfo. Windows has no /proc, so it is read
+    through GlobalMemoryStatusEx; without that the metric was simply absent
+    from every Windows snapshot, so a memory threshold could never fire.
+    """
+    if os.name == "nt":  # pragma: no cover - Windows only
+        try:
+            import ctypes
+
+            class _MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatus()
+            status.dwLength = ctypes.sizeof(_MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return round(status.dwMemoryLoad / 100.0, 4)
+        except (AttributeError, OSError, ValueError):
+            return None
+        return None
+
     try:
         with open("/proc/meminfo") as handle:
             info = {}
@@ -90,9 +121,12 @@ class SystemMonitor:
         except (AttributeError, OSError):
             payload["load_1m"] = None
         payload["rss_mb"] = _resident_mb()
+        # Always present, None when the platform cannot report it. A stable set
+        # of keys is easier to consume than one that varies by platform, and a
+        # threshold check can simply skip a None.
         memory_used = _memory_used_pct()
-        if memory_used is not None:
-            payload["memory_used_pct"] = round(memory_used, 4)
+        payload["memory_used_pct"] = (
+            None if memory_used is None else round(memory_used, 4))
         try:
             usage = shutil.disk_usage(self.data_dir)
             payload["disk_used_pct"] = round(usage.used / usage.total, 4)

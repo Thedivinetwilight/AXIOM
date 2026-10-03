@@ -638,6 +638,25 @@ code-signing certificate (`signtool sign /f cert.pfx dist\Arena.exe`) — the sp
 deliberately disables UPX compression because compressed binaries are flagged
 far more often.
 
+### Platform notes (Windows)
+
+The executable is built and smoke-tested on Windows by CI, and the core paths —
+install, setup, console, paper trading, monitoring, live gates — pass there. A
+few older test cases in the research subsystems still assume POSIX and are
+listed here rather than hidden, because they mark real differences:
+
+| Area | Behaviour on Windows |
+|---|---|
+| System monitoring | Working. Memory, RSS and disk are reported through Windows APIs. |
+| `python -m app monitor` | Working, including the memory threshold. |
+| Kronos worker process | `test_clean_shutdown_leaves_no_process_behind` fails with WinError 87 — process teardown semantics differ. The research worker path is untested there. |
+| Kronos model cache | The `~` expansion tests assume POSIX tilde/XDG handling. Weights still load; the cache location may differ from what those tests expect. |
+| `upstox-login` token write | One test asserts POSIX file permissions, which Windows does not apply. The token is still written to a gitignored `.env`. |
+
+None of these affect the trading path. Treat Windows as verified for
+paper/sandbox operation and for the packaging, and unverified for the Kronos
+research extras.
+
 ### Live trading from the executable
 
 Unchanged, and deliberately unchanged: the setup screen **refuses** to set
