@@ -73,14 +73,17 @@ jobs:
           - os: windows-latest
             artifact: Arena-windows-x64
             binary: dist/Arena.exe
+            release_asset: Arena.exe
             checksum: SHA256SUMS-windows-x64.txt
           - os: ubuntu-latest
             artifact: Arena-linux-x64
             binary: dist/Arena
+            release_asset: Arena-linux-x64
             checksum: SHA256SUMS-linux-x64.txt
           - os: macos-latest
             artifact: Arena-macos
             binary: dist/Arena
+            release_asset: Arena-macos
             checksum: SHA256SUMS-macos.txt
 
     steps:
@@ -145,12 +148,24 @@ jobs:
         # it over HTTP, so a missing hidden import fails the job here.
         run: python build_exe.py --test
 
+      - name: Name the release asset per platform
+        # Windows produces Arena.exe, but Linux and macOS BOTH produce a file
+        # called Arena. Attached to one release those two collide: the second
+        # upload replaces the first, so the macOS binary silently vanished and
+        # the Linux one stood in its place. Every asset gets an unambiguous
+        # name before anything is published.
+        shell: bash
+        run: |
+          mkdir -p release
+          cp "${{ matrix.binary }}" "release/${{ matrix.release_asset }}"
+          ls -l release/
+
       - name: Record the artifact checksum
         shell: bash
         run: |
           python - <<'PY'
-          import hashlib, pathlib, os
-          target = pathlib.Path("${{ matrix.binary }}")
+          import hashlib, pathlib
+          target = pathlib.Path("release") / "${{ matrix.release_asset }}"
           digest = hashlib.sha256(target.read_bytes()).hexdigest()
           pathlib.Path("${{ matrix.checksum }}").write_text(
               f"{digest}  {target.name}\n", encoding="utf-8")
@@ -162,7 +177,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            ${{ matrix.binary }}
+            release/${{ matrix.release_asset }}
             ${{ matrix.checksum }}
           if-no-files-found: error
           retention-days: 30
@@ -194,7 +209,7 @@ jobs:
             anyway). Real-money trading stays off and needs the four-switch
             opt-in plus non-zero risk limits; the setup screen refuses it.
           files: |
-            ${{ matrix.binary }}
+            release/${{ matrix.release_asset }}
             ${{ matrix.checksum }}
           fail_on_unmatched_files: true
           allowUpdates: true
@@ -222,14 +237,14 @@ jobs:
               failure) echo "- Full suite on this platform: **FAILED** — reported, does not block the artifact; see the annotations for this job" ;;
               *)       echo "- Full suite on this platform: not run" ;;
             esac
-            if [ -f "${{ matrix.binary }}" ]; then
-              echo "- Artifact: **built and smoke-tested** — \`${{ matrix.binary }}\`, $(du -h "${{ matrix.binary }}" | cut -f1)"
+            if [ -f "release/${{ matrix.release_asset }}" ]; then
+              echo "- Artifact: **built and smoke-tested** — \`${{ matrix.release_asset }}\`, $(du -h "release/${{ matrix.release_asset }}" | cut -f1)"
               if [ -f "${{ matrix.checksum }}" ]; then
                 echo "- Checksum: \`$(cat "${{ matrix.checksum }}")\`"
               fi
               echo
               echo "Download it from the **Artifacts** section of this run page."
             else
-              echo "- Artifact: **NOT built** — ${{ matrix.binary }} does not exist in this job"
+              echo "- Artifact: **NOT built** — release/${{ matrix.release_asset }} does not exist in this job"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
