@@ -823,7 +823,13 @@ class TestApiSurfaces:
         settings = self._live_settings(tmp_path)
         with self._client(tmp_path, settings) as client:
             repository = client.app.state.repository
-            TokenGuard(repository, now_fn=lambda: NOW).record_verified(when=NOW)
+            # The API builds its TokenGuard WITHOUT now_fn, so it judges
+            # freshness against the real clock. Record the verification at the
+            # real current time: recording it at the module's fixed NOW made
+            # this test fail the moment the wall clock passed NOW + 20h, which
+            # is a property of the calendar rather than of the code.
+            TokenGuard(repository).record_verified(
+                when=datetime.now(timezone.utc))
             data = client.get("/api/v2/live/status",
                               headers={"Authorization": "Bearer t"}).json()
         assert data["token"]["decision"]["allowed"] is True

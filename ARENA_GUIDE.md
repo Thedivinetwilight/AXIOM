@@ -516,6 +516,7 @@ Useful flags: `--strategy`, `--parameters '{...}'`, `--timeframe`,
 | `sandbox-test [--place-order] [--quantity N]` | Verify sandbox credentials (read-only unless you pass `--place-order`) |
 | `live-preflight [--instrument X]` | Full live readiness verdict. Read-only; never places an order |
 | `live-drill [--database-url URL]` | Offline fire drill for the safety rails. No network, no orders |
+| `tools/live_config_check.py` | Check a live/sandbox config offline, before `live-preflight` |
 | `monitor` | Self-monitoring snapshot; exit code 1 on alerts (cron-friendly) |
 | `upstox-test [--timeout N]` | Test Upstox auth and connectivity (read-only) |
 
@@ -637,7 +638,8 @@ python -m app engine              # with canary caps in place
    step with a queue — do it first.**
 2. **Create a live app** on Upstox to get your API key and secret.
 3. **Generate an access token.** Live tokens expire **daily**; refresh with
-   `python -m app upstox-login`.
+   `python -m app upstox-login`. Paste it into `.env`, then let
+   `tools/live_config_check.py` confirm it does not look like a placeholder.
 
 Regulatory context: algorithmic trading through a broker API requires that
 your orders pass generic risk checks and carry an algo identifier. Under 10
@@ -661,6 +663,27 @@ Before you continue, satisfy yourself that:
 - [ ] `ALERT_WEBHOOK_URL` is set if you will not be watching the screen
 
 ### Phase 3: Prove it before risking money
+
+```bash
+python tools/live_config_check.py
+```
+
+This is the step people skip and then regret. It reads your configuration the
+same way the app does and reports **every** problem at once, instead of the
+first one:
+
+- the four switches and four non-zero limits,
+- whether the order host is really a live order host,
+- whether your timeframe and market-data mode are a pair the engine accepts,
+- **keys you mistyped** — `MAX_POSITION_SIZE` instead of `MAX_POSITION_VALUE`
+  is silently ignored by the app, so the limit looks set and is not,
+- unfilled placeholders (`<your-token>`) and tokens carrying whitespace,
+- rails that are inert: canary off, drawdown auto-stop off, no webhook.
+
+It is offline, it places no order, and it never prints a credential. Exit code
+0 means nothing blocks, 1 means at least one blocker, 2 means the config is not
+aiming at live at all. `--json` gives machine-readable output and `--env-file`
+checks a candidate file before you replace the real one.
 
 ```bash
 python -m app live-preflight
@@ -833,6 +856,14 @@ python run.py --mode paper --source replay
 ```bash
 export API_TOKEN=...
 python run.py --mode api --host 0.0.0.0 --port 8000
+```
+
+**Before any live session (safety habit)**
+
+```bash
+python tools/live_config_check.py     # every config problem, at once
+python -m app live-preflight          # the authority: readiness.ok must be true
+python -m app live-drill              # exercise the rails offline
 ```
 
 **Daily operations check**
