@@ -29,14 +29,33 @@ Meanwhile, stages 1 and 2 give you the full experience with no money involved.
 
 ## 2. Download
 
+### The easy way — Releases
+
+1. Open **https://github.com/Thedivinetwilight/AXIOM/releases**
+2. Under the newest release (**Arena 3.0.5 — executable build**), click
+   **`Arena.exe`**.
+3. Save it somewhere convenient — your Desktop or a folder like `C:\Arena`.
+
+That is the whole file: one 18 MB download, no ZIP, no GitHub account needed.
+
+Each release also carries `Arena-linux-x64`, `Arena-macos` and a
+`SHA256SUMS-*.txt` checksum per platform. Every one of them was built *and
+started* by the build machine before publication: the workflow runs the binary,
+serves `/health`, `/setup`, `/console` and `/dashboard` from it, and checks it
+created its database outside the bundle.
+
+### The other way — Actions artifacts
+
+Use this when you want the newest build, or a platform the release does not
+cover. Artifacts are kept 30 days.
+
 1. Open the repository on GitHub.
 2. Click the **Actions** tab.
 3. In the left sidebar click **Build executable**.
 4. Click the newest run at the top of the list (a green ✓).
 5. Scroll to the bottom, to **Artifacts**.
 6. Click **`Arena-windows-x64`** to download a ZIP (~18 MB).
-7. Open the ZIP and extract **`Arena.exe`** anywhere convenient — your Desktop
-   or a folder like `C:\Arena`.
+7. Open the ZIP and extract **`Arena.exe`** anywhere convenient.
 
 Artifacts are kept for **30 days** after each build, so download the most recent
 one. If you prefer to build it yourself, see §9.
@@ -444,22 +463,22 @@ Never include your `.env` file: it contains your credentials.
 ## 11. The one-page version
 
 ```
-1.  GitHub → Actions → "Build executable" → newest green run
-2.  Download artifact "Arena-windows-x64", unzip, run Arena.exe
-3.  SmartScreen: More info → Run anyway
-4.  Browser opens /setup → Generate a secure token → copy it
-5.  Leave BROKER=LOCAL_PAPER and MODE=PAPER → Save
-6.  Close the window, run Arena.exe again (now opens /console)
-7.  Terminal:  Arena.exe --run paper --source replay --symbol DEMO
-8.  Dashboard: http://127.0.0.1:8042/dashboard   ← watch it work
+1.  GitHub → Releases → newest → download Arena.exe
+    (or: Actions → "Build executable" → newest green run → artifact ZIP)
+2.  Run Arena.exe — SmartScreen: More info → Run anyway
+3.  Browser opens /setup → Generate a secure token → copy it
+4.  Leave BROKER=LOCAL_PAPER and MODE=PAPER → Save
+5.  Close the window, run Arena.exe again (now opens /console)
+6.  Terminal:  Arena.exe --run paper --source replay --symbol DEMO
+7.  Dashboard: http://127.0.0.1:8042/dashboard   ← watch it work
 
 Real money, later, by hand — never from the setup screen:
-9.  Register your static IP with Upstox TODAY (it has a queue)
-10. Edit %LOCALAPPDATA%\Arena\.env: the four switches + four non-zero limits
-11. Arena.exe --cli live-preflight    → must say readiness.ok: true
-12. Arena.exe --cli live-drill        → safety rails, offline
-13. Arena.exe --cli engine            → small size, watch the dashboard
-14. Arena.exe --cli live-halt --reason "stopping"
+8.  Register your static IP with Upstox TODAY (it has a queue)
+9.  Edit %LOCALAPPDATA%\Arena\.env: the four switches + four non-zero limits
+10. Arena.exe --cli live-preflight    → must say readiness.ok: true
+11. Arena.exe --cli live-drill        → safety rails, offline
+12. Arena.exe --cli engine            → small size, watch the dashboard
+13. Arena.exe --cli live-halt --reason "stopping"
 ```
 
 ---
