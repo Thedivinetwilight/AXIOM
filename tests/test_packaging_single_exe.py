@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -203,7 +204,14 @@ class TestLauncher:
 
         holder = socket.socket()
         try:
-            holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Reserving a port means something different on each platform.
+            # POSIX: SO_REUSEADDR + listen is enough. Windows: the default is
+            # the opposite — SO_REUSEADDR there ALLOWS a second bind, so a
+            # holder must use SO_EXCLUSIVEADDRUSE to truly own the port.
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                holder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             holder.bind(("127.0.0.1", 0))
             taken = holder.getsockname()[1]
             holder.listen(5)
@@ -218,6 +226,19 @@ class TestLauncher:
                 check.listen(1)
         finally:
             holder.close()
+
+    def test_probe_does_not_use_so_reuseaddr_on_windows(self):
+        """On Windows SO_REUSEADDR PERMITS double-binding, so setting it in the
+        probe would make every port look free and Arena would then fail to
+        start with "address already in use" — the error the picker exists to
+        avoid."""
+        source = (ROOT / "arena.py").read_text("utf-8")
+        assert 'if os.name != "nt":' in source
+        assert "SO_REUSEADDR" in source
+        # the guard must come BEFORE the setsockopt call
+        guard = source.index('if os.name != "nt":')
+        reuse = source.index("SO_REUSEADDR", guard)
+        assert guard < reuse
 
     def test_first_run_detection(self, frozen, monkeypatch):
         import arena

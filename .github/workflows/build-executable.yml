@@ -73,11 +73,26 @@ jobs:
           pip install pyinstaller
 
       - name: Verify the packaging code (hard gate)
+        id: packaging
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
           python -m pytest -q --no-header \
-            tests/test_packaging_single_exe.py tests/test_feature_console.py
+            tests/test_packaging_single_exe.py tests/test_feature_console.py \
+            2>&1 | tee packaging-output.txt
+
+      - name: Report packaging failures
+        # Annotations are readable through the API even when workflow logs and
+        # artifacts are not reachable, which matters when the only Windows and
+        # macOS coverage is this matrix.
+        if: steps.packaging.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" packaging-output.txt | head -25 | while IFS= read -r line; do
+            echo "::error title=Packaging test failed on ${{ matrix.os }}::${line}"
+          done
+          exit 1
 
       - name: Run the full suite (reported, does not block the build)
         id: fullsuite

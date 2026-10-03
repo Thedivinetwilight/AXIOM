@@ -39,11 +39,23 @@ def _free_port(preferred: int, host: str, tries: int = 25) -> int:
 
     A double-clicked .exe must never fail with "address already in use" — most
     often the culprit is a previous Arena that has not fully exited.
+
+    The probe must bind the way the server will, and SO_REUSEADDR does NOT mean
+    the same thing on both platforms:
+
+    * POSIX — SO_REUSEADDR only relaxes TIME_WAIT, so it is safe and avoids
+      discarding a port that is about to become available.
+    * Windows — SO_REUSEADDR permits binding to an address that another socket
+      is ALREADY USING. Setting it here would make every port look free, the
+      picker would return a busy port, and Arena would fail at startup with the
+      very error this function exists to prevent. asyncio also disables address
+      reuse on Windows, so a plain bind is the accurate test there.
     """
     for offset in range(tries):
         candidate = preferred + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if os.name != "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind((host, candidate))
             except OSError:
