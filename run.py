@@ -166,6 +166,15 @@ def main(argv=None):
         import uvicorn
         from app.api.server import create_app
 
+        shown_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
+        print(json.dumps({
+            "event": "API_READY",
+            "url": f"http://{shown_host}:{args.port}",
+            "feature_console": f"http://{shown_host}:{args.port}/console",
+            "dashboard": f"http://{shown_host}:{args.port}/dashboard",
+            "docs": f"http://{shown_host}:{args.port}/docs",
+            "note": "The feature console runs real commands; it asks for your API_TOKEN.",
+        }, indent=2), flush=True)
         uvicorn.run(
             create_app(settings), host=args.host, port=args.port, log_level="info", access_log=False
         )

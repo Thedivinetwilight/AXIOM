@@ -364,7 +364,9 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px
 .ctrls{display:flex;gap:6px;align-items:center}
 .chip{background:rgba(0,255,156,.04);border:1px solid var(--line);color:var(--muted);
   padding:5px 10px;font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
-  cursor:pointer;clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px)}
+  cursor:pointer;clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);
+  /* the same chip is used for a button and for the link to /console */
+  display:inline-block;text-decoration:none;line-height:1}
 .chip:hover{color:var(--mint);border-color:var(--line-2);background:rgba(0,255,156,.09)}
 .chip b{color:var(--cash);font-weight:600}
 .stop{position:relative;background:rgba(255,95,109,.08);border:1px solid rgba(255,95,109,.6);
@@ -466,6 +468,7 @@ body[data-density="dense"] .vital .v.sm{font-size:11px;padding-top:2px}
   <div class="ctrls">
     <button class="chip" id="c-glow" title="Cycle green glow intensity">glow <b>std</b></button>
     <button class="chip" id="c-dens" title="Cycle panel density">density <b>normal</b></button>
+    <a class="chip" href="/console" title="Open the feature console — every command">features &rarr;</a>
   </div>
   <button class="stop" id="stop">⬢ EMERGENCY STOP</button>
   <span id="err"></span>

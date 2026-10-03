@@ -238,8 +238,17 @@ export API_TOKEN=pick-something-private     # required for API endpoints
 python run.py --mode api --host 0.0.0.0 --port 8000
 ```
 
-Then open **http://127.0.0.1:8000/dashboard** — you will be prompted for the
-token. Section 7 explains the interface.
+Two interfaces are served from that one process:
+
+| Open | What it is |
+|---|---|
+| **http://127.0.0.1:8000/console** | **The feature console — all 36 features, click to run.** See section 7.5 |
+| http://127.0.0.1:8000/dashboard | The live trading HUD. Section 7 |
+| http://127.0.0.1:8000/docs | Interactive API reference |
+
+The console is the fastest way to reach everything; the dashboard is the
+at-a-glance view of a running paper session. You will be prompted for the token
+in both.
 
 > `API_TOKEN` is what protects every API endpoint except `/health`. Use a
 > long random value. Never use the placeholder from `.env.example`.
@@ -433,6 +442,60 @@ does not relax.
   restarting the process.
 - The footer repeats the mode and, when the configured order host is not a
   documented live host, says so plainly: `ORDER HOST NOT A LIVE HOST`.
+- The **features →** button in the header opens the feature console (7.5).
+
+### 7.5 The feature console — every command, in the browser
+
+Open **`/console`** on a running API server. It lists every feature the
+platform offers and runs the one you pick, showing its exact output.
+
+**What it covers.** All 29 `python -m app` commands and all 7 `run.py` modes —
+36 features. The list is **read from the argument parsers themselves**, not
+hand-written, so it cannot drift: a command added to the CLI appears in the
+console automatically, and a removed command cannot linger as a dead button.
+
+**How to use it**
+
+1. Open `/console`. Enter your `API_TOKEN` when prompted — it is kept in the
+   browser's session storage for that tab only.
+2. Filter the list, or pick a command. On the right, a form is built from that
+   command's real arguments: fixed sets become drop-downs, optional flags become
+   checkboxes, and each field shows the same help text as `--help`.
+3. Adjust the timeout if the command is a long one, then **Run command**
+   (or press **Ctrl/Cmd+Enter**).
+4. The output pane shows the exit code, the duration, and the full stdout and
+   stderr. **Recent runs** lets you click a previous run to reload it.
+
+Every command shows its raw equivalent, e.g.
+`python -m app research run --name demo --periods 2,3`, so anything you do here
+you can copy straight into a terminal or a cron job.
+
+**Badges.** Commands are marked `network` (leaves the machine), `changes state`
+(can move a lifecycle state or halt/resume), and `long-running` (does not return
+on its own; the console will stop it at the timeout and say so).
+
+**What it will not do**
+
+- It cannot enable a mode your `.env` has not already enabled. It runs the real
+  CLI as a child process and sets **no** environment variables, so the
+  four-switch live opt-in and the risk limits are still evaluated by the
+  application itself. There is no "go live" button because there is no code
+  path here that could create one.
+- It is not a second implementation of anything. Every gate, lock and refusal
+  behaves exactly as in the terminal.
+- `/console/run` and `/console/catalog` require the bearer token — the same
+  gate as every other protected route. Only the HTML shell is served to a local
+  browser without a token, exactly like the dashboard page, and it contains no
+  secrets and no data.
+
+**Endpoints**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /console` | The page (local browsers; no secrets inside) |
+| `GET /console/catalog` | Every command and flag, derived from the parsers |
+| `POST /console/run` | Run one command, return exit code + output |
+| `GET /console/state` | Read-only mode/engine snapshot |
 
 ---
 
@@ -452,7 +515,11 @@ Selected endpoints:
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Liveness + mode, no auth |
-| `GET /dashboard` / `GET /dashboard/data` | The console and its payload |
+| `GET /dashboard` / `GET /dashboard/data` | The live trading HUD and its payload |
+| `GET /console` | The feature console page (every command) |
+| `GET /console/catalog` | Every feature, derived from the CLI parsers |
+| `POST /console/run` | Run one CLI command, return its output |
+| `GET /console/state` | Mode/engine snapshot for the console header |
 | `GET /api/v2/live/status` | Live-ops snapshot (rails, lock, token verdict) |
 | `GET /api/v2/alerts` | Recorded alerts with acknowledgement state |
 | `POST /api/v2/alerts/ack` | Acknowledge alerts |
@@ -488,7 +555,8 @@ sandbox (no display server), so treat the first launch as unproven.
 
 Two entry points:
 
-- `python -m app <command>` — operational commands (29 of them)
+- `python -m app <command>` — operational commands (29 of them). **All 29
+  are also available as buttons in the feature console — see 7.5.**
 - `python run.py --mode <mode>` — research and serving modes
 
 ### 10.1 Research and serving — `run.py`

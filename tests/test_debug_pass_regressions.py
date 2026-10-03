@@ -302,40 +302,63 @@ class TestDeadCodeRemoved:
     """The debug pass removed assignments whose only effect was wasted work —
     or, in one case, a latent crash. These pin that they stay gone."""
 
-    def test_no_undefined_names_remain(self):
-        """A cheap in-process guard for the exact bug class that started this."""
-        import ast
+    def test_the_two_original_nameerrors_cannot_come_back(self):
+        """The pass began with two `NameError`s: `argv` in cmd_paper_live and
+        `BacktestEngine` in cmd_research. This pins that neither is ever used as
+        a bare undefined name again.
 
+        It inspects real AST `Name` nodes with a Load context. An earlier
+        version of this guard searched the raw SOURCE TEXT, which produced a
+        false positive the moment a template string in `app/` contained the
+        word "argv" in JavaScript — a guard that cries wolf gets deleted, so it
+        is worth being precise.
+        """
+        import ast
+        import builtins
+
+        watched = {"argv", "BacktestEngine"}
         problems = []
+
         for path in sorted((ROOT / "app").rglob("*.py")):
-            source = path.read_text(encoding="utf-8")
             try:
-                tree = ast.parse(source)
-            except SyntaxError as exc:  # pragma: no cover
-                problems.append(f"{path}: syntax error {exc}")
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # pragma: no cover
                 continue
-            # module-level names available to a function body
-            module_names = set()
+
+            defined = set(dir(builtins))
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     for alias in node.names:
-                        module_names.add((alias.asname or alias.name).split(".")[0])
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                       ast.ClassDef)):
-                    module_names.add(node.name)
+                        defined.add((alias.asname or alias.name).split(".")[0])
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    defined.add(node.name)
                 elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                    module_names.add(node.id)
+                    defined.add(node.id)
                 elif isinstance(node, ast.arg):
-                    module_names.add(node.arg)
+                    defined.add(node.arg)
                 elif isinstance(node, ast.ExceptHandler) and node.name:
-                    module_names.add(node.name)
-            builtins_ = set(dir(__builtins__)) if isinstance(__builtins__, dict) is False \
-                else set(__builtins__.keys())
-            for name in ("argv", "BacktestEngine"):
-                # these two were the real defects; they must now be reachable
-                if name in source and name not in module_names and name not in builtins_:
-                    problems.append(f"{path}: uses {name} without defining/importing it")
-        assert not problems, problems
+                    defined.add(node.name)
+                elif isinstance(node, (ast.keyword,)) and node.arg:
+                    defined.add(node.arg)
+
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                        and node.id in watched and node.id not in defined):
+                    problems.append(f"{path.name}:{node.lineno} uses undefined {node.id!r}")
+
+        assert problems == [], problems
+
+    def test_module_level_strings_are_not_mistaken_for_code(self):
+        """Regression for the guard itself: `app/console/page.py` holds a big
+        JavaScript page in a Python string, and its identifiers must not be
+        treated as Python names."""
+        import ast
+
+        path = ROOT / "app" / "console" / "page.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {n.id for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        assert "argv" not in names
 
     def test_director_does_not_parse_an_unused_rationale(self):
         """The removed line called json.loads on a stored field and discarded

@@ -14,6 +14,7 @@ from app.paper_trading.broker import PaperBroker
 from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import dashboard, health, market, strategies, backtests, paper, v2, market_events
+from app.api.routes import console as console_routes
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -88,6 +89,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # /dashboard/data and the engine STOP/RESUME controls keep the full
     # bearer gate (see app/api/auth.py).
     app.include_router(dashboard.router)
+    # Feature console: `loopback_or_bearer` on the HTML shell only; every
+    # endpoint that EXECUTES a command carries the full bearer gate in the
+    # route module itself.
+    app.include_router(console_routes.router)
     for module in (market, strategies, backtests, paper, v2, market_events):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     app.state.sandbox_engine = None  # set by the sandbox engine embedding
