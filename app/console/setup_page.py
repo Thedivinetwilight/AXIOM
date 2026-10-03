@@ -304,7 +304,7 @@ document.getElementById("save").onclick = function () {
       "Updated: <code>" + (d.updated.join("</code>, <code>") || "none") + "</code>" +
       (d.added.length ? "<br>Added: <code>" + d.added.join("</code>, <code>") + "</code>" : "") +
       "<br><br>" + esc(d.note) + extra +
-      "<br><br>Next: <a href=\"/console\">open the feature console</a> once you have restarted Arena.");
+      "<br><br>Next: <a href='/console'>open the feature console</a> once you have restarted Arena.");
     document.getElementById("result").innerHTML = "";
     loadStatus();
   }).catch(function (e) {
@@ -332,7 +332,7 @@ function loadStatus() {
     document.getElementById("status").innerHTML = rows.map(function (r) {
       var cls = /ENABLED|present|^set$/.test(r[1]) ? "yes" : "no";
       if (r[0] === "Live trading") cls = d.live_trading ? "yes" : "no";
-      return "<tr><td>" + r[0] + "</td><td class=\"" + cls + "\">" + r[1] + "</td></tr>";
+      return "<tr><td>" + r[0] + "</td><td class='" + cls + "'>" + r[1] + "</td></tr>";
     }).join("");
   }).catch(function (e) {
     document.getElementById("homepath").textContent = "unavailable: " + esc(e.message);
