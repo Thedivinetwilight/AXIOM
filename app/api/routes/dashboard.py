@@ -282,28 +282,40 @@ async def dashboard(request: Request):
   --cash:#14f195; --green:#00ff9c; --mint:#8affce; --dim:#3f7d63; --muted:#5e9c81;
   --text:#c6ffe4; --amber:#ffc861; --red:#ff5f6d; --cyan:#5ad2ff;
   --mono:ui-monospace,SFMono-Regular,"JetBrains Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  /* glow intensity is a single dial: every glow in the page reads these three
+     stops (and the scanline / vignette strength), so one attribute retunes it */
+  --g-low:rgba(20,241,149,.16); --g-mid:rgba(20,241,149,.34); --g-high:rgba(20,241,149,.58);
+  --scan:.028; --vig:.48;
 }
+body[data-glow="calm"]{ --g-low:rgba(20,241,149,.05); --g-mid:rgba(20,241,149,.12);
+  --g-high:rgba(20,241,149,.22); --scan:.008; --vig:.30}
+body[data-glow="vivid"]{ --g-low:rgba(20,241,149,.28); --g-mid:rgba(20,241,149,.55);
+  --g-high:rgba(20,241,149,.85); --scan:.055; --vig:.62}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;background:
-    radial-gradient(1200px 600px at 50% -10%,rgba(0,255,156,.10),transparent 70%),
-    radial-gradient(900px 500px at 100% 100%,rgba(20,241,149,.06),transparent 70%),
+    radial-gradient(1200px 600px at 50% -10%,var(--g-mid),transparent 70%),
+    radial-gradient(900px 500px at 100% 100%,var(--g-low),transparent 70%),
     linear-gradient(180deg,var(--bg) 0%,var(--bg-2) 60%,#010705 100%);
   color:var(--text);font:13px/1.5 var(--mono);letter-spacing:.02em;min-height:100%}
 body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
-  background:repeating-linear-gradient(0deg,rgba(0,255,156,.030) 0 1px,transparent 1px 3px);mix-blend-mode:screen}
+  background:repeating-linear-gradient(0deg,rgba(0,255,156,var(--scan)) 0 1px,transparent 1px 3px);
+  mix-blend-mode:screen}
 body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:10;
-  background:radial-gradient(120% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%)}
+  background:radial-gradient(120% 100% at 50% 50%,transparent 55%,rgba(0,0,0,var(--vig)) 100%)}
 
 /* ---------------------------------------------------------------- command bar */
 header{position:relative;display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-  padding:12px 20px;background:linear-gradient(180deg,rgba(0,255,156,.07),rgba(0,0,0,0));
+  padding:12px 20px;background:linear-gradient(180deg,var(--g-low),rgba(0,0,0,0));
   border-bottom:1px solid var(--line-2)}
 header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
   background:linear-gradient(90deg,transparent,var(--green),transparent);
   animation:sweep 6s linear infinite;opacity:.7}
 @keyframes sweep{0%{transform:translateX(-40%)}100%{transform:translateX(40%)}}
 .brand{display:flex;align-items:center;gap:12px;min-width:230px}
+
+/* the core reacts to order flow: rings accelerate and a shockwave fires whenever
+   the poll observes new order / fill activity, and the pip is coloured by state */
 .core{width:38px;height:38px;position:relative;flex:0 0 auto}
 .core .ring{position:absolute;inset:0;border-radius:50%;
   border:1px solid var(--line-2);border-top-color:var(--green);border-right-color:var(--dim);
@@ -311,11 +323,26 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px
 .core .ring.b{inset:6px;border-top-color:var(--dim);border-left-color:var(--cash);
   animation-duration:7s;animation-direction:reverse}
 .core .pip{position:absolute;inset:14px;border-radius:50%;background:var(--cash);
-  box-shadow:0 0 12px var(--cash),0 0 26px rgba(20,241,149,.5);animation:pulse 2.4s ease-in-out infinite}
+  box-shadow:0 0 12px var(--g-high),0 0 26px var(--g-mid);animation:pulse 2.4s ease-in-out infinite}
+.core .burst{position:absolute;inset:0;border-radius:50%;
+  border:1px solid var(--green);opacity:0;pointer-events:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{opacity:.55;transform:scale(.85)}50%{opacity:1;transform:scale(1.12)}}
+@keyframes burst{0%{opacity:.85;transform:scale(.55)}100%{opacity:0;transform:scale(2.3)}}
+.core.flow .burst{animation:burst .95s ease-out}
+.core.flow .ring{animation-duration:.85s}
+.core.flow .ring.b{animation-duration:1.15s}
+.core.flow .pip{animation-duration:.5s}
+.core.live .ring{animation-duration:1.7s;border-top-color:var(--cash)}
+.core.live .ring.b{animation-duration:2.5s}
+.core.alert .pip{background:var(--amber);animation-duration:1s;
+  box-shadow:0 0 12px var(--amber),0 0 26px rgba(255,200,97,.4)}
+.core.alert .ring{border-top-color:var(--amber)}
+.core.halt .pip{background:var(--red);animation-duration:.7s;
+  box-shadow:0 0 12px var(--red),0 0 30px rgba(255,95,109,.5)}
+.core.halt .ring{border-top-color:var(--red);border-right-color:rgba(255,95,109,.4)}
 .wordmark{font-size:19px;font-weight:600;letter-spacing:.42em;color:var(--cash);
-  text-shadow:0 0 16px rgba(20,241,149,.45)}
+  text-shadow:0 0 16px var(--g-mid)}
 .wordmark small{display:block;font-size:9.5px;letter-spacing:.28em;color:var(--muted);
   font-weight:400;margin-top:3px}
 .badges{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -324,10 +351,22 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px
   border:1px solid var(--line-2);clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 7px) 100%,0 100%,0 7px)}
 .badge.warn,.warn{color:var(--amber);border-color:rgba(255,200,97,.55);background:rgba(255,200,97,.07)}
 #conn::before{content:"";display:inline-block;width:6px;height:6px;margin-right:8px;border-radius:50%;
-  background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.8s ease-in-out infinite;vertical-align:middle}
+  background:var(--green);box-shadow:0 0 8px var(--g-mid);animation:pulse 1.8s ease-in-out infinite;vertical-align:middle}
 .spacer{flex:1}
 .clock{font-size:12px;color:var(--mint);letter-spacing:.18em;min-width:132px;text-align:right}
-.clock b{color:var(--cash);text-shadow:0 0 10px rgba(20,241,149,.4)}
+.clock b{color:var(--cash);text-shadow:0 0 10px var(--g-mid)}
+/* flow ticker: appears only when the poll actually saw order activity */
+#flow-chip{font-size:10.5px;letter-spacing:.16em;color:var(--cash);opacity:0;
+  padding:3px 9px;border:1px solid var(--line-3);text-transform:uppercase;white-space:nowrap;
+  clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px)}
+#flow-chip.on{opacity:1;animation:chippulse 1.6s ease-out}
+@keyframes chippulse{0%{background:rgba(20,241,149,.22)}100%{background:transparent}}
+.ctrls{display:flex;gap:6px;align-items:center}
+.chip{background:rgba(0,255,156,.04);border:1px solid var(--line);color:var(--muted);
+  padding:5px 10px;font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;
+  cursor:pointer;clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px)}
+.chip:hover{color:var(--mint);border-color:var(--line-2);background:rgba(0,255,156,.09)}
+.chip b{color:var(--cash);font-weight:600}
 .stop{position:relative;background:rgba(255,95,109,.08);border:1px solid rgba(255,95,109,.6);
   color:#ffc9ce;padding:9px 16px;font:600 11.5px/1 var(--mono);letter-spacing:.18em;cursor:pointer;
   clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px)}
@@ -344,16 +383,17 @@ header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px
 .vital::after{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--green);opacity:.6}
 .vital .k{font-size:9.5px;letter-spacing:.24em;color:var(--muted);text-transform:uppercase}
 .vital .v{font-size:21px;color:var(--cash);font-variant-numeric:tabular-nums;margin-top:3px;
-  text-shadow:0 0 14px rgba(20,241,149,.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  text-shadow:0 0 14px var(--g-mid);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vital .v.sm{font-size:15px;padding-top:4px}
 .vital .v.neg{color:var(--red);text-shadow:0 0 14px rgba(255,95,109,.35)}
 .vital .v.pos{color:var(--cash)}
+.vital .v.warnc{color:var(--amber);text-shadow:0 0 14px rgba(255,200,97,.35)}
 
 /* ---------------------------------------------------------------------- panels */
 main{display:grid;grid-template-columns:repeat(12,1fr);gap:12px;padding:14px 20px 26px;max-width:1680px;margin:0 auto}
 section{grid-column:span 4;position:relative;padding:13px 15px 15px;background:
     linear-gradient(180deg,var(--panel),var(--panel-2));
-  border:1px solid var(--line);box-shadow:inset 0 0 40px rgba(0,255,156,.045)}
+  border:1px solid var(--line);box-shadow:inset 0 0 40px var(--g-low)}
 section::before,section::after{content:"";position:absolute;width:13px;height:13px;border:1px solid var(--line-3)}
 section::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
 section::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
@@ -361,7 +401,7 @@ section.w6{grid-column:span 6}section.w8{grid-column:span 8}
 section.w3{grid-column:span 3}section.w12{grid-column:span 12}
 h2{margin:0 0 10px;font-size:10.5px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;
   color:var(--mint);display:flex;align-items:center;gap:9px}
-h2::before{content:"◈";color:var(--green);font-size:11px;text-shadow:0 0 10px rgba(0,255,156,.6)}
+h2::before{content:"◈";color:var(--green);font-size:11px;text-shadow:0 0 10px var(--g-mid)}
 h2::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line-2),transparent)}
 table{width:100%;border-collapse:collapse;font-size:12px}
 td,th{padding:5px 7px;border-bottom:1px solid rgba(0,255,156,.09);text-align:left;vertical-align:top}
@@ -381,14 +421,38 @@ tr.al-CRITICAL.unacked td:last-child,tr.unacked b{color:var(--red);animation:bli
 @keyframes blink{50%{opacity:.35}}
 footer{max-width:1680px;margin:0 auto;padding:0 20px 24px;color:var(--dim);font-size:10.5px;letter-spacing:.16em;
   display:flex;gap:18px;flex-wrap:wrap;text-transform:uppercase}
+
+/* ------------------------------------------------------------------- density */
+body[data-density="compact"] main{padding:9px 14px 18px;gap:8px}
+body[data-density="compact"] section{padding:8px 10px 10px}
+body[data-density="compact"] h2{margin-bottom:6px}
+body[data-density="compact"] table{font-size:11px}
+body[data-density="compact"] td,body[data-density="compact"] th{padding:2px 6px}
+body[data-density="compact"] .vitals{grid-template-columns:repeat(auto-fit,minmax(146px,1fr))}
+body[data-density="compact"] .vital{padding:6px 11px}
+body[data-density="compact"] .vital .v{font-size:17px;margin-top:1px}
+body[data-density="compact"] .vital .v.sm{font-size:12.5px;padding-top:2px}
+body[data-density="dense"] main{padding:6px 10px 14px;gap:6px}
+body[data-density="dense"] section{padding:6px 8px 7px}
+body[data-density="dense"] h2{margin-bottom:4px;font-size:9.5px}
+body[data-density="dense"] table{font-size:10.5px}
+body[data-density="dense"] td,body[data-density="dense"] th{padding:1px 5px}
+body[data-density="dense"] small{font-size:9.5px}
+body[data-density="dense"] .vitals{grid-template-columns:repeat(auto-fit,minmax(124px,1fr))}
+body[data-density="dense"] .vital{padding:4px 9px}
+body[data-density="dense"] .vital .k{font-size:8.5px;letter-spacing:.16em}
+body[data-density="dense"] .vital .v{font-size:14px;margin-top:0}
+body[data-density="dense"] .vital .v.sm{font-size:11px;padding-top:2px}
+
 @media (max-width:1180px){section{grid-column:span 6}section.w8,section.w12{grid-column:span 12}}
 @media (max-width:820px){main{grid-template-columns:1fr;padding:12px}
   section,section.w3,section.w6,section.w8,section.w12{grid-column:1/-1}
-  .wordmark{letter-spacing:.24em;font-size:16px}}
+  .wordmark{letter-spacing:.24em;font-size:16px}
+  .ctrls{order:9}}
 </style>
 <header>
   <div class="brand">
-    <div class="core"><div class="ring"></div><div class="ring b"></div><div class="pip"></div></div>
+    <div class="core" id="core"><div class="ring"></div><div class="ring b"></div><div class="burst"></div><div class="pip"></div></div>
     <div class="wordmark">ARENA<small>COMMAND CONSOLE · 3.0.5</small></div>
   </div>
   <div class="badges">
@@ -397,7 +461,12 @@ footer{max-width:1680px;margin:0 auto;padding:0 20px 24px;color:var(--dim);font-
     <span class="badge" id="conn">…</span>
   </div>
   <span class="spacer"></span>
+  <span id="flow-chip"></span>
   <div class="clock" id="clock">—</div>
+  <div class="ctrls">
+    <button class="chip" id="c-glow" title="Cycle green glow intensity">glow <b>std</b></button>
+    <button class="chip" id="c-dens" title="Cycle panel density">density <b>normal</b></button>
+  </div>
   <button class="stop" id="stop">⬢ EMERGENCY STOP</button>
   <span id="err"></span>
 </header>
@@ -440,6 +509,94 @@ function clock(){
     + ' · ' + d.toISOString().slice(0,10);
 }
 clock(); setInterval(clock, 1000);
+
+/* ---------------------------------------------------------------- appearance */
+/* Both dials are pure presentation and persist locally. They change CSS custom
+   properties / a body attribute only — never any trading state. */
+const GLOWS = [['calm','lo'],['std','std'],['vivid','hi']];
+const DENS  = [['comfortable','normal'],['compact','compact'],['dense','dense']];
+function cycle(list, key, attr, store, dflt){
+  let i = list.findIndex(x => x[0] === (localStorage.getItem(store) || dflt));
+  if (i < 0) i = 0;
+  return () => {
+    i = (i + 1) % list.length;
+    localStorage.setItem(store, list[i][0]);
+    document.body.setAttribute(attr, list[i][0]);
+    $(key).innerHTML = $(key).innerHTML.replace(/<b>.*<\/b>/, '<b>' + list[i][1] + '</b>');
+  };
+}
+(function applyAppearance(){
+  const g = localStorage.getItem('arena_glow') || 'std';
+  const d = localStorage.getItem('arena_density') || 'comfortable';
+  document.body.setAttribute('data-glow', g);
+  document.body.setAttribute('data-density', d);
+  const gl = GLOWS.find(x => x[0] === g) || GLOWS[1];
+  const dn = DENS.find(x => x[0] === d) || DENS[0];
+  $('c-glow').innerHTML = 'glow <b>' + gl[1] + '</b>';
+  $('c-dens').innerHTML = 'density <b>' + dn[1] + '</b>';
+  $('c-glow').onclick = cycle(GLOWS, 'c-glow', 'data-glow', 'arena_glow', 'std');
+  $('c-dens').onclick = cycle(DENS, 'c-dens', 'data-density', 'arena_density', 'comfortable');
+})();
+
+/* ------------------------------------------------------------------ order flow
+   The core is driven by what the poll ACTUALLY observed changing, not by a
+   decorative timer: new orders / fills accelerate the rings and fire a
+   shockwave, and a ticker names the change. If nothing moved, the core idles. */
+let prevFlow = null, flowTimer = null, burstTimer = null;
+function flowCounts(d){
+  const lo = d.live_ops || {}, ca = lo.canary || {};
+  return {
+    orders: (d.sandbox_orders || []).length + (d.live_orders || []).length,
+    canary: ca.submitted || 0,
+    open: d.open_orders || 0,
+    events: (d.system_events || []).length
+  };
+}
+function fireFlow(label){
+  const core = $('core');
+  core.classList.remove('flow');
+  void core.offsetWidth;            // force reflow so the animation restarts
+  core.classList.add('flow');
+  clearTimeout(flowTimer);
+  flowTimer = setTimeout(() => core.classList.remove('flow'), 1400);
+  const chip = $('flow-chip');
+  chip.textContent = label;
+  chip.classList.remove('on');
+  void chip.offsetWidth;
+  chip.classList.add('on');
+  clearTimeout(burstTimer);
+  burstTimer = setTimeout(() => chip.classList.remove('on'), 4000);
+}
+function coreState(d){
+  const core = $('core');
+  const lo = d.live_ops || {};
+  core.classList.toggle('halt', !!d.emergency_stop);
+  core.classList.toggle('alert', !d.emergency_stop && (lo.unacknowledged_critical || 0) > 0);
+  core.classList.toggle('live', !!d.live_trading && !d.emergency_stop);
+}
+function flow(d){
+  const now = flowCounts(d);
+  if (prevFlow) {
+    const dOrders = now.orders - prevFlow.orders;
+    const dCanary = now.canary - prevFlow.canary;
+    const dOpen   = now.open - prevFlow.open;
+    const dEvents = now.events - prevFlow.events;
+    if (dOrders > 0 || dCanary > 0) {
+      fireFlow('+' + (Math.max(dOrders, 0) + Math.max(dCanary, 0)) + ' order');
+    } else if (dOpen > 0) {
+      fireFlow('+' + dOpen + ' open');
+    } else if (dOpen < 0) {
+      fireFlow(dOpen + ' open');
+    } else if (dOrders < 0) {
+      fireFlow(dOrders + ' closed');
+    } else if (dEvents > 0) {
+      fireFlow('+' + dEvents + ' event');
+    }
+  }
+  prevFlow = now;
+}
+
+/* ---------------------------------------------------------------------- data */
 function vitals(d){
   const lo = d.live_ops || {};
   $('v-equity').textContent = d.equity == null ? '—' : d.equity;
@@ -454,6 +611,7 @@ function vitals(d){
   $('v-lock').textContent = (lk && lk.held)
     ? (lk.owner || 'held') + (lk.stale ? ' · STALE' : ' · live')
     : 'not held';
+  $('v-lock').className = 'v sm' + (lk && lk.held && lk.stale ? ' warnc' : '');
   $('f-mode').textContent = (d.display || '') + ' · ' + (d.broker_mode || '');
   const warn = d.live_ops && d.live_ops.order_host_is_documented_live === false
     ? 'ORDER HOST NOT A LIVE HOST' : '';
@@ -565,6 +723,8 @@ async function tick(){
     // STRATEGY HEALTH
     const sh = d.strategy_health || {};
     $('health').innerHTML = sh && Object.keys(sh).length ? Object.entries(sh).slice(0,6).map(([k,v])=>row(k, esc(typeof v==='object'?JSON.stringify(v).slice(0,80):v))).join('') : '<tr><td>No health data</td></tr>';
+    coreState(d);
+    flow(d);
     vitals(d);
   }catch(e){$('err').textContent=String(e).slice(0,80);}
 }
