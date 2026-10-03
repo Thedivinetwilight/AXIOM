@@ -36,7 +36,9 @@ Meanwhile, stages 1 and 2 give you the full experience with no money involved.
    **`Arena.exe`**.
 3. Save it somewhere convenient — your Desktop or a folder like `C:\Arena`.
 
-That is the whole file: one 18 MB download, no ZIP, no GitHub account needed.
+That is the whole file: one 18 MB download, no ZIP to extract, and nothing that
+expires after 30 days. This repository is private, so the download needs a
+GitHub sign-in that has access to it.
 
 Each release also carries `Arena-linux-x64`, `Arena-macos` and a
 `SHA256SUMS-*.txt` checksum per platform. Every one of them was built *and
