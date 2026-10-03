@@ -39,6 +39,11 @@ on:
       # the artifact. Omitting this would leave the newest executable built from
       # stale code.
       - "app/**"
+      # These two files ARE the build's hard gate. If the gate itself changes,
+      # the gate must run again — otherwise a fix to a failing test would never
+      # be verified against the platform that failed.
+      - "tests/test_packaging_single_exe.py"
+      - "tests/test_feature_console.py"
     tags:
       - "v*"
 
