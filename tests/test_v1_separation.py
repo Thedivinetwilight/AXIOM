@@ -62,14 +62,26 @@ class TestSandboxHostIsolation:
         intent2 = broker.submit("SELL", 5, 0.0, intent_id="iso2", symbol="RELIANCE")
         broker.cancel(intent2)
         hosts = {httpx.URL(u).host for u in transport.urls}
-        assert hosts == {"api-hft.upstox.com", "api.upstox.com"}
+        # V2 audit: api-hft.upstox.com is Upstox's LIVE order host and is
+        # never contacted by the sandbox broker — only sandbox hosts plus
+        # the documented read-only history endpoint.
+        assert hosts == {"api-sandbox.upstox.com", "api.upstox.com"}
+        assert "api-hft.upstox.com" not in hosts, \
+            "the live order host must never be contacted in sandbox mode"
         paths = {httpx.URL(u).path for u in transport.urls}
         assert paths == {"/v3/order/place", "/v2/order/history", "/v3/order/cancel"}
-        # No live order endpoint ever contacted.
-        assert not any("/v2/order/place" in u for u in transport.urls)
 
 
 class TestPaperSandboxSeparation:
+    def test_default_sandbox_host_is_not_the_live_order_host(self):
+        from app.config.hosts import LIVE_ORDER_HOSTS
+        from app.config.settings import Settings
+
+        settings = Settings(broker="UPSTOX_SANDBOX",
+                            upstox_sandbox_access_token="t")
+        assert settings.upstox_sandbox_base_url not in {
+            f"https://{host}" for host in LIVE_ORDER_HOSTS}
+
     def test_paper_pipeline_untouched_by_sandbox_module(self):
         paper = PaperBroker(ExecutionConfig(), timeframe="1m")
         sandbox = UpstoxSandboxBroker("tok", INSTRUMENT, repository=None)

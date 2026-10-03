@@ -1,0 +1,250 @@
+name: Build executable
+
+# Produces a single-file Arena executable for Windows, macOS and Linux.
+#
+# PyInstaller cannot cross-compile — a Windows .exe must be built on Windows —
+# so this workflow exists to do that for you. Run it from the Actions tab
+# ("Run workflow"), download the artifact, and you have Arena.exe without
+# installing anything locally.
+#
+# The build is only kept if it passes a smoke test: the executable is started
+# from a directory that is NOT the project folder, with a throwaway data
+# directory, and must serve /health, /setup, /console and /dashboard and create
+# its own database. A bundle that builds but cannot serve is worse than no
+# bundle, because the failure appears at first use.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the artifact name (optional)"
+        required: false
+        default: ""
+  # Also build whenever something that affects packaging changes, on ANY
+  # branch. GitHub only offers the manual "Run workflow" button for a workflow
+  # that exists on the default branch, so this trigger is what makes the build
+  # reachable from a feature branch without merging first. The path filter
+  # keeps it from spending three runners on every unrelated commit.
+  push:
+    branches:
+      - "**"
+    paths:
+      - "packaging/**"
+      - "build_exe.py"
+      - "arena.py"
+      - "run.py"
+      - "requirements.txt"
+      - ".github/workflows/build-executable.yml"
+      # The application source is INSIDE the bundle, so a change to it changes
+      # the artifact. Omitting this would leave the newest executable built from
+      # stale code.
+      - "app/**"
+      # These files ARE the build's hard gate (they run in the "Verify the
+      # packaging code" step; a failure there discards the artifact). If the
+      # gate itself changes, the gate must run again — otherwise a fix to a
+      # failing test would never be verified against the platform that failed.
+      - "tests/test_packaging_single_exe.py"
+      - "tests/test_feature_console.py"
+      - "tests/test_windows_portability.py"
+      # These are the tests that fail on a platform rather than locally (code
+      # pages, chmod, pid liveness, sleep-based timing). A fix to one of them
+      # is worthless until this matrix has re-run it, so they are part of the
+      # trigger for the same reason the gate is.
+      - "tests/test_kronos_worker.py"
+      - "tests/test_kronos_runtime.py"
+      - "tests/test_upstox_v062.py"
+      - "tests/test_live_ops_v2_1.py"
+      # The reported full-suite result covers the AXIOM-Kronos subsystem.
+      - "axiom/**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Arena-windows-x64
+            binary: dist/Arena.exe
+            release_asset: Arena.exe
+            checksum: SHA256SUMS-windows-x64.txt
+          - os: ubuntu-latest
+            artifact: Arena-linux-x64
+            binary: dist/Arena
+            release_asset: Arena-linux-x64
+            checksum: SHA256SUMS-linux-x64.txt
+          - os: macos-latest
+            artifact: Arena-macos
+            binary: dist/Arena
+            release_asset: Arena-macos
+            checksum: SHA256SUMS-macos.txt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify the packaging code (hard gate)
+        id: packaging
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header \
+            tests/test_packaging_single_exe.py tests/test_feature_console.py \
+            tests/test_windows_portability.py \
+            2>&1 | tee packaging-output.txt
+
+      - name: Report packaging failures
+        # Annotations are readable through the API even when workflow logs and
+        # artifacts are not reachable, which matters when the only Windows and
+        # macOS coverage is this matrix.
+        if: steps.packaging.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" packaging-output.txt | head -25 | while IFS= read -r line; do
+            echo "::error title=Packaging test failed on ${{ matrix.os }}::${line}"
+          done
+          exit 1
+
+      - name: Run the full suite (reported, does not block the build)
+        id: fullsuite
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" 2>&1 | tee pytest-output.txt
+
+      - name: Report any full-suite failures as annotations
+        # This platform matrix is the only place Arena is exercised on Windows
+        # and macOS at all, so a failure here is information worth surfacing
+        # where it is visible without downloading logs.
+        if: steps.fullsuite.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" pytest-output.txt | head -25 | while IFS= read -r line; do
+            echo "::error title=Suite failure on ${{ matrix.os }}::${line}"
+          done
+          echo "::warning title=Suite failures on ${{ matrix.os }}::The packaging tests passed and the executable was still built and smoke-tested, but the full suite does not pass on this platform."
+
+      - name: Build and smoke-test the executable
+        # --test starts the built binary in a scratch ARENA_HOME and talks to
+        # it over HTTP, so a missing hidden import fails the job here.
+        run: python build_exe.py --test
+
+      - name: Name the release asset per platform
+        # Windows produces Arena.exe, but Linux and macOS BOTH produce a file
+        # called Arena. Attached to one release those two collide: the second
+        # upload replaces the first, so the macOS binary silently vanished and
+        # the Linux one stood in its place. Every asset gets an unambiguous
+        # name before anything is published.
+        shell: bash
+        run: |
+          mkdir -p release
+          cp "${{ matrix.binary }}" "release/${{ matrix.release_asset }}"
+          ls -l release/
+
+      - name: Record the artifact checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib
+          target = pathlib.Path("release") / "${{ matrix.release_asset }}"
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          pathlib.Path("${{ matrix.checksum }}").write_text(
+              f"{digest}  {target.name}\n", encoding="utf-8")
+          print(f"{target}  {target.stat().st_size / 1048576:.1f} MB")
+          print(f"sha256 {digest}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/${{ matrix.release_asset }}
+            ${{ matrix.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to the release
+        # A tag build publishes the artifacts where a normal person looks for
+        # them — Releases — instead of only in this run's 30-day Artifacts
+        # section, which needs a GitHub login to download from.
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Arena 3.0.5 — executable build"
+          body: |
+            Single-file Arena executables, built and smoke-tested by this
+            workflow on each platform (the run that produced this release
+            started the binary, served /health, /setup, /console and
+            /dashboard, ran a real command through the frozen `--cli` entry
+            point, and checked it wrote its database outside the bundle).
+
+            - `Arena.exe` — Windows x64 (double-click it; first run opens the
+              credential screen)
+            - `Arena` — Linux x64
+            - `Arena` — macOS
+            - `SHA256SUMS-*.txt` — checksum per platform
+
+            Start with **paper trading**: it needs no credentials and no money.
+            See `INSTALL_AND_TRADE.md` in the repository. The executables are
+            unsigned, so Windows SmartScreen will ask once (More info → Run
+            anyway). Real-money trading stays off and needs the four-switch
+            opt-in plus non-zero risk limits; the setup screen refuses it.
+          files: |
+            release/${{ matrix.release_asset }}
+            ${{ matrix.checksum }}
+          fail_on_unmatched_files: true
+          allowUpdates: true
+          prerelease: true
+
+      - name: Summarise the build
+        # The job conclusion is green even when the full suite failed on this
+        # platform, because those failures are reported rather than blocking.
+        # That has already led a reader to conclude the Windows build had
+        # failed when it had in fact produced a working artifact. So state, in
+        # the run itself, what this job did and did not do.
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.artifact }} — ${{ matrix.os }}"
+            echo
+            if [ "${{ steps.packaging.outcome }}" = "success" ]; then
+              echo "- Packaging tests (hard gate): **passed**"
+            else
+              echo "- Packaging tests (hard gate): **FAILED** — no artifact is kept"
+            fi
+            case "${{ steps.fullsuite.outcome }}" in
+              success) echo "- Full suite on this platform: **passed**" ;;
+              failure) echo "- Full suite on this platform: **FAILED** — reported, does not block the artifact; see the annotations for this job" ;;
+              *)       echo "- Full suite on this platform: not run" ;;
+            esac
+            if [ -f "release/${{ matrix.release_asset }}" ]; then
+              echo "- Artifact: **built and smoke-tested** — \`${{ matrix.release_asset }}\`, $(du -h "release/${{ matrix.release_asset }}" | cut -f1)"
+              if [ -f "${{ matrix.checksum }}" ]; then
+                echo "- Checksum: \`$(cat "${{ matrix.checksum }}")\`"
+              fi
+              echo
+              echo "Download it from the **Artifacts** section of this run page."
+            else
+              echo "- Artifact: **NOT built** — release/${{ matrix.release_asset }} does not exist in this job"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

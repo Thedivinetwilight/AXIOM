@@ -49,6 +49,36 @@ class StrategyLifecycleManager:
                                          evidence or {"why": "promotion step"})
         return {"promoted": True, "stage": next_stage}
 
+    def degrade(self, lineage_id: str, *, evidence: dict | None = None) -> dict:
+        """Manual, explicit step DOWN the health ladder.
+
+        This is the operator's counterpart to :meth:`promote`: the CLI
+        ``lifecycle degrade`` command calls it, and until now it did not exist,
+        so that command died with AttributeError. It is deliberately separate
+        from :meth:`detect_degradation`, which needs market evidence
+        (``recent_returns`` + a baseline). A manual degrade records that a human
+        asked for it, so the audit trail never implies evidence it does not have.
+
+        One step per call, never skipped: ACTIVE → PROBATION → SHADOW →
+        RETIRED. RETIRED is terminal — nothing is resurrected silently.
+        """
+        current = self._current(lineage_id)
+        if current is None:
+            return {"degraded": False, "reason": "unknown lineage id"}
+        status = current["status"]
+        if status not in HEALTH:
+            return {"degraded": False, "reason": f"unknown status {status}"}
+        if status == "RETIRED":
+            return {"degraded": False, "reason": "already RETIRED (terminal)"}
+        index = HEALTH.index(status)
+        new_status = HEALTH[min(index + 1, len(HEALTH) - 1)]
+        record = dict(evidence or {})
+        record.setdefault("why", "manual degradation step")
+        self.repository.record_lifecycle(lineage_id, current["stage"],
+                                         new_status, record)
+        return {"degraded": True, "status": new_status,
+                "previous_status": status}
+
     def is_tradable(self, lineage_id: str) -> bool:
         current = self._current(lineage_id)
         return bool(current and current["stage"] == "APPROVED"

@@ -1,4 +1,9 @@
-"""Portable CLI. Defaults to paper replay; cannot select a live-money mode."""
+"""Portable CLI for research, replay and paper trading.
+
+This entry point exposes no broker selection: it always runs the in-process
+PaperBroker. Real-money routing is only reachable through the gated
+``python -m app engine`` path (see LIVE_TRADING_ENABLEMENT.md).
+"""
 
 import argparse
 import asyncio
@@ -76,11 +81,23 @@ def parser():
     return p
 
 
+def _output_root() -> Path:
+    """Results, logs and cache go under ARENA_HOME when packaged.
+
+    When frozen, ROOT is PyInstaller's temporary extraction directory, deleted
+    on exit -- so a backtest run from the .exe would print a results path that
+    no longer exists moments later.
+    """
+    from app import runtime
+
+    return runtime.output_root()
+
+
 def load_bars(path, symbol, timeframe, args, calendar):
     provider = CSVProvider(
         path,
         timeframe,
-        DataCache(ROOT / "data/cache"),
+        DataCache(_output_root() / "data" / "cache"),
         clean=args.clean,
         strict_gaps=args.strict_gaps,
         calendar=calendar,
@@ -110,12 +127,26 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
         delay=args.delay,
         symbol=settings.default_symbol,
     )
-    # Live data adapters report the symbols they actually subscribe to.
-    symbols = list(getattr(provider, "symbols", None) or [settings.default_symbol])
+    # Live data adapters report the symbols they actually subscribe to. This
+    # was computed and then dropped, so the operator never saw which
+    # instruments a live feed was really streaming — the one fact worth
+    # confirming before trusting a paper session driven by real data.
+    subscribed = list(getattr(provider, "symbols", None) or [settings.default_symbol])
+    print(json.dumps({"event": "STREAM_SUBSCRIBED",
+                      "source": args.source or settings.data_source,
+                      "timeframe": settings.default_timeframe,
+                      "symbols": subscribed}), flush=True)
     loop = asyncio.get_running_loop()
 
     def stop_requested():
-        asyncio.create_task(simulator.stop())
+        # Do NOT run the full stop path here. Stopping cancels orders and
+        # persists the final state, which needs the repository writer — and
+        # the writer is released at the end of shutdown. A task created here
+        # was never awaited, so it ran after that release and died with
+        # "Paper write requires exclusive ownership", printing a traceback at
+        # the end of an otherwise clean session. Requesting the stop lets the
+        # single awaited stop() below perform the ordered shutdown.
+        simulator.request_stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -141,6 +172,9 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
 
 
 def main(argv=None):
+    from app.runtime import ensure_utf8_output
+
+    ensure_utf8_output()
     args = parser().parse_args(argv)
     settings = Settings.from_env()
     settings = replace(
@@ -149,11 +183,20 @@ def main(argv=None):
         default_timeframe=args.timeframe or settings.default_timeframe,
         database_url=args.database or settings.database_url,
     )
-    configure(settings.log_level, ROOT / "logs/bot.jsonl")
+    configure(settings.log_level, _output_root() / "logs" / "bot.jsonl")
     if args.mode == "api":
         import uvicorn
         from app.api.server import create_app
 
+        shown_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
+        print(json.dumps({
+            "event": "API_READY",
+            "url": f"http://{shown_host}:{args.port}",
+            "feature_console": f"http://{shown_host}:{args.port}/console",
+            "dashboard": f"http://{shown_host}:{args.port}/dashboard",
+            "docs": f"http://{shown_host}:{args.port}/docs",
+            "note": "The feature console runs real commands; it asks for your API_TOKEN.",
+        }, indent=2), flush=True)
         uvicorn.run(
             create_app(settings), host=args.host, port=args.port, log_level="info", access_log=False
         )
@@ -164,9 +207,9 @@ def main(argv=None):
     config = ExecutionConfig(**settings.execution_kwargs())
     strategy = create_strategy(args.strategy, json.loads(args.parameters))
     engine = BacktestEngine(config, annualization=args.annualization, calendar=calendar)
-    grids = json.loads(args.grids.read_text()) if args.grids else DEFAULT_GRIDS
+    grids = json.loads(args.grids.read_text(encoding="utf-8")) if args.grids else DEFAULT_GRIDS
     scoring = (
-        ScoringConfig(**json.loads(args.scoring.read_text())) if args.scoring else ScoringConfig()
+        ScoringConfig(**json.loads(args.scoring.read_text(encoding="utf-8"))) if args.scoring else ScoringConfig()
     )
     symbol, timeframe = settings.default_symbol, settings.default_timeframe
     bars = None
@@ -174,7 +217,7 @@ def main(argv=None):
         bars = load_bars(args.csv, symbol, timeframe, args, calendar)
     database = Database(settings.database_url)
     repository = Repository(database)
-    output = args.output or ROOT / "results" / args.mode
+    output = args.output or _output_root() / "results" / args.mode
     output.mkdir(parents=True, exist_ok=True)
     try:
         if args.mode == "backtest":
@@ -191,7 +234,7 @@ def main(argv=None):
             datasets = {(symbol, timeframe): bars}
             if args.datasets:
                 datasets = {}
-                for entry in json.loads(args.datasets.read_text()):
+                for entry in json.loads(args.datasets.read_text(encoding="utf-8")):
                     path = Path(entry["csv"])
                     if not path.is_absolute():
                         path = args.datasets.parent / path
@@ -231,7 +274,9 @@ def main(argv=None):
             result = asyncio.run(
                 run_paper(settings, args, repository, config, strategy, bars, calendar)
             )
-        (output / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+        (output / "result.json").write_text(
+            json.dumps(result, indent=2, allow_nan=False), encoding="utf-8"
+        )
         if args.mode != "paper":
             repository.save_research(args.mode, result)
         summary = {

@@ -6,9 +6,7 @@ The listener itself never places orders, never bypasses hard risk.
 
 from __future__ import annotations
 
-import json
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/api/market-events")
 

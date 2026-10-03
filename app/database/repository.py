@@ -188,10 +188,17 @@ class _V1RepositoryBase:
                 ).fetchall()
             ]
 
-    def record_sandbox_order(self, record: dict) -> None:
+    # -- order audit (sandbox vs LIVE are separate tables, one implementation) --
+    #
+    # V2 live-hardening: real-money orders are recorded in ``live_orders`` /
+    # ``live_transitions``, never in the sandbox tables. Both modes share the
+    # code below, so behaviour (idempotency, per-child identity, reconciliation
+    # ordering) is identical while the audit trail stays unambiguous.
+
+    def _record_order(self, table: str, record: dict) -> None:
         with self.db.transaction() as db:
             db.execute(
-                "INSERT OR REPLACE INTO sandbox_orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT OR REPLACE INTO {table} VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     record["id"], record.get("upstox_order_id"), record["symbol"],
                     record["side"], record["quantity"], record.get("price"),
@@ -201,9 +208,10 @@ class _V1RepositoryBase:
                 ),
             )
 
-    def record_sandbox_transition(self, order_id: str, upstox_order_id: str | None,
-                                  status: str, filled_quantity: float | None,
-                                  average_price: float | None, ts: str, raw: dict) -> bool:
+    def _record_transition(self, order_table: str, transition_table: str,
+                           order_id: str, upstox_order_id: str | None,
+                           status: str, filled_quantity: float | None,
+                           average_price: float | None, ts: str, raw: dict) -> bool:
         """Idempotent state-transition append. Returns False if already recorded.
 
         3.0.3: the identity includes the CHILD (slice) order id — two children
@@ -212,32 +220,32 @@ class _V1RepositoryBase:
         """
         with self.db.transaction() as db:
             existing = db.execute(
-                "SELECT 1 FROM sandbox_transitions WHERE order_id=? AND status=? "
+                f"SELECT 1 FROM {transition_table} WHERE order_id=? AND status=? "
                 "AND filled_quantity IS ? AND ts=? AND upstox_order_id IS ?",
                 (order_id, status, filled_quantity, ts, upstox_order_id),
             ).fetchone()
             if existing:
                 return False
             db.execute(
-                "INSERT INTO sandbox_transitions VALUES (?,?,?,?,?,?,?)",
+                f"INSERT INTO {transition_table} VALUES (?,?,?,?,?,?,?)",
                 (order_id, upstox_order_id, status, filled_quantity, average_price, ts, encode(raw)),
             )
             if upstox_order_id:
                 db.execute(
-                    "UPDATE sandbox_orders SET upstox_order_id=?, status=?, updated_ts=? WHERE id=?",
+                    f"UPDATE {order_table} SET upstox_order_id=?, status=?, updated_ts=? WHERE id=?",
                     (upstox_order_id, status, ts, order_id),
                 )
             else:
                 db.execute(
-                    "UPDATE sandbox_orders SET status=?, updated_ts=? WHERE id=?",
+                    f"UPDATE {order_table} SET status=?, updated_ts=? WHERE id=?",
                     (status, ts, order_id),
                 )
         return True
 
-    def list_sandbox_orders(self, limit=200):
+    def _list_orders(self, order_table: str, transition_table: str, limit=200):
         with self.db.transaction() as db:
             rows = db.execute(
-                "SELECT * FROM sandbox_orders ORDER BY created_ts DESC LIMIT ?", (limit,)
+                f"SELECT * FROM {order_table} ORDER BY created_ts DESC LIMIT ?", (limit,)
             ).fetchall()
             orders = []
             for row in rows:
@@ -258,7 +266,7 @@ class _V1RepositoryBase:
                 )
                 transitions = [
                     dict(t) for t in db.execute(
-                        "SELECT * FROM sandbox_transitions WHERE order_id=? ORDER BY ts",
+                        f"SELECT * FROM {transition_table} WHERE order_id=? ORDER BY ts",
                         (row["id"],),
                     ).fetchall()
                 ]
@@ -268,9 +276,43 @@ class _V1RepositoryBase:
                 orders.append(order)
         return orders
 
+    def record_sandbox_order(self, record: dict) -> None:
+        self._record_order("sandbox_orders", record)
+
+    def record_sandbox_transition(self, order_id: str, upstox_order_id: str | None,
+                                  status: str, filled_quantity: float | None,
+                                  average_price: float | None, ts: str, raw: dict) -> bool:
+        return self._record_transition(
+            "sandbox_orders", "sandbox_transitions", order_id, upstox_order_id,
+            status, filled_quantity, average_price, ts, raw)
+
+    def list_sandbox_orders(self, limit=200):
+        return self._list_orders("sandbox_orders", "sandbox_transitions", limit)
+
     def open_sandbox_orders(self):
         return [
             order for order in self.list_sandbox_orders(limit=1000)
+            if order["status"] in {"SUBMITTED", "OPEN", "PARTIALLY_FILLED"}
+        ]
+
+    # -- LIVE (real money) audit: separate tables, identical semantics -------
+
+    def record_live_order(self, record: dict) -> None:
+        self._record_order("live_orders", record)
+
+    def record_live_transition(self, order_id: str, upstox_order_id: str | None,
+                               status: str, filled_quantity: float | None,
+                               average_price: float | None, ts: str, raw: dict) -> bool:
+        return self._record_transition(
+            "live_orders", "live_transitions", order_id, upstox_order_id,
+            status, filled_quantity, average_price, ts, raw)
+
+    def list_live_orders(self, limit=200):
+        return self._list_orders("live_orders", "live_transitions", limit)
+
+    def open_live_orders(self):
+        return [
+            order for order in self.list_live_orders(limit=1000)
             if order["status"] in {"SUBMITTED", "OPEN", "PARTIALLY_FILLED"}
         ]
 

@@ -601,7 +601,11 @@ def test_health_and_status_are_paper_only(tmp_path):
         health = client.get("/health").json()
         assert health["version"] == __version__
         assert health["mode"] == "PAPER" and health["live_trading"] is False
-        assert health["real_order_routing"] == "NOT_IMPLEMENTED"
+        # V2 truthfulness: default routing is simulated LOCAL_PAPER; the value
+        # now reflects the ACTUAL broker instead of a hardcoded claim.
+        assert health["real_order_routing"] == "SIMULATED_LOCAL_PAPER"
+        assert health["broker"] == "LOCAL_PAPER"
+        assert health["warning"] is None
         headers = {"Authorization": "Bearer local-test-token"}
         status = client.get("/market/status", headers=headers).json()
         assert status["paper_mode"] is True and status["mode"] == "PAPER"

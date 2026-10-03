@@ -3,13 +3,19 @@
 **Release: Arena 3.0.4 (current build in this repository)**
 Audience: human operator / developer running Arena locally.
 
-> **Safety headline.** Arena is a quantitative **research and paper/sandbox**
-> platform. `MODE=PAPER` and `LIVE_TRADING=false` are hard-coded as the only
-> permitted values — any other combination is rejected at startup. `BROKER=LIVE`
-> is rejected by validation. Real-money order routing **does not exist** in the
-> codebase. The only real order APIs Arena can call are the documented
-> **Upstox SANDBOX** endpoints, and only when you explicitly configure
-> `BROKER=UPSTOX_SANDBOX` with your own sandbox token.
+> **Safety headline.** Arena is a quantitative **research, paper and sandbox**
+> platform by default. `MODE=PAPER` / `LIVE_TRADING=false` / `BROKER=LOCAL_PAPER`
+> are the shipped defaults, and no single variable can change that: real-money
+> routing requires **four independent switches** (`MODE=LIVE`, `LIVE_TRADING=true`,
+> `BROKER=UPSTOX_LIVE`, `LIVE_CONFIRM=I-ACCEPT-REAL-MONEY-RISK`) **plus** all four
+> hard risk limits set to non-zero values. Any missing switch aborts startup with
+> a message naming what is missing, and the bare alias `BROKER=LIVE` still raises.
+> The sandbox broker refuses the live order host (`api-hft.upstox.com`), so a live
+> token pasted into `UPSTOX_SANDBOX_ACCESS_TOKEN` cannot place a real order.
+> **V1 correction:** earlier builds shipped the live order host as the *sandbox
+> default*, which could route real orders while every label said "sandbox"; that
+> is fixed. Read [LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md) and run
+> `python -m app live-preflight` (read-only) before enabling live mode.
 
 ---
 
@@ -51,7 +57,8 @@ records every decision durably for replay and reporting.
 |---|---|---|---|
 | `BROKER=LOCAL_PAPER` (default) | local simulated `PaperBroker` | never | **enabled**, default |
 | `BROKER=UPSTOX_SANDBOX` | `UpstoxSandboxBroker` → documented sandbox REST V3 | sandbox-only, no real money | **enabled** with your sandbox token |
-| `BROKER=LIVE` | none | — | **NOT IMPLEMENTED** — rejected by `Settings` validation ("LIVE trading is not enabled") |
+| `BROKER=UPSTOX_LIVE` | `UpstoxLiveBroker` → documented live order host | **REAL money** | **implemented, OFF unless all four switches + non-zero risk limits** |
+| `BROKER=LIVE` | none | — | rejected: the bare alias is not a mode |
 
 Market *data* (read-only Upstox feed, `DATA_SOURCE=upstox`) is a separate
 concern from order routing; even with real data, `LOCAL_PAPER` never sends
@@ -621,16 +628,40 @@ the machine; real money **cannot** move. This is also the mode behind
 **UPSTOX SANDBOX.** Enable: `.env` with `BROKER=UPSTOX_SANDBOX` +
 `UPSTOX_SANDBOX_ACCESS_TOKEN` (validation refuses the broker without a
 token). Verify: `python -m app sandbox-test --instrument …` →
-`"credential_accepted": true`; `/health` still reports PAPER mode (mode and
-broker are independent). Broker: `UpstoxSandboxBroker` → documented sandbox
-order APIs. Real money: **no** — sandbox tokens only reach sandbox endpoints.
-Safety: every order passes the same hard risk gate, intent journal, and
-identity checks; orders are real HTTP calls to the sandbox only.
+`"credential_accepted": true`; `/health` reports `SANDBOX_ORDERS_ONLY` while
+`MODE` stays `PAPER` (mode and broker are independent). Broker:
+`UpstoxSandboxBroker` → documented sandbox order APIs
+(`api-sandbox.upstox.com` by default; the live order host is refused).
+Real money: **no**. Safety: every order passes the same hard risk gate, intent
+journal, and identity checks; orders are real HTTP calls to the sandbox only.
 
-**LIVE.** **Not implemented.** `BROKER=LIVE` raises "LIVE trading is not
-enabled"; `MODE≠PAPER` / `LIVE_TRADING=true` raise at boot. There is no live
-broker adapter, no live order routing, and no configuration that can enable
-either.
+**UPSTOX LIVE (real money).** Enable — all five conditions at once:
+
+```ini
+MODE=LIVE
+LIVE_TRADING=true
+BROKER=UPSTOX_LIVE
+LIVE_CONFIRM=I-ACCEPT-REAL-MONEY-RISK
+UPSTOX_LIVE_ACCESS_TOKEN=<live token>
+MAX_POSITION_VALUE=10000   # and MAX_OPEN_POSITIONS / MAX_DAILY_LOSS /
+MAX_TRADES_PER_DAY=5       # MAX_TRADES_PER_DAY — 0 is refused in live mode
+```
+
+Verify (read-only, places no order):
+
+```bash
+python -m app live-preflight          # prints hosts, locks, limits, credential verdict
+python -m app engine                  # starts only after Settings accepted the opt-in
+```
+
+Broker: `UpstoxLiveBroker` → documented live order host
+(`api-hft.upstox.com`), writing to the separate `live_orders` /
+`live_transitions` audit tables. `/health` then reports `mode: "LIVE"`,
+`real_order_routing: "LIVE_REAL_MONEY"` and a real-money warning; the
+dashboard and weekly report say so too. On a genuine LIVE host the engine
+still enforces the hard risk gate, intent dedup, emergency stop and
+reconciliation. Regulatory requirements (static IP, algo registration) apply —
+see LIVE_TRADING_ENABLEMENT.md §7.
 
 ---
 
@@ -974,7 +1005,11 @@ Full detail: `ARENA_FINAL_VERIFICATION.md` (3.0.4) in the repo root.
   implemented, not externally verified (credential probe, reconnect,
   resubscribe tested against fakes).
 - **Sandbox order placement end-to-end with a real token:** NOT ATTEMPTED.
-- **Live trading:** NOT IMPLEMENTED (rejected by validation; no adapter).
+- **Live trading:** IMPLEMENTED (`UpstoxLiveBroker`) but **not externally
+  verified** — no live token was used in this environment and no real order was
+  ever placed by the test suite. The gate (four switches + non-zero limits),
+  host classification, audit-table separation and truthful reporting are
+  covered by unit tests; a real-money end-to-end run has NOT been attempted.
 - **GUI verification:** desktop (PySide6) — NOT VERIFIED (sandbox has no
   display); web dashboard routes/panels — VERIFIED via the API test suite.
 - **Termux:** NOT ATTEMPTED. **Python 3.11/3.12 specifically:** NOT ATTEMPTED

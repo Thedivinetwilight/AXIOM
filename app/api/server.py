@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 from threading import Lock
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from app.api.auth import authenticate
 from app import __version__
@@ -14,6 +14,8 @@ from app.paper_trading.broker import PaperBroker
 from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import dashboard, health, market, strategies, backtests, paper, v2, market_events
+from app.api.routes import console as console_routes
+from app.api.routes import setup as setup_routes
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -44,7 +46,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         title="Arena",
         version=__version__,
         lifespan=lifespan,
-        description="Research and simulated orders only. Real-money routing is absent.",
+        description=("Research, simulation, sandbox orders, and gated real-money "
+                     "routing. Execution mode is reported truthfully by /health."),
         docs_url="/docs",
         redoc_url=None,
     )
@@ -87,6 +90,13 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # /dashboard/data and the engine STOP/RESUME controls keep the full
     # bearer gate (see app/api/auth.py).
     app.include_router(dashboard.router)
+    # Feature console: `loopback_or_bearer` on the HTML shell only; every
+    # endpoint that EXECUTES a command carries the full bearer gate in the
+    # route module itself.
+    app.include_router(console_routes.router)
+    # First-run setup writes credentials, so it is loopback-or-bearer like
+    # the dashboard page and never open to the network.
+    app.include_router(setup_routes.router)
     for module in (market, strategies, backtests, paper, v2, market_events):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     app.state.sandbox_engine = None  # set by the sandbox engine embedding

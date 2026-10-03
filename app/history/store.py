@@ -15,8 +15,6 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
-import io
-import json
 import os
 import re
 from datetime import date, datetime, timezone
@@ -88,7 +86,7 @@ class CandleStore:
             return {str(ts): row for ts, row in
                     zip(table["ts"], zip(*[table[c] for c in COLUMNS[1:]]))}
         rows = {}
-        with gzip.open(path, "rt", newline="") as fh:
+        with gzip.open(path, "rt", newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 rows[row["ts"]] = [row[c] for c in COLUMNS[1:]]
         return rows
@@ -107,7 +105,7 @@ class CandleStore:
                     columns[col].append(value)
             pq.write_table(pa.table(columns), tmp)
         else:
-            with gzip.open(tmp, "wt", newline="") as fh:
+            with gzip.open(tmp, "wt", newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(COLUMNS)
                 for ts in sorted(rows):
@@ -145,7 +143,6 @@ class CandleStore:
     def read_range(self, instrument_key: str, unit: str, interval: int,
                    from_ts: str | None = None, to_ts: str | None = None) -> list[dict]:
         """Chronological candles in [from_ts, to_ts] (ISO strings, inclusive)."""
-        from app.data.models import Candle
 
         directory = (self.root / _slug(instrument_key) / f"{unit}-{interval}")
         if not directory.exists():

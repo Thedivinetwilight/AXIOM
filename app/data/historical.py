@@ -139,7 +139,7 @@ class BinanceHistorical(APIProvider):
 def write_csv(path: Path, candles: list[Candle]):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as file:
+    with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
             file, fieldnames=["timestamp", "open", "high", "low", "close", "volume", "symbol"]
         )

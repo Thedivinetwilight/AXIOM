@@ -58,6 +58,9 @@ INSTRUMENT_KEY = re.compile(r"^[A-Z]{2,6}(?:_[A-Z]+)*\|[^|\r\n]{1,40}$")
 
 TICK_MODES = frozenset({"ltpc"})  # candles built from LTP ticks
 INTERVAL_MODES = frozenset({"full"})  # official 1m/30m aggregate bars
+#: timeframes the interval ("full") modes can carry; other timeframes are built
+#: locally from ticks, which is what the "ltpc" tick mode is for
+INTERVAL_MODE_TIMEFRAMES = frozenset({"1m", "30m"})
 MODES = TICK_MODES | INTERVAL_MODES
 TIMEFRAMES_LIVE = frozenset({"1m", "5m", "15m", "30m", "1h", "1D"})
 
@@ -246,8 +249,11 @@ class UpstoxStream(WebSocketProvider):
             raise ValueError("Upstox mode must be 'ltpc' or 'full'")
         if timeframe not in TIMEFRAMES_LIVE:
             raise ValueError(f"Upstox adapter supports timeframes {sorted(TIMEFRAMES_LIVE)}")
-        if mode in INTERVAL_MODES and timeframe not in {"1m", "30m"}:
-            raise ValueError("Upstox full mode carries official 1m/30m bars; use ltpc mode otherwise")
+        if mode in INTERVAL_MODES and timeframe not in INTERVAL_MODE_TIMEFRAMES:
+            raise ValueError(
+                "Upstox full mode carries official "
+                f"{'/'.join(sorted(INTERVAL_MODE_TIMEFRAMES))} bars; use ltpc mode "
+                "otherwise")
         if authorize_url.split(":")[0] not in {"https", "http"}:
             raise ValueError("Authorize URL must be http(s) for the local/test override")
         keys: list[str] = []

@@ -207,6 +207,22 @@ CREATE TABLE IF NOT EXISTS market_event_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_market_observations_event ON market_event_observations (event_id, window);
 
+-- Arena V2 LIVE: real-money order audit, deliberately SEPARATE from the
+-- sandbox tables so a real fill can never be read back as a simulated one.
+-- Additive only; created empty on every existing database.
+INSERT OR IGNORE INTO schema_version VALUES (8);
+CREATE TABLE IF NOT EXISTS live_orders (
+ id TEXT PRIMARY KEY, upstox_order_id TEXT, symbol TEXT NOT NULL, side TEXT NOT NULL,
+ quantity REAL NOT NULL, price REAL, order_type TEXT, status TEXT NOT NULL, tag TEXT,
+ created_ts TEXT NOT NULL, updated_ts TEXT, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_transitions (
+ order_id TEXT NOT NULL, upstox_order_id TEXT, status TEXT NOT NULL,
+ filled_quantity REAL, average_price REAL, ts TEXT NOT NULL, raw TEXT NOT NULL,
+ PRIMARY KEY (order_id, upstox_order_id, status, filled_quantity, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_live_orders_status ON live_orders (status, created_ts);
+
 -- Arena 3.0.5: performance / trade-quality hardening — bounded caches, numerical, attribution. Additive only.
 INSERT OR IGNORE INTO schema_version VALUES (7);
 CREATE TABLE IF NOT EXISTS quality_scores (

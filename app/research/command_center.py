@@ -110,7 +110,8 @@ class CommandCenter:
     def _risk_answer(self) -> dict:
         stop = self.repository.get_engine_state("emergency_stop") or {}
         allocation = self.repository.get_engine_state("capital_allocation") or {}
-        exposure = self.repository.get_engine_state("sandbox_equity") or {}
+        from app.engine.state import read_equity_state
+        exposure = read_equity_state(self.repository)
         lines = ["Current recorded risk state (OBSERVED):",
                  f"- emergency stop: {'ACTIVE' if stop.get('stopped') else 'clear'}",
                  f"- recorded equity: {exposure.get('equity', '—')}",

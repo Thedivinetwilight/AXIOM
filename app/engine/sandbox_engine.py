@@ -1,4 +1,12 @@
-"""24/7 trading engine for the Upstox SANDBOX mode (V1).
+"""24/7 trading engine for the Upstox execution modes (V1 sandbox, V2 gated LIVE).
+
+The mode is the BROKER's own identity: an UpstoxSandboxBroker routes to a
+sandbox host and records sandbox audit rows; an UpstoxLiveBroker routes to the
+documented live order host and records LIVE audit rows. Real money is reachable
+ONLY when Settings accepted the four-switch opt-in (MODE=LIVE,
+LIVE_TRADING=true, BROKER=UPSTOX_LIVE, LIVE_CONFIRM) plus explicit non-zero
+hard risk limits — see LIVE_TRADING_ENABLEMENT.md. The engine itself can never
+enable live trading, alter risk limits, or pick a host.
 
 Pipeline per completed candle (market OPEN only, provider gate respected):
 
@@ -21,7 +29,6 @@ them, and nothing in this engine can enable live trading.
 """
 
 import logging
-import math
 import time
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
@@ -35,7 +42,6 @@ from app.data.cross_market import CrossMarketCache
 from app.research.entry_timing import EntryTimingEngine
 from app.research.alpha_decay import AlphaDecayTracker
 from app.engine.hot_path import HotPathMonitor, ColdPathQueue
-from app.utils.numerical import is_valid_price, is_valid_quantity, sanitize_candle
 
 logger = logging.getLogger("bot.engine")
 
@@ -58,6 +64,7 @@ class SandboxEngine:
                  event_engine=None, pause_gate=None, monitor=None,
                  maintenance_scheduler=None, strategy_source=None,
                  allocator=None, instrument_keys=None,
+                 live_ops=None,
                  market_timezone: str = "Asia/Kolkata",
                  stop_loss: float | None = 0.0,
                  take_profit: float | None = 0.0,
@@ -87,6 +94,17 @@ class SandboxEngine:
         self.processed = 0
         self.submitted = 0
         self.rejected_by_risk = 0
+        # V2.1 L-ops: single-engine lock. Enforced for LIVE engines only;
+        # paper/sandbox runs record it but are never blocked by it.
+        self.live_lock = None
+        if live_ops is not None and hasattr(live_ops, "make_lock"):
+            try:
+                self.live_lock = live_ops.make_lock()
+            except Exception:  # pragma: no cover - a lock must not block start
+                logger.exception("could not construct the engine lock")
+        # V2.1 L-ops: optional live safety rails (guards/watchdog/breaches).
+        # None = the paper/sandbox behaviour is byte-for-byte unchanged.
+        self.live_ops = live_ops
         self.signals: dict = {}
         self.regime: str | None = None
         self._history: list = []
@@ -114,6 +132,8 @@ class SandboxEngine:
 
         self.intent_journal = SubmissionJournal(repository) \
             if repository is not None else None
+        if live_ops is not None:
+            live_ops.attach_journal(self.intent_journal)
         self.daily = DailyRiskAccount(repository, market_timezone) \
             if repository is not None else None
         # authoritative symbol → instrument key resolution.
@@ -165,7 +185,8 @@ class SandboxEngine:
             self.scanner_funnel = None
         # durable account recovery BEFORE anything can trade
         if repository is not None:
-            self._recovery_report = recover_ledger_state(broker.ledger, repository)
+            self._recovery_report = recover_ledger_state(
+                broker.ledger, repository, live=bool(getattr(broker, "LIVE", False)))
             if self._recovery_report.get("orders_replayed"):
                 logger.warning("LEDGER_RECOVERED",
                                extra={"orders": self._recovery_report["orders_replayed"]})
@@ -208,7 +229,10 @@ class SandboxEngine:
         restored = 0
         if self.repository is None or not hasattr(self.broker, "orders"):
             return restored
-        for record in self.repository.open_sandbox_orders():
+        open_orders = (self.repository.open_live_orders()
+                       if getattr(self.broker, "LIVE", False)
+                       else self.repository.open_sandbox_orders())
+        for record in open_orders:
             intent_id = record.get("intent_id")
             if not intent_id or intent_id in self.broker.orders:
                 continue
@@ -260,7 +284,9 @@ class SandboxEngine:
             self.broker.orders[intent_id] = state
             restored += 1
         if restored:
-            logger.info("SANDBOX_ORDERS_RESTORED", extra={"count": restored})
+            logger.info(
+                "LIVE_ORDERS_RESTORED" if getattr(self.broker, "LIVE", False)
+                else "SANDBOX_ORDERS_RESTORED", extra={"count": restored})
         return restored
 
     def _surface_unresolved_intents(self):
@@ -315,8 +341,25 @@ class SandboxEngine:
 
     # -- main loop -----------------------------------------------------------
 
-    def run(self, *, max_candles: int | None = None):
-        """Consume the provider stream until it ends / max_candles / stop flag."""
+    def run(self, *, max_candles: int | None = None, force_lock: bool = False):
+        """Consume the provider stream until it ends / max_candles / stop flag.
+
+        Refuses to start when another LIVE engine is heartbeating against the
+        same database: two live engines on one account double every entry.
+        """
+        if self.live_lock is not None:
+            decision = self.live_lock.acquire(force=force_lock)
+            if not decision.granted:
+                self.state = "REFUSED_DUPLICATE_ENGINE"
+                self.repository.record_system_event(
+                    "ENGINE_REFUSED_DUPLICATE",
+                    {"reason": decision.reason,
+                     "existing": (decision.existing.to_dict()
+                                  if decision.existing else None)})
+                logger.error("ENGINE_REFUSED_DUPLICATE",
+                             extra={"reason": decision.reason})
+                return {"ok": False, "reason": decision.reason,
+                        "lock": decision.to_dict(), **self.status()}
         self.state = "RUNNING"
         try:
             import asyncio
@@ -331,6 +374,7 @@ class SandboxEngine:
                             self.maintenance_scheduler.run_due()
                         except Exception:  # maintenance must never kill the loop
                             logger.exception("maintenance job failed")
+                    self._ops_tick()
                     self.process_candle(candle)
                     if max_candles is not None and self.processed >= max_candles:
                         break
@@ -343,7 +387,89 @@ class SandboxEngine:
         finally:
             if self.state == "RUNNING":
                 self.state = "STOPPED"
+            if self.live_lock is not None:
+                self.live_lock.release()
         return self.status()
+
+    def _ops_tick(self, *, now=None) -> None:
+        """Observe operational health and escalate breaches (V2.1 L-ops).
+
+        Runs every loop iteration — including when the market is closed —
+        because the failures worth catching (a stuck order, an auth fail,
+        reconciliation going quiet) happen precisely while nothing is being
+        traded. Never raises: an operations check must not break the loop.
+        """
+        if self.live_ops is None:
+            return
+        now = now or datetime.now(timezone.utc)
+        live_lock = getattr(self, "live_lock", None)
+        if live_lock is not None:
+            # proving this engine is alive is what makes a stale lock harmless
+            live_lock.heartbeat(now=now)
+        try:
+            findings = self.live_ops.observe(now=now)
+            self._auto_cancel_escalated_stuck_orders(findings)
+            self._retry_failed_alerts_once(now=now)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops observe failed")
+        try:
+            equity = self.broker.ledger.equity()
+            realized_today = (self.daily.realized_pnl if self.daily is not None
+                              else self._last_realized)
+            breach = self.live_ops.breach(
+                realized_today=realized_today, equity=equity,
+                peak_equity=self._peak_equity or None)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops breach check failed")
+            breach = None
+        if breach and breach.get("stop") and not self._check_emergency():
+            self.emergency_stop(
+                reason=f"AUTO_STOP {breach['kind']}: {breach['message']}")
+
+    def _retry_failed_alerts_once(self, *, now=None) -> dict:
+        """Give a failed page another chance on the ops cadence.
+
+        Paging is the one rail that depends on a third party being reachable;
+        a single transient 502 must not be the difference between an operator
+        knowing and not knowing. Bounded by the router's attempt cap.
+        """
+        result = self.live_ops.retry_failed_alerts(now=now)
+        if result.get("delivered") or result.get("dropped"):
+            logger.warning("ALERT_RETRY_TICK", extra={"result": result})
+        return result
+
+    def _auto_cancel_escalated_stuck_orders(self, findings) -> list[str]:
+        """Cancel orders the watchdog has escalated, when explicitly enabled.
+
+        The watchdog only *reports*; acting is the engine's job (it owns the
+        broker). This runs only when ``LIVE_AUTO_CANCEL_STUCK`` is on — the
+        default is to alert a human, never to cancel silently. Failures are
+        recorded, never swallowed, and a cancel that cannot be confirmed leaves
+        the order working (the broker decides, not this method).
+        """
+        if not getattr(self.live_ops, "auto_cancel_stuck", False) or not findings:
+            return []
+        targets = self.live_ops.escalated_stuck_order_ids(findings)
+        if not targets:
+            return []
+        cancelled: list[str] = []
+        for intent_id, state in list(self.broker.orders.items()):
+            if state.our_id not in targets or state.status in FINAL_STATUSES:
+                continue
+            try:
+                self.broker.cancel(intent_id)
+                cancelled.append(state.our_id)
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL",
+                    {"order": state.our_id, "intent_id": intent_id,
+                     "reason": "escalated by the L-ops watchdog"})
+                logger.warning("STUCK_ORDER_AUTO_CANCEL", extra={"order": state.our_id})
+            except Exception as exc:  # a failed cancel must never be silent
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL_FAILED",
+                    {"order": state.our_id, "error": type(exc).__name__})
+                logger.exception("STUCK_ORDER_AUTO_CANCEL_FAILED")
+        return cancelled
 
     def process_candle(self, candle) -> None:
         metrics = self.provider.metrics()
@@ -486,6 +612,11 @@ class SandboxEngine:
 
         triggers = triggers or []
         if signal == Signal.HOLD:
+            logger.debug(
+                "SIGNAL_NOT_AN_ORDER",
+                extra={"reason": "HOLD", "symbol": candle.symbol,
+                       "price": candle.close, "processed": self.processed},
+            )
             return
         params = dict(self.strategy.parameters)
         self.journal.record_signal(
@@ -500,6 +631,13 @@ class SandboxEngine:
             if ledger.position_quantity > 0:
                 self._submit("SELL", ledger.position_quantity, candle.close, candle,
                              reason="STRATEGY_EXIT")
+            else:
+                logger.info(
+                    "SIGNAL_NOT_AN_ORDER",
+                    extra={"reason": "EXIT_WITH_NO_POSITION",
+                           "signal": signal.value, "symbol": candle.symbol,
+                           "price": candle.close, "processed": self.processed},
+                )
             return
         # --- BUY: size FIRST, then gate the EXACT final quantity (3.0.1) -----
         # 3.0.2: with a strategy source, entries require an ELIGIBLE router
@@ -862,6 +1000,29 @@ class SandboxEngine:
             logger.warning("INSTRUMENT_IDENTITY_MISSING",
                            extra={"symbol": candle.symbol, "side": side})
             return
+        # V2.1 L-ops: operational guards gate NEW ENTRIES only. Exits and
+        # protective stops are never blocked by an operational rail.
+        if self.live_ops is not None:
+            decision = self.live_ops.guard_entry(
+                side=side, quantity=quantity, price=price)
+            if not decision.allowed:
+                self.rejected_by_risk += 1
+                self.repository.record_system_event("ENTRY_GUARD_BLOCKED", {
+                    "reason": decision.reason, "side": side,
+                    "quantity": quantity, "price": price,
+                    "symbol": candle.symbol, "intent_reason": reason,
+                    "ts": candle.timestamp.isoformat()})
+                logger.warning("ENTRY_GUARD_BLOCKED",
+                               extra={"reason": decision.reason[:120]})
+                return
+            if decision.adjusted_quantity is not None:
+                self.repository.record_system_event("ENTRY_GUARD_REDUCED", {
+                    "reason": decision.reason, "side": side,
+                    "from_quantity": quantity,
+                    "to_quantity": decision.adjusted_quantity,
+                    "price": price, "symbol": candle.symbol,
+                    "ts": candle.timestamp.isoformat()})
+                quantity = decision.adjusted_quantity
         # full decision observability (3.0.1): reconstructable end-to-end
         self.repository.record_system_event("DECISION", {
             "ts": candle.timestamp.isoformat(),
@@ -895,6 +1056,8 @@ class SandboxEngine:
         self.repository.set_engine_state("processed_signals", sorted(processed)[-2000:])
         self.submitted += 1
         if side == "BUY":
+            if self.live_ops is not None:
+                self.live_ops.record_submitted_entry(quantity=quantity, price=price)
             if self.daily is not None:
                 self.daily.register_trade()
             else:
@@ -902,6 +1065,10 @@ class SandboxEngine:
 
     def reconcile(self) -> list[dict]:
         fills = self.broker.reconcile() if hasattr(self.broker, "reconcile") else []
+        # L-ops liveness stamp: silence here is a silent 24/7 failure mode
+        self.repository.set_engine_state(
+            "last_reconcile_at", {"ts": datetime.now(timezone.utc).isoformat(),
+                                  "fills": len(fills)})
         for fill in fills:
             if fill["side"] == "SELL":
                 realized_delta = self.broker.ledger.realized_pnl - self._last_realized
@@ -945,8 +1112,9 @@ class SandboxEngine:
         equity = self.broker.ledger.equity()
         self._peak_equity = max(self._peak_equity, equity)
         drawdown = (self._peak_equity - equity) / self._peak_equity if self._peak_equity > 0 else 0.0
+        from app.engine.state import equity_state_key
         self.repository.set_engine_state(
-            "sandbox_equity",
+            equity_state_key(bool(getattr(self.broker, "LIVE", False))),
             {"equity": equity, "peak": self._peak_equity, "drawdown": drawdown,
              "ts": datetime.now(timezone.utc).isoformat()},
         )
@@ -981,10 +1149,10 @@ class SandboxEngine:
 
     def status(self) -> dict:
         return {
-            "engine": "sandbox",
+            "engine": "live" if getattr(self.broker, "LIVE", False) else "sandbox",
             "state": self.state,
-            "mode": "PAPER/SANDBOX",
-            "live_trading": False,
+            "mode": getattr(self.broker, "mode", "LOCAL_PAPER"),
+            "live_trading": bool(getattr(self.broker, "LIVE", False)),
             "processed": self.processed,
             "submitted": self.submitted,
             "rejected_by_risk": self.rejected_by_risk,
@@ -1005,6 +1173,9 @@ class SandboxEngine:
             "unresolved_intents": (
                 len(self.intent_journal.unresolved()) if self.intent_journal else 0),
             "recovery": self._recovery_report,
+            "live_ops": self.live_ops.status() if self.live_ops is not None else None,
+            "engine_lock": (getattr(self, "live_lock", None).status()
+                            if getattr(self, "live_lock", None) is not None else None),
         }
 
 

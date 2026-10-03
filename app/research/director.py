@@ -93,7 +93,6 @@ class ResearchDirector:
                                                      experiment_id=None)
             return {"scheduled": False,
                     "reason": "no local data/experiment engine available; recorded as blocked"}
-        rationale = _load(question["rationale"])
         seed = abs(hash(question["question"])) % (2 ** 31)
         experiment_id = uuid.uuid4().hex
         self.repository.record_experiment(experiment_id, f"director:{question_id}", {

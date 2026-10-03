@@ -1,5 +1,6 @@
 .env
 .venv/
+.venv-kronos/
 __pycache__/
 .pytest_cache/
 *.db
@@ -7,6 +8,24 @@ __pycache__/
 *.db-wal
 logs/*.jsonl
 data/cache/
+# Downloaded candle partitions (written by CandleStore under DATA_DIR/history).
+# Runtime data, not source: replaceable by re-syncing, and needlessly large.
+data/history/
 results/*
 !results/.gitkeep
 *.paper.lock
+
+# Kronos model weights are runtime artefacts: downloaded into
+# %LOCALAPPDATA%\AXIOM\models\kronos and verified by SHA-256 — never committed.
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+models/
+.cache/axiom/
+
+# PyInstaller build output (build_exe.py writes these)
+dist/
+build/
+*.spec.bak

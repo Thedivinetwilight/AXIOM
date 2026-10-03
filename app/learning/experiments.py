@@ -13,7 +13,6 @@ parameter stability are recorded with each candidate.
 
 from __future__ import annotations
 
-import json
 from uuid import uuid4
 
 from app.backtesting.costs import ExecutionConfig
@@ -95,7 +94,6 @@ class ExperimentEngine:
 
         baseline_oos = next((r for r in results if r.get("parameters") == baseline), None)
         baseline_expectancy = oos_expectancy(baseline_oos) if baseline_oos else 0.0
-        promoted_ids = []
         winner = None
         for candidate in results:
             if "error" in candidate:
