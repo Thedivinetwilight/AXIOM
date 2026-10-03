@@ -171,6 +171,20 @@ def describe() -> dict:
     }
 
 
+def static_dir() -> Path:
+    """The folder holding Arena's CSS/JS frontend assets.
+
+    From source this is ``app/static``. Frozen, the files are bundled via the
+    spec's ``datas`` and extracted under ``sys._MEIPASS`` — the same
+    mechanism the bundled sample data uses — so the lookup must branch on
+    ``frozen`` exactly like every other bundle-relative path.
+    """
+    if is_frozen():
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        return base / "app" / "static"
+    return Path(__file__).resolve().parent / "static"
+
+
 def output_root() -> Path:
     """Where Arena writes RESULTS, LOGS and CACHE.
 

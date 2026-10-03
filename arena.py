@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
 """Arena — one entry point that starts everything.
 
-    python arena.py                 # start the server, open the console
+    python arena.py                 # start the server, open the interface
     python arena.py --port 9000     # pick a port
     python arena.py --no-browser    # headless (servers, containers)
     python arena.py --cli live-status   # run any CLI command
-    python arena.py --setup        # open the credential screen
+    python arena.py --setup         # open the setup screen on this run
 
 This is the same file whether Arena runs from source or as a packaged
 executable. When frozen it is the .exe's entry point, and it also acts as the
 child-process re-entry point so the feature console can launch commands:
 PyInstaller sets ``sys.executable`` to the .exe itself, which cannot be
 invoked as ``python -m app``, so the console calls back here with ``--cli``.
+
+Desktop behaviours implemented here (3.1.0):
+
+* **single instance per data directory** — a second launch detects the running
+  session through ``app.instance.InstanceGuard`` and opens it in the browser
+  instead of starting a conflicting server (no tracebacks, no Task Manager);
+* **free port discovery** — a busy default port never stops a launch;
+* **first-run routing** — a fresh install opens the setup wizard, an
+  established one opens the main application;
+* **durable logs** — a frozen build also logs to ``<home>/logs/arena.log``
+  so a windowed launch still leaves diagnostics behind;
+* **readable failures** — a double-clicked build that cannot start explains
+  itself instead of flashing a window.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import socket
 import sys
@@ -72,77 +86,177 @@ def _free_port(preferred: int, host: str, tries: int = 25) -> int:
 
 
 def _first_run() -> bool:
-    """True when no configuration has been saved yet."""
-    from app import runtime
+    """True when the guided setup screen should open.
 
-    return not runtime.env_file().exists()
+    First run means no configuration file yet. A file that exists but has no
+    API_TOKEN also counts as "not set up": without a token the protected API
+    (and therefore the dashboard) cannot be used, which is exactly the state
+    the wizard exists to fix.
+    """
+    from app import runtime
+    from app.config.envfile import read_values
+
+    path = runtime.env_file()
+    if not path.exists():
+        return True
+    try:
+        return not (read_values(path).get("API_TOKEN") or "").strip()
+    except OSError:
+        return True
 
 
 def _print_banner(url: str, setup: bool) -> None:
     from app.runtime import ensure_utf8_output
 
     ensure_utf8_output()
-    target = f"{url}/setup" if setup else f"{url}/console"
+    target = f"{url}/setup" if setup else f"{url}/app"
     print()
     print("  " + "-" * 66)
-    print("   ARENA — trading research platform")
+    print("   ARENA — quantitative research & paper trading")
     print("  " + "-" * 66)
     print(f"   Open this address:   {target}")
     if setup:
-        print("   (first run: enter your credentials, then press Save)")
+        print("   (first run: the guided setup starts paper trading in")
+        print("    one click — no credentials and no commands needed)")
     print()
     print("   Keep this window open while you use Arena.")
     print("   Press Ctrl+C here to stop.")
+    print("  " + "-" * 66, flush=True)
+
+
+def _configure_file_logging() -> None:
+    """Always keep a durable log in the Arena home.
+
+    A windowed/frozen launch has no console to read, so the file is where
+    startup problems become diagnosable. Failures here must never stop a
+    launch — logging is observability, not a dependency.
+    """
+    try:
+        from app import runtime
+
+        logs = runtime.arena_home() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(logs / "arena.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root = logging.getLogger()
+        if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
+            root.addHandler(handler)
+        if root.level == logging.NOTSET:
+            root.setLevel(logging.INFO)
+    except (OSError, ValueError):
+        pass  # observability must never break startup
+
+
+def _handle_existing_instance(existing, *, open_browser: bool) -> int:
+    """A second launch while one Arena already owns this data directory.
+
+    Never starts a conflicting server, never kills the holder, never deletes
+    a lock. Either opens the running session or explains precisely what is
+    in the way.
+    """
+    from app import runtime
+    from app.instance import wait_until_healthy
+
+    runtime.ensure_utf8_output()
+    print()
     print("  " + "-" * 66)
-    print(flush=True)
+    print("   Arena is already running for this data directory.")
+    print("   A second server is NOT started — one engine per session.")
+    if existing.pid:
+        print(f"   Running session: pid {existing.pid}"
+              + (f", {existing.url}" if existing.url else ""))
+    print("  " + "-" * 66)
+
+    url = existing.url
+    reachable = existing.reachable
+    if url and not reachable:
+        # The holder may simply be mid-startup (a one-file build unpacks for
+        # a few seconds). Give it a short, bounded chance to answer.
+        print("   Waiting for the running session to answer…", flush=True)
+        reachable = wait_until_healthy(url, timeout=8.0)
+
+    if url and reachable:
+        print(f"   Opening the running session: {url}/app")
+        if open_browser:
+            try:
+                webbrowser.open(f"{url}/app")
+            except Exception:
+                pass  # no browser is not an error worth failing for
+        print("  " + "-" * 66)
+        return 0
+
+    # Lock held but nothing answering: fail closed and explain. We do NOT
+    # guess that the holder is stale — the OS lock only survives a live
+    # process, so deleting anything here could destroy an active session.
+    print("   The running session is not answering HTTP requests yet.")
+    print("   Look for an Arena window or console on this machine. If you")
+    print("   are certain no Arena is running, a reboot of the machine")
+    print("   releases every lock safely — no files need manual deletion.")
+    print("  " + "-" * 66, flush=True)
+    return 2
 
 
 def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
     import uvicorn
 
-    from app import runtime
+    from app import build_info, runtime
     from app.api.server import create_app
     from app.config.settings import Settings
+    from app.instance import InstanceGuard
 
     runtime.ensure_home()
-    settings = Settings.from_env()
-    application = create_app(settings)
+    _configure_file_logging()
 
-    shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    url = f"http://{shown}:{port}"
-    setup = force_setup or _first_run()
-
-    config = uvicorn.Config(
-        application,
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=False,
-        # A frozen bundle must not spawn reloaders or worker processes: they
-        # re-execute the bundle and multiply memory for no benefit.
-        reload=False,
-        workers=1,
-    )
-    server = uvicorn.Server(config)
-
-    def open_when_ready() -> None:
-        for _ in range(200):  # up to ~20s
-            if getattr(server, "started", False):
-                break
-            time.sleep(0.1)
-        else:
-            return
-        if open_browser:
-            webbrowser.open(f"{url}/setup" if setup else f"{url}/console")
-
-    threading.Thread(target=open_when_ready, daemon=True).start()
-    _print_banner(url, setup)
+    guard = InstanceGuard(runtime.arena_home())
+    existing = guard.try_acquire()
+    if existing is not None:
+        return _handle_existing_instance(existing, open_browser=open_browser)
 
     try:
-        server.run()
-    except KeyboardInterrupt:
-        print("\n  Arena stopped.", flush=True)
-    return 0
+        settings = Settings.from_env()
+        application = create_app(settings)
+        application.state.instance_guard = guard
+
+        shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        url = f"http://{shown}:{port}"
+        guard.publish(port=port, host=host, version=build_info.version(),
+                      build=build_info.build_id())
+        guard.start_heartbeat()
+        setup = force_setup or _first_run()
+        config = uvicorn.Config(
+            application,
+            host=host,
+            port=port,
+            log_level="info",
+            access_log=False,
+            # A frozen bundle must not spawn reloaders or worker processes: they
+            # re-execute the bundle and multiply memory for no benefit.
+            reload=False,
+            workers=1,
+        )
+        server = uvicorn.Server(config)
+
+        def open_when_ready() -> None:
+            for _ in range(200):  # up to ~20s
+                if getattr(server, "started", False):
+                    break
+                time.sleep(0.1)
+            else:
+                return
+            if open_browser:
+                webbrowser.open(f"{url}/setup" if setup else f"{url}/app")
+
+        threading.Thread(target=open_when_ready, daemon=True).start()
+        _print_banner(url, setup)
+
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            print("\n  Arena stopped.", flush=True)
+        return 0
+    finally:
+        guard.release()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-browser", action="store_true",
                         help="do not open a web browser")
     parser.add_argument("--setup", action="store_true",
-                        help="open the credential screen on this run")
+                        help="open the setup screen on this run")
     parser.add_argument("--diagnostics", action="store_true",
                         help="print where Arena keeps its files, then exit")
     args = parser.parse_args(argv)
@@ -243,14 +357,37 @@ def _hold_console_open(reason: str) -> None:
         pass  # the window is closing anyway; never mask the original error
 
 
+def _show_fatal_dialog(reason: str) -> None:
+    """Last-resort visibility for a WINDOWED frozen build on Windows.
+
+    A windowed executable has no console to keep open, so a startup failure
+    would otherwise be completely invisible. ctypes talks to user32 directly,
+    which needs no extra bundled dependency (tkinter is deliberately excluded
+    from the build). On any other platform the durable log in
+    ``<home>/logs/arena.log`` already carries the reason.
+    """
+    if os.name != "nt" or not sys.stdin or sys.stdin.isatty():
+        return
+    try:
+        import ctypes
+
+        text = (f"Arena did not start:\n\n{reason}\n\n"
+                "Nothing was changed and no order was placed.\n"
+                "Details: %LOCALAPPDATA%\\Arena\\logs\\arena.log")
+        MB_ICONERROR = 0x10
+        ctypes.windll.user32.MessageBoxW(0, text, "Arena", MB_ICONERROR)
+    except Exception:
+        pass  # the dialog is best-effort; never mask the original error
+
+
 if __name__ == "__main__":
-    # A frozen console build is very likely a double-click. Anything that stops
+    # A frozen build is very likely a double-click. Anything that stops
     # it from starting must be readable rather than a window that flashes.
     from app.runtime import is_frozen
 
     def reader_is_watching() -> bool:
         return _should_hold_console(sys.argv[1:], frozen=is_frozen(),
-                                    attached=sys.stdin.isatty())
+                                    attached=bool(sys.stdin and sys.stdin.isatty()))
 
     try:
         raise SystemExit(main())
@@ -269,4 +406,6 @@ if __name__ == "__main__":
             traceback.print_exc()
             _hold_console_open(f"{type(exc).__name__}: {exc}")
             raise SystemExit(1)  # already reported; do not print it twice
+        if is_frozen():
+            _show_fatal_dialog(f"{type(exc).__name__}: {exc}")
         raise

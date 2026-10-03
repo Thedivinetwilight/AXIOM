@@ -16,6 +16,9 @@ from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import dashboard, health, market, strategies, backtests, paper, v2, market_events
 from app.api.routes import console as console_routes
 from app.api.routes import setup as setup_routes
+from app.api.routes import frontend as frontend_routes
+from app.api.routes import wizard as wizard_routes
+from app.api.routes import app_api as app_api_routes
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -97,6 +100,13 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # First-run setup writes credentials, so it is loopback-or-bearer like
     # the dashboard page and never open to the network.
     app.include_router(setup_routes.router)
+    # 3.1.0 redesign: the guided wizard, the main application shell, static
+    # assets and the application-level endpoints. Page routes apply their own
+    # loopback_or_bearer dependency; protected data routes carry the bearer
+    # gate explicitly in the route modules.
+    app.include_router(frontend_routes.router)
+    app.include_router(wizard_routes.router)
+    app.include_router(app_api_routes.router)
     for module in (market, strategies, backtests, paper, v2, market_events):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     app.state.sandbox_engine = None  # set by the sandbox engine embedding

@@ -1,17 +1,36 @@
-# Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
+# Arena — Quantitative Research & Trading Platform (3.1.0)
 
-> **New here?** [Download `Arena.exe`](../../releases) and follow
-> [INSTALL_AND_TRADE.md](INSTALL_AND_TRADE.md) — install it and start trading,
-> step by step. (If the release page is empty, the newest build is on the
-> **Actions** tab under *Build executable*.)
-
+> **New here?** [Download `Arena.exe`](../../releases) and double-click it.
+> A first-run wizard opens automatically: one click picks **OFFLINE REPLAY**
+> paper trading, Arena generates its own local credential, initializes its
+> database and starts paper trading. **No commands, no configuration files.**
+> (If the release page is empty, the newest build is on the **Actions** tab
+> under *Build executable*.)
 
 **Arena is a working, modular Python research and paper-trading platform,
-identified as `arena` version `3.0.5`. Real-money order routing does not exist
-in this project.** Sections below keep the full release history (V0.1 → V0.6 →
-V1 → V2.1 → FINAL 3.0.0); each historical section describes its own release.
+identified as `arena` version `3.1.0`.** Live order routing is fully
+implemented and shipped in the same executable, but it is fail-closed behind
+four deliberate switches plus canary/drill/emergency-stop gates — nothing on
+the default or wizard paths can enable it. Sections below keep the full
+release history (V0.1 → V0.6 → V1 → V2.1 → FINAL 3.0.0 → FINAL 3.0.5); each
+historical section describes its own release.
 
-**Current release (FINAL 3.0.5) highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
+**Current release (3.1.0) highlights:** Command-center UX — one-file
+`Arena.exe` with zero-command first-run wizard (Welcome → data mode →
+auto-generated local credential → preflight → START PAPER TRADING),
+professional dark trading-terminal design system served as static assets
+(never templated through Python — the 3.0.5 inline-JS bug class is closed by
+construction), state-first dashboard (OFFLINE/CONNECTING/RUNNING/ERROR/LOCKED),
+research & model lab with experiment tracking and leakage warnings, alert
+center, logs/audit, organized settings with credential masking; graceful
+duplicate-instance handling via a single-instance guard (no SQLite lock
+tracebacks, stale locks recovered only when provably safe); LOCAL_PAPER stays
+zero-config and can never route to a live order host; full frozen-executable
+validation suite (~38 checks incl. real JavaScript parsing of the served
+pages and a scripted end-to-end wizard run against the actual binary) runs as
+a hard CI gate on every platform.
+
+**FINAL 3.0.5 highlights (previous release):** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
 
 **FINAL 3.0.5 (additive — Market Event Listener):** internet news ingestion (public sources, wars/escalations/ceasefires, sanctions/relief, tariffs/trade incl. US-China, policy/central-bank, oil/gas, shipping, regulatory, geopolitical) with relevance detection, source validation, normalization/dedup (fingerprint, multi-source merge, conflict reduces confidence, preserves conflict), impact assessment via transmission paths, decision IGNORE/MONITOR/EVALUATE/NO_TRADE with context to Strategy Router + hard-risk gate; never directly trades, never bypasses Router/lifecycle/portfolio-risk/hard-risk/STOP/broker/auth/LIVE; persisted event_id/timestamp/source/headline/summary/type/countries/markets/assets/sectors/confidence/relevance/effect/response/action/strategy/instruments/result; reputable→primary sources, dedup, unavailable→Arena continues; timeout/retry/backoff/rate-limit/cache/dedup/isolation; no eval/exec/shell; learning memory records price/vol/volume/sector response per 5m/30m/1h/1d/3d/5d via existing market-data infra (observational); dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, escaped, no secrets) — additive, no external live dependency; 20 deterministic tests.
 

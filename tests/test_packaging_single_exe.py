@@ -433,11 +433,16 @@ class TestBuildScript:
         ast.parse((ROOT / "build_exe.py").read_text("utf-8"))
 
     def test_script_smoke_tests_from_a_foreign_working_directory(self):
-        """The smoke test must not run the executable from the project folder,
-        or it would pass while hiding every relative-path bug."""
-        source = (ROOT / "build_exe.py").read_text("utf-8")
-        assert "cwd=str(home)" in source
+        """The frozen verification must not run the executable from the
+        project folder, or it would pass while hiding every relative-path bug.
+        Since 3.1.0 that verification lives in packaging/frozen_e2e.py (run by
+        `build_exe.py --test`), and it launches the artifact from a directory
+        that is neither the repository nor the data home."""
+        source = (ROOT / "packaging" / "frozen_e2e.py").read_text("utf-8")
+        assert "launch_dir" in source
+        assert "cwd=str(launch_dir)" in source
         assert "ARENA_HOME" in source
+        assert "neither the repo nor the home" in source
 
     def test_script_checks_the_artifact_exists(self):
         source = (ROOT / "build_exe.py").read_text("utf-8")

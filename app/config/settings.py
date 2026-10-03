@@ -462,10 +462,13 @@ class Settings:
         hints = get_type_hints(cls)
         values = {}
         # V0.6.2: documented UPSTOX_* aliases for the market-data fields.
-        # Explicit MARKET_DATA_* variables always win.
+        # Explicit MARKET_DATA_* variables always win. 3.1.0: MARKET_DATA_SOURCE
+        # is accepted as an alias for DATA_SOURCE so legacy .env files and old
+        # setup screens keep meaning what they say.
         aliases = {
             "market_data_access_token": "UPSTOX_ACCESS_TOKEN",
             "market_data_symbols": "UPSTOX_INSTRUMENT_KEYS",
+            "data_source": "MARKET_DATA_SOURCE",
         }
         for f in fields(cls):
             name = f.name

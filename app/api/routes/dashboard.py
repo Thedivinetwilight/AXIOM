@@ -152,7 +152,7 @@ async def dashboard_data(request: Request):
             ev["summary"] = str(ev.get("summary", ""))[:2000]
     except Exception:
         market_events = []
-    # 3.0.5: additive quality/market/execution/health panels (no secrets)
+    # __VERSION__: additive quality/market/execution/health panels (no secrets)
     try:
         # Recent quality scores (if any)
         quality_recent = repository.list_system_events(limit=15) if repository else []
@@ -275,7 +275,7 @@ async def dashboard(request: Request):
     page = """<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>Arena 3.0.5 — Command Console</title><style>
+<title>Arena __VERSION__ — Command Console</title><style>
 :root{
   --bg:#010806; --bg-2:#03130d; --panel:rgba(5,38,26,.52); --panel-2:rgba(2,16,11,.72);
   --line:rgba(0,255,156,.20); --line-2:rgba(0,255,156,.45); --line-3:rgba(0,255,156,.75);
@@ -455,7 +455,7 @@ body[data-density="dense"] .vital .v.sm{font-size:11px;padding-top:2px}
 <header>
   <div class="brand">
     <div class="core" id="core"><div class="ring"></div><div class="ring b"></div><div class="burst"></div><div class="pip"></div></div>
-    <div class="wordmark">ARENA<small>COMMAND CONSOLE · 3.0.5</small></div>
+    <div class="wordmark">ARENA<small>COMMAND CONSOLE · __VERSION__</small></div>
   </div>
   <div class="badges">
     <span class="badge" id="mode">__MODE_BADGE__</span>
@@ -487,16 +487,16 @@ body[data-density="dense"] .vital .v.sm{font-size:11px;padding-top:2px}
 <section class="w4"><h2>Strategy &amp; Signals</h2><table id="strategy"></table></section>
 <section class="w6"><h2>Positions &amp; Sandbox Orders</h2><table id="orders"></table></section>
 <section class="w3"><h2>Learning / Model</h2><table id="learning"></table></section>
-<section class="w3"><h2>Execution (3.0.5)</h2><table id="execution"></table></section>
+<section class="w3"><h2>Execution (__VERSION__)</h2><table id="execution"></table></section>
 <section class="w8"><h2>Alerts &amp; Live Ops (V2.1)</h2><table id="alerts"></table></section>
-<section class="w4"><h2>Strategy Health (3.0.5)</h2><table id="health"></table></section>
+<section class="w4"><h2>Strategy Health (__VERSION__)</h2><table id="health"></table></section>
 <section class="w6"><h2>Market Events</h2><table id="market_events"></table></section>
-<section class="w6"><h2>Market Context (3.0.5)</h2><table id="market_context"></table></section>
-<section class="w6"><h2>Quality (3.0.5)</h2><table id="quality"></table></section>
+<section class="w6"><h2>Market Context (__VERSION__)</h2><table id="market_context"></table></section>
+<section class="w6"><h2>Quality (__VERSION__)</h2><table id="quality"></table></section>
 <section class="w6"><h2>Recent Events</h2><table id="events"></table></section>
 </main>
 <footer>
-  <span>Arena 3.0.5</span><span id="f-mode">—</span><span id="f-src">data: recorded state</span>
+  <span>Arena __VERSION__</span><span id="f-mode">—</span><span id="f-src">data: recorded state</span>
   <span>poll 5s</span><span id="f-warn"></span>
 </footer>
 <script>
@@ -713,7 +713,7 @@ async function tick(){
         + '<tr><td>CONF: '+esc(ev.confidence)+' | RESPONSE: '+esc(ev.arena_response)+' | ACTION: '+esc(ev.action_taken)+' | RESULT: '+esc(ev.result_after_event?JSON.stringify(ev.result_after_event).slice(0,120):'pending')+'</td></tr>'
       ).join('');
     }
-    // 3.0.5 QUALITY panel
+    // __VERSION__ QUALITY panel
     const qe = d.quality_events || [];
     $('quality').innerHTML = qe.length? qe.map(e=>'<tr><td>'+esc(e.kind)+'</td><td>'+esc(JSON.stringify(e.payload).slice(0,120))+'</td></tr>').join('') : '<tr><td>No quality events</td></tr>';
     // MARKET CONTEXT
@@ -748,4 +748,5 @@ tick(); setInterval(tick, 5000);
     return HTMLResponse(
         page.replace("__MODE_BADGE__", mode_badge)
             .replace("__LIVE_CLASS__", live_class)
-            .replace("__LIVE_BADGE__", live_badge))
+            .replace("__LIVE_BADGE__", live_badge)
+            .replace("__VERSION__", __version__))

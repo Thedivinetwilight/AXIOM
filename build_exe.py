@@ -23,9 +23,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -62,9 +59,44 @@ def clean() -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def write_build_meta() -> Path:
+    """Record the exact commit/version this bundle is built from.
+
+    The file is bundled as data, so a packaged Arena can identify itself on
+    machines without git — and the UI/tests can detect stale builds. Written
+    fresh on every build; never committed.
+    """
+    from datetime import datetime, timezone
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        from app import __version__
+    finally:
+        sys.path.pop(0)
+    commit = ""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            commit = out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    meta = {
+        "version": __version__,
+        "commit": commit,
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+    }
+    path = ROOT / "app" / "BUILD_META.json"
+    path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return path
+
+
 def build(onefile: bool) -> Path:
     ensure_pyinstaller()
     clean()
+    write_build_meta()
     argv = [
         sys.executable, "-m", "PyInstaller", str(SPEC),
         "--noconfirm", "--distpath", str(DIST), "--workpath", str(BUILD),
@@ -80,105 +112,32 @@ def build(onefile: bool) -> Path:
 
 
 def smoke_test(artifact: Path) -> bool:
-    """Start the built executable in a throwaway home and talk to it.
+    """Full end-to-end verification of the ACTUAL executable.
 
-    This is the check that matters: a bundle can build cleanly and still be
-    missing a module that only gets imported on the first HTTP request.
+    Not a smoke test in the old sense: this runs packaging/frozen_e2e.py,
+    which starts the artifact in a fresh external home, validates the served
+    frontend JavaScript with a real parser, drives the real wizard button flow
+    (start paper -> replay -> preflight -> START PAPER TRADING) against the
+    running build, verifies simulated executions, restart recovery and
+    duplicate-launch handling, and checks that no secret reaches the logs.
+
+    Loaded by path: ``packaging/`` must NOT be a Python package, because the
+    ``packaging`` name belongs to the PyPI library PyInstaller itself imports.
     """
-    home = ROOT / "build" / "smoketest-home"
-    if home.exists():
-        shutil.rmtree(home, ignore_errors=True)
-    home.mkdir(parents=True, exist_ok=True)
+    import importlib.util
 
-    port = "8099"
-    env = dict(os.environ)
-    env["ARENA_HOME"] = str(home)
-    env["ARENA_PORT"] = port
-    env.pop("DATABASE_URL", None)
-    env.pop("DATA_DIR", None)
+    spec = importlib.util.spec_from_file_location(
+        "arena_frozen_e2e", ROOT / "packaging" / "frozen_e2e.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
-    print(f"\n  starting {artifact.name} on port {port}…", flush=True)
-    process = subprocess.Popen(
-        [str(artifact), "--no-browser"],
-        cwd=str(home),  # deliberately NOT the app folder, to catch CWD bugs
-        env=env,
-        stdin=subprocess.DEVNULL,  # a smoke test must never wait for a keypress
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    base = f"http://127.0.0.1:{port}"
-    results: dict[str, object] = {}
-    try:
-        for _ in range(120):  # up to ~60s: first launch unpacks the bundle
-            if process.poll() is not None:
-                print("  the executable exited early. Output:")
-                print(process.stdout.read() if process.stdout else "")
-                return False
-            try:
-                with urllib.request.urlopen(base + "/health", timeout=2) as response:
-                    results["health"] = json.load(response)
-                break
-            except Exception:
-                time.sleep(0.5)
-        else:
-            print("  timed out waiting for /health")
-            return False
-
-        for path in ("/setup", "/console", "/dashboard"):
-            try:
-                with urllib.request.urlopen(base + path, timeout=10) as response:
-                    results[path] = response.status
-            except Exception as exc:  # pragma: no cover
-                results[path] = f"ERROR {exc}"
-
-        print("\n  --- smoke test results ---")
-        print(f"  /health    -> {results.get('health')}")
-        for path in ("/setup", "/console", "/dashboard"):
-            print(f"  {path:10s} -> {results.get(path)}")
-
-        created = sorted(p.name for p in home.iterdir())
-        print(f"  created in ARENA_HOME: {created}")
-        database = home / "trading_bot.db"
-        print(f"  database created outside the bundle: {database.exists()}")
-
-        # The feature console runs commands by re-entering the bundle with
-        # --cli (PyInstaller makes sys.executable the .exe itself, which cannot
-        # be invoked as `python -m app`). That is a different code path from
-        # the server, it is the one that spawns a child process, and on Windows
-        # it is also the one where a missing encoding turns a digest into an
-        # empty file and exit code 1. So run one real CLI command and check the
-        # bytes it wrote.
-        digest = home / "digest.md"
-        cli = subprocess.run(
-            [str(artifact), "--cli", "live-digest", "--markdown", "--out", str(digest)],
-            cwd=str(home), env=env, capture_output=True, text=True, timeout=300)
-        try:
-            digest_ok = "LIVE OPS DIGEST" in digest.read_text(encoding="utf-8")
-            digest_error = ""
-        except (OSError, UnicodeDecodeError) as exc:
-            digest_ok, digest_error = False, f"{type(exc).__name__}: {exc}"
-        print(f"  --cli live-digest -> exit {cli.returncode}, "
-              f"{digest.stat().st_size if digest.exists() else 0} bytes written, "
-              f"utf-8 readable: {digest_ok} {digest_error}")
-        if cli.returncode != 0:
-            print(f"  --cli output:\n{cli.stdout[-2000:]}\n{cli.stderr[-2000:]}")
-
-        ok = (
-            isinstance(results.get("health"), dict)
-            and all(results.get(path) == 200 for path in ("/setup", "/console", "/dashboard"))
-            and database.exists()
-            and cli.returncode == 0
-            and digest_ok
-        )
-        return ok
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:  # pragma: no cover
-            process.kill()
+    result = module.run_frozen_e2e(artifact, ROOT / "build" / "e2e-workdir")
+    failed = [r for r in result["results"] if not r["ok"]]
+    if failed:
+        print("\n  FAILED CHECKS:")
+        for entry in failed:
+            print(f"    - {entry['name']}: {entry['detail']}")
+    return result["ok"]
 
 
 def main() -> int:

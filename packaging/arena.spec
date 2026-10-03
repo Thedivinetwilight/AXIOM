@@ -49,6 +49,27 @@ hiddenimports = [
     "app.console.runner",
     "app.console.page",
     "app.console.setup_page",
+    # 3.1.0: the redesigned frontend + wizard backend + app-level endpoints.
+    "app.api.routes.frontend",
+    "app.api.routes.wizard",
+    "app.api.routes.app_api",
+    # The complete live-trading rail ships inside the bundle (locked, but
+    # present and functional — activation stays deliberate and external).
+    "app.brokers.live",
+    "app.live.alerts",
+    "app.live.digest",
+    "app.live.drill",
+    "app.live.guards",
+    "app.live.lock",
+    "app.live.ops",
+    "app.live.pnl",
+    "app.live.preflight",
+    "app.live.watchdog",
+    "app.validation.walk_forward",
+    "app.validation.robustness",
+    "app.validation.train_test",
+    "app.instance",
+    "app.build_info",
 ]
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
@@ -68,6 +89,21 @@ for pattern in (
     (".env.example", "."),
     ("ARENA_GUIDE.md", "."),
     ("requirements.txt", "."),
+):
+    source = ROOT / pattern[0]
+    if source.exists():
+        datas.append((str(source), pattern[1]))
+
+# 3.1.0: the redesigned frontend. Static files (never templated through Python
+# strings), resolved at runtime by app.runtime.static_dir(). BUILD_META.json is
+# written by build_exe.py before the build; a source-run fallback covers its
+# absence so the spec stays usable with a bare `pyinstaller` invocation.
+for pattern in (
+    ("app/static/arena.css", "app/static"),
+    ("app/static/arena-core.js", "app/static"),
+    ("app/static/arena-wizard.js", "app/static"),
+    ("app/static/arena-app.js", "app/static"),
+    ("app/BUILD_META.json", "app"),
 ):
     source = ROOT / pattern[0]
     if source.exists():

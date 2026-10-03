@@ -126,7 +126,11 @@ def main() -> int:
 
         def __init__(self):
             super().__init__()
-            self.setWindowTitle("Arena 3.0.5 — Quantitative Research & Trading Platform")
+            try:
+                from app import __version__ as _v
+            except Exception:
+                _v = "unknown"
+            self.setWindowTitle(f"Arena {_v} — Quantitative Research & Trading Platform")
             self.resize(1240, 800)
             self.client = ArenaApiClient(base_url, token)
             self.forecast = ForecastUiState()
