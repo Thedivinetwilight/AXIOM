@@ -40,6 +40,7 @@ Two properties worth stating explicitly:
 | `python -m app engine` | runs the engine (refuses a second LIVE engine) | yes, by design |
 | `python -m app live-status [--audit]` | snapshot from recorded state; `--audit` replays both order trails | no |
 | `python -m app live-digest [--hours 24] [--markdown] [--post]` | one-page roll-up of alerts/rails/orders/PnL | no |
+| `python tools/determinism_check.py` | proves a replayed backtest reproduces (fresh processes, different hash seeds) | no |
 | `python -m app live-ack --id ID \| --kind K \| --all` | acknowledges alerts (local bookkeeping) | no |
 | `python -m app live-halt --reason "..."` | persisted EMERGENCY STOP; works even on a broken config | no (only ever halts) |
 | `python -m app live-resume` | clears the stop; refuses unless the live opt-in is armed | no (only clears a stop) |

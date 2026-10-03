@@ -61,7 +61,14 @@ second LIVE engine is refused while the first heartbeats), and
 `GET /api/v2/alerts` ·
 `POST /api/v2/alerts/ack` · `GET /api/v2/live/status` — see
 [LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
-Verification status: **1149 tests passed / 37 skipped**;
+Replay determinism is checked by `tools/determinism_check.py`: the real backtest
+engine is run twice in-process and again in fresh interpreters with different
+`PYTHONHASHSEED` values, and a canonical fingerprint of orders/fills/trades/
+metrics must match every time (opaque uuid identities are relabelled rather than
+compared, so only decisions are measured). Exit code 0/1; a failure names the
+first differing location, or — when only the cross-process runs diverge — points
+at string-hash ordering, the classic silent cause.
+Verification status: **1173 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See
