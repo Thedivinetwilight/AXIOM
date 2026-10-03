@@ -73,12 +73,15 @@ jobs:
           - os: windows-latest
             artifact: Arena-windows-x64
             binary: dist/Arena.exe
+            checksum: SHA256SUMS-windows-x64.txt
           - os: ubuntu-latest
             artifact: Arena-linux-x64
             binary: dist/Arena
+            checksum: SHA256SUMS-linux-x64.txt
           - os: macos-latest
             artifact: Arena-macos
             binary: dist/Arena
+            checksum: SHA256SUMS-macos.txt
 
     steps:
       - uses: actions/checkout@v4
@@ -149,7 +152,7 @@ jobs:
           import hashlib, pathlib, os
           target = pathlib.Path("${{ matrix.binary }}")
           digest = hashlib.sha256(target.read_bytes()).hexdigest()
-          pathlib.Path("SHA256SUMS.txt").write_text(
+          pathlib.Path("${{ matrix.checksum }}").write_text(
               f"{digest}  {target.name}\n", encoding="utf-8")
           print(f"{target}  {target.stat().st_size / 1048576:.1f} MB")
           print(f"sha256 {digest}")
@@ -160,18 +163,42 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             ${{ matrix.binary }}
-            SHA256SUMS.txt
+            ${{ matrix.checksum }}
           if-no-files-found: error
           retention-days: 30
 
       - name: Attach to the release
+        # A tag build publishes the artifacts where a normal person looks for
+        # them — Releases — instead of only in this run's 30-day Artifacts
+        # section, which needs a GitHub login to download from.
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: "Arena 3.0.5 — executable build"
+          body: |
+            Single-file Arena executables, built and smoke-tested by this
+            workflow on each platform (the run that produced this release
+            started the binary, served /health, /setup, /console and
+            /dashboard, ran a real command through the frozen `--cli` entry
+            point, and checked it wrote its database outside the bundle).
+
+            - `Arena.exe` — Windows x64 (double-click it; first run opens the
+              credential screen)
+            - `Arena` — Linux x64
+            - `Arena` — macOS
+            - `SHA256SUMS-*.txt` — checksum per platform
+
+            Start with **paper trading**: it needs no credentials and no money.
+            See `INSTALL_AND_TRADE.md` in the repository. The executables are
+            unsigned, so Windows SmartScreen will ask once (More info → Run
+            anyway). Real-money trading stays off and needs the four-switch
+            opt-in plus non-zero risk limits; the setup screen refuses it.
           files: |
             ${{ matrix.binary }}
-            SHA256SUMS.txt
+            ${{ matrix.checksum }}
           fail_on_unmatched_files: true
+          allowUpdates: true
+          prerelease: true
 
       - name: Summarise the build
         # The job conclusion is green even when the full suite failed on this
@@ -197,8 +224,8 @@ jobs:
             esac
             if [ -f "${{ matrix.binary }}" ]; then
               echo "- Artifact: **built and smoke-tested** — \`${{ matrix.binary }}\`, $(du -h "${{ matrix.binary }}" | cut -f1)"
-              if [ -f SHA256SUMS.txt ]; then
-                echo "- Checksum: \`$(cat SHA256SUMS.txt)\`"
+              if [ -f "${{ matrix.checksum }}" ]; then
+                echo "- Checksum: \`$(cat "${{ matrix.checksum }}")\`"
               fi
               echo
               echo "Download it from the **Artifacts** section of this run page."
