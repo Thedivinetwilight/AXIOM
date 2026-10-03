@@ -68,6 +68,35 @@ class ConsoleError(RuntimeError):
     """Raised for requests the console refuses before running anything."""
 
 
+def _terminate_tree(process: subprocess.Popen, *, force: bool) -> None:
+    """Stop a command and everything it started.
+
+    POSIX: the child was launched with start_new_session=True, so it leads its
+    own process group and the whole tree can be signalled at once — important
+    because a command like `engine` may have spawned threads or helpers that
+    would otherwise keep the SQLite lock.
+
+    Windows: there is no process-group signal. `os.killpg` does not exist at
+    all there, so calling it raised AttributeError the first time a timeout
+    fired. `taskkill /T` is the supported way to take down a tree.
+    """
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
+
+    signal_number = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(process.pid), signal_number)
+    except (ProcessLookupError, PermissionError):
+        # The process is already gone, or we may not signal it: fall back to
+        # the single-process API rather than letting the timeout handler raise.
+        process.kill() if force else process.terminate()
+
+
 def _allowed() -> dict[str, set[str]]:
     """Command allowlist, derived from the live parsers on every call."""
     allowed = {"app": {c.name for c in cli_commands()}}
@@ -155,17 +184,11 @@ def run_command(
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):  # pragma: no cover
-                process.terminate()
+            _terminate_tree(process, force=False)
             try:
                 stdout, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:  # pragma: no cover
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    process.kill()
+                _terminate_tree(process, force=True)
                 stdout, stderr = process.communicate()
 
         duration_ms = int((time.perf_counter() - started) * 1000)
