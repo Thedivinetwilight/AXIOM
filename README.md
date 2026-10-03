@@ -1,5 +1,8 @@
 # Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
 
+> **New here?** [INSTALL_AND_TRADE.md](INSTALL_AND_TRADE.md) — download the `.exe`, install it, and start trading, step by step.
+
+
 **Arena is a working, modular Python research and paper-trading platform,
 identified as `arena` version `3.0.5`. Real-money order routing does not exist
 in this project.** Sections below keep the full release history (V0.1 → V0.6 →

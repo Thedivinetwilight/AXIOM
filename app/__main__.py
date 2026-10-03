@@ -1574,9 +1574,13 @@ def cmd_upstox_login(args) -> int:
     """Official OAuth 2.0 authorization-code flow; token goes to .env only."""
     from app.data.upstox_auth import run_login_flow
 
-    from app.config.settings import ROOT
+    # NOT ROOT/.env: when packaged, ROOT is PyInstaller's temporary extraction
+    # directory, so a refreshed token would be written to a file that is
+    # deleted on exit. The operator would see "login complete" and the engine
+    # would still hold the stale credential.
+    from app import runtime
 
-    run_login_flow(ROOT / ".env")
+    run_login_flow(runtime.env_file())
     return 0
 
 

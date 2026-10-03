@@ -81,7 +81,18 @@ BLOCKER = "BLOCKER"
 WARNING = "WARNING"
 NOTE = "NOTE"
 
-DEFAULT_ENV_FILE = ROOT / ".env"
+def _default_env_file():
+    """The .env the application will actually load.
+
+    Not simply ROOT/.env: a packaged Arena reads a per-user file, so checking
+    the repository one would validate a configuration the app never sees.
+    """
+    from app import runtime
+
+    return runtime.env_file()
+
+
+DEFAULT_ENV_FILE = _default_env_file()
 
 #: Documented Upstox-named aliases; a mirror of the mapping inside
 #: ``Settings.from_env`` (explicit MARKET_DATA_* variables always win).

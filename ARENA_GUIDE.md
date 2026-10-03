@@ -544,6 +544,10 @@ Selected endpoints:
 
 ## 8.5 Running as a single executable
 
+> **Just want to get running?** [INSTALL_AND_TRADE.md](INSTALL_AND_TRADE.md) is a
+> self-contained walkthrough: download, install, first trade. This section is the
+> reference for how the packaging works.
+
 Everything — server, interface and every command — can be packaged into one
 file you double-click.
 

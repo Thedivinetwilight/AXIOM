@@ -630,3 +630,46 @@ class TestPaperShutdown:
         assert process.returncode == 0, output[-600:]
         assert "Task exception was never retrieved" not in output
         assert "Paper write requires exclusive ownership" not in output
+
+
+class TestCredentialPathsFollowTheHome:
+    """Files that hold credentials must never be written to ROOT when frozen:
+    it is PyInstaller's temporary extraction directory, deleted on exit."""
+
+    def test_upstox_login_writes_to_the_runtime_env_file(self):
+        """A refreshed daily token written to a temp directory would vanish,
+        while the operator saw 'login complete' and the engine kept the stale
+        credential."""
+        source = (ROOT / "app" / "__main__.py").read_text("utf-8")
+        assert 'run_login_flow(ROOT / ".env")' not in source
+        assert "run_login_flow(runtime.env_file())" in source
+
+    def test_the_config_checker_inspects_the_file_the_app_loads(self):
+        """Validating the repository .env in a packaged build would check a
+        configuration the application never sees."""
+        source = (ROOT / "tools" / "live_config_check.py").read_text("utf-8")
+        assert 'DEFAULT_ENV_FILE = ROOT / ".env"' not in source
+        assert "runtime.env_file()" in source
+
+    def test_the_checker_default_is_the_runtime_file(self, frozen, monkeypatch):
+        import importlib
+
+        monkeypatch.setenv("ARENA_ENV_FILE", str(frozen / ".env"))
+        import tools.live_config_check as checker
+
+        reloaded = importlib.reload(checker)
+        try:
+            assert Path(reloaded.DEFAULT_ENV_FILE) == frozen / ".env"
+        finally:
+            monkeypatch.delenv("ARENA_ENV_FILE", raising=False)
+            importlib.reload(checker)
+
+    def test_login_flow_defaults_are_unchanged_for_library_callers(self):
+        """run_login_flow(env_path=None) still means 'the current directory',
+        which is what the existing tests and any embedder expect."""
+        import inspect
+
+        from app.data.upstox_auth import run_login_flow
+
+        source = inspect.getsource(run_login_flow)
+        assert 'env_path or Path.cwd() / ".env"' in source
