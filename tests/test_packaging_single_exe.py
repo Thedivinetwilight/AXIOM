@@ -604,6 +604,58 @@ class TestPaperShutdown:
         for forbidden in ("cancel_all", "persist", "save_broker", "close()"):
             assert forbidden not in code, f"request_stop performs I/O: {forbidden}"
 
+    def test_stopping_twice_is_safe_and_cancels_once(self, tmp_path, monkeypatch):
+        """The exact failure: stop() ran twice, the second pass writing to a
+        repository whose writer had been released. Driven directly rather than
+        through a signal, so it is deterministic and runs on every platform."""
+        import asyncio
+        from datetime import timezone
+
+        from app.backtesting.costs import ExecutionConfig
+        from app.database.database import Database
+        from app.database.repository import Repository
+        from app.paper_trading.broker import PaperBroker
+        from app.paper_trading.simulator import PaperSimulator
+
+        monkeypatch.chdir(tmp_path)
+        database = Database(f"sqlite:///{tmp_path}/shutdown.db")
+        repository = Repository(database)
+        try:
+            broker = PaperBroker(
+                ExecutionConfig(commission=0.0, slippage=0.0, spread=0.0),
+                currency="INR", timeframe="1D", repository=repository,
+            )
+            simulator = PaperSimulator(broker)
+
+            async def run():
+                first = await simulator.stop()
+                # broker.close() releases the repository writer — this happened
+                # BEFORE the orphaned task ran, which is why the second stop
+                # died with "Paper write requires exclusive ownership"
+                broker.close()
+                # the orphaned signal-handler task's stop() lands here
+                second = await simulator.stop()
+                return first, second
+
+            first, second = asyncio.run(run())
+            assert first["state"] == "STOPPED"
+            assert second["state"] == "STOPPED", (
+                "stopping after the writer was released must be a safe no-op"
+            )
+        finally:
+            repository.release_writer()
+            database.close()
+
+    def test_the_signal_test_is_posix_only(self):
+        """Windows cannot deliver SIGINT to a child process from a test, so the
+        integration check below is POSIX-only. The behaviour it covers is
+        pinned deterministically by the test above on every platform."""
+        source = (ROOT / "tests" / "test_packaging_single_exe.py").read_text("utf-8")
+        assert "cannot send SIGINT to a child process" in source
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Windows cannot send SIGINT to a child process; "
+                               "the test above covers the same contract directly")
     def test_a_real_session_ends_without_a_traceback(self, frozen, tmp_path):
         import signal
         import subprocess
