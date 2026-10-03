@@ -498,3 +498,135 @@ class TestWindowsPortability:
         assert "ts" in snapshot
         assert snapshot.get("rss_mb") is None or isinstance(snapshot["rss_mb"], float)
         assert "disk_used_pct" in snapshot
+
+
+class TestOutputsSurviveTheBundle:
+    """ROOT is PyInstaller's temporary extraction directory when frozen, and it
+    is deleted on exit. Anything written there is lost."""
+
+    def test_output_root_follows_the_home_when_portable(self, frozen):
+        from app import runtime
+
+        assert runtime.output_root() == frozen
+
+    def test_output_root_is_the_repo_from_source(self, monkeypatch):
+        monkeypatch.delenv("ARENA_HOME", raising=False)
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        from app import runtime
+
+        assert runtime.output_root() == ROOT
+
+    def test_run_py_writes_outputs_outside_the_bundle(self):
+        """results/, logs/ and data/cache are outputs: a backtest launched from
+        the .exe must not print a path that disappears."""
+        source = (ROOT / "run.py").read_text("utf-8")
+        assert 'ROOT / "results"' not in source
+        assert 'ROOT / "logs/bot.jsonl"' not in source
+        assert 'ROOT / "data/cache"' not in source
+        assert source.count("_output_root()") >= 3
+        # bundled INPUT data must still be read from the bundle
+        assert 'ROOT / "data/sample.csv"' in source
+
+    def test_backtest_writes_where_it_says_it_did(self, frozen, tmp_path):
+        """End-to-end: run a backtest in a packaged-style home and confirm the
+        reported results file exists."""
+        import subprocess
+
+        env = dict(os.environ)
+        env["ARENA_HOME"] = str(frozen)
+        frozen.mkdir(parents=True, exist_ok=True)
+        repo_copy = ROOT / "results" / "backtest" / "result.json"
+        before = repo_copy.stat().st_mtime if repo_copy.exists() else 0.0
+        result = subprocess.run(
+            [sys.executable, "run.py", "--mode", "backtest",
+             "--database", f"sqlite:///{tmp_path}/bt.db"],
+            capture_output=True, text=True, timeout=600, cwd=str(ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr[-600:]
+
+        written = frozen / "results" / "backtest" / "result.json"
+        assert written.exists(), (
+            "the backtest wrote nothing into ARENA_HOME; it would have gone to "
+            f"ROOT when frozen. Files found: {sorted(p.name for p in frozen.rglob('*'))}"
+        )
+        # and the project's own results directory was left untouched, so the
+        # assertion cannot be broken by an earlier source-mode run
+        repo_copy = ROOT / "results" / "backtest" / "result.json"
+        assert not repo_copy.exists() or repo_copy.stat().st_mtime < before
+
+
+class TestPaperShutdown:
+    """Ctrl+C used to print a RuntimeError traceback at the end of every clean
+    paper session: the signal handler created an unawaited stop() task that ran
+    after broker.close() released the repository writer."""
+
+    def test_stop_is_idempotent(self):
+        import asyncio
+        import inspect
+
+        from app.paper_trading.simulator import PaperSimulator
+
+        source = inspect.getsource(PaperSimulator.stop)
+        assert "if self._stopped:" in source
+        assert "self._stopped = True" in source
+
+    def test_the_signal_handler_does_not_create_an_orphan_task(self):
+        source = (ROOT / "run.py").read_text("utf-8")
+        handler = source[source.index("def stop_requested():"):]
+        handler = handler[:handler.index("for sig in")]
+        assert "create_task" not in handler, "a fire-and-forget stop races the shutdown"
+        assert "request_stop()" in handler
+
+    def test_request_stop_does_no_io(self):
+        """It must be safe to call from a signal handler, i.e. no repository
+        writes — cancelling the stream task is all it may do."""
+        import inspect
+
+        from app.paper_trading.simulator import PaperSimulator
+
+        import ast as _ast
+        import textwrap
+
+        source = inspect.getsource(PaperSimulator.request_stop)
+        tree = _ast.parse(textwrap.dedent(source))
+        # strip docstrings: the explanation legitimately mentions broker.close()
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                 _ast.ClassDef, _ast.Module)):
+                body = node.body
+                if body and isinstance(body[0], _ast.Expr) and \
+                        isinstance(body[0].value, _ast.Constant) and \
+                        isinstance(body[0].value.value, str):
+                    node.body = body[1:] or [_ast.Pass()]
+        code = _ast.unparse(tree)
+
+        assert "cancel()" in code
+        for forbidden in ("cancel_all", "persist", "save_broker", "close()"):
+            assert forbidden not in code, f"request_stop performs I/O: {forbidden}"
+
+    def test_a_real_session_ends_without_a_traceback(self, frozen, tmp_path):
+        import signal
+        import subprocess
+        import time
+
+        env = dict(os.environ)
+        env["ARENA_HOME"] = str(frozen)
+        frozen.mkdir(parents=True, exist_ok=True)
+        process = subprocess.Popen(
+            [sys.executable, "run.py", "--mode", "paper", "--source", "replay",
+             "--symbol", "DEMO", "--delay", "0.05",
+             "--database", f"sqlite:///{tmp_path}/paper.db"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            cwd=str(ROOT), env=env,
+        )
+        time.sleep(8)
+        process.send_signal(signal.SIGINT)
+        try:
+            output, _ = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover
+            process.kill()
+            output, _ = process.communicate()
+
+        assert process.returncode == 0, output[-600:]
+        assert "Task exception was never retrieved" not in output
+        assert "Paper write requires exclusive ownership" not in output

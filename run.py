@@ -81,11 +81,23 @@ def parser():
     return p
 
 
+def _output_root() -> Path:
+    """Results, logs and cache go under ARENA_HOME when packaged.
+
+    When frozen, ROOT is PyInstaller's temporary extraction directory, deleted
+    on exit -- so a backtest run from the .exe would print a results path that
+    no longer exists moments later.
+    """
+    from app import runtime
+
+    return runtime.output_root()
+
+
 def load_bars(path, symbol, timeframe, args, calendar):
     provider = CSVProvider(
         path,
         timeframe,
-        DataCache(ROOT / "data/cache"),
+        DataCache(_output_root() / "data" / "cache"),
         clean=args.clean,
         strict_gaps=args.strict_gaps,
         calendar=calendar,
@@ -127,7 +139,14 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
     loop = asyncio.get_running_loop()
 
     def stop_requested():
-        asyncio.create_task(simulator.stop())
+        # Do NOT run the full stop path here. Stopping cancels orders and
+        # persists the final state, which needs the repository writer — and
+        # the writer is released at the end of shutdown. A task created here
+        # was never awaited, so it ran after that release and died with
+        # "Paper write requires exclusive ownership", printing a traceback at
+        # the end of an otherwise clean session. Requesting the stop lets the
+        # single awaited stop() below perform the ordered shutdown.
+        simulator.request_stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -164,7 +183,7 @@ def main(argv=None):
         default_timeframe=args.timeframe or settings.default_timeframe,
         database_url=args.database or settings.database_url,
     )
-    configure(settings.log_level, ROOT / "logs/bot.jsonl")
+    configure(settings.log_level, _output_root() / "logs" / "bot.jsonl")
     if args.mode == "api":
         import uvicorn
         from app.api.server import create_app
@@ -198,7 +217,7 @@ def main(argv=None):
         bars = load_bars(args.csv, symbol, timeframe, args, calendar)
     database = Database(settings.database_url)
     repository = Repository(database)
-    output = args.output or ROOT / "results" / args.mode
+    output = args.output or _output_root() / "results" / args.mode
     output.mkdir(parents=True, exist_ok=True)
     try:
         if args.mode == "backtest":

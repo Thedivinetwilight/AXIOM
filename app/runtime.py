@@ -169,3 +169,19 @@ def describe() -> dict:
         "env_candidates": [str(p) for p in env_candidates()],
         "python": sys.version.split()[0],
     }
+
+
+def output_root() -> Path:
+    """Where Arena writes RESULTS, LOGS and CACHE.
+
+    These are outputs, not source: nothing reads them back to run the program.
+    From source they stay in the repository, exactly as before. Packaged, they
+    must NOT go to ROOT — when frozen, ROOT is PyInstaller's temporary
+    extraction directory, which is deleted on exit. A backtest run from the
+    .exe would print
+
+        Results: /tmp/_MEIabc123/results/backtest/result.json
+
+    and that path would be gone moments later.
+    """
+    return arena_home() if is_portable() else _repo_root()
