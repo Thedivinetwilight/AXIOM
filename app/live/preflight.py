@@ -117,6 +117,16 @@ def run_checks(settings, *, repository=None) -> list[Check]:
          f"only: {', '.join(ENGINE_TIMEFRAMES)}); the live engine refuses to "
          "start rather than silently downgrading")))
 
+    # 4c. market-data mode vs the timeframe the engine will run
+    from app.data.factory import market_data_mode_error
+
+    mode_error = market_data_mode_error(settings)
+    checks.append(_check(
+        "market_data_mode_matches_timeframe", not mode_error, ERROR,
+        mode_error or (f"MARKET_DATA_MODE={getattr(settings, 'market_data_mode', '?')} "
+                       f"can carry DEFAULT_TIMEFRAME="
+                       f"{getattr(settings, 'default_timeframe', '?')}")))
+
     # 5. canary ramp
     canary_notional = float(getattr(settings, "live_canary_max_notional", 0) or 0)
     canary_orders = int(getattr(settings, "live_canary_orders", 0) or 0)

@@ -439,12 +439,13 @@ def cmd_engine(args) -> int:
         return 2
     # A live engine is intraday-only; refuse before building anything, rather
     # than silently downgrading the engine while the stream keeps its timeframe.
-    from app.data.factory import live_timeframe_error
+    from app.data.factory import live_timeframe_error, market_data_mode_error
 
-    timeframe_error = live_timeframe_error(settings, broker_mode)
-    if timeframe_error:
-        print(json.dumps({"ok": False, "error": timeframe_error}, indent=2))
-        return 2
+    for error in (live_timeframe_error(settings, broker_mode),
+                  market_data_mode_error(settings)):
+        if error:
+            print(json.dumps({"ok": False, "error": error}, indent=2))
+            return 2
 
     from app.backtesting.costs import ExecutionConfig
     from app.brokers.live import UpstoxLiveBroker

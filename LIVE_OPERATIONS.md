@@ -123,8 +123,10 @@ is never trapped.
 
 - **configuration** — the four switches, a documented live order host, a credential, all
   four hard limits non-zero, canary/drawdown/alert hygiene, the data source, the session
-  calendar, and `DEFAULT_TIMEFRAME` (the engine is intraday-only and refuses to start live
-  with a daily default instead of silently downgrading while the stream keeps its timeframe);
+  calendar, `DEFAULT_TIMEFRAME` (the engine is intraday-only and refuses to start live
+  with a daily default instead of silently downgrading while the stream keeps its timeframe),
+  and the `MARKET_DATA_MODE` ↔ timeframe pairing (`full` carries official 1m/30m bars only;
+  every other timeframe is built locally from ticks, so use `ltpc` for 5m/15m);
 - **recorded state** — will a fresh engine inherit a clean world? It verifies the audit
   trail is internally consistent (no orphan fills, no FILLED order without executions, no
   quantity mismatches), that no persisted EMERGENCY STOP is set, that no working orders or

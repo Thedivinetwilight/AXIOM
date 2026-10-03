@@ -34,6 +34,28 @@ def live_timeframe_error(settings, broker_mode: str) -> str:
             "intraday timeframe before trading")
 
 
+def market_data_mode_error(settings) -> str:
+    """Why this MARKET_DATA_MODE + timeframe pair cannot run ("" when it can).
+
+    ``full`` carries official aggregate bars, which Upstox only publishes for
+    1m/30m; every other timeframe is built locally from ticks, i.e. ``ltpc``.
+    Without this check the combination was accepted by readiness and then
+    refused by the data adapter — a config that passes preflight must be a
+    config the engine accepts.
+    """
+    from app.data.upstox_stream import INTERVAL_MODE_TIMEFRAMES, INTERVAL_MODES
+
+    mode = str(getattr(settings, "market_data_mode", "") or "").strip().lower()
+    timeframe = engine_timeframe(settings)
+    if mode in INTERVAL_MODES and timeframe not in INTERVAL_MODE_TIMEFRAMES:
+        return (f"MARKET_DATA_MODE={mode} carries official "
+                f"{'/'.join(sorted(INTERVAL_MODE_TIMEFRAMES))} bars only, but the "
+                f"engine timeframe is {timeframe}; set MARKET_DATA_MODE=ltpc to "
+                f"build {timeframe} bars from ticks, or use "
+                f"{'/'.join(sorted(INTERVAL_MODE_TIMEFRAMES))}")
+    return ""
+
+
 def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None):
     if source == "replay":
         return ReplayStream(bars, delay)

@@ -2321,3 +2321,92 @@ class TestEngineTimeframeCoherence:
         payload = json.loads(capsys.readouterr().out)
         assert code == 2 and payload["ok"] is False
         assert payload["error"] == live_timeframe_error(settings, "UPSTOX_LIVE")
+
+
+class TestMarketDataModeCoherence:
+    """Readiness and the data adapter must agree on which pairs can run.
+
+    `full` carries official aggregate bars, which Upstox publishes for 1m/30m
+    only; every other timeframe is built locally from ticks (`ltpc`). Before
+    this check, readiness said "ready" for a pairing the adapter then refused.
+    """
+
+    def _settings(self, tmp_path, **kwargs):
+        base = dict(broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+                    live_confirm="I-ACCEPT-REAL-MONEY-RISK",
+                    upstox_live_access_token="t", max_position_value=10_000,
+                    max_open_positions=1, max_daily_loss=500, max_trades_per_day=3,
+                    data_source="upstox", market_calendar="nse-session",
+                    database_url=f"sqlite:///{tmp_path}/mdm.db")
+        base.update(kwargs)
+        return Settings(**base)
+
+    def test_full_mode_is_fine_on_the_timeframes_it_carries(self, tmp_path):
+        from app.data.factory import market_data_mode_error
+
+        for timeframe in ("1m", "30m"):
+            settings = self._settings(tmp_path, market_data_mode="full",
+                                      default_timeframe=timeframe)
+            assert market_data_mode_error(settings) == "", timeframe
+
+    def test_full_mode_is_refused_on_a_locally_built_timeframe(self, tmp_path):
+        from app.data.factory import market_data_mode_error
+
+        settings = self._settings(tmp_path, market_data_mode="full",
+                                  default_timeframe="5m")
+        error = market_data_mode_error(settings)
+        assert "full" in error and "1m/30m" in error and "ltpc" in error
+
+    def test_ltpc_mode_can_build_any_engine_timeframe(self, tmp_path):
+        from app.data.factory import market_data_mode_error
+
+        for timeframe in ("1m", "5m", "15m", "30m"):
+            settings = self._settings(tmp_path, market_data_mode="ltpc",
+                                      default_timeframe=timeframe)
+            assert market_data_mode_error(settings) == "", timeframe
+
+    def test_the_check_is_bound_to_the_adapters_own_rule(self, tmp_path):
+        """If the adapter's rule changes, this check must change with it."""
+        from app.data.factory import market_data_mode_error
+        from app.data.upstox_stream import UpstoxStream
+
+        settings = self._settings(tmp_path, market_data_mode="full",
+                                  default_timeframe="5m")
+        assert market_data_mode_error(settings) != ""
+        with pytest.raises(ValueError, match="1m/30m"):
+            UpstoxStream("token", ["NSE_EQ|INE002A01018"], timeframe="5m",
+                         mode="full")
+        # and the pair the check allows must NOT raise from the adapter
+        UpstoxStream("token", ["NSE_EQ|INE002A01018"], timeframe="1m", mode="full")
+
+    def test_preflight_reports_it_as_an_error(self, tmp_path):
+        settings = self._settings(tmp_path, market_data_mode="full",
+                                  default_timeframe="5m")
+        report = summarize(run_checks(settings))
+        assert report["ok"] is False
+        names = {check["name"] for check in report["errors"]}
+        assert "market_data_mode_matches_timeframe" in names
+
+    def test_a_valid_pairing_passes_readiness(self, tmp_path):
+        settings = self._settings(tmp_path, market_data_mode="full",
+                                  default_timeframe="1m")
+        report = summarize(run_checks(settings))
+        assert "market_data_mode_matches_timeframe" not in {
+            check["name"] for check in report["errors"]}
+
+    def test_the_engine_refuses_before_building_anything(self, tmp_path, capsys,
+                                                        monkeypatch):
+        from app import __main__ as cli
+        from app.data.factory import market_data_mode_error
+
+        settings = self._settings(tmp_path, market_data_mode="full",
+                                  default_timeframe="5m")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        monkeypatch.setenv("MARKET_DATA_SYMBOLS", "NSE_EQ|INE002A01018")
+        monkeypatch.setenv("MARKET_DATA_ACCESS_TOKEN", "t")
+        code = cli.cmd_engine(type("A", (), {"max_candles": 1,
+                                             "force_live_lock": False})())
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 2 and payload["ok"] is False
+        # the message an operator sees is the same one readiness shows
+        assert payload["error"] == market_data_mode_error(settings)

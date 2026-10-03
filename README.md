@@ -68,7 +68,7 @@ metrics must match every time (opaque uuid identities are relabelled rather than
 compared, so only decisions are measured). Exit code 0/1; a failure names the
 first differing location, or — when only the cross-process runs diverge — points
 at string-hash ordering, the classic silent cause.
-Verification status: **1173 tests passed / 37 skipped**;
+Verification status: **1180 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See
