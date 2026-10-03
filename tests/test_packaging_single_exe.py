@@ -442,3 +442,59 @@ class TestBuildScript:
     def test_script_checks_the_artifact_exists(self):
         source = (ROOT / "build_exe.py").read_text("utf-8")
         assert "ARTIFACT.exists()" in source
+
+
+class TestWindowsPortability:
+    """Bugs found by running the suite in the CI matrix — the only place this
+    code is exercised on Windows and macOS at all."""
+
+    def test_no_module_imports_posix_only_stdlib_at_the_top_level(self):
+        """`resource` does not exist on Windows. Importing it unguarded made
+        app/monitoring/system.py unimportable there, which broke
+        `python -m app monitor` and every engine system snapshot."""
+        offenders = []
+        for path in sorted((ROOT / "app").rglob("*.py")):
+            tree = ast.parse(path.read_text("utf-8"))
+            for node in tree.body:  # top level only
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module.split(".")[0]]
+                for name in names:
+                    if name in {"resource", "pwd", "grp", "fcntl", "termios",
+                                "msvcrt", "tty"}:
+                        offenders.append(f"{path.name}: imports {name}")
+        assert offenders == [], offenders
+
+    def test_monitoring_reports_memory_without_the_resource_module(self, monkeypatch):
+        """Prove the fallback path works, not just that the import is guarded."""
+        import builtins
+
+        import app.monitoring.system as monitor
+
+        monkeypatch.setattr(monitor, "_resource", None)
+        # must return a value or None, but never raise
+        value = monitor._resident_mb()
+        assert value is None or isinstance(value, float)
+
+    def test_the_monitor_snapshot_never_needs_resource(self, monkeypatch, tmp_path):
+        """Takes a real snapshot with the POSIX module removed, which is the
+        situation on Windows."""
+        import app.monitoring.system as monitor_module
+        from app.database.database import Database
+        from app.database.repository import Repository
+        from app.monitoring.system import SystemMonitor
+
+        monkeypatch.setattr(monitor_module, "_resource", None)
+
+        database = Database(f"sqlite:///{tmp_path}/monitor.db")
+        try:
+            monitor = SystemMonitor(Repository(database), data_dir=str(tmp_path))
+            snapshot = monitor.snapshot()
+        finally:
+            database.close()
+
+        assert "ts" in snapshot
+        assert snapshot.get("rss_mb") is None or isinstance(snapshot["rss_mb"], float)
+        assert "disk_used_pct" in snapshot

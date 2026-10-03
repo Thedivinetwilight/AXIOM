@@ -7,13 +7,58 @@ crossed): load, RSS, memory %, disk %, database size + quick_check result.
 from __future__ import annotations
 
 import os
-import resource
 import shutil
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 ALERT_THRESHOLDS = {"disk_used_pct": 0.90, "memory_used_pct": 0.92}
+
+# `resource` is POSIX-only. Importing it unguarded made this whole module
+# unimportable on Windows, which broke `python -m app monitor` and every
+# system snapshot taken by the engine there.
+try:  # pragma: no cover - platform dependent
+    import resource as _resource
+except ImportError:  # Windows
+    _resource = None  # type: ignore[assignment]
+
+
+def _resident_mb() -> float | None:
+    """Resident set size in MB, or None where the platform cannot report it."""
+    if _resource is not None:
+        # ru_maxrss is KiB on Linux, bytes on macOS.
+        raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+        return round(raw / divisor, 1)
+    if os.name == "nt":  # pragma: no cover - Windows only
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _Counters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _Counters()
+            counters.cb = ctypes.sizeof(_Counters)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(
+                    handle, ctypes.byref(counters), ctypes.sizeof(_Counters)):
+                return round(counters.WorkingSetSize / (1024 * 1024), 1)
+        except (AttributeError, OSError, ValueError):
+            return None
+    return None
 
 
 def _memory_used_pct() -> float | None:
@@ -44,8 +89,7 @@ class SystemMonitor:
             payload["load_1m"] = round(loads[0], 3)
         except (AttributeError, OSError):
             payload["load_1m"] = None
-        payload["rss_mb"] = round(
-            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+        payload["rss_mb"] = _resident_mb()
         memory_used = _memory_used_pct()
         if memory_used is not None:
             payload["memory_used_pct"] = round(memory_used, 4)
