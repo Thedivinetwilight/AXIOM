@@ -20,7 +20,20 @@ on:
         description: "Version label for the artifact name (optional)"
         required: false
         default: ""
+  # Also build whenever something that affects packaging changes, on ANY
+  # branch. GitHub only offers the manual "Run workflow" button for a workflow
+  # that exists on the default branch, so this trigger is what makes the build
+  # reachable from a feature branch without merging first. The path filter
+  # keeps it from spending three runners on every unrelated commit.
   push:
+    branches:
+      - "**"
+    paths:
+      - "packaging/**"
+      - "build_exe.py"
+      - "arena.py"
+      - "requirements.txt"
+      - ".github/workflows/build-executable.yml"
     tags:
       - "v*"
 
