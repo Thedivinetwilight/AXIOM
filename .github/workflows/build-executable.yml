@@ -1,0 +1,100 @@
+name: Build executable
+
+# Produces a single-file Arena executable for Windows, macOS and Linux.
+#
+# PyInstaller cannot cross-compile — a Windows .exe must be built on Windows —
+# so this workflow exists to do that for you. Run it from the Actions tab
+# ("Run workflow"), download the artifact, and you have Arena.exe without
+# installing anything locally.
+#
+# The build is only kept if it passes a smoke test: the executable is started
+# from a directory that is NOT the project folder, with a throwaway data
+# directory, and must serve /health, /setup, /console and /dashboard and create
+# its own database. A bundle that builds but cannot serve is worse than no
+# bundle, because the failure appears at first use.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the artifact name (optional)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Arena-windows-x64
+            binary: dist/Arena.exe
+          - os: ubuntu-latest
+            artifact: Arena-linux-x64
+            binary: dist/Arena
+          - os: macos-latest
+            artifact: Arena-macos
+            binary: dist/Arena
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify the source tree before packaging
+        run: python -m pytest -q --no-header -x -k "not slow"
+        continue-on-error: false
+
+      - name: Build and smoke-test the executable
+        # --test starts the built binary in a scratch ARENA_HOME and talks to
+        # it over HTTP, so a missing hidden import fails the job here.
+        run: python build_exe.py --test
+
+      - name: Record the artifact checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, os
+          target = pathlib.Path("${{ matrix.binary }}")
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          pathlib.Path("SHA256SUMS.txt").write_text(
+              f"{digest}  {target.name}\n", encoding="utf-8")
+          print(f"{target}  {target.stat().st_size / 1048576:.1f} MB")
+          print(f"sha256 {digest}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.binary }}
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.binary }}
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true

@@ -1,0 +1,132 @@
+# PyInstaller spec for Arena.
+#
+# Build with:  python build_exe.py           (recommended)
+# or:          pyinstaller packaging/arena.spec --noconfirm
+#
+# PyInstaller builds for the platform it RUNS on — a Windows .exe must be built
+# on Windows. This spec is deliberately platform-neutral so the identical file
+# produces Arena.exe on Windows, Arena.app/binary on macOS and a Linux binary
+# here.
+#
+# One-file mode is used because the whole point is a single artifact somebody
+# can double-click. The trade-off is a few seconds of unpacking at each launch;
+# the app compensates by keeping all STATE in a per-user directory
+# (see app/runtime.py) rather than next to the executable.
+
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_submodules
+
+ROOT = Path(SPECPATH).resolve().parent
+
+# Everything uvicorn imports at runtime by name. PyInstaller's static analysis
+# cannot see these (they are chosen from strings), so a build without them
+# starts and then dies with "Could not import module" the moment it serves.
+hiddenimports = [
+    "uvicorn.logging",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.loops.asyncio",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
+    "uvicorn.lifespan.off",
+    # Loaded by app/__main__.py through importlib for the operator-error
+    # boundary; importable statically too, but listed so a future refactor
+    # cannot silently drop them from the bundle.
+    "app.data.upstox_auth",
+    "app.data.upstox_stream",
+    "app.brokers.sandbox",
+    "app.api.routes.console",
+    "app.api.routes.setup",
+    "app.console.catalog",
+    "app.console.runner",
+    "app.console.page",
+    "app.console.setup_page",
+]
+hiddenimports += collect_submodules("uvicorn")
+hiddenimports += collect_submodules("websockets")
+
+# Files the app reads from its own tree. Bundled data lands inside the
+# temporary extraction directory, which is exactly where ROOT points when
+# frozen, so `ROOT / "data/sample.csv"` keeps working.
+datas = []
+for pattern in (
+    ("data/sample.csv", "data"),
+    ("data/sample_1h.csv", "data"),
+    ("data/sample_alt.csv", "data"),
+    ("data/sample_alt_1h.csv", "data"),
+    ("data/example_grids.json", "data"),
+    ("data/example_scoring.json", "data"),
+    ("data/tournament_datasets.json", "data"),
+    (".env.example", "."),
+    ("ARENA_GUIDE.md", "."),
+    ("requirements.txt", "."),
+):
+    source = ROOT / pattern[0]
+    if source.exists():
+        datas.append((str(source), pattern[1]))
+
+block_cipher = None
+
+a = Analysis(
+    [str(ROOT / "arena.py")],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    # Exclude what a headless trading engine never needs; each of these is
+    # large and some of them (tkinter, test suites) can break the build.
+    excludes=[
+        "tkinter",
+        "test",
+        "unittest",
+        "pytest",
+        "PySide6",
+        "PyQt5",
+        "PyQt6",
+        "matplotlib",
+        "IPython",
+        "notebook",
+        "pandas.tests",
+        "numpy.tests",
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name="Arena",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,  # UPX would flag the binary with most antivirus vendors
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,  # a visible console IS the status window for a local server
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,
+)

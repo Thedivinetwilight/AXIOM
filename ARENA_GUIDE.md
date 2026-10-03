@@ -149,6 +149,10 @@ Copy-Item .env.example .env
 If script execution is blocked, call the interpreter directly instead of
 activating: `.\.venv\Scripts\python.exe -m app paper-test`.
 
+**Or skip all of that: double-click `START_HERE.bat`.** It checks for Python,
+creates the virtual environment, installs the dependencies and starts Arena with
+the browser open — the same steps as above, automated. It sets up only once.
+
 ### 3.3 Optional: desktop application
 
 ```bash
@@ -238,11 +242,14 @@ export API_TOKEN=pick-something-private     # required for API endpoints
 python run.py --mode api --host 0.0.0.0 --port 8000
 ```
 
+> Want one file you can double-click instead of running commands?
+> See **section 8.5 — Running as a single executable**.
+
 Two interfaces are served from that one process:
 
 | Open | What it is |
 |---|---|
-| **http://127.0.0.1:8000/console** | **The feature console — all 36 features, click to run.** See section 7.5 |
+| **http://127.0.0.1:8000/console** | **The feature console — all 36 features, click to run.** See section 7.3 |
 | http://127.0.0.1:8000/dashboard | The live trading HUD. Section 7 |
 | http://127.0.0.1:8000/docs | Interactive API reference |
 
@@ -442,9 +449,9 @@ does not relax.
   restarting the process.
 - The footer repeats the mode and, when the configured order host is not a
   documented live host, says so plainly: `ORDER HOST NOT A LIVE HOST`.
-- The **features →** button in the header opens the feature console (7.5).
+- The **features →** button in the header opens the feature console (7.3).
 
-### 7.5 The feature console — every command, in the browser
+### 7.3 The feature console — every command, in the browser
 
 Open **`/console`** on a running API server. It lists every feature the
 platform offers and runs the one you pick, showing its exact output.
@@ -456,6 +463,8 @@ console automatically, and a removed command cannot linger as a dead button.
 
 **How to use it**
 
+0. **First run:** Arena opens `/setup` instead. Enter your credentials there
+   (it can generate a secure `API_TOKEN` for you), save, and restart.
 1. Open `/console`. Enter your `API_TOKEN` when prompted — it is kept in the
    browser's session storage for that tab only.
 2. Filter the list, or pick a command. On the right, a form is built from that
@@ -533,6 +542,111 @@ Selected endpoints:
 
 ---
 
+## 8.5 Running as a single executable
+
+Everything — server, interface and every command — can be packaged into one
+file you double-click.
+
+### The easy way: download a built executable
+
+The repository contains a GitHub Actions workflow that builds the executable
+for Windows, macOS and Linux and runs a smoke test on it:
+
+1. Open the repo's **Actions** tab → **Build executable** → **Run workflow**.
+2. When it finishes, download the **`Arena-windows-x64`** artifact.
+3. Unzip and run **`Arena.exe`**.
+
+No Python installation is needed on the target machine.
+
+### Building it yourself
+
+On the machine you want the executable for:
+
+```bash
+pip install -r requirements.txt
+python build_exe.py --test
+```
+
+`--test` builds, then starts the result in a scratch data directory and checks
+that it serves the interface and creates its own database. **Never ship a build
+that fails this** — a bundle can compile cleanly and still be missing a module
+that only breaks on the first request.
+
+> PyInstaller cannot cross-compile. A Windows `.exe` must be built on Windows;
+> a Linux binary must be built on Linux. Use the Actions workflow if you do not
+> have the target platform to hand.
+
+### What happens when you run it
+
+```
+  ------------------------------------------------------------------
+   ARENA — trading research platform
+  ------------------------------------------------------------------
+   Open this address:   http://127.0.0.1:8042/setup
+   (first run: enter your credentials, then press Save)
+
+   Keep this window open while you use Arena.
+   Press Ctrl+C here to stop.
+  ------------------------------------------------------------------
+```
+
+Your browser opens on the **setup screen**. Enter your credentials, press Save,
+restart, and the console opens from then on. The window that stays open is the
+server — closing it stops Arena.
+
+| Option | Effect |
+|---|---|
+| *(none)* | Start, open the browser on setup (first run) or the console |
+| `--no-browser` | Start without opening a browser (servers, containers) |
+| `--port 9000` | Use a specific port (default 8042; finds the next free one if busy) |
+| `--host 0.0.0.0` | Accept connections from other machines — **read the warning below** |
+| `--setup` | Re-open the credential screen |
+| `--diagnostics` | Print where Arena keeps its files, then exit |
+| `--cli <command>` | Run any CLI command, e.g. `--cli live-status` |
+
+### Where your data lives
+
+A packaged Arena does **not** write next to the executable. That folder may be
+read-only, and a one-file build unpacks into a temporary directory that is
+deleted on exit. Your state lives in a per-user folder instead:
+
+| Platform | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\Arena` |
+| macOS | `~/Library/Application Support/Arena` |
+| Linux | `~/.local/share/Arena` |
+
+`--diagnostics` prints the exact path, and the setup screen shows it too.
+Inside that folder: `trading_bot.db` (trades, positions, audit trail), `.env`
+(your configuration), `data/` (candles), `logs/`, `results/`, `backups/`.
+
+Set **`ARENA_HOME`** to override it — useful for a portable install on a USB
+stick, or to keep several configurations side by side. A `.env` placed beside
+the executable is also picked up, so a portable copy stays self-contained.
+
+> **Binding to `0.0.0.0`** makes the interface reachable from your network. The
+> console can *run commands*, so only do this with `API_TOKEN` set to a long
+> random value, and never on an untrusted network. Arena refuses setup saves and
+> console runs from non-local clients without that token.
+
+### If SmartScreen or antivirus complains
+
+Unsigned executables produced by PyInstaller are commonly flagged on Windows.
+That is a reputation problem, not a detection of anything malicious. To proceed,
+choose **More info → Run anyway**. To avoid it entirely, sign the binary with a
+code-signing certificate (`signtool sign /f cert.pfx dist\Arena.exe`) — the spec
+deliberately disables UPX compression because compressed binaries are flagged
+far more often.
+
+### Live trading from the executable
+
+Unchanged, and deliberately unchanged: the setup screen **refuses** to set
+`LIVE_TRADING`, a live `BROKER`/`MODE`, or any risk limit. A packaged app is
+still not a shortcut past the opt-in. See section 0 and the "Going live"
+checklist.
+
+---
+
 ## 9. Desktop application (optional)
 
 A PySide6 GUI with 13 pages. **Presentation only** — every number comes from
@@ -556,7 +670,7 @@ sandbox (no display server), so treat the first launch as unproven.
 Two entry points:
 
 - `python -m app <command>` — operational commands (29 of them). **All 29
-  are also available as buttons in the feature console — see 7.5.**
+  are also available as buttons in the feature console — see 7.3.**
 - `python run.py --mode <mode>` — research and serving modes
 
 ### 10.1 Research and serving — `run.py`

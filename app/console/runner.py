@@ -101,6 +101,15 @@ def build_argv(program: str, command: str, args: list[str]) -> list[str]:
         if len(arg) > 4000:
             raise ConsoleError("argument too long")
 
+    # Packaged builds: `sys.executable` is Arena.exe, which cannot be asked to
+    # run `-m app`. It re-enters itself through the launcher's --cli/--run
+    # switches instead, so the console keeps working identically inside a
+    # one-file executable.
+    if getattr(sys, "frozen", False):
+        if program == "app":
+            return [sys.executable, "--cli", command, *args]
+        return [sys.executable, "--run", command, *args]
+
     if program == "app":
         return [sys.executable, "-m", "app", command, *args]
     return [sys.executable, str(REPO_ROOT / "run.py"), "--mode", command, *args]

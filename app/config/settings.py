@@ -439,10 +439,19 @@ class Settings:
 
     @classmethod
     def from_env(cls):
+        # Load configuration from every applicable .env, most specific first.
+        # When Arena runs from source with no ARENA_HOME this is exactly the
+        # repository's .env as before; a packaged executable instead reads the
+        # per-user one (and a portable .env beside the .exe, if present), since
+        # its own code lives in a temporary extraction directory.
         try:
             from dotenv import load_dotenv
 
-            load_dotenv(ROOT / ".env", override=False)
+            from app import runtime
+
+            for candidate in runtime.env_candidates():
+                if candidate.exists():
+                    load_dotenv(candidate, override=False)
         except ImportError:
             pass  # Core research/replay also works with stdlib and exported env vars.
         # 3.0.2 fix: conversion follows the DECLARED FIELD ANNOTATION
@@ -471,4 +480,26 @@ class Settings:
                 # int-lit default survives under a float annotation
                 values[name] = coerce_env_value(
                     name, annotation, getattr(defaults, name))
+
+        # Packaged/portable installs must not depend on the working directory.
+        # A double-clicked .exe on Windows often starts in C:\Windows\System32,
+        # so `sqlite:///trading_bot.db` and `data` would resolve somewhere
+        # unpredictable and the database would look like it reset each launch.
+        # Only UNSET values are redirected: anything the operator wrote in .env
+        # is honoured exactly as given.
+        # Imported rather than assumed: the core research/replay path is
+        # documented to work with a minimal stdlib environment. If the module
+        # is somehow absent we simply keep the classic defaults; any real
+        # failure inside it is allowed to surface rather than being swallowed.
+        try:
+            from app import runtime
+        except ImportError:  # pragma: no cover - optional import
+            runtime = None  # type: ignore[assignment]
+
+        if runtime is not None and runtime.is_portable():
+            if not (os.getenv("DATABASE_URL") or "").strip():
+                values["database_url"] = runtime.default_database_path()
+            if not (os.getenv("DATA_DIR") or "").strip():
+                values["data_dir"] = runtime.default_data_dir()
+
         return cls(**values)

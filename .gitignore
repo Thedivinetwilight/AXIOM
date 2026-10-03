@@ -24,3 +24,8 @@ results/*
 *.onnx
 models/
 .cache/axiom/
+
+# PyInstaller build output (build_exe.py writes these)
+dist/
+build/
+*.spec.bak
