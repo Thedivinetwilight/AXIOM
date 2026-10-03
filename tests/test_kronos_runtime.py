@@ -415,20 +415,31 @@ class TestModelCache:
         monkeypatch.setenv("AXIOM_MODEL_CACHE", str(tmp_path / "weights"))
         assert default_cache_root() == tmp_path / "weights"
 
+    def _point_home_at(self, monkeypatch, path):
+        """Aim `~` at `path` the way this operating system resolves it.
+
+        posixpath.expanduser() reads HOME; ntpath.expanduser() reads
+        USERPROFILE first, so patching HOME alone is a no-op on Windows and
+        the test would silently assert the runner's real profile instead.
+        """
+        monkeypatch.setenv("HOME", str(path))
+        if os.name == "nt":
+            monkeypatch.setenv("USERPROFILE", str(path))
+
     def test_a_tilde_in_the_override_is_expanded(self, monkeypatch, tmp_path):
         """AXIOM_MODEL_CACHE=~/weights must not create a literal '~' folder.
 
         Without expanduser() the cache would be created at '<cwd>/~/weights',
         which is a real directory named '~' rather than the user's home.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
+        self._point_home_at(monkeypatch, tmp_path)
         monkeypatch.setenv("AXIOM_MODEL_CACHE", "~/axiom-weights")
         assert default_cache_root() == tmp_path / "axiom-weights"
 
     def test_a_tilde_in_xdg_cache_home_is_expanded(self, monkeypatch, tmp_path):
         from axiom.kronos.model_cache import cache_root_for
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        self._point_home_at(monkeypatch, tmp_path)
         root = cache_root_for(
             override=None, os_name="posix", platform="linux",
             localappdata=None, xdg_cache_home="~/.cache-axiom", home=tmp_path)

@@ -207,9 +207,9 @@ def main(argv=None):
     config = ExecutionConfig(**settings.execution_kwargs())
     strategy = create_strategy(args.strategy, json.loads(args.parameters))
     engine = BacktestEngine(config, annualization=args.annualization, calendar=calendar)
-    grids = json.loads(args.grids.read_text()) if args.grids else DEFAULT_GRIDS
+    grids = json.loads(args.grids.read_text(encoding="utf-8")) if args.grids else DEFAULT_GRIDS
     scoring = (
-        ScoringConfig(**json.loads(args.scoring.read_text())) if args.scoring else ScoringConfig()
+        ScoringConfig(**json.loads(args.scoring.read_text(encoding="utf-8"))) if args.scoring else ScoringConfig()
     )
     symbol, timeframe = settings.default_symbol, settings.default_timeframe
     bars = None
@@ -234,7 +234,7 @@ def main(argv=None):
             datasets = {(symbol, timeframe): bars}
             if args.datasets:
                 datasets = {}
-                for entry in json.loads(args.datasets.read_text()):
+                for entry in json.loads(args.datasets.read_text(encoding="utf-8")):
                     path = Path(entry["csv"])
                     if not path.is_absolute():
                         path = args.datasets.parent / path
@@ -274,7 +274,9 @@ def main(argv=None):
             result = asyncio.run(
                 run_paper(settings, args, repository, config, strategy, bars, calendar)
             )
-        (output / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False))
+        (output / "result.json").write_text(
+            json.dumps(result, indent=2, allow_nan=False), encoding="utf-8"
+        )
         if args.mode != "paper":
             repository.save_research(args.mode, result)
         summary = {

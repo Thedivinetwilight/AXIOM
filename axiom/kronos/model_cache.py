@@ -27,6 +27,23 @@ MANIFEST_NAME = "manifest.json"
 CHUNK = 1 << 20
 
 
+def _expand_user_path(value: str, home: Path) -> Path:
+    """Expand a leading '~' against ``home``, not the process environment.
+
+    ``Path.expanduser()`` reads USERPROFILE on Windows and HOME elsewhere, so
+    the same value would land in two different directories depending on the
+    platform — and this function is handed ``home`` precisely so its answer
+    does not depend on the interpreter's environment. Only the forms that
+    mean "this user's home" are rewritten; anything else keeps the ordinary
+    expanduser() handling.
+    """
+    if value in ("~", "~/", "~\\"):
+        return home
+    if value.startswith(("~/", "~\\")):
+        return home / value[2:]
+    return Path(value).expanduser()
+
+
 def cache_root_for(
     *,
     override: str | None,
@@ -38,13 +55,13 @@ def cache_root_for(
 ) -> Path:
     """Pure location logic — testable without monkeypatching the interpreter."""
     if override:
-        return Path(override).expanduser()
+        return _expand_user_path(override, home)
     if os_name == "nt":
         base = Path(localappdata) if localappdata else home / "AppData" / "Local"
         return base / "AXIOM" / "models" / "kronos"
     if platform == "darwin":
         return home / "Library" / "Caches" / "AXIOM" / "models" / "kronos"
-    base = Path(xdg_cache_home).expanduser() if xdg_cache_home else home / ".cache"
+    base = _expand_user_path(xdg_cache_home, home) if xdg_cache_home else home / ".cache"
     return base / "AXIOM" / "models" / "kronos"
 
 

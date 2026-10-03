@@ -41,7 +41,8 @@ class BacktestResult:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "result.json").write_text(
-            json.dumps(self.to_dict(), indent=2, allow_nan=False)
+            json.dumps(self.to_dict(), indent=2, allow_nan=False),
+            encoding="utf-8",
         )
         for name, rows in (
             ("equity", self.equity_curve),
@@ -49,7 +50,9 @@ class BacktestResult:
             ("daily_returns", self.daily_returns),
         ):
             if rows:
-                with (directory / f"{name}.csv").open("w", newline="") as file:
+                with (directory / f"{name}.csv").open(
+                    "w", newline="", encoding="utf-8"
+                ) as file:
                     writer = csv.DictWriter(file, fieldnames=list(rows[0]))
                     writer.writeheader()
                     writer.writerows(rows)
@@ -62,7 +65,8 @@ class BacktestResult:
                 for i, v in enumerate(equities)
             )
             (directory / "equity.svg").write_text(
-                f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400"><rect width="1000" height="400" fill="#102033"/><text x="30" y="25" fill="white">BACKTEST equity — historical simulation, not a forecast</text><polyline points="{points}" fill="none" stroke="#52deb1" stroke-width="2"/><text x="30" y="385" fill="white">Min {low:.2f} / Max {high:.2f}</text></svg>'
+                f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400"><rect width="1000" height="400" fill="#102033"/><text x="30" y="25" fill="white">BACKTEST equity — historical simulation, not a forecast</text><polyline points="{points}" fill="none" stroke="#52deb1" stroke-width="2"/><text x="30" y="385" fill="white">Min {low:.2f} / Max {high:.2f}</text></svg>',
+                encoding="utf-8",
             )
 
 

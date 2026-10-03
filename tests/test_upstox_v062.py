@@ -303,15 +303,28 @@ def test_token_exchange_success_failure_and_no_secret_leak():
 
 
 def test_store_token_writes_gitignored_env_atomically(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text("API_TOKEN=local\n")
-    outcome = store_token_in_env("issued-token", env_path)
+    import os
     import stat as stat_module
 
+    env_path = tmp_path / ".env"
+    env_path.write_text("API_TOKEN=local\n", encoding="utf-8")
+    outcome = store_token_in_env("issued-token", env_path)
+
     assert "written" in outcome and "issued-token" not in outcome
-    content = env_path.read_text()
+    content = env_path.read_text(encoding="utf-8")
     assert "API_TOKEN=local" in content and "UPSTOX_ACCESS_TOKEN=issued-token" in content
-    assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+    if os.name == "nt":
+        # Windows has no group/other permission bits. os.chmod can only toggle
+        # the read-only flag, and os.stat reports a synthesised 0o666 for any
+        # writable file, so asserting the POSIX bits here can never pass — the
+        # file is protected by the ACL it inherits (%LOCALAPPDATA% is
+        # owner-only). What must hold is that the write left it usable and the
+        # reported outcome says what actually happened.
+        assert env_path.stat().st_mode & stat_module.S_IWUSR
+        assert "ACLs" in outcome
+    else:
+        assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+        assert "600" in outcome
 
 
 # ---------------------------------------------------------------- pipeline

@@ -373,6 +373,55 @@ class TestManagerInProcess:
             KronosManager(config(), mode="telepathy")
 
 
+def _process_is_gone(pid: int) -> bool:
+    """True when `pid` no longer names a running process.
+
+    `os.kill(pid, 0)` is the POSIX idiom for this, but it is NOT a liveness
+    probe on Windows: every signal other than CTRL_C_EVENT/CTRL_BREAK_EVENT is
+    handed to TerminateProcess, and a pid that does not exist raises
+    `OSError: [WinError 87] The parameter is incorrect` rather than
+    ProcessLookupError. Calling it there can kill the process being checked
+    and can never raise the exception the test expects, so Windows asks the
+    OS directly instead.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        ERROR_INVALID_PARAMETER = 87
+        ERROR_NOT_FOUND = 1168
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Prototypes, not defaults: a HANDLE is pointer-sized and ctypes would
+        # otherwise truncate it to a 32-bit int on 64-bit Windows.
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                                ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            # No such process at all — which is the answer we want. Any other
+            # failure (access denied) means something still owns the pid.
+            return ctypes.get_last_error() in (ERROR_INVALID_PARAMETER,
+                                              ERROR_NOT_FOUND)
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value != STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 class TestManagerProcess:
     """The packaged AXIOM-Kronos runtime, spawned as a real subprocess."""
 
@@ -418,15 +467,12 @@ class TestManagerProcess:
         manager.shutdown(timeout=30)
         # Give the OS a moment, then confirm the pid is gone.
         for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if _process_is_gone(pid):
                 break
             time.sleep(0.05)
         else:  # pragma: no cover - only on a wedged OS
             pytest.fail(f"kronos child {pid} is still running after shutdown")
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        assert _process_is_gone(pid)
 
     def test_a_dead_kronos_process_is_isolated(self):
         manager = KronosManager(config(), mode="process")
@@ -466,11 +512,19 @@ class SlowBackend(StubKronosBackend):
         super().__init__()
         self.delay = delay
         self.calls = 0
+        # Set for exactly as long as the model is busy. Tests wait on this
+        # instead of on the clock, so "poll while inference runs" does not
+        # depend on how loaded the CI machine happens to be.
+        self.busy = threading.Event()
 
     def forecast(self, bars, future_timestamps, cfg):
         self.calls += 1
-        time.sleep(self.delay)
-        return super().forecast(bars, future_timestamps, cfg)
+        self.busy.set()
+        try:
+            time.sleep(self.delay)
+            return super().forecast(bars, future_timestamps, cfg)
+        finally:
+            self.busy.clear()
 
 
 class TestResponsiveness:
@@ -493,18 +547,23 @@ class TestResponsiveness:
             assert queued_ms < 50, f"queueing took {queued_ms:.1f} ms"
 
             # Poll repeatedly while the model is busy: every poll returns fast.
+            # The model's own "busy" flag drives the loop, not a wall-clock
+            # budget — a sleep-based loop counts the runner's load as well as
+            # the code's behaviour (on a loaded macOS runner it managed 7
+            # iterations in 0.5 s and the count assertion failed for no
+            # product reason).
+            assert runtime.backend.busy.wait(timeout=5), "the model never started"
             polls = 0
-            deadline = time.perf_counter() + 0.5
-            while time.perf_counter() < deadline:
+            outcomes: list = []
+            while runtime.backend.busy.is_set() and polls < 25:
                 tick = time.perf_counter()
-                service.poll()
+                found = service.poll()  # poll() DRAINS the queue; keep what it gives
                 assert (time.perf_counter() - tick) * 1000 < 20
+                outcomes = outcomes or found
                 polls += 1
-                time.sleep(0.01)
-            assert polls > 10
+            assert polls >= 10, f"only {polls} polls fitted into one inference"
 
             deadline = time.perf_counter() + 5
-            outcomes = []
             while not outcomes and time.perf_counter() < deadline:
                 outcomes = service.poll()
                 time.sleep(0.02)

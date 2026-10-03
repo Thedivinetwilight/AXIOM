@@ -749,9 +749,15 @@ def cmd_live_digest(args) -> int:
     if args.out:
         from pathlib import Path as _Path
 
+        # encoding is NOT optional here. The digest contains characters outside
+        # every legacy code page (the "→" in the window line is one), and a
+        # default-encoding write on Windows raises UnicodeEncodeError, leaving
+        # an empty file behind. `ensure_utf8_output` fixes the console, not
+        # files.
         _Path(args.out).write_text(
             digest_markdown(digest) if args.markdown else
-            json.dumps(digest, indent=2, default=str))
+            json.dumps(digest, indent=2, default=str),
+            encoding="utf-8")
     return 0
 
 

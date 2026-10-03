@@ -206,13 +206,24 @@ def store_token_in_env(token: str, env_path: Path) -> str:
     """
     lines = []
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
+        # utf-8 both ways, always. The operator's .env is hand-editable and can
+        # contain any comment they like; a locale-encoded read raises
+        # UnicodeDecodeError on Windows for a single non-ASCII character, and
+        # a locale-encoded write would corrupt what it did not fail on. This is
+        # the daily token refresh, so a code-page accident here costs a
+        # trading day.
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             if line.startswith("UPSTOX_ACCESS_TOKEN="):
                 continue
             lines.append(line)
     lines.append(f"UPSTOX_ACCESS_TOKEN={token}")
-    env_path.write_text("\n".join(lines) + "\n")
-    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # POSIX honours this; Windows chmod can only toggle the read-only bit, so
+    # the file keeps its inherited ACLs (owner-only under %LOCALAPPDATA%).
+    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    if os.name == "nt":
+        return (f"UPSTOX_ACCESS_TOKEN written to {env_path} "
+                "(file permissions: inherited Windows ACLs)")
     return f"UPSTOX_ACCESS_TOKEN written to {env_path} (file permissions 600)"
 
 

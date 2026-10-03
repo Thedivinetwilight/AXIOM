@@ -94,7 +94,7 @@ def _memory_used_pct() -> float | None:
         return None
 
     try:
-        with open("/proc/meminfo") as handle:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
             info = {}
             for line in handle:
                 key, _, rest = line.partition(":")

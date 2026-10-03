@@ -142,10 +142,34 @@ def smoke_test(artifact: Path) -> bool:
         database = home / "trading_bot.db"
         print(f"  database created outside the bundle: {database.exists()}")
 
+        # The feature console runs commands by re-entering the bundle with
+        # --cli (PyInstaller makes sys.executable the .exe itself, which cannot
+        # be invoked as `python -m app`). That is a different code path from
+        # the server, it is the one that spawns a child process, and on Windows
+        # it is also the one where a missing encoding turns a digest into an
+        # empty file and exit code 1. So run one real CLI command and check the
+        # bytes it wrote.
+        digest = home / "digest.md"
+        cli = subprocess.run(
+            [str(artifact), "--cli", "live-digest", "--markdown", "--out", str(digest)],
+            cwd=str(home), env=env, capture_output=True, text=True, timeout=300)
+        try:
+            digest_ok = "LIVE OPS DIGEST" in digest.read_text(encoding="utf-8")
+            digest_error = ""
+        except (OSError, UnicodeDecodeError) as exc:
+            digest_ok, digest_error = False, f"{type(exc).__name__}: {exc}"
+        print(f"  --cli live-digest -> exit {cli.returncode}, "
+              f"{digest.stat().st_size if digest.exists() else 0} bytes written, "
+              f"utf-8 readable: {digest_ok} {digest_error}")
+        if cli.returncode != 0:
+            print(f"  --cli output:\n{cli.stdout[-2000:]}\n{cli.stderr[-2000:]}")
+
         ok = (
             isinstance(results.get("health"), dict)
             and all(results.get(path) == 200 for path in ("/setup", "/console", "/dashboard"))
             and database.exists()
+            and cli.returncode == 0
+            and digest_ok
         )
         return ok
     finally:

@@ -86,7 +86,7 @@ class CandleStore:
             return {str(ts): row for ts, row in
                     zip(table["ts"], zip(*[table[c] for c in COLUMNS[1:]]))}
         rows = {}
-        with gzip.open(path, "rt", newline="") as fh:
+        with gzip.open(path, "rt", newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 rows[row["ts"]] = [row[c] for c in COLUMNS[1:]]
         return rows
@@ -105,7 +105,7 @@ class CandleStore:
                     columns[col].append(value)
             pq.write_table(pa.table(columns), tmp)
         else:
-            with gzip.open(tmp, "wt", newline="") as fh:
+            with gzip.open(tmp, "wt", newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(COLUMNS)
                 for ts in sorted(rows):

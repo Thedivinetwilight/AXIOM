@@ -39,11 +39,23 @@ on:
       # the artifact. Omitting this would leave the newest executable built from
       # stale code.
       - "app/**"
-      # These two files ARE the build's hard gate. If the gate itself changes,
-      # the gate must run again — otherwise a fix to a failing test would never
-      # be verified against the platform that failed.
+      # These files ARE the build's hard gate (they run in the "Verify the
+      # packaging code" step; a failure there discards the artifact). If the
+      # gate itself changes, the gate must run again — otherwise a fix to a
+      # failing test would never be verified against the platform that failed.
       - "tests/test_packaging_single_exe.py"
       - "tests/test_feature_console.py"
+      - "tests/test_windows_portability.py"
+      # These are the tests that fail on a platform rather than locally (code
+      # pages, chmod, pid liveness, sleep-based timing). A fix to one of them
+      # is worthless until this matrix has re-run it, so they are part of the
+      # trigger for the same reason the gate is.
+      - "tests/test_kronos_worker.py"
+      - "tests/test_kronos_runtime.py"
+      - "tests/test_upstox_v062.py"
+      - "tests/test_live_ops_v2_1.py"
+      # The reported full-suite result covers the AXIOM-Kronos subsystem.
+      - "axiom/**"
     tags:
       - "v*"
 
@@ -90,6 +102,7 @@ jobs:
           set -o pipefail
           python -m pytest -q --no-header \
             tests/test_packaging_single_exe.py tests/test_feature_console.py \
+            tests/test_windows_portability.py \
             2>&1 | tee packaging-output.txt
 
       - name: Report packaging failures
@@ -159,3 +172,37 @@ jobs:
             ${{ matrix.binary }}
             SHA256SUMS.txt
           fail_on_unmatched_files: true
+
+      - name: Summarise the build
+        # The job conclusion is green even when the full suite failed on this
+        # platform, because those failures are reported rather than blocking.
+        # That has already led a reader to conclude the Windows build had
+        # failed when it had in fact produced a working artifact. So state, in
+        # the run itself, what this job did and did not do.
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.artifact }} — ${{ matrix.os }}"
+            echo
+            if [ "${{ steps.packaging.outcome }}" = "success" ]; then
+              echo "- Packaging tests (hard gate): **passed**"
+            else
+              echo "- Packaging tests (hard gate): **FAILED** — no artifact is kept"
+            fi
+            case "${{ steps.fullsuite.outcome }}" in
+              success) echo "- Full suite on this platform: **passed**" ;;
+              failure) echo "- Full suite on this platform: **FAILED** — reported, does not block the artifact; see the annotations for this job" ;;
+              *)       echo "- Full suite on this platform: not run" ;;
+            esac
+            if [ -f "${{ matrix.binary }}" ]; then
+              echo "- Artifact: **built and smoke-tested** — \`${{ matrix.binary }}\`, $(du -h "${{ matrix.binary }}" | cut -f1)"
+              if [ -f SHA256SUMS.txt ]; then
+                echo "- Checksum: \`$(cat SHA256SUMS.txt)\`"
+              fi
+              echo
+              echo "Download it from the **Artifacts** section of this run page."
+            else
+              echo "- Artifact: **NOT built** — ${{ matrix.binary }} does not exist in this job"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
