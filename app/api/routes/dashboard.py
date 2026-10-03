@@ -522,7 +522,7 @@ function cycle(list, key, attr, store, dflt){
     i = (i + 1) % list.length;
     localStorage.setItem(store, list[i][0]);
     document.body.setAttribute(attr, list[i][0]);
-    $(key).innerHTML = $(key).innerHTML.replace(/<b>.*<\/b>/, '<b>' + list[i][1] + '</b>');
+    $(key).innerHTML = $(key).innerHTML.replace(/<b>.*<\\/b>/, '<b>' + list[i][1] + '</b>');
   };
 }
 (function applyAppearance(){

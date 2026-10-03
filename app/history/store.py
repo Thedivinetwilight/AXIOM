@@ -15,8 +15,6 @@ from __future__ import annotations
 import csv
 import gzip
 import hashlib
-import io
-import json
 import os
 import re
 from datetime import date, datetime, timezone
@@ -145,7 +143,6 @@ class CandleStore:
     def read_range(self, instrument_key: str, unit: str, interval: int,
                    from_ts: str | None = None, to_ts: str | None = None) -> list[dict]:
         """Chronological candles in [from_ts, to_ts] (ISO strings, inclusive)."""
-        from app.data.models import Candle
 
         directory = (self.root / _slug(instrument_key) / f"{unit}-{interval}")
         if not directory.exists():

@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 from threading import Lock
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from app.api.auth import authenticate
 from app import __version__

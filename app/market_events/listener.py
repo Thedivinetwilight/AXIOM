@@ -6,10 +6,8 @@ never enables LIVE_TRADING.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
 from uuid import uuid4
 
 from app.market_events.models import MarketEvent, MarketEventSource, event_fingerprint

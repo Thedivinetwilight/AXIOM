@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from app.utils.clock import utc_today
 
 from app.reporting.pdf import simple_pdf
 
@@ -26,7 +27,7 @@ class WeeklyReport:
         self.broker = broker
 
     def assemble(self, *, today: date | None = None) -> dict:
-        today = today or date.today()
+        today = today or utc_today()
         week_start = today - timedelta(days=7)
         snapshots = [row for row in self.repository.list_daily_snapshots(limit=30)
                      if row["date"] >= week_start.isoformat()]
@@ -153,9 +154,9 @@ class PeriodReport(WeeklyReport):
         self.title = title
 
     def assemble(self, *, today=None):
-        from datetime import date as date_type, timedelta as timedelta_type
+        from datetime import timedelta as timedelta_type
 
-        today = today or date_type.today()
+        today = today or utc_today()
         week_start = today - timedelta_type(days=self.days)
         snapshots = [row for row in self.repository.list_daily_snapshots(limit=400)
                      if row["date"] >= week_start.isoformat()]

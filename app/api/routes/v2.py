@@ -176,7 +176,6 @@ async def portfolio(request: Request):
     from app.learning.portfolio import PortfolioIntelligence
 
     repository = _repo(request)
-    engine = getattr(request.app.state, "sandbox_engine", None)
     broker = getattr(request.app.state, "sandbox_broker", None)
     intelligence = PortfolioIntelligence(repository)
     if broker is not None:

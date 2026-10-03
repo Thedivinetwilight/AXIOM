@@ -126,7 +126,6 @@ class AlphaDecayTracker:
     def should_trade(self, strategy: str, age: int) -> tuple[bool, str]:
         if age < 0:
             return False, "invalid_age"
-        prof = self.profile(strategy)
         if len([r for r in self._records if r["strategy"] == strategy]) < self.min_samples:
             return True, "insufficient_sample"
         factor = self.decay_factor(strategy, age)

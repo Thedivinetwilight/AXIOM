@@ -100,7 +100,7 @@ def main():
     print(f"SHA-256 {sha}")
     print(f"Sidecar {sidecar}")
     # Verify sidecar
-    import subprocess, sys
+    import subprocess
     # CRC check via unzip -l
     # List files
     with zipfile.ZipFile(OUT_ZIP) as z:

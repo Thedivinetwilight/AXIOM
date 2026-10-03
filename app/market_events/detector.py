@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 
 
 # Keywords that indicate market-relevant events (objective, not political judgment)

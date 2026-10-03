@@ -115,8 +115,15 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
         delay=args.delay,
         symbol=settings.default_symbol,
     )
-    # Live data adapters report the symbols they actually subscribe to.
-    symbols = list(getattr(provider, "symbols", None) or [settings.default_symbol])
+    # Live data adapters report the symbols they actually subscribe to. This
+    # was computed and then dropped, so the operator never saw which
+    # instruments a live feed was really streaming — the one fact worth
+    # confirming before trusting a paper session driven by real data.
+    subscribed = list(getattr(provider, "symbols", None) or [settings.default_symbol])
+    print(json.dumps({"event": "STREAM_SUBSCRIBED",
+                      "source": args.source or settings.data_source,
+                      "timeframe": settings.default_timeframe,
+                      "symbols": subscribed}), flush=True)
     loop = asyncio.get_running_loop()
 
     def stop_requested():

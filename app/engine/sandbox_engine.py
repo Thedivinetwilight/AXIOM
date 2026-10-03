@@ -29,7 +29,6 @@ them, and nothing in this engine can enable live trading.
 """
 
 import logging
-import math
 import time
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
@@ -43,7 +42,6 @@ from app.data.cross_market import CrossMarketCache
 from app.research.entry_timing import EntryTimingEngine
 from app.research.alpha_decay import AlphaDecayTracker
 from app.engine.hot_path import HotPathMonitor, ColdPathQueue
-from app.utils.numerical import is_valid_price, is_valid_quantity, sanitize_candle
 
 logger = logging.getLogger("bot.engine")
 

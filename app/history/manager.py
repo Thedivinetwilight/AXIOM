@@ -24,7 +24,8 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
+from app.utils.clock import utc_today
 
 import httpx
 
@@ -192,7 +193,7 @@ class HistoricalDataManager:
                       interval: int = 1) -> dict:
         try:
             candles = self._get_candles(instrument_key, unit, int(interval), None,
-                                        date.today(), intraday=True)
+                                        utc_today(), intraday=True)
         except PermissionError as exc:
             return {"status": "blocked", "reason": str(exc), "performed": False}
         except RuntimeError as exc:

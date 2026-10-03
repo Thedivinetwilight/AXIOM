@@ -8,6 +8,9 @@ __pycache__/
 *.db-wal
 logs/*.jsonl
 data/cache/
+# Downloaded candle partitions (written by CandleStore under DATA_DIR/history).
+# Runtime data, not source: replaceable by re-syncing, and needlessly large.
+data/history/
 results/*
 !results/.gitkeep
 *.paper.lock

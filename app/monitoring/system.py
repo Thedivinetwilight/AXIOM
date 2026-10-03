@@ -6,7 +6,6 @@ crossed): load, RSS, memory %, disk %, database size + quick_check result.
 
 from __future__ import annotations
 
-import json
 import os
 import resource
 import shutil

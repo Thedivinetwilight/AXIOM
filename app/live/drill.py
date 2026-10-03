@@ -36,7 +36,7 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+from app.config.hosts import LIVE_ORDER_HOSTS
 
 SANDBOX_HOST = "https://api-sandbox.upstox.com"
 DRILL_TOKEN = "drill-token-not-a-credential"  # never a real credential

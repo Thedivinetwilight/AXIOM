@@ -46,7 +46,6 @@ SAFETY:
   logged, printed, or embedded in exceptions.
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -423,8 +422,7 @@ class UpstoxSandboxBroker:
             return intent_id  # duplicate submission protection (in-process)
         if self.repository is not None:
             from app.engine.state import (SubmissionJournal, SUBMISSION_ATTEMPTED,
-                                          ACKNOWLEDGED, UNKNOWN, FINAL_STATE,
-                                          RECONCILED)
+                                          ACKNOWLEDGED, UNKNOWN, FINAL_STATE)
 
             self._journal = getattr(self, "_journal", None) or SubmissionJournal(
                 self.repository)

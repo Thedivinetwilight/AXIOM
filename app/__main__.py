@@ -41,10 +41,10 @@ Commands:
 
 import argparse
 import asyncio
+import importlib
 import json
-from datetime import date
+from app.utils.clock import utc_today_iso
 from pathlib import Path
-import sys
 
 
 def _load_settings():
@@ -405,10 +405,36 @@ def cmd_paper_test(args) -> int:
 
 
 def cmd_paper_live(args) -> int:
-    """Full paper pipeline over the real data source (existing run.py engine)."""
+    """Full paper pipeline over the real data source (existing run.py engine).
+
+    Extra arguments land in ``args.passthrough`` (the positional ``nargs="*"``
+    after ``--``) and are forwarded to run.py verbatim.
+    """
     from run import main as run_main
 
-    passthrough = argv[args.passthrough:] if args.passthrough else []
+    # BUGFIX: this read a global ``argv`` that does not exist, so any use of
+    # the passthrough form died with NameError: name 'argv' is not defined.
+    # ``args.passthrough`` is already the list of extra arguments.
+    passthrough = list(args.passthrough or [])
+    # Surface a bad instrument key as guidance rather than a raw ValueError
+    # traceback out of the stream factory (DEFAULT_SYMBOL=DEMO, the shipped
+    # default, is not an Upstox instrument key).
+    settings = _load_settings()
+    from app.data.upstox_stream import from_symbol
+
+    try:
+        from_symbol(settings.default_symbol)
+    except ValueError:
+        print(json.dumps({
+            "ok": False,
+            "error": f"DEFAULT_SYMBOL={settings.default_symbol!r} is not an "
+                     "Upstox instrument key",
+            "hint": "paper-live streams real Upstox data, so it needs a real "
+                    "instrument. Set DEFAULT_SYMBOL=NSE_EQ|INE002A01018 (or use "
+                    "the paper/replay path: python run.py --mode paper "
+                    "--source replay)",
+        }, indent=2))
+        return 2
     run_main(["--mode", "paper", "--source", "upstox", *passthrough])
     return 0
 
@@ -450,7 +476,7 @@ def cmd_engine(args) -> int:
     from app.backtesting.costs import ExecutionConfig
     from app.brokers.live import UpstoxLiveBroker
     from app.brokers.sandbox import UpstoxSandboxBroker
-    from app.data.factory import engine_timeframe, stream_provider
+    from app.data.factory import engine_timeframe
     from app.database.database import Database
     from app.database.repository import Repository
     from app.engine.sandbox_engine import SandboxEngine
@@ -1033,7 +1059,6 @@ def cmd_sandbox_test(args) -> int:
         "note": "read-only history probe; sandbox orders only; never live",
     }
     try:
-        import httpx as _httpx
 
         response = broker._request(
             "GET", settings.upstox_sandbox_order_history_url, params={"order_id": "0"}
@@ -1165,6 +1190,17 @@ def cmd_dataset(args) -> int:
             result = builder.build(args.name, keys, args.unit, args.interval,
                                    args.from_date, args.to_date)
         elif args.action == "audit":
+            # BUGFIX: without --dataset-id this passed None into the builder,
+            # which raised ValueError("unknown dataset: None") as a raw
+            # traceback. An omitted argument is a usage error, not a crash.
+            if not args.dataset_id:
+                print(json.dumps({
+                    "ok": False,
+                    "error": "'dataset audit' requires --dataset-id <id>",
+                    "hint": "list recorded datasets with 'python -m app dataset build' "
+                            "output, or inspect them via the research API",
+                }, indent=2))
+                return 2
             result = builder.audit(args.dataset_id)
         else:
             result = {"ok": False, "error": f"unknown action {args.action}"}
@@ -1197,6 +1233,27 @@ def cmd_universe_screen(args) -> int:
 
 def cmd_research(args) -> int:
     settings = _load_settings()
+    # Validate arguments BEFORE touching the database or the candle store: a
+    # typo in --periods should be reported immediately, not after the tool has
+    # loaded history and then discovered it has nothing to do.
+    periods: list[int] = []
+    if args.action == "run":
+        try:
+            periods = [int(p.strip()) for p in str(args.periods).split(",")
+                       if p.strip()]
+        except ValueError:
+            print(json.dumps({
+                "ok": False,
+                "error": f"--periods must be comma-separated integers, got "
+                         f"{args.periods!r}",
+                "hint": "e.g. --periods 2,3,5",
+            }, indent=2))
+            return 2
+        if not periods:
+            print(json.dumps({"ok": False,
+                              "error": "--periods must list at least one period"},
+                             indent=2))
+            return 2
     database, repository, store, _manager = _data_stack(settings)
     try:
         if args.action == "run":
@@ -1213,6 +1270,10 @@ def cmd_research(args) -> int:
                                  indent=2))
                 return 2
             from app.backtesting.costs import ExecutionConfig
+            # BUGFIX: BacktestEngine was used below but never imported here, so
+            # `python -m app research run` died with NameError as soon as it had
+            # candles to work with (other call sites import it; this one did not).
+            from app.backtesting.engine import BacktestEngine
 
             from app.data.models import Candle as CandleModel
             from app.history.store import parse_ts
@@ -1238,7 +1299,12 @@ def cmd_research(args) -> int:
                 candles.extend(CandleModel(parse_ts(r["ts"]), r["open"], r["high"],
                                            r["low"], r["close"], r["volume"],
                                            symbol_for(key)) for r in rows)
-            grid = [{"period": p, "threshold": 0.0} for p in args.periods]
+            # BUGFIX: --periods is a comma-separated STRING ("2,3,5"), but the
+            # grid iterated it directly, yielding the characters '2', ',', '3'
+            # — so every parameter set carried period="," and strategy
+            # construction raised "period must be an integer between 1 and 2000".
+            # This made `research run` unusable. Parsed and validated above.
+            grid = [{"period": period, "threshold": 0.0} for period in periods]
             engine = ExperimentEngine(repository,
                                       engine=BacktestEngine(ExecutionConfig()))
             result = engine.run(args.name, candles, "momentum", grid, args.timeframe)
@@ -1266,7 +1332,7 @@ def cmd_report(args) -> int:
         report = WeeklyReport(repository, settings=settings)
         if args.format == "pdf":
             payload = report.pdf()
-            target = Path(args.output or f"arena-weekly-{date.today().isoformat()}.pdf")
+            target = Path(args.output or f"arena-weekly-{utc_today_iso()}.pdf")
             target.write_bytes(payload)
             print(json.dumps({"ok": True, "path": str(target), "bytes": len(payload)}))
         else:
@@ -1378,11 +1444,9 @@ def cmd_scan(args) -> int:
 
 def cmd_discover(args) -> int:
     settings = _load_settings()
-    from app.backtesting.costs import ExecutionConfig
-    from app.backtesting.engine import BacktestEngine
     from app.data.models import Candle as CandleModel
     from app.history.store import CandleStore, parse_ts
-    from app.research.discovery import StrategyDiscoveryEngine, generate_specs
+    from app.research.discovery import StrategyDiscoveryEngine
 
     database, repository = _stack_or_none(settings)
     try:
@@ -1399,16 +1463,24 @@ def cmd_discover(args) -> int:
             print(json.dumps({"ok": False,
                               "error": f"only {len(candles)} local candles; run history sync first"}))
             return 2
-        discovery = StrategyDiscoveryEngine(
-            repository, engine=BacktestEngine(ExecutionConfig()))
-        specs = generate_specs(max_candidates=settings.discovery_max_candidates)
-        run = discovery.discover(args.name, candles, args.timeframe, specs=specs)
-        print(json.dumps({"experiment_id": run["experiment_id"],
-                          "candidates": len(run["results"]),
-                          "qualified": len(run["qualified"]),
-                          "qualified_detail": [{k: q.get(k) for k in ("strategy", "parameters", "score", "oos")}
-                                               for q in run["qualified"]]},
-                         indent=2, default=str))
+        # BUGFIX: this call was written against an older discovery API.
+        # StrategyDiscoveryEngine takes (repository, *, settings=...) — it has
+        # no `engine` parameter — and discover(name, candles, timeframe)
+        # generates its own deterministic spec list internally, so the separate
+        # generate_specs()/specs= path and the `qualified` key never existed.
+        # The command therefore died with TypeError before evaluating anything.
+        discovery = StrategyDiscoveryEngine(repository, settings=settings)
+        run = discovery.discover(args.name, candles, args.timeframe)
+        results = run.get("results", [])
+        qualified = [r for r in results if r.get("tradable")]
+        print(json.dumps({
+            "experiment_id": run.get("experiment_id"),
+            "candidates": len(results),
+            "qualified": len(qualified),
+            "qualified_detail": [
+                {k: q.get(k) for k in ("strategy", "parameters", "oos")}
+                for q in qualified],
+        }, indent=2, default=str))
         return 0
     finally:
         database.close()
@@ -1630,7 +1702,7 @@ def parser() -> argparse.ArgumentParser:
     hist.add_argument("--instrument", default=None)
     hist.add_argument("--interval", default="days:1", help="unit:interval e.g. minutes:1, days:1")
     hist.add_argument("--from-date", default="2025-01-01")
-    hist.add_argument("--to-date", default=date.today().isoformat())
+    hist.add_argument("--to-date", default=utc_today_iso())
     hist.set_defaults(func=cmd_history)
 
     dset = sub.add_parser("dataset", help="versioned research datasets: build/audit")
@@ -1719,9 +1791,42 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def _operator_errors() -> tuple[type[BaseException], ...]:
+    """Exception types that mean "the operator must change something".
+
+    These carry actionable messages (missing credentials, a refused host, a
+    rejected sandbox call) and were previously reaching the user as a ~12-line
+    traceback ending in ``raise UpstoxOAuthError(...)``. Anything NOT in this
+    tuple keeps its traceback, because an unexpected exception is a bug and the
+    stack is how it gets diagnosed.
+    """
+    types: list[type[BaseException]] = []
+    for module_name, class_name in (
+        ("app.data.upstox_auth", "UpstoxOAuthError"),
+        ("app.data.upstox_stream", "UpstoxAuthError"),
+        ("app.brokers.sandbox", "SandboxAuthError"),
+        ("app.brokers.sandbox", "SandboxRequestError"),
+    ):
+        try:
+            module = importlib.import_module(module_name)
+            candidate = getattr(module, class_name, None)
+            if isinstance(candidate, type) and issubclass(candidate, BaseException):
+                types.append(candidate)
+        except Exception:  # pragma: no cover - optional/missing dependency
+            continue
+    return tuple(types)
+
+
 def main(argv=None) -> None:
     args = parser().parse_args(argv)
-    raise SystemExit(args.func(args))
+    try:
+        raise SystemExit(args.func(args))
+    except SystemExit:
+        raise
+    except _operator_errors() as exc:
+        print(json.dumps({"ok": False, "error": str(exc),
+                          "error_type": type(exc).__name__}, indent=2), flush=True)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

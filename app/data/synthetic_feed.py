@@ -23,7 +23,6 @@ fills and equity. Restart/replay determinism follows from the committed
 cursor: replayed candles are ignored exactly like a real feed's duplicates.
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.data.candles import LiveCandleBuilder
