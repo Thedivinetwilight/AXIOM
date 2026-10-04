@@ -520,11 +520,28 @@ class TestProtectiveExits:
         engine2.process_candle(candle(2, 94.0))
         assert state2["placed"] == 1, "exit must work off recovered state"
 
-    def test_emergency_stop_blocks_even_protective_exits(self, env):
+    def test_emergency_stop_never_traps_a_held_position(self, env):
+        # FINAL-11/10 §12: the emergency stop halts NEW RISK, but it must
+        # never hold a position hostage — the protective exit still fires.
         engine, broker, state, baseline = self._engine_with_position(env)
         engine.emergency_stop("test")
         engine.process_candle(candle(2, 94.0))
-        assert state["placed"] == baseline, "STOP halts all order flow"
+        assert state["placed"] == baseline + 1, \
+            "a risk-reducing stop-loss must escape the emergency stop"
+        allowed = [e for e in env.list_system_events(limit=100)
+                   if e["kind"] == "EXECUTION_STOPPED_EXIT_ALLOWED"]
+        assert allowed, "the permitted exit must be audited"
+
+    def test_emergency_stop_still_blocks_new_entries(self, env):
+        state = {"placed": 0, "orders": {}, "next": 8101, "auth_mode": "ok"}
+        broker = make_broker(state, env)
+        engine = make_engine(env, broker, strategy=FixedSignal(Signal.BUY))
+        engine.emergency_stop("test")
+        engine.process_candle(candle(1, 100.0))
+        assert state["placed"] == 0, "new risk stays blocked under STOP"
+        skips = [e for e in env.list_system_events(limit=100)
+                 if e["kind"] == "EXECUTION_STOPPED_SKIP"]
+        assert skips, "the blocked entry must be audited"
 
 
 class TestEventDrivenDecisions:

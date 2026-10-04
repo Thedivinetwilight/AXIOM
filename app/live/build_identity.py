@@ -9,10 +9,19 @@ loudly ("unproven") — it never fabricates a value.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import subprocess
 import sys
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
 
 
 @lru_cache(maxsize=1)
@@ -20,24 +29,21 @@ def _git_identity() -> str:
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            timeout=5, cwd=os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__)))))
+            timeout=5, cwd=_repo_root())
         if commit.returncode == 0 and commit.stdout.strip():
             tree = subprocess.run(
                 ["git", "rev-parse", "HEAD^{tree}"], capture_output=True,
-                text=True, timeout=5, cwd=os.path.dirname(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__)))))
+                text=True, timeout=5, cwd=_repo_root())
             tree_sha = tree.stdout.strip() if tree.returncode == 0 else ""
             dirty = subprocess.run(
                 ["git", "status", "--porcelain"], capture_output=True,
-                text=True, timeout=5, cwd=os.path.dirname(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__)))))
+                text=True, timeout=5, cwd=_repo_root())
             state = "dirty" if dirty.stdout.strip() else "clean"
             return (f"git:{commit.stdout.strip()[:12]}"
                     + (f"/tree:{tree_sha[:12]}" if tree_sha else "")
                     + f"/{state}")
-    except Exception:
-        pass
+    except Exception as exc:  # best-effort identity, never safety-critical
+        logger.debug("git identity unavailable: %s", exc)
     return ""
 
 
@@ -53,8 +59,8 @@ def _binary_identity() -> str:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     digest.update(chunk)
             return f"frozen:sha256:{digest.hexdigest()[:16]}"
-    except Exception:
-        pass
+    except Exception as exc:  # hashing failed -> say so, never invent
+        logger.debug("binary identity unavailable: %s", exc)
     return "frozen:unproven"
 
 
