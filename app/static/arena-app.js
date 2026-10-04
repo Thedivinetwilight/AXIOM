@@ -2182,6 +2182,31 @@
         liveBtn("Stop", "stop", { reasonPrompt: "Why is the live session being stopped?" });
         liveBtn("Disarm", "disarm");
         host.appendChild(controls);
+
+        // Consequences, in plain language (spec §90): every consequential
+        // control states what it does, what changes, what can go wrong and
+        // how to recover.
+        var edu = Arena.el("div", { "class": "section-gap", style: "margin-top:10px" }, [
+          Arena.el("dl", { "class": "kv" }, [
+            Arena.el("dt", {}, [document.createTextNode("Arm")]),
+            Arena.el("dd", {}, [document.createTextNode(
+              "Checks the full readiness contract and, only if it passes with your confirmation phrase, " +
+              "moves the session to ARMED. No orders yet. Undo: Disarm.")]),
+            Arena.el("dt", {}, [document.createTextNode("Activate")]),
+            Arena.el("dd", {}, [document.createTextNode(
+              "Starts live order flow from an ARMED session — real money at the broker. Every order still " +
+              "passes the guard chain. Undo: Pause or Stop.")]),
+            Arena.el("dt", {}, [document.createTextNode("Stop")]),
+            Arena.el("dd", {}, [document.createTextNode(
+              "Ends the session; orders already at the broker are reported by reconciliation, not silently " +
+              "forgotten. Returning to live requires a fresh Arm cycle.")]),
+            Arena.el("dt", {}, [document.createTextNode("Can go wrong")]),
+            Arena.el("dd", {}, [document.createTextNode(
+              "Stale broker tokens, clock drift or a blocked static IP make readiness BLOCKED — the buttons " +
+              "then refuse instead of guessing. Nothing here can arm live trading without you.")])
+          ])
+        ]);
+        host.appendChild(edu);
         host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:6px" }, [
           document.createTextNode(d.note || "Arming requires the full readiness contract; no restart or background job can arm live trading.")]));
 
@@ -2251,12 +2276,27 @@
     if (!host) return;
     host.innerHTML = "";
     var row = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
-    [["Pause live (new orders)", "/api/live/session/pause", {}],
-     ["Stop live session", "/api/live/session/stop", { reason: "emergency stop from GUI" }],
-     ["Stop paper engine (cancels open orders)", "/paper/stop", {}]].forEach(function (action) {
+    var emergencyActions = [
+      ["Pause live (new orders)", "/api/live/session/pause", {},
+       "What it does: live order submission stops immediately. " +
+       "What changes: the session moves to PAUSED; positions and already-submitted orders are untouched. " +
+       "What can go wrong: open orders keep working at the broker while paused — watch them. " +
+       "Recovery: Resume from this panel; nothing is lost."],
+      ["Stop live session", "/api/live/session/stop", { reason: "emergency stop from GUI" },
+       "What it does: ends the live session (STOPPED) and blocks new live orders. " +
+       "What changes: returning to live later requires a fresh ARM cycle through the full readiness contract. " +
+       "What can go wrong: orders already at the broker are not cancelled by this button — reconciliation reports them. " +
+       "Recovery: re-arm after readiness passes; reconciliation covers the gap."],
+      ["Stop paper engine (cancels open orders)", "/paper/stop", {},
+       "What it does: stops the paper engine and cancels open paper orders. " +
+       "What changes: simulated trading halts until the engine is started again; the journal is preserved. " +
+       "What can go wrong: nothing financial — paper only. " +
+       "Recovery: start the engine again from the dashboard; state is restored from the journal."]
+    ];
+    emergencyActions.forEach(function (action) {
       var b = Arena.el("button", { "class": "btn sm danger", id: "emg-" + action[0].replace(/[^a-z0-9]+/g, "-").toLowerCase() }, [document.createTextNode(action[0])]);
       b.addEventListener("click", function () {
-        Arena.confirmDialog("Emergency action", "Execute: " + action[0] + "? This acts immediately on engine/broker state.", "Execute", true, function () {
+        Arena.confirmDialog("Emergency action", action[3], "Execute", true, function () {
           Arena.post(action[1], action[2]).then(function (r) {
             Arena.toast("ok", "Executed: " + (r.state || r.message || "done"));
             refreshLiveChip();
@@ -2543,7 +2583,11 @@
         row.appendChild(checkBtn);
         var prepBtn = Arena.el("button", { "class": "btn ghost sm", id: "update-install" }, [document.createTextNode("Install staged update")]);
         prepBtn.addEventListener("click", function () {
-          Arena.confirmDialog("Install update", "Replace the current executable with the staged, verified artifact? A restart is required afterwards.", "Install", true, function () {
+          Arena.confirmDialog("Install update",
+            "What it does: re-checks the staged artifact's sha256, backs up the current executable (.previous) and replaces it. " +
+            "What changes: the next launch runs the new version; a restart is required. " +
+            "What can go wrong: if the OS refuses to replace a running binary, the install is reported REFUSED and the verified artifact stays staged — nothing half-written. " +
+            "Recovery: the previous executable is preserved as .previous.", "Install", true, function () {
             Arena.post("/api/system/update/install", {}).then(function (r) {
               Arena.toast(r.ok ? "ok" : "err", r.status + (r.detail ? " — " + r.detail : ""));
               paint();
@@ -2627,9 +2671,20 @@
             }).catch(function (e) { Arena.toast("err", e.message); });
           });
           restoreBtn.addEventListener("click", function () {
-            Arena.confirmDialog("Restore backup", "Restore this backup? Current workstation data files will be replaced (a safety backup runs first).", "Restore", true, function () {
+            Arena.confirmDialog("Restore backup",
+              "What it does: verifies this archive, then swaps in its database. " +
+              "What changes: journals, universes and settings revert to the backup's state — everything recorded after it is replaced. " +
+              "What can go wrong: if the OS keeps the database locked, AXIOM stages the verified file and reports RESTORE_PREPARED_RESTART_REQUIRED instead of a fake success. " +
+              "How to recover: the previous database is preserved alongside (.pre-restore) for rollback.",
+              "Restore", true, function () {
               Arena.post("/api/backup/restore", { path: b.path }).then(function (r) {
-                Arena.toast("ok", "Restored from verified backup (" + (r.restored ? r.restored.length : 0) + " files).");
+                if (r.restored) {
+                  Arena.toast("ok", "Restored from verified backup; previous database preserved for rollback.");
+                } else if (r.status === "RESTORE_PREPARED_RESTART_REQUIRED") {
+                  Arena.toast("err", r.note || "Verified database staged; apply it with AXIOM stopped.");
+                } else {
+                  Arena.toast("err", (r.note || "Restore refused") + " — active state untouched.");
+                }
               }).catch(function (e) { Arena.toast("err", e.message); });
             });
           });
