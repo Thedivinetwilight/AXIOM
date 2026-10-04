@@ -1626,9 +1626,6 @@ def parser() -> argparse.ArgumentParser:
     engine = sub.add_parser(
         "engine",
         help="24/7 engine (requires BROKER=UPSTOX_SANDBOX or UPSTOX_LIVE + DATA_SOURCE=upstox)")
-    engine.add_argument("--force-live-lock", action="store_true",
-                        help="start even if another LIVE engine is heartbeating "
-                             "(only if you are certain it is dead)")
     engine.add_argument("--max-candles", type=int, default=None,
                         help="bound the run for tests/verification (default: unlimited)")
     engine.set_defaults(func=cmd_engine)

@@ -33,6 +33,10 @@ class Check:
     ok: bool
     severity: str
     detail: str
+    #: REQUIRED checks must PASS to arm: UNKNOWN or BLOCKED both refuse.
+    #: Optional checks (observational only) may stay UNKNOWN. The default is
+    #: required=True — the fail-closed direction (FINAL-11/10 §8, §17).
+    required: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -40,6 +44,11 @@ class Check:
 
 def _check(name: str, ok: bool, severity: str, detail: str) -> Check:
     return Check(name=name, ok=bool(ok), severity=severity, detail=detail)
+
+
+def _optional_check(name: str, ok: bool, severity: str, detail: str) -> Check:
+    return Check(name=name, ok=bool(ok), severity=severity, detail=detail,
+                 required=False)
 
 
 def _unavailable(name: str, why: str) -> Check:

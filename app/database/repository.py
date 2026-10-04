@@ -383,6 +383,75 @@ class _V1RepositoryBase:
             row = db.execute("SELECT payload FROM engine_state WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
 
+    # ------------------------------------------------- engine leases (§15) --
+    # Atomic, conditional ownership. ONE statement decides the owner, so two
+    # engines racing cannot both win. ``stale_before_ts`` is the heartbeat
+    # cutoff: an existing owner whose heartbeat is older than the cutoff is
+    # provably gone and may be replaced; a fresh owner never is.
+    def try_acquire_lease(self, name: str, owner: str, *, pid: int, host: str,
+                          live: bool, now_ts: str, stale_before_ts: str) -> dict:
+        """Attempt to own lease ``name``. Returns {acquired, existing}.
+
+        The decision is ONE conditional upsert: ownership goes to the caller
+        only when the row is absent, already theirs, or provably stale
+        (heartbeat older than ``stale_before_ts``). Two racers cannot both
+        satisfy the WHERE clause for the same committed row, so exactly one
+        wins. There is no force bypass.
+        """
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT owner, heartbeat_ts, live FROM engine_lease WHERE name=?",
+                (name,)).fetchone()
+            existing = None
+            if row:
+                existing = {"owner": row[0], "heartbeat_ts": row[1],
+                            "live": bool(row[2])}
+            cur = db.execute(
+                "INSERT INTO engine_lease (name, owner, pid, host, started_ts, "
+                "heartbeat_ts, live) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "owner=excluded.owner, pid=excluded.pid, host=excluded.host, "
+                "started_ts=CASE WHEN engine_lease.owner=excluded.owner "
+                "THEN engine_lease.started_ts ELSE excluded.started_ts END, "
+                "heartbeat_ts=excluded.heartbeat_ts, live=excluded.live "
+                "WHERE engine_lease.owner=excluded.owner "
+                "OR engine_lease.heartbeat_ts < ?",
+                (name, owner, pid, host, now_ts, now_ts, int(bool(live)),
+                 stale_before_ts))
+            acquired = cur.rowcount > 0
+            renewed = bool(acquired and existing and existing["owner"] == owner)
+            return {"acquired": acquired, "existing": existing,
+                    "renewed": renewed,
+                    "took_over_stale": bool(acquired and existing
+                                            and existing["owner"] != owner)}
+
+    def heartbeat_lease(self, name: str, owner: str, *, now_ts: str) -> bool:
+        """Refresh the heartbeat ONLY if we still own the lease."""
+        with self.db.transaction() as db:
+            cur = db.execute(
+                "UPDATE engine_lease SET heartbeat_ts=? WHERE name=? AND owner=?",
+                (now_ts, name, owner))
+            return cur.rowcount > 0
+
+    def release_lease(self, name: str, owner: str) -> bool:
+        """Release ONLY if we own it; never delete someone else's lease."""
+        with self.db.transaction() as db:
+            cur = db.execute(
+                "DELETE FROM engine_lease WHERE name=? AND owner=?",
+                (name, owner))
+            return cur.rowcount > 0
+
+    def read_lease(self, name: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT owner, pid, host, started_ts, heartbeat_ts, live "
+                "FROM engine_lease WHERE name=?", (name,)).fetchone()
+        if not row:
+            return None
+        return {"owner": row[0], "pid": row[1], "host": row[2],
+                "started_ts": row[3], "heartbeat_ts": row[4],
+                "live": bool(row[5])}
+
 
 # ------------------------------------------------------------------ V2.1 ----
 

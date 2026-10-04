@@ -453,20 +453,25 @@ def _step_single_engine_lock(ctx: _Context) -> Step:
 
     granted = first.acquire(now=now).granted
     refused = second.acquire(now=now)
+    # FINAL-11/10 §15: force is NOT a casual bypass — against a fresh
+    # heartbeat it must be refused too.
     forced = second.acquire(now=now, force=True)
     # after the stale window a crashed engine must never block a restart
     revived = third.acquire(now=now + timedelta(minutes=30))
     # and a paper/sandbox engine is never blocked by a live lock
     paper = non_live.acquire(now=now)
     first.release()
+    third.release()
     ok = (granted and not refused.granted and "two live engines" in refused.reason
-          and forced.granted and revived.granted and paper.granted)
+          and not forced.granted and revived.granted and paper.granted)
     return Step(
         "single_engine_lock", ok,
-        "a second live engine is refused, force works, and a stale lock never "
-        "blocks a restart" if ok else "the single-engine lock did not hold",
+        "a second live engine is refused, force cannot bypass a fresh "
+        "heartbeat, and a stale lock never blocks a restart"
+        if ok else "the single-engine lock did not hold",
         {"first": granted, "second_refused": not refused.granted,
          "refusal_reason": refused.reason[:120], "forced": forced.granted,
+         "force_bypass_refused": not forced.granted,
          "stale_lock_allows_restart": revived.granted,
          "paper_not_blocked": paper.granted})
 

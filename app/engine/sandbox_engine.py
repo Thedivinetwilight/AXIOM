@@ -364,6 +364,43 @@ class SandboxEngine:
                              extra={"reason": decision.reason})
                 return {"ok": False, "reason": decision.reason,
                         "lock": decision.to_dict(), **self.status()}
+            if decision.took_over_stale and getattr(self.live_lock, "live", False):
+                # FINAL-11/10 §15: a stale takeover means the previous owner's
+                # open positions and in-flight intents are UNKNOWN. Reconcile
+                # against the broker BEFORE submitting anything, so the engine
+                # never trades on a fabricated view of the book.
+                self.repository.record_system_event(
+                    "LIVE_TAKEOVER_RECONCILE",
+                    {"reason": decision.reason,
+                     "existing": (decision.existing.to_dict()
+                                  if decision.existing else None)})
+                logger.warning("LIVE_TAKEOVER_RECONCILE",
+                               extra={"reason": decision.reason})
+                # The dead owner's authorization epoch must not be reusable.
+                try:
+                    from app.live.gateway import AuthorizationEpochs
+
+                    invalidated = AuthorizationEpochs(self.repository).invalidate(
+                        reason="stale lease takeover")
+                    if invalidated:
+                        self.repository.record_system_event(
+                            "LIVE_EPOCH_INVALIDATED_ON_TAKEOVER",
+                            {"epoch": invalidated.get("epoch")})
+                except Exception:
+                    logger.exception("could not invalidate epoch on takeover")
+                try:
+                    self.reconcile()
+                except Exception:
+                    # Reconciliation is a precondition for trading after a
+                    # takeover; if it fails we must NOT trade. Fail closed.
+                    self.state = "BLOCKED_TAKEOVER_RECONCILE_FAILED"
+                    logger.exception("takeover reconciliation failed; "
+                                     "refusing to trade")
+                    if self.live_lock is not None:
+                        self.live_lock.release()
+                    return {"ok": False,
+                            "reason": "stale takeover: reconciliation failed",
+                            "lock": decision.to_dict(), **self.status()}
         self.state = "RUNNING"
         try:
             import asyncio

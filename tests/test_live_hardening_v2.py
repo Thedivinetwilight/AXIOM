@@ -138,16 +138,16 @@ class TestLiveBrokerIdentity:
     def test_live_broker_refuses_sandbox_hosts(self):
         for host in sorted(SANDBOX_ORDER_HOSTS):
             with pytest.raises(ValueError, match="not permitted for UPSTOX_LIVE"):
-                UpstoxLiveBroker("tok", INSTRUMENT, confirm="y",
+                UpstoxLiveBroker("tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE,
                                  base_url=f"https://{host}")
 
     def test_live_broker_refuses_the_auth_host(self):
         with pytest.raises(ValueError):
-            UpstoxLiveBroker("tok", INSTRUMENT, confirm="y",
+            UpstoxLiveBroker("tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE,
                              base_url="https://api.upstox.com")
 
     def test_live_broker_labels_itself_truthfully(self):
-        broker = UpstoxLiveBroker("tok", INSTRUMENT, confirm="y")
+        broker = UpstoxLiveBroker("tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE)
         assert broker.mode == "UPSTOX_LIVE"
         assert broker.LIVE is True
         assert "live=True" in repr(broker)
@@ -164,7 +164,7 @@ class TestLiveBrokerIdentity:
     def test_live_broker_never_contacts_a_sandbox_host(self):
         transport = RecordingTransport()
         broker = UpstoxLiveBroker(
-            "tok", INSTRUMENT, confirm="y", repository=None, transport=transport)
+            "tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE, repository=None, transport=transport)
         broker.instrument_map["RELIANCE"] = INSTRUMENT
         broker.submit("BUY", 1, 0.0, intent_id="live1", symbol="RELIANCE")
         broker.reconcile()
@@ -179,7 +179,7 @@ class TestLiveAuditSeparation:
         repository = Repository(database)
         transport = RecordingTransport()
         broker = UpstoxLiveBroker(
-            "tok", INSTRUMENT, confirm="y", repository=repository,
+            "tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE, repository=repository,
             transport=transport)
         broker.instrument_map["RELIANCE"] = INSTRUMENT
         broker.submit("BUY", 1, 0.0, intent_id="live-1", symbol="RELIANCE")
@@ -219,7 +219,7 @@ class TestLiveAuditSeparation:
         database = Database(f"sqlite:///{tmp_path}/ledger.db")
         repository = Repository(database)
         transport = RecordingTransport()
-        broker = UpstoxLiveBroker("tok", INSTRUMENT, confirm="y",
+        broker = UpstoxLiveBroker("tok", INSTRUMENT, confirm=LIVE_CONFIRM_PHRASE,
                                   repository=repository, transport=transport)
         broker.instrument_map["RELIANCE"] = INSTRUMENT
         broker.submit("BUY", 1, 0.0, intent_id="live-2", symbol="RELIANCE")

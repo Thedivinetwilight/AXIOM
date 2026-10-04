@@ -24,6 +24,7 @@ from the CLI.
 import logging
 
 from app.brokers.sandbox import SandboxLedger, UpstoxSandboxBroker
+from app.config.settings import LIVE_CONFIRM_PHRASE
 from app.config.hosts import (
     DEFAULT_LIVE_BASE_URL,
     DEFAULT_ORDER_HISTORY_URL,
@@ -65,10 +66,15 @@ class UpstoxLiveBroker(UpstoxSandboxBroker):
         transport=None,
         algo_name: str = "",
     ):
-        if not str(confirm).strip():
+        if str(confirm) != LIVE_CONFIRM_PHRASE:
+            # Defense in depth (FINAL-11/10 §16): the broker boundary demands
+            # the EXACT phrase — not "non-empty", not case-insensitive, no
+            # whitespace forgiveness. A config mistake cannot instantiate a
+            # live broker.
             raise ValueError(
-                "UpstoxLiveBroker places REAL orders and requires the explicit "
-                "confirm= argument (the LIVE_CONFIRM phrase validated by Settings)"
+                "UpstoxLiveBroker places REAL orders and requires the EXACT "
+                f"confirmation phrase (LIVE_CONFIRM={LIVE_CONFIRM_PHRASE}); "
+                "the supplied value does not match it precisely"
             )
         super().__init__(
             access_token, instrument_key,

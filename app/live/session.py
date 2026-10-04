@@ -84,6 +84,11 @@ class LiveSessionManager:
     def __init__(self, repository, bus=None):
         self.repository = repository
         self.bus = bus
+        # Authorization epochs (§6 FINAL-11/10): activation mints a fresh
+        # epoch; stop/disarm/block invalidate it. Durable, so a stale engine
+        # process cannot reuse a superseded authorization.
+        from app.live.gateway import AuthorizationEpochs
+        self.epochs = AuthorizationEpochs(repository) if repository is not None else None
 
     # ------------------------------------------------------------ current --
     def current(self) -> LiveSnapshot:
@@ -153,6 +158,11 @@ class LiveSessionManager:
         blocked = [c for c in serialized if c["status"] == "BLOCKED"]
         unknown = [c for c in serialized if c["status"] == "UNKNOWN"]
         warnings = [c for c in serialized if c["status"] == "WARNING"]
+        # FINAL-11/10 §8: an UNKNOWN REQUIRED safety check is not healthy —
+        # it blocks arming exactly like a BLOCKED one. Optional (marked
+        # informational) checks may stay UNKNOWN without blocking.
+        required_blocked = [c for c in blocked if c.get("required", True)]
+        required_unknown = [c for c in unknown if c.get("required", True)]
         # Verdict semantics follow the preflight design: ERROR-severity
         # failures block; WARNINGs are accepted-known gaps; INFO "not
         # checked" items (fresh database, no recorded state yet) never fail
@@ -161,6 +171,10 @@ class LiveSessionManager:
         # check must never silently become healthy).
         if blocked:
             verdict = "BLOCKED"
+        elif required_unknown:
+            # UNKNOWN on a REQUIRED check is not arming-healthy. It gets its
+            # own verdict so it can never be read as "ready with a caveat".
+            verdict = "BLOCKED_UNVERIFIED"
         elif warnings:
             verdict = "READY_WITH_WARNINGS"
         elif unknown:
@@ -173,7 +187,11 @@ class LiveSessionManager:
             "required_phrase": LIVE_CONFIRM_PHRASE,
             "counts": {"ready": len(serialized) - len(blocked) - len(unknown) - len(warnings),
                        "warning": len(warnings), "blocked": len(blocked),
-                       "unknown": len(unknown)},
+                       "unknown": len(unknown),
+                       "required_blocked": len(required_blocked),
+                       "required_unknown": len(required_unknown)},
+            "required_blocked": [c["name"] for c in required_blocked],
+            "required_unknown": [c["name"] for c in required_unknown],
         }
 
     # ------------------------------------------------------- transitions --
@@ -198,23 +216,34 @@ class LiveSessionManager:
             if stopped:
                 raise LiveTransitionError(
                     f"Cannot arm while the emergency stop is active ({why}).")
-        readiness = self.readiness(settings, repository=repository)
-        if readiness["verdict"] == "BLOCKED":
+        readiness = self.readiness(settings, repository=repository or self.repository)
+        if readiness["verdict"] in ("BLOCKED", "BLOCKED_UNVERIFIED"):
+            offenders = readiness["required_blocked"] + readiness["required_unknown"]
             raise LiveTransitionError(
-                "Readiness contract has BLOCKED checks: "
-                + "; ".join(c["name"] for c in readiness["checks"] if c["status"] == "BLOCKED"))
+                "Readiness contract refuses arming: "
+                + "; ".join(offenders or ["unknown blocker"])
+                + (" — a required check is UNKNOWN and must block"
+                   if readiness["verdict"] == "BLOCKED_UNVERIFIED" else ""))
         return self._transition(ARMED, f"operator arming by {actor} after readiness "
                                        f"verdict {readiness['verdict']}",
                                 payload={"verdict": readiness["verdict"]})
 
     def activate(self, *, actor: str = "gui") -> LiveSnapshot:
-        """ARMED -> ACTIVE. Requires prior explicit arming; never from OFF/READY."""
+        """ARMED -> ACTIVE. Requires prior explicit arming; never from OFF/READY.
+
+        Activation mints a FRESH authorization epoch (§6): a stale engine
+        holding the previous epoch can no longer submit, and a restart never
+        silently reuses an old authorization.
+        """
         current = self.current()
         if current.state != ARMED:
             raise LiveTransitionError(
                 f"Cannot activate live trading from state {current.state}; "
                 "explicit arming is required first.")
-        return self._transition(ACTIVE, f"operator start by {actor}")
+        snapshot = self._transition(ACTIVE, f"operator start by {actor}")
+        if self.epochs is not None:
+            self.epochs.activate(actor=actor)
+        return snapshot
 
     def pause(self, *, reason: str = "operator pause") -> LiveSnapshot:
         current = self.current()
@@ -226,7 +255,11 @@ class LiveSessionManager:
         current = self.current()
         if current.state != PAUSED:
             raise LiveTransitionError(f"Cannot resume from state {current.state}")
-        return self._transition(ACTIVE, "operator resume")
+        snapshot = self._transition(ACTIVE, "operator resume")
+        if self.epochs is not None:
+            # Resuming IS an activation: fresh epoch, stale intents refused.
+            self.epochs.activate(actor="resume")
+        return snapshot
 
     def begin_reconciliation(self, *, reason: str = "reconciliation watchdog") -> LiveSnapshot:
         current = self.current()
@@ -248,6 +281,8 @@ class LiveSessionManager:
         if current.state == OFF:
             return current
         snapshot = self._transition(STOPPED, reason)
+        if self.epochs is not None:
+            self.epochs.invalidate(reason=f"session stopped: {reason}")
         if not keep_configuration:
             self._transition(OFF, "configuration cleared after stop")
             return self.current()
@@ -260,11 +295,17 @@ class LiveSessionManager:
         if current.state in (ACTIVE, PAUSED, RECONCILING):
             raise LiveTransitionError(
                 f"Stop the live session before disarming (state {current.state})")
-        return self._transition(STOPPED, reason)
+        snapshot = self._transition(STOPPED, reason)
+        if self.epochs is not None:
+            self.epochs.invalidate(reason=f"session disarmed: {reason}")
+        return snapshot
 
     def block(self, *, reason: str) -> LiveSnapshot:
         """Hard conditions (emergency stop, breach) force BLOCKED from anywhere."""
-        return self._transition(BLOCKED, reason)
+        snapshot = self._transition(BLOCKED, reason)
+        if self.epochs is not None:
+            self.epochs.invalidate(reason=f"session blocked: {reason}")
+        return snapshot
 
     def release_block(self, *, destination: str | None = None,
                       reason: str = "block released") -> LiveSnapshot:

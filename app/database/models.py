@@ -329,6 +329,21 @@ CREATE TABLE IF NOT EXISTS broker_connections (
  broker TEXT PRIMARY KEY, status TEXT NOT NULL, token_state TEXT NOT NULL,
  account_hint TEXT, updated_ts TEXT NOT NULL, note TEXT
 );
+
+-- FINAL-11/10 §15: atomic live-engine leases. Ownership is decided by ONE
+-- conditional SQL statement (INSERT ... ON CONFLICT ... WHERE), never by a
+-- read-then-write pair, so two engines starting at the same instant cannot
+-- both conclude they own execution.
+INSERT OR IGNORE INTO schema_version VALUES (10);
+CREATE TABLE IF NOT EXISTS engine_lease (
+ name TEXT PRIMARY KEY,
+ owner TEXT NOT NULL,
+ pid INTEGER NOT NULL,
+ host TEXT NOT NULL,
+ started_ts TEXT NOT NULL,
+ heartbeat_ts TEXT NOT NULL,
+ live INTEGER NOT NULL
+);
 """
 
 # ---------------------------------------------------------------------------

@@ -6,8 +6,11 @@ because each engine on its own is behaving correctly.
 
 The lock is deliberately *soft* rather than a filesystem lock:
 
-* it lives in ``engine_state`` next to the other durable state, so it travels
-  with the database the engines already share;
+* it lives in the shared database next to the other durable state, so it
+  travels with the database the engines already share; FINAL-11/10 §15 made
+  ownership a single conditional SQL upsert (``engine_lease``) so two engines
+  racing cannot both win, and removed the casual ``--force-live-lock`` bypass
+  (takeover still requires the owner's heartbeat to be provably stale);
 * it carries a **heartbeat**; a lock whose heartbeat has stopped is treated as
   stale and does not block a new engine, because a crash must never be able to
   wedge an operator out of restarting;
@@ -18,10 +21,13 @@ The lock is deliberately *soft* rather than a filesystem lock:
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 LOCK_KEY = "engine_lock"
 
@@ -46,10 +52,16 @@ class LockDecision:
     granted: bool
     reason: str
     existing: LockState | None = None
+    #: FINAL-11/10 §15 — True when this grant replaced a stale owner. The
+    #: engine MUST reconcile (and the session MUST mint a fresh epoch) before
+    #: it may submit live orders, because the previous owner's open positions
+    #: and in-flight intents are unknown.
+    took_over_stale: bool = False
 
     def to_dict(self) -> dict:
         return {"granted": self.granted, "reason": self.reason,
-                "existing": self.existing.to_dict() if self.existing else None}
+                "existing": self.existing.to_dict() if self.existing else None,
+                "took_over_stale": self.took_over_stale}
 
 
 def _parse(ts) -> datetime | None:
@@ -114,8 +126,67 @@ class EngineLock:
     # -- lifecycle -----------------------------------------------------------
 
     def acquire(self, *, now=None, force: bool = False) -> LockDecision:
-        """Take the lock unless another LIVE engine is demonstrably alive."""
+        """Take the lock unless another LIVE engine is demonstrably alive.
+
+        FINAL-11/10 §15: live ownership is decided by ONE conditional SQL
+        statement (repository.try_acquire_lease) — never by a read-then-write
+        pair, so two engines starting at the same instant cannot both win.
+        ``force`` is NOT a casual bypass: takeover still requires the
+        existing owner's heartbeat to be provably stale.
+        """
         now = now or self._now()
+        now_iso = now.isoformat()
+        stale_before = (now - timedelta(seconds=self.stale_after_seconds)).isoformat()
+
+        if self.repository is not None and hasattr(self.repository,
+                                                   "try_acquire_lease"):
+            result = self.repository.try_acquire_lease(
+                LOCK_KEY, self.owner, pid=os.getpid(),
+                host=socket.gethostname(), live=self.live, now_ts=now_iso,
+                stale_before_ts=stale_before)
+            if result["acquired"]:
+                self.held = True
+                detail = "lock acquired"
+                takeover = bool(result.get("took_over_stale"))
+                if takeover:
+                    detail = (f"took over stale lease from "
+                              f"{result['existing']['owner']}")
+                    # FINAL-11/10 §15/§61: a takeover is a safety event; the
+                    # proof (old heartbeat, new pid/host) must be durable.
+                    try:
+                        self.repository.record_system_event(
+                            "LIVE_LEASE_TAKEOVER", {
+                                "name": LOCK_KEY,
+                                "old_owner": result["existing"]["owner"],
+                                "old_heartbeat_ts":
+                                    result["existing"]["heartbeat_ts"],
+                                "stale_before_ts": stale_before,
+                                "new_owner": self.owner,
+                                "pid": os.getpid(),
+                                "host": socket.gethostname(),
+                                "live": self.live})
+                    except Exception:
+                        logger.debug("lease takeover audit event not recorded")
+                return LockDecision(True, detail, took_over_stale=takeover)
+            if not (self.live and result["existing"].get("live", True)):
+                # Non-live sessions are not exclusive; record and continue.
+                self.held = True
+                return LockDecision(True, "lock acquired (non-live coexists)")
+            existing = LockState(
+                owner=result["existing"]["owner"], pid=0, host="?",
+                started_ts="", heartbeat_ts=result["existing"]["heartbeat_ts"],
+                live=result["existing"].get("live", True))
+            return LockDecision(
+                False,
+                f"another LIVE engine ({existing.owner}) is heartbeating "
+                f"(last seen {existing.heartbeat_ts}); running two live "
+                "engines against one account would double every entry. "
+                "Stop it, or wait for the heartbeat to go stale — there is "
+                "no casual force bypass.",
+                existing=existing)
+
+        # Repository without lease support (older databases): fall back to
+        # the legacy in-state lock. Same semantics, weaker atomicity.
         existing = self._load()
         if existing is not None and existing.owner != self.owner:
             if self.is_stale(existing, now=now):
@@ -123,20 +194,18 @@ class EngineLock:
                 pass
             elif not (self.live and existing.live):
                 pass  # non-live sessions are not exclusive; record and continue
-            elif not force:
+            else:
                 return LockDecision(
                     False,
                     f"another LIVE engine ({existing.owner}) is heartbeating "
                     f"(last seen {existing.heartbeat_ts}); running two live "
-                    "engines against one account would double every entry. "
-                    "Stop it, wait for the heartbeat to go stale, or pass the "
-                    "explicit --force-live-lock flag if you are certain.",
+                    "engines against one account would double every entry.",
                     existing=existing)
         started = (existing.started_ts if existing and existing.owner == self.owner
-                   and existing.started_ts else now.isoformat())
+                   and existing.started_ts else now_iso)
         self._save(LockState(owner=self.owner, pid=os.getpid(),
                              host=socket.gethostname(), started_ts=started,
-                             heartbeat_ts=now.isoformat(), live=self.live))
+                             heartbeat_ts=now_iso, live=self.live))
         self.held = True
         return LockDecision(True, "lock acquired")
 
@@ -146,6 +215,14 @@ class EngineLock:
             return False
         now = now or self._now()
         try:
+            if hasattr(self.repository, "heartbeat_lease"):
+                # Only refreshes when we still own the lease; a takeover is
+                # visible immediately (heartbeat returns False and the engine
+                # must treat itself as de-authorized).
+                ok = self.repository.heartbeat_lease(
+                    LOCK_KEY, self.owner, now_ts=now.isoformat())
+                self.held = bool(ok)
+                return ok
             existing = self._load()
             started = (existing.started_ts
                        if existing and existing.owner == self.owner
@@ -163,6 +240,11 @@ class EngineLock:
         if self.repository is None:
             return False
         try:
+            if hasattr(self.repository, "release_lease"):
+                released = self.repository.release_lease(LOCK_KEY, self.owner)
+                if released:
+                    self.held = False
+                return released
             existing = self._load()
             if existing is not None and existing.owner != self.owner:
                 return False
@@ -174,8 +256,18 @@ class EngineLock:
 
     def status(self, *, now=None) -> dict:
         """What an operator/dashboard needs to know about the lock."""
-        existing = self._load()
         now = now or self._now()
+        lease = None
+        if self.repository is not None and hasattr(self.repository, "read_lease"):
+            lease = self.repository.read_lease(LOCK_KEY)
+        if lease is not None:
+            existing = LockState(owner=lease["owner"], pid=lease.get("pid") or 0,
+                                 host=lease.get("host") or "?",
+                                 started_ts=lease.get("started_ts") or "",
+                                 heartbeat_ts=lease.get("heartbeat_ts") or "",
+                                 live=lease.get("live", True))
+        else:
+            existing = self._load()
         if existing is None:
             return {"held": False, "stale": None, "owner": None,
                     "heartbeat_ts": None, "heartbeat_age_seconds": None,

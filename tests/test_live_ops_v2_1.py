@@ -2141,12 +2141,77 @@ class TestSingleEngineLock:
         assert second.status(now=now + timedelta(minutes=5))["owner"] == "host-b:2"
         database.close()
 
-    def test_force_overrides_a_live_conflict(self, tmp_path):
+    def test_force_cannot_override_a_fresh_heartbeat(self, tmp_path):
+        # FINAL-11/10 §15: force is NOT a casual bypass. Against a fresh
+        # heartbeat the takeover must be refused even under force.
         now = datetime.now(timezone.utc)
         first, repository, database = self._lock(tmp_path, owner="host-a:1")
         second = first.__class__(repository, live=True, owner="host-b:2")
         first.acquire(now=now)
-        assert second.acquire(now=now, force=True).granted is True
+        decision = second.acquire(now=now, force=True)
+        assert decision.granted is False
+        assert "two live engines" in decision.reason
+        assert first.status(now=now)["owner"] == "host-a:1"
+        database.close()
+
+    def test_force_can_take_over_a_stale_owner(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1",
+                                                 stale_after_seconds=180)
+        second = first.__class__(repository, live=True, owner="host-b:2",
+                                 stale_after_seconds=180)
+        first.acquire(now=now)
+        decision = second.acquire(now=now + timedelta(minutes=5), force=True)
+        assert decision.granted is True
+        assert "stale" in decision.reason
+        database.close()
+
+    def test_takeover_is_visible_to_the_old_owner(self, tmp_path):
+        # After a stale takeover the dead owner's heartbeat must fail, so a
+        # zombie process notices it lost ownership instead of trading anyway.
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(tmp_path, owner="host-a:1",
+                                                 stale_after_seconds=60)
+        second = first.__class__(repository, live=True, owner="host-b:2",
+                                 stale_after_seconds=60)
+        first.acquire(now=now)
+        assert second.acquire(now=now + timedelta(minutes=10)).granted is True
+        assert first.heartbeat(now=now + timedelta(minutes=10)) is False
+        assert first.held is False
+        database.close()
+
+    def test_two_racing_engines_yield_exactly_one_owner(self, tmp_path):
+        # FINAL-11/10 §15 atomicity: the lease is decided by ONE conditional
+        # SQL statement, so N simultaneous *processes* with separate
+        # connections produce exactly one win — the true two-starts race.
+        import multiprocessing
+
+        db_path = tmp_path / "race.db"
+        repository, database = repo(tmp_path, "race.db")  # creates the schema
+        now = datetime.now(timezone.utc)
+
+        def _race(index, queue):
+            from app.database.database import Database
+            from app.database.repository import Repository
+            from app.live.lock import EngineLock
+
+            db = Database(f"sqlite:///{db_path}")
+            rep = Repository(db)
+            lock = EngineLock(rep, live=True, owner=f"racer-{index}")
+            decision = lock.acquire(now=now)
+            queue.put((index, decision.granted))
+            db.close()
+
+        queue = multiprocessing.Queue()
+        processes = [multiprocessing.Process(target=_race, args=(i, queue))
+                     for i in range(6)]
+        for proc in processes:
+            proc.start()
+        for proc in processes:
+            proc.join(30)
+        results = [queue.get(timeout=10) for _ in processes]
+        winners = [index for index, granted in results if granted]
+        assert len(winners) == 1, f"expected exactly one owner, got {winners}"
         database.close()
 
     def test_paper_engines_are_never_blocked(self, tmp_path):
@@ -2155,8 +2220,9 @@ class TestSingleEngineLock:
                                                 live=True, owner="live:1")
         live.acquire(now=now)
         paper = live.__class__(repository, live=False, owner="paper:2")
-        paper.acquire(now=now)          # replaces the lock, but never refuses
-        assert paper.status(now=now)["held"] is True
+        assert paper.acquire(now=now).granted is True  # never refuses paper
+        # …and never disturbs the live owner's lease either.
+        assert live.status(now=now)["owner"] == "live:1"
         database.close()
 
     def test_a_foreign_release_is_refused(self, tmp_path):
@@ -2197,6 +2263,57 @@ class TestSingleEngineLock:
         assert recording.submitted == []       # nothing was ever sent
         kinds = {e["kind"] for e in repository.list_system_events(limit=50)}
         assert "ENGINE_REFUSED_DUPLICATE" in kinds
+        database.close()
+        ops_db.close()
+
+    def test_stale_takeover_forces_reconcile_and_kills_the_old_epoch(self, tmp_path):
+        # FINAL-11/10 §15: after taking over a stale lease the new engine must
+        # reconcile BEFORE trading and must NOT inherit the dead owner's epoch.
+        from app.live.gateway import AuthorizationEpochs
+        from app.live.lock import EngineLock
+
+        ops, ops_repo, ops_db = TestLiveOperationsFacade()._ops(tmp_path)
+        engine, recording, repository, database, Candle = (
+            TestEngineIntegration()._engine(tmp_path, ops))
+
+        class EmptyProvider:
+            symbols = ["RELIANCE"]
+
+            async def stream(self, symbols, timeframe):
+                return
+                yield  # async generator that emits nothing
+
+        engine.provider = EmptyProvider()
+
+        # The dead owner had been ACTIVE: it left a valid authorization epoch.
+        epochs = AuthorizationEpochs(repository)
+        epochs.activate(actor="dead-owner")
+        assert epochs.current()["valid"] is True
+
+        # Dead owner's lease, heartbeat far older than the stale window.
+        rival = EngineLock(repository, live=True, owner="dead:1",
+                           stale_after_seconds=60)
+        rival.acquire(now=datetime.now(timezone.utc) - timedelta(minutes=30))
+
+        reconcile_calls = {"n": 0}
+        real_reconcile = engine.reconcile
+
+        def spy_reconcile():
+            reconcile_calls["n"] += 1
+            return real_reconcile()
+
+        engine.reconcile = spy_reconcile
+
+        engine.live_lock = EngineLock(repository, live=True, owner="new:2",
+                                      stale_after_seconds=60)
+        engine.run(max_candles=1)
+
+        assert engine.state == "STOPPED"          # ran, was not refused
+        assert reconcile_calls["n"] >= 1          # reconciled before trading
+        assert epochs.current()["valid"] is False  # dead epoch unusable
+        kinds = {e["kind"] for e in repository.list_system_events(limit=200)}
+        assert "LIVE_TAKEOVER_RECONCILE" in kinds
+        assert "LIVE_EPOCH_INVALIDATED_ON_TAKEOVER" in kinds
         database.close()
         ops_db.close()
 
