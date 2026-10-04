@@ -201,14 +201,29 @@ class EngineLock:
                     except Exception:
                         logger.debug("lease takeover audit event not recorded")
                 return LockDecision(True, detail, took_over_stale=takeover)
-            if not (self.live and result["existing"].get("live", True)):
+            existing_row = result.get("existing")
+            if not isinstance(existing_row, dict):
+                # A conditional upsert can lose to a concurrent INSERT after
+                # its pre-upsert SELECT observed no row. That is an ordinary
+                # losing race, not a reason to crash or infer that we won.
+                # Paper/non-live engines are explicitly non-exclusive, so they
+                # may proceed locally without claiming the live lease.
+                if not self.live:
+                    self.held = True
+                    return LockDecision(True, "lock acquired (non-live coexists)")
+                return LockDecision(
+                    False,
+                    "live-engine lease changed during atomic acquisition; refusing start")
+            if not (self.live and existing_row.get("live", True)):
                 # Non-live sessions are not exclusive; record and continue.
                 self.held = True
                 return LockDecision(True, "lock acquired (non-live coexists)")
             existing = LockState(
-                owner=result["existing"]["owner"], pid=0, host="?",
-                started_ts="", heartbeat_ts=result["existing"]["heartbeat_ts"],
-                live=result["existing"].get("live", True))
+                owner=existing_row["owner"], pid=int(existing_row.get("pid") or 0),
+                host=str(existing_row.get("host") or "?"),
+                started_ts=str(existing_row.get("started_ts") or ""),
+                heartbeat_ts=str(existing_row.get("heartbeat_ts") or ""),
+                live=bool(existing_row.get("live", True)))
             return LockDecision(
                 False,
                 f"another LIVE engine ({existing.owner}) is heartbeating "
