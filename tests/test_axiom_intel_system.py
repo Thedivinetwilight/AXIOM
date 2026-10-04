@@ -587,3 +587,50 @@ class TestWorkstationApi:
     def test_secrets_not_in_boot_surfaces(self, client):
         boot = client.get("/api/boot").json()
         assert "workstation-token" not in json.dumps(boot)
+
+
+# =====================================================================
+# Drift detection (spec 25)
+# =====================================================================
+
+class TestDriftDetector:
+    def _closes(self, base_level=100.0, recent_level=100.0, n=40, noise=0.001):
+        import random
+        rng = random.Random(7)
+        out = []
+        for i in range(n):
+            level = base_level if i < n // 2 else recent_level
+            out.append(level * (1 + rng.uniform(-noise, noise)))
+        return out
+
+    def test_stable_series_is_stable(self):
+        from app.intel.drift import DriftDetector
+        report = DriftDetector(window=20, min_samples=15).evaluate(
+            "NSE|X", self._closes())
+        assert report.verdict == "STABLE"
+        assert report.drifted == ()
+        assert report.statistics["location"]["baseline"] > 0
+
+    def test_level_shift_is_detected_with_evidence(self):
+        from app.intel.drift import DriftDetector
+        report = DriftDetector(window=20, min_samples=15).evaluate(
+            "NSE|X", self._closes(base_level=100.0, recent_level=130.0))
+        assert report.verdict == "DRIFT_DETECTED"
+        assert "location" in report.drifted
+        assert report.statistics["location"]["recent"] > \
+            report.statistics["location"]["baseline"]
+
+    def test_insufficient_data_makes_no_claim(self):
+        from app.intel.drift import DriftDetector
+        report = DriftDetector(window=20, min_samples=15).evaluate(
+            "NSE|X", self._closes(n=12))
+        assert report.verdict == "INSUFFICIENT_DATA"
+        assert report.statistics == {}
+
+    def test_bad_input_refused_not_repaired(self):
+        from app.intel.drift import DriftDetector
+        import pytest as _pt
+        with _pt.raises(ValueError):
+            DriftDetector().evaluate("NSE|X", [100.0, float("nan"), 101.0])
+        with _pt.raises(ValueError):
+            DriftDetector().evaluate("NSE|X", [100.0, -5.0, 101.0])

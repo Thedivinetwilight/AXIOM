@@ -297,3 +297,8 @@ class TestSystemPage:
         install = client.post("/api/system/update/install")
         assert install.status_code == 200
         assert install.json()["status"] == "INSTALL_REFUSED"
+
+    def test_drift_detection_route_is_honest(self, client):
+        report = client.get("/api/research/drift?market_id=india&identity=NSE|RELIANCE").json()
+        assert report["verdict"] in {"STABLE", "DRIFT_DETECTED", "INSUFFICIENT_DATA"}
+        assert report["verdict"] == "INSUFFICIENT_DATA"  # no recorded bars yet

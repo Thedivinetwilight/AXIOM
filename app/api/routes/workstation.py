@@ -965,3 +965,17 @@ async def update_install(request: Request) -> dict:
 @router.get("/api/system/update/status", dependencies=[Depends(authenticate)])
 async def update_status(request: Request) -> dict:
     return ws(request).updater.status()
+
+
+# =====================================================================
+# DRIFT DETECTION (spec section 25)
+# =====================================================================
+
+@router.get("/api/research/drift", dependencies=[Depends(authenticate)])
+async def research_drift(market_id: str, identity: str, request: Request) -> dict:
+    from app.intel.drift import DriftDetector
+
+    workstation = ws(request)
+    closes, _ = _recorded_series(workstation, identity)
+    report = DriftDetector().evaluate(identity, closes)
+    return report.to_dict()
