@@ -91,7 +91,7 @@ async def static_asset(name: str) -> Response:
             dependencies=[Depends(loopback_or_bearer)])
 async def app_page() -> HTMLResponse:
     """The main application shell (command center and all panels)."""
-    return HTMLResponse(_shell("Arena — Command Center", "arena-app", "app-root"))
+    return HTMLResponse(_shell("AXIOM — Command Center", "arena-app", "app-root"))
 
 
 @router.get("/api/boot")

@@ -1,15 +1,16 @@
 /* ===========================================================================
- * ARENA MAIN APPLICATION (3.1.0)
+ * AXIOM-MONEY-PRINTER MAIN APPLICATION (3.2.0)
  *
- * The operating cockpit: command center, paper controls, research lab,
- * market events, alerts, execution detail, settings and system diagnostics.
+ * The operating cockpit: COMMAND CENTER · MARKETS · RESEARCH · MODELS ·
+ * TRADING · RISK · INTELLIGENCE · REPORTS · SYSTEM (master spec §45, §124).
  *
  * Static asset — no Python templating. All state comes from JSON endpoints.
- * Design rules implemented here:
+ * Design rules implemented here (master spec §62, §93, §100):
  *   - every control has a backend action and visible busy/success/error state
- *   - missing data is shown as "—"/empty state, never as zero
- *   - PAPER / SANDBOX / LIVE modes are visually distinct everywhere
- *   - live controls render locked until the backend reports them enabled
+ *   - missing data is shown as "—"/UNAVAILABLE, never as a fake zero
+ *   - PAPER / SANDBOX / LIVE states are textually distinct everywhere
+ *   - live controls render locked until the state machine reports them armed
+ *   - every realtime panel carries a freshness indicator
  * =========================================================================== */
 "use strict";
 
@@ -108,31 +109,37 @@
     var app = Arena.el("div", { "class": "app" });
 
     var brand = Arena.el("div", { "class": "brand" }, [
-      Arena.el("div", { "class": "logo" }, [document.createTextNode("A")]),
+      Arena.el("div", { "class": "logo" }, [document.createTextNode("Ω")]),
       Arena.el("div", { "class": "name" }, [
-        document.createTextNode("ARENA"),
-        Arena.el("small", {}, [document.createTextNode("research · paper trading")])
+        document.createTextNode("AXIOM"),
+        Arena.el("small", {}, [document.createTextNode("MONEY-PRINTER workstation")])
       ])
     ]);
 
     var topbar = Arena.el("div", { "class": "topbar", id: "topbar" }, [
       Arena.modeBadge(state.boot),
+      Arena.el("span", { id: "live-chip" }, [Arena.stateBadge("OFFLINE")]),
+      Arena.el("span", { id: "market-chip" }, [document.createTextNode("market: —")]),
       Arena.el("span", { id: "conn-badge" }, [Arena.stateBadge("CONNECTING")]),
       Arena.el("span", { "class": "spacer" }),
+      Arena.el("button", { "class": "btn ghost sm", id: "open-palette", title: "Ctrl+K",
+        onclick: function () { openPalette(); } }, [document.createTextNode("⌘ Search (Ctrl+K)")]),
       Arena.el("span", { "class": "faint mono", id: "build-label" },
-        [document.createTextNode("Arena " + state.boot.version + " · " + state.boot.build_id)]),
+        [document.createTextNode("AXIOM " + state.boot.version + " · " + state.boot.build_id)]),
       Arena.el("span", { id: "engine-controls" })
     ]);
 
     var nav = Arena.el("nav", { "class": "sidenav", id: "sidenav" });
     [
       ["command", "◧", "Command Center"],
-      ["research", "⚗", "Research Lab"],
-      ["execution", "⇄", "Orders & Trades"],
-      ["events", "◉", "Market Events"],
-      ["alerts", "▲", "Alerts"],
-      ["settings", "⚙", "Settings"],
-      ["system", "▤", "System"]
+      ["markets", "◎", "Markets"],
+      ["research", "⚗", "Research"],
+      ["models", "▲", "Models"],
+      ["trading", "⇄", "Trading"],
+      ["risk", "⛨", "Risk"],
+      ["intelligence", "◉", "Intelligence"],
+      ["reports", "▦", "Reports"],
+      ["system", "⚙", "System"]
     ].forEach(function (item) {
       var link = Arena.el("div", {
         "class": "navlink", "data-view": item[0], tabindex: "0", role: "button", id: "nav-" + item[0]
@@ -147,17 +154,26 @@
       nav.appendChild(link);
     });
     nav.appendChild(Arena.el("div", { style: "flex:1" }));
-    nav.appendChild(Arena.el("a", { "class": "navlink", href: "/console", id: "nav-console" }, [
-      Arena.el("span", { "class": "ico" }, [document.createTextNode("❯")]),
-      document.createTextNode("Feature console")
-    ]));
 
     var main = Arena.el("main", { "class": "main", id: "main-view" });
-    app.appendChild(brand); app.appendChild(topbar); app.appendChild(nav); app.appendChild(main);
+    var statusbar = Arena.el("div", { "class": "statusbar", id: "statusbar" }, [
+      Arena.el("span", { id: "sb-feed" }, [document.createTextNode("Feed —")]),
+      Arena.el("span", { id: "sb-engine" }, [document.createTextNode("Engine —")]),
+      Arena.el("span", { id: "sb-research" }, [document.createTextNode("Research —")]),
+      Arena.el("span", { id: "sb-kronos" }, [document.createTextNode("Kronos —")]),
+      Arena.el("span", { id: "sb-risk" }, [document.createTextNode("Risk —")]),
+      Arena.el("span", { id: "sb-tasks" }, [document.createTextNode("Tasks —")]),
+      Arena.el("span", { "class": "spacer" }),
+      Arena.el("span", { id: "sb-freshness", "class": "faint" }, [document.createTextNode("updated —")])
+    ]);
+    app.appendChild(brand); app.appendChild(topbar); app.appendChild(nav); app.appendChild(main); app.appendChild(statusbar);
     document.body.appendChild(app);
     document.body.appendChild(Arena.el("div", { id: "toasts" }));
     mainEl = main;
     renderEngineControls();
+    connectStream();
+    refreshMarketChip();
+    refreshLiveChip();
   }
 
   function show(view) {
@@ -169,8 +185,11 @@
     mainEl.innerHTML = "";
     mainEl.scrollTop = 0;
     var views = {
-      command: viewCommand, research: viewResearch, execution: viewExecution,
-      events: viewEvents, alerts: viewAlerts, settings: viewSettings, system: viewSystem
+      command: viewCommand, markets: viewMarkets, research: viewResearch,
+      models: viewModels, trading: viewTrading, risk: viewRisk,
+      intelligence: viewIntelligence, reports: viewReports,
+      execution: viewTrading, events: viewIntelligence, alerts: viewIntelligence,
+      settings: viewSettings, system: viewSystem
     };
     try {
       (views[view] || viewCommand)(mainEl);
@@ -1308,6 +1327,1089 @@
       logsBody.appendChild(pre);
     }).catch(function (e) { logsBody.innerHTML = ""; logsBody.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
   }
+
+/* =====================================================================
+ * AXIOM INTELLIGENCE LAYER — realtime stream, chips, palette, pages
+ * ===================================================================== */
+
+  var stream = { lastSeq: 0, connected: false, retryDelay: 2000 };
+
+  // ------------------------------------------------------------- stream ----
+  function connectStream() {
+    var url = "/api/stream?last_seq=" + stream.lastSeq;
+    fetch(url, { headers: Arena.getToken() ? { "Authorization": "Bearer " + Arena.getToken() } : {} })
+      .then(function (res) {
+        if (!res.ok || !res.body) throw new Error("stream unavailable (" + res.status + ")");
+        stream.connected = true;
+        setConnBadge("LIVE");
+        var reader = res.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+        function pump() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) throw new Error("stream closed");
+            buffer += decoder.decode(chunk.value, { stream: true });
+            var idx;
+            while ((idx = buffer.indexOf("\n\n")) >= 0) {
+              var frame = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+              handleFrame(frame);
+            }
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function () {
+        stream.connected = false;
+        setConnBadge("POLLING");
+        setTimeout(connectStream, stream.retryDelay);
+        stream.retryDelay = Math.min(stream.retryDelay * 2, 15000);
+      });
+  }
+
+  function handleFrame(frame) {
+    var lines = frame.split("\n"); var data = "";
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("data:") === 0) data += lines[i].slice(5).trim();
+    }
+    if (!data || data === "[heartbeat]") return;
+    var msg = null; try { msg = JSON.parse(data); } catch (e) { return; }
+    stream.retryDelay = 2000;
+    if (msg.seq) stream.lastSeq = Math.max(stream.lastSeq, msg.seq);
+    if (msg.type === "opportunity.detected") {
+      var opp = msg.payload || {};
+      Arena.toast("info", "New candidate observed: " + (opp.identity || "instrument"));
+      if (state.view === "intelligence") refreshOpportunities(document.getElementById("opp-list"));
+    }
+    if (msg.type === "state.changed") {
+      Arena.toast("info", "What changed: " + ((msg.payload || {}).domain || "state") + "/" + ((msg.payload || {}).object_key || ""));
+      if (state.view === "markets") whatChangedFeed(document.getElementById("mk-changed"), "");
+    }
+    if (msg.type === "opportunity.transition" && state.view === "intelligence") {
+      refreshOpportunities(document.getElementById("opp-list"));
+    }
+    if (msg.type && msg.type.indexOf("task.") === 0) refreshTasksBadge();
+    if (msg.type === "live.session") refreshLiveChip();
+  }
+
+  function setConnBadge(stateName) {
+    var host = document.getElementById("conn-badge");
+    if (!host) return;
+    host.innerHTML = ""; host.appendChild(Arena.stateBadge(stateName));
+  }
+
+  // --------------------------------------------------------------- chips ----
+  function refreshMarketChip() {
+    var host = document.getElementById("market-chip");
+    if (!host || host.dataset.loading) return;
+    host.dataset.loading = "1";
+    var market = localStorage.getItem("axiom_market") || "india";
+    Arena.get("/api/markets/" + encodeURIComponent(market) + "/session")
+      .then(function (d) {
+        host.textContent = market + " · " + d.status;
+      })
+      .catch(function () { host.textContent = "market: —"; })
+      .finally(function () { delete host.dataset.loading; });
+  }
+
+  function refreshLiveChip() {
+    var host = document.getElementById("live-chip");
+    if (!host || host.dataset.loading) return;
+    host.dataset.loading = "1";
+    Arena.get("/api/live/session")
+      .then(function (d) {
+        host.innerHTML = "";
+        host.appendChild(Arena.stateBadge(d.state || "OFF"));
+        host.title = d.emergency_stop_active ? "EMERGENCY STOP ACTIVE" : "Live trading state machine";
+      })
+      .catch(function () { host.innerHTML = ""; host.appendChild(Arena.stateBadge("OFF")); })
+      .finally(function () { delete host.dataset.loading; });
+  }
+
+  function refreshTasksBadge() {
+    Arena.get("/api/tasks").then(function (d) {
+      var el = document.getElementById("sb-tasks");
+      if (el) el.textContent = "Tasks " + (d.counts.RUNNING || 0) + " running / " + (d.counts.PENDING || 0) + " pending";
+    }).catch(function () {});
+  }
+
+  function markFresh(id) {
+    var el = document.getElementById(id || "sb-freshness");
+    if (el) el.textContent = "updated " + new Date().toLocaleTimeString();
+  }
+
+  function updateStatusbar() {
+    var engineEl = document.getElementById("sb-engine");
+    Arena.get("/api/live/session").then(function (d) {
+      if (engineEl) engineEl.textContent = "Engine " + (state.paper && state.paper.state ? state.paper.state : (d.state || "OFF"));
+      var riskEl = document.getElementById("sb-risk");
+      if (riskEl) riskEl.textContent = d.emergency_stop_active ? "Risk EMERGENCY-STOP" : "Risk CLEAR";
+    }).catch(function () {});
+    Arena.get("/api/system/control").then(function (d) {
+      var comp = d.components || {};
+      var kronosEl = document.getElementById("sb-kronos");
+      if (kronosEl && comp.kronos) kronosEl.textContent = "Kronos " + comp.kronos;
+      var feedEl = document.getElementById("sb-feed");
+      if (feedEl) feedEl.textContent = "Feed " + (stream.connected ? "LIVE" : "POLLING");
+    }).catch(function () {});
+    Arena.get("/api/tasks").then(function (d) {
+      var el = document.getElementById("sb-research");
+      if (el) el.textContent = "Research " + (d.counts.RUNNING || 0) + " running";
+    }).catch(function () {});
+    refreshTasksBadge();
+    markFresh("sb-freshness");
+  }
+
+  // ------------------------------------------------------------ palette ----
+  var PALETTE_COMMANDS = [
+    ["Go to Command Center", function () { show("command"); }],
+    ["Go to Markets", function () { show("markets"); }],
+    ["Go to Research", function () { show("research"); }],
+    ["Go to Models (Kronos)", function () { show("models"); }],
+    ["Go to Trading", function () { show("trading"); }],
+    ["Go to Risk", function () { show("risk"); }],
+    ["Go to Intelligence", function () { show("intelligence"); }],
+    ["Go to Reports", function () { show("reports"); }],
+    ["Open System control", function () { show("system"); }],
+    ["Stop the paper engine", function () {
+      Arena.post("/paper/stop").then(function () { Arena.toast("ok", "Paper engine stop requested."); })
+        .catch(function (e) { Arena.toast("err", e.message); });
+    }],
+    ["Export active universe", function () { exportActiveUniverse(); }],
+    ["Set attention: conservative", function () { setAttention("conservative"); }],
+    ["Set attention: balanced", function () { setAttention("balanced"); }],
+    ["Set attention: aggressive", function () { setAttention("aggressive"); }]
+  ];
+
+  function openPalette() {
+    if (document.getElementById("palette")) return;
+    var overlay = Arena.el("div", { id: "palette", style: "position:fixed;inset:0;background:rgba(5,10,20,.72);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding-top:12vh" });
+    var box = Arena.el("div", { "class": "card", style: "width:min(560px,92vw)" }, [
+      Arena.el("div", { "class": "card-body" }, [
+        Arena.el("input", { id: "palette-input", placeholder: "Search actions… (Esc to close)",
+          style: "width:100%;padding:10px;font-size:14px", autocomplete: "off" }),
+        Arena.el("div", { id: "palette-list", style: "margin-top:8px;max-height:46vh;overflow:auto" })
+      ])
+    ]);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    var input = document.getElementById("palette-input");
+    function render(filter) {
+      var list = document.getElementById("palette-list");
+      list.innerHTML = "";
+      PALETTE_COMMANDS.filter(function (c) {
+        return !filter || c[0].toLowerCase().indexOf(filter.toLowerCase()) >= 0;
+      }).slice(0, 10).forEach(function (c) {
+        var row = Arena.el("div", { "class": "palette-row", tabindex: "0",
+          style: "padding:8px 10px;border-radius:8px;cursor:pointer" }, [document.createTextNode(c[0])]);
+        row.addEventListener("mouseenter", function () { row.style.background = "rgba(120,200,255,.08)"; });
+        row.addEventListener("mouseleave", function () { row.style.background = ""; });
+        row.addEventListener("click", function () { close(); c[1](); });
+        row.addEventListener("keydown", function (e) { if (e.key === "Enter") { close(); c[1](); } });
+        list.appendChild(row);
+      });
+      if (!list.children.length) list.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No matching actions.")]));
+    }
+    function close() { document.removeEventListener("keydown", onKey, true); overlay.remove(); }
+    function onKey(e) {
+      if (e.key === "Escape") close();
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        var rows = Array.prototype.slice.call(document.querySelectorAll(".palette-row"));
+        var idx = rows.indexOf(document.activeElement);
+        var next = e.key === "ArrowDown" ? Math.min(idx + 1, rows.length - 1) : Math.max(idx - 1, 0);
+        if (rows[next]) rows[next].focus();
+      }
+    }
+    input.addEventListener("input", function () { render(input.value); });
+    document.addEventListener("keydown", onKey, true);
+    render(""); input.focus();
+  }
+  document.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); if (state.tokenGatePassed) openPalette(); }
+  });
+
+  // ------------------------------------------------------------ helpers ----
+  function attentionBadge(mode) {
+    var cls = mode === "aggressive" ? "danger" : mode === "conservative" ? "info" : "warn";
+    return Arena.el("span", { "class": "badge " + cls }, [document.createTextNode((mode || "balanced").toUpperCase())]);
+  }
+
+  function setAttention(mode) {
+    Arena.post("/api/settings/attention", { mode: mode }).then(function (d) {
+      Arena.toast("ok", "Attention mode is now " + (d.mode || mode) + ". Research focus only — safety limits unchanged.");
+    }).catch(function (e) { Arena.toast("err", e.message); });
+  }
+
+  function freshnessRow(tsIso, label) {
+    return Arena.el("span", { "class": "faint", style: "font-size:11px" },
+      [document.createTextNode((label || "data as of") + ": " + (tsIso ? Arena.timeAgo(tsIso) : "—"))]);
+  }
+
+  function whatChangedFeed(host, params) {
+    if (!host) return;
+    host.innerHTML = "";
+    Arena.get("/api/changes" + (params || "")).then(function (d) {
+      var changes = d.changes || [];
+      if (!changes.length) {
+        host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No state changes recorded yet.")]));
+        return;
+      }
+      changes.slice(0, 15).forEach(function (c) {
+        host.appendChild(Arena.el("div", { style: "margin-bottom:4px" }, [
+          Arena.el("span", { "class": "faint mono", style: "font-size:11px" }, [document.createTextNode(Arena.timeAgo(c.ts) + "  ")]),
+          Arena.el("b", {}, [document.createTextNode(c.domain + "/" + c.object_key + " · " + c.field + " ")]),
+          document.createTextNode(String(c.previous === undefined || c.previous === null ? "—" : c.previous) + " → " +
+            String(c.current === undefined || c.current === null ? "—" : c.current))
+        ]));
+      });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function exportActiveUniverse() {
+    var id = localStorage.getItem("axiom_universe");
+    if (!id) { Arena.toast("err", "Select a universe on the Markets page first."); return; }
+    Arena.get("/api/universes/" + encodeURIComponent(id) + "/export")
+      .then(function () { Arena.toast("ok", "Universe exported to data/universes/ (check the data folder)."); })
+      .catch(function (e) { Arena.toast("err", e.message); });
+  }
+
+  function kvRows(rows) {
+    var out = [];
+    rows.forEach(function (r) {
+      out.push(Arena.el("dt", {}, [document.createTextNode(r[0])]));
+      out.push(Arena.el("dd", {}, [document.createTextNode(String(r[1]))]));
+    });
+    return out;
+  }
+
+  function startStatusPolling() {
+    if (state.axiomPolling) return;
+    state.axiomPolling = setInterval(function () {
+      if (!document.hidden) updateStatusbar();
+    }, 5000);
+  }
+
+  // =====================================================================
+  // MARKETS workstation
+  // =====================================================================
+  function viewMarkets(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Markets")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "Market scopes, session clocks, universes and the instrument workspace. Symbols are market-scoped identities; every value shown states its source (OBSERVED only).")]));
+
+    var grid = Arena.el("div", { "class": "grid cols-2" });
+    var sessionHost = Arena.el("div", { id: "mk-session" });
+    grid.appendChild(card("Session state", sessionHost));
+    var universeHost = Arena.el("div", { id: "mk-universes" });
+    grid.appendChild(card("Universes", universeHost));
+    root.appendChild(grid);
+
+    var instrumentHost = Arena.el("div", { id: "mk-instrument", "class": "section-gap" });
+    root.appendChild(card("Instrument workspace", instrumentHost));
+
+    var changedHost = Arena.el("div", { id: "mk-changed" });
+    root.appendChild(Arena.el("div", { "class": "section-gap" }, [card("What changed", changedHost)]));
+    whatChangedFeed(changedHost, "");
+
+    renderMarketSessions(sessionHost);
+    renderUniverseStudio(universeHost, instrumentHost);
+    startStatusPolling();
+  }
+
+  function renderMarketSessions(host) {
+    Arena.get("/api/markets").then(function (d) {
+      var markets = d.markets || [];
+      var active = localStorage.getItem("axiom_market") || (markets[0] && markets[0].market_id) || d.selected || "india";
+      localStorage.setItem("axiom_market", active);
+      host.innerHTML = "";
+      var tabs = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
+      markets.forEach(function (m) {
+        tabs.appendChild(Arena.el("button", {
+          "class": "btn sm " + (m.market_id === active ? "primary" : "ghost"),
+          onclick: function () { localStorage.setItem("axiom_market", m.market_id); viewMarketsRefresh(); }
+        }, [document.createTextNode(m.display_name || m.market_id)]));
+      });
+      host.appendChild(tabs);
+      var meta = markets.filter(function (m) { return m.market_id === active; })[0];
+      var body = Arena.el("div", { style: "margin-top:10px" }, [document.createTextNode("Loading…")]);
+      host.appendChild(body);
+      Arena.get("/api/markets/" + encodeURIComponent(active) + "/session").then(function (s) {
+        body.innerHTML = "";
+        body.appendChild(Arena.el("dl", { "class": "kv" }, kvRows([
+          ["Status", s.status], ["Reason", s.reason || "—"],
+          ["Local time", s.local_time || "—"], ["Timezone", s.timezone || (meta && meta.timezone) || "—"],
+          ["Currency", (meta && meta.currency) || "—"],
+          ["Exchanges", (meta && meta.exchanges ? meta.exchanges.join(", ") : "—")],
+          ["Next transition", s.next_transition ? s.next_transition + " (" + s.minutes_to_next_transition + " min)" : "—"]
+        ])));
+        body.appendChild(freshnessRow(new Date().toISOString(), "evaluated"));
+      }).catch(function (e) { body.innerHTML = ""; body.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function viewMarketsRefresh() {
+    var root = document.getElementById("main-view");
+    if (root && state.view === "markets") { root.innerHTML = ""; viewMarkets(root); }
+  }
+
+  function renderUniverseStudio(host, instrumentHost) {
+    function paint() {
+      Arena.get("/api/universes").then(function (d) {
+        host.innerHTML = "";
+        var universes = d.universes || [];
+        if (!universes.length) {
+          host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No universes yet — create one below.")]));
+        }
+        var list = Arena.el("div", {});
+        universes.forEach(function (u) {
+          list.appendChild(Arena.el("div", { style: "display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap" }, [
+            Arena.el("b", {}, [document.createTextNode(u.name)]),
+            Arena.el("span", { "class": "faint" }, [document.createTextNode(u.market_id + " · " + (u.symbols || []).length + " symbols")]),
+            Arena.el("span", { style: "flex:1" }),
+            Arena.el("button", { "class": "btn ghost sm", onclick: function () {
+              localStorage.setItem("axiom_universe", u.id);
+              Arena.toast("ok", "Active universe: " + u.name);
+              renderInstrumentWorkspace(instrumentHost);
+            } }, [document.createTextNode("Select")]),
+            Arena.el("button", { "class": "btn ghost sm", onclick: function () {
+              Arena.get("/api/universes/" + encodeURIComponent(u.id) + "/export")
+                .then(function () { Arena.toast("ok", "Exported to data/universes/"); })
+                .catch(function (e) { Arena.toast("err", e.message); });
+            } }, [document.createTextNode("Export")]),
+            Arena.el("button", { "class": "btn ghost sm", onclick: function () {
+              Arena.api("DELETE", "/api/universes/" + encodeURIComponent(u.id)).then(function () {
+                Arena.toast("ok", "Universe removed."); paint();
+              }).catch(function (e) { Arena.toast("err", e.message); });
+            } }, [document.createTextNode("Remove")])
+          ]));
+        });
+        host.appendChild(list);
+
+        var form = Arena.el("div", { "class": "section-gap" }, [
+          Arena.el("div", { "class": "field" }, [
+            Arena.el("label", { for: "uni-name" }, [document.createTextNode("Name")]),
+            Arena.el("input", { id: "uni-name", placeholder: "e.g. Nifty 50 core" })
+          ]),
+          Arena.el("div", { "class": "field" }, [
+            Arena.el("label", { for: "uni-symbols" }, [document.createTextNode("Symbols (one per line, e.g. NSE|RELIANCE, NYSE|AAPL, FOREX|EUR/USD)")]),
+            Arena.el("textarea", { id: "uni-symbols", rows: "3", style: "width:100%" })
+          ]),
+          Arena.el("div", { "class": "btn-row" }, [
+            Arena.el("button", { "class": "btn primary sm", id: "uni-create" }, [document.createTextNode("Create universe")])
+          ])
+        ]);
+        host.appendChild(form);
+        document.getElementById("uni-create").addEventListener("click", function () {
+          var name = document.getElementById("uni-name").value.trim();
+          var symbols = document.getElementById("uni-symbols").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+          var market = localStorage.getItem("axiom_market") || "india";
+          Arena.post("/api/universes", { market_id: market, name: name, symbols: symbols }).then(function () {
+            Arena.toast("ok", "Universe created.");
+            document.getElementById("uni-name").value = ""; document.getElementById("uni-symbols").value = ""; paint();
+          }).catch(function (e) { Arena.toast("err", e.message); });
+        });
+      }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+    }
+    paint();
+    renderInstrumentWorkspace(instrumentHost);
+  }
+
+  function renderInstrumentWorkspace(host) {
+    host.innerHTML = "";
+    var universeId = localStorage.getItem("axiom_universe");
+    if (!universeId) {
+      host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("Select a universe to open its instrument workspace.")]));
+      return;
+    }
+    Arena.get("/api/universes/" + encodeURIComponent(universeId)).then(function (d) {
+      var u = d.universe || d;
+      host.innerHTML = "";
+      host.appendChild(Arena.el("h3", {}, [document.createTextNode(u.name + " (" + u.market_id + ")")]));
+      var chips = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
+      (u.symbols || []).forEach(function (sym) {
+        chips.appendChild(Arena.el("button", { "class": "btn ghost sm", id: "instr-" + sym.replace(/[^A-Za-z0-9]/g, "_"),
+          onclick: function () { renderInstrumentDetail(u.market_id, sym); } }, [document.createTextNode(sym)]));
+      });
+      if (!(u.symbols || []).length) chips.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode("Universe has no symbols.")]));
+      host.appendChild(chips);
+      Arena.get("/api/universe/pins?market_id=" + encodeURIComponent(u.market_id)).then(function (p) {
+        (p.pins || []).forEach(function (pin) {
+          chips.appendChild(Arena.el("span", { "class": "badge info", style: "margin-left:6px" },
+            [document.createTextNode("pinned: " + (pin.identity || pin))]));
+        });
+      }).catch(function () {});
+      host.appendChild(Arena.el("div", { id: "instr-detail", "class": "section-gap" }));
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderInstrumentDetail(marketId, identity) {
+    var detail = document.getElementById("instr-detail");
+    if (!detail) return;
+    detail.innerHTML = "";
+    detail.appendChild(document.createTextNode("Loading evidence for " + identity + "…"));
+    Arena.get("/api/evidence/" + encodeURIComponent(marketId) + "/" + encodeURIComponent(identity)).then(function (ev) {
+      detail.innerHTML = "";
+      detail.appendChild(Arena.el("h3", {}, [document.createTextNode(identity + " — evidence stack")]));
+      var layers = ev.layers || ev;
+      (Array.isArray(layers) ? layers : []).forEach(function (layer) {
+        var status = layer.status || "NOT LOADED";
+        var row = Arena.el("div", { style: "margin:6px 0;padding:8px;border:1px solid #1d2739;border-radius:8px" }, [
+          Arena.el("b", {}, [document.createTextNode(layer.layer + " ")]),
+          Arena.stateBadge(status),
+          Arena.el("div", { "class": "mono faint", style: "font-size:11.5px;margin-top:4px;word-break:break-word" },
+            [document.createTextNode(layer.status === "NOT LOADED" || layer.value === undefined || layer.value === null
+              ? ("UNAVAILABLE — " + (layer.unavailable_reason || "no data recorded"))
+              : JSON.stringify(layer.value))]),
+          Arena.el("div", { "class": "faint", style: "font-size:11px" }, [document.createTextNode("provenance: " + (layer.provenance || "—"))])
+        ]);
+        detail.appendChild(row);
+      });
+      detail.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px" }, [
+        document.createTextNode("Recommendations are guidance for human review only; the execution path applies its own risk gates regardless.")
+      ]));
+      var actions = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
+      var recBtn = Arena.el("button", { "class": "btn ghost sm", id: "evidence-recommend-" + identity.replace(/[^A-Za-z0-9]/g, "_") }, [document.createTextNode("Log WATCH recommendation")]);
+      recBtn.addEventListener("click", function () {
+        Arena.post("/api/evidence/" + encodeURIComponent(marketId) + "/" + encodeURIComponent(identity) +
+          "/recommend?state=WATCH&rationale=" + encodeURIComponent("logged from instrument workspace"), {})
+          .then(function (r) { Arena.toast("ok", "Recommendation logged: " + (r.recommendation ? r.recommendation.state : "recorded")); })
+          .catch(function (e) { Arena.toast("err", e.message); });
+      });
+      actions.appendChild(recBtn);
+      var missedBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Log missed opportunity")]);
+      missedBtn.addEventListener("click", function () {
+        Arena.post("/api/research/missed", { kind: "false_negative", payload: { source: "instrument workspace" },
+          knowable: true, market_id: marketId, identity: identity,
+          research_question: "Why was this setup not acted on?" })
+          .then(function () { Arena.toast("ok", "Recorded in the missed-opportunity ledger."); })
+          .catch(function (e) { Arena.toast("err", e.message); });
+      });
+      actions.appendChild(missedBtn);
+      detail.appendChild(actions);
+
+      var analogHost = Arena.el("div", { "class": "section-gap" });
+      detail.appendChild(analogHost);
+      Arena.post("/api/analogues/search", { market_id: marketId, identity: identity }).then(function (a) {
+        analogHost.innerHTML = "";
+        analogHost.appendChild(Arena.el("b", {}, [document.createTextNode("Historical analogues (" + a.sample_size + " candidate windows, " +
+          (a.enough_history ? "enough history" : "insufficient history — treated as such") + ")")]));
+        var results = a.results || [];
+        if (!results.length) { analogHost.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No analogue matches recorded.")])); return; }
+        var table = Arena.el("table", { "class": "table" });
+        table.appendChild(Arena.el("tr", {}, ["Window start", "Similarity", "Forward return", "Forward vol"].map(function (h) { return Arena.el("th", {}, [document.createTextNode(h)]); })));
+        results.forEach(function (r) {
+          table.appendChild(Arena.el("tr", {}, [
+            Arena.el("td", {}, [document.createTextNode(String(r.analogue_start_index))]),
+            Arena.el("td", {}, [document.createTextNode((r.similarity * 100).toFixed(1) + "%")]),
+            Arena.el("td", {}, [document.createTextNode(r.forward_return !== null && r.forward_return !== undefined ? (r.forward_return * 100).toFixed(2) + "%" : "—")]),
+            Arena.el("td", {}, [document.createTextNode(r.forward_volatility !== null && r.forward_volatility !== undefined ? (r.forward_volatility * 100).toFixed(2) + "%" : "—")])
+          ]));
+        });
+        analogHost.appendChild(table);
+        if (a.limitations && a.limitations.length) {
+          analogHost.appendChild(Arena.el("div", { "class": "faint", style: "font-size:11px;margin-top:4px" },
+            [document.createTextNode("Limitations: " + a.limitations.join("; "))]));
+        }
+      }).catch(function () {});
+    }).catch(function (e) { detail.innerHTML = ""; detail.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // MODELS — Kronos studio
+  // =====================================================================
+  function viewModels(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Models — Kronos Studio")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "DOWNLOAD → VERIFY → INSTALL → BENCHMARK → ACTIVATE. Kronos stays isolated from execution: it forecasts; the risk layer decides. Every status is reported honestly — no weights means no claims.")]));
+    var studioHost = Arena.el("div", { id: "model-studio" }, [document.createTextNode("Loading…")]);
+    root.appendChild(card("Model pipeline", studioHost));
+    startStatusPolling();
+    renderStudio(studioHost);
+  }
+
+  function renderStudio(studioHost) {
+    Arena.get("/api/kronos/studio").then(function (d) {
+      studioHost.innerHTML = "";
+      studioHost.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-bottom:8px" }, [
+        Arena.el("span", { "class": "faint" }, [document.createTextNode("cache root: " + d.cache_root)]),
+        Arena.el("span", { "class": "faint" }, [document.createTextNode("active model: " + (d.active_model || "none"))])
+      ]));
+      var grid = Arena.el("div", { "class": "grid cols-3", style: "gap:10px" });
+      (d.cards || []).forEach(function (m) {
+        var c = Arena.el("div", { "class": "card", style: "margin:0" }, [
+          Arena.el("div", { "class": "card-head" }, [
+            Arena.el("h3", { style: "font-size:13px" }, [document.createTextNode(m.model_id)]),
+            Arena.stateBadge(m.lifecycle)
+          ]),
+          Arena.el("div", { "class": "card-body", style: "padding:10px" }, [
+            Arena.el("div", { "class": "faint", style: "font-size:11.5px;margin-bottom:6px" }, [
+              document.createTextNode((m.context_length || "?") + " ctx · ~" + m.parameters_approx + " params · tokenizer " + m.tokenizer_id)]),
+            Arena.el("div", { "class": "hint " + ((m.integrity && m.integrity.ok) ? "" : "faint"), style: "font-size:11px" }, [
+              document.createTextNode((m.integrity && m.integrity.ok) ? "integrity VERIFIED" : "integrity NOT VERIFIED")])
+          ])
+        ]);
+        var actions = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;padding:0 10px 10px" });
+        [["Download", "download"], ["Verify", "verify"], ["Install", "install"], ["Benchmark", "benchmark"], ["Activate", "activate"]].forEach(function (step) {
+          var b = Arena.el("button", { "class": "btn ghost sm", id: "kronos-" + step[1] + "-" + m.model_id.replace(/[^A-Za-z0-9.-]/g, "_") }, [document.createTextNode(step[0])]);
+          b.addEventListener("click", function () {
+            b.disabled = true; b.textContent = "Working…";
+            Arena.post("/api/kronos/studio/" + step[1], { model_id: m.model_id }).then(function (r) {
+              Arena.toast(r.ok ? "ok" : "err", (r.status || "done") + (r.detail ? " — " + r.detail : ""));
+              renderStudio(studioHost);
+            }).catch(function (e) { Arena.toast("err", e.message); renderStudio(studioHost); });
+          });
+          actions.appendChild(b);
+        });
+        c.appendChild(actions);
+        if (m.notes && m.notes.length) {
+          c.appendChild(Arena.el("div", { "class": "faint", style: "font-size:10.5px;padding:0 10px 10px" }, [document.createTextNode(m.notes.join(" · "))]));
+        }
+        grid.appendChild(c);
+      });
+      studioHost.appendChild(grid);
+      studioHost.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:8px" }, [document.createTextNode(d.note)]));
+    }).catch(function (e) { studioHost.innerHTML = ""; studioHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // TRADING — paper controls + LIVE state machine + orders
+  // =====================================================================
+  function viewTrading(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Trading")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "Paper execution, the live-trading state machine and the order ledger. Live never auto-activates: OFF → CONFIGURED → READY → ARMED → ACTIVE, each transition explicit.")]));
+
+    var liveHost = Arena.el("div", { id: "live-panel" }, [document.createTextNode("Loading…")]);
+    root.appendChild(card("Live trading session", liveHost));
+
+    var readinessHost = Arena.el("div", { id: "readiness-host", "class": "section-gap" });
+    root.appendChild(card("Readiness center", readinessHost));
+
+    var summaryHost = Arena.el("div", { id: "summary-host", "class": "section-gap" });
+    root.appendChild(card("Start confirmation summary", summaryHost));
+
+    var emergencyHost = Arena.el("div", { "class": "section-gap" });
+    root.appendChild(card("Emergency controls", emergencyHost));
+
+    var execInner = Arena.el("div", { id: "exec-inner", "class": "section-gap" });
+    root.appendChild(execInner);
+
+    renderLivePanel(liveHost);
+    renderReadiness(readinessHost);
+    renderStartSummary(summaryHost);
+    renderEmergency(emergencyHost);
+    viewExecution(execInner);
+    startStatusPolling();
+  }
+
+  function renderLivePanel(host) {
+    if (!host) return;
+    Promise.all([Arena.get("/api/live/session"), Arena.get("/api/live/rate-limit"), Arena.get("/api/live/history")])
+      .then(function (results) {
+        var d = results[0], rl = results[1], hist = results[2];
+        host.innerHTML = "";
+        var head = Arena.el("div", { "class": "btn-row", style: "align-items:center;flex-wrap:wrap" }, [
+          Arena.stateBadge(d.state || "OFF"),
+          Arena.el("span", { "class": "faint" }, [document.createTextNode(
+            (d.emergency_stop_active ? "EMERGENCY STOP ACTIVE · " : "") +
+            "configuration: " + (d.derived_configuration_state || "—") +
+            (d.reason ? " · " + d.reason : ""))]),
+          Arena.el("span", { "class": "faint mono" }, [document.createTextNode(
+            "rate profile " + rl.profile + " · recent " + rl.current.per_min + "/min, " + rl.current.per_sec + "/s")])
+        ]);
+        host.appendChild(head);
+
+        var controls = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-top:10px" });
+        function liveBtn(label, path, opts) {
+          opts = opts || {};
+          var b = Arena.el("button", { "class": "btn sm " + (opts.kind || "ghost"), id: "live-" + path.replace(/[^a-z]/g, "-") }, [document.createTextNode(label)]);
+          b.addEventListener("click", function () {
+            var body = {};
+            if (opts.prompt) {
+              var phrase = window.prompt(opts.prompt);
+              if (phrase === null) return;
+              body.confirmation_phrase = phrase;
+            }
+            if (opts.reasonPrompt) {
+              var reason = window.prompt(opts.reasonPrompt, "manual stop from GUI");
+              if (reason === null) return;
+              body.reason = reason;
+            }
+            b.disabled = true;
+            Arena.post("/api/live/session/" + path, body).then(function (r) {
+              Arena.toast("ok", "Live session is now " + r.state + (r.reason ? " — " + r.reason : ""));
+              renderLivePanel(host); refreshLiveChip();
+            }).catch(function (e) { Arena.toast("err", e.message); b.disabled = false; });
+          });
+          controls.appendChild(b);
+        }
+        liveBtn("Arm", "arm", { kind: "primary", prompt: "Arming live trading requires the readiness contract to pass.\nEnter the configured LIVE confirmation phrase:" });
+        liveBtn("Activate", "activate", { kind: "danger" });
+        liveBtn("Pause", "pause");
+        liveBtn("Resume", "resume");
+        liveBtn("Stop", "stop", { reasonPrompt: "Why is the live session being stopped?" });
+        liveBtn("Disarm", "disarm");
+        host.appendChild(controls);
+        host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:6px" }, [
+          document.createTextNode(d.note || "Arming requires the full readiness contract; no restart or background job can arm live trading.")]));
+
+        var history = hist.history || [];
+        if (history.length) {
+          var hwrap = Arena.el("div", { style: "margin-top:10px" }, [
+            Arena.el("b", {}, [document.createTextNode("Transition history (most recent first)")]
+          )]);
+          history.slice(0, 8).forEach(function (h) {
+            hwrap.appendChild(Arena.el("div", { "class": "faint mono", style: "font-size:11px" }, [
+              document.createTextNode((h.ts || "") + "  " + (h.from_state || "?") + " → " + (h.to_state || "?") + (h.reason ? "  (" + h.reason + ")" : ""))
+            ]));
+          });
+          host.appendChild(hwrap);
+        }
+      })
+      .catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderReadiness(host) {
+    if (!host) return;
+    Arena.get("/api/live/readiness-center").then(function (d) {
+      host.innerHTML = "";
+      host.appendChild(Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" }, [
+        Arena.stateBadge(d.verdict || "UNKNOWN"),
+        Arena.el("span", { "class": "faint" }, [document.createTextNode(
+          (d.counts.ready || 0) + " passed · " + (d.counts.blocked || 0) + " blockers · " +
+          (d.counts.warning || 0) + " warnings · " + (d.counts.unknown || 0) + " not verified (never treated as passing)")])
+      ]));
+      var table = Arena.el("table", { "class": "table", style: "margin-top:8px" });
+      table.appendChild(Arena.el("tr", {}, ["Check", "Status", "Detail"].map(function (h) { return Arena.el("th", {}, [document.createTextNode(h)]); })));
+      (d.checks || []).forEach(function (c) {
+        table.appendChild(Arena.el("tr", {}, [
+          Arena.el("td", {}, [document.createTextNode(c.name)]),
+          Arena.el("td", {}, [Arena.stateBadge(c.status)]),
+          Arena.el("td", { "class": "faint", style: "font-size:12px" }, [document.createTextNode(c.detail)])
+        ]));
+      });
+      host.appendChild(table);
+      host.appendChild(Arena.el("div", { "class": "hint", style: "font-size:12px;margin-top:6px" }, [
+        document.createTextNode(d.verdict === "BLOCKED"
+          ? "ARMING BLOCKED — resolve the items above before live trading can be armed."
+          : "Readiness currently permits arming (confirmation phrase still required).")
+      ]));
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderStartSummary(host) {
+    if (!host) return;
+    Arena.get("/api/live/start-summary").then(function (d) {
+      host.innerHTML = "";
+      var summary = d.summary || d;
+      if (Array.isArray(summary)) {
+        summary.forEach(function (line) {
+          host.appendChild(Arena.el("div", { style: "font-size:12.5px;margin:2px 0" }, [document.createTextNode(String(typeof line === "object" ? JSON.stringify(line) : line))]));
+        });
+      } else {
+        var pre = Arena.el("pre", { style: "white-space:pre-wrap;font-size:12px" }, [document.createTextNode(JSON.stringify(summary, null, 2))]);
+        host.appendChild(pre);
+      }
+      host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px" }, [
+        document.createTextNode("This summary is shown again at arm time — nothing hidden between this view and activation.")]));
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderEmergency(host) {
+    if (!host) return;
+    host.innerHTML = "";
+    var row = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
+    [["Pause live (new orders)", "/api/live/session/pause", {}],
+     ["Stop live session", "/api/live/session/stop", { reason: "emergency stop from GUI" }],
+     ["Stop paper engine (cancels open orders)", "/paper/stop", {}]].forEach(function (action) {
+      var b = Arena.el("button", { "class": "btn sm danger", id: "emg-" + action[0].replace(/[^a-z0-9]+/g, "-").toLowerCase() }, [document.createTextNode(action[0])]);
+      b.addEventListener("click", function () {
+        Arena.confirmDialog("Emergency action", "Execute: " + action[0] + "? This acts immediately on engine/broker state.", "Execute", true, function () {
+          Arena.post(action[1], action[2]).then(function (r) {
+            Arena.toast("ok", "Executed: " + (r.state || r.message || "done"));
+            refreshLiveChip();
+          }).catch(function (e) { Arena.toast("err", e.message); });
+        });
+      });
+      row.appendChild(b);
+    });
+    host.appendChild(row);
+    host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:6px" }, [
+      document.createTextNode("Emergency paths are independent of the strategy loop: they act on broker/engine state directly and never require a model to be running.")]));
+  }
+
+  // =====================================================================
+  // RISK
+  // =====================================================================
+  function viewRisk(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Risk")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "Hard limits, utilisation and breaches. Limits are enforced by the engine; this page shows their state — it cannot raise them.")]));
+    var host = Arena.el("div", { id: "risk-host" }, [document.createTextNode("Loading…")]);
+    root.appendChild(card("Risk limits & breaches", host));
+    var guardHost = Arena.el("div", { "class": "section-gap", id: "guard-host" });
+    root.appendChild(card("Live guard chain", guardHost));
+    startStatusPolling();
+
+    Arena.get("/dashboard/data").then(function (d) {
+      host.innerHTML = "";
+      var limits = d.risk_limits || {};
+      var grid = Arena.el("div", { "class": "grid cols-4" });
+      [["Max drawdown", limits.max_drawdown], ["Max daily loss", limits.max_daily_loss],
+       ["Max trades/day", limits.max_trades_per_day], ["Max position size", limits.max_position_size]].forEach(function (row) {
+        grid.appendChild(Arena.el("div", { "class": "card", style: "margin:0" }, [
+          Arena.el("div", { "class": "card-body", style: "padding:12px" }, [
+            Arena.el("div", { "class": "faint", style: "font-size:11px" }, [document.createTextNode(row[0])]),
+            Arena.el("div", { "class": "mono", style: "font-size:16px" }, [document.createTextNode(row[1] === undefined || row[1] === null ? "—" : String(row[1]))])
+          ])
+        ]));
+      });
+      host.appendChild(grid);
+      host.appendChild(Arena.el("div", { style: "margin-top:10px" }, [
+        Arena.stateBadge(d.emergency_stop ? "EMERGENCY-STOP" : "CLEAR"),
+        Arena.el("span", { "class": "faint", style: "margin-left:8px" }, [
+          document.createTextNode(d.emergency_stop ? ("reason: " + (d.emergency_reason || "—")) : "no emergency stop engaged")])
+      ]));
+      var breaches = d.breaches || d.risk_breaches || [];
+      host.appendChild(Arena.el("div", { style: "margin-top:10px" }, [
+        Arena.el("b", {}, [document.createTextNode("Breaches: " + breaches.length)])
+      ]));
+      if (!breaches.length) host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No risk breaches recorded.")]));
+      breaches.slice(0, 10).forEach(function (br) {
+        host.appendChild(Arena.el("div", { "class": "faint", style: "font-size:12px;margin:2px 0" }, [document.createTextNode(JSON.stringify(br))]));
+      });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+
+    Arena.get("/api/live/guard-chain").then(function (d) {
+      guardHost.innerHTML = "";
+      var list = Arena.el("div", {});
+      (d.guards || []).forEach(function (g, i) {
+        list.appendChild(Arena.el("div", { style: "margin:3px 0" }, [
+          Arena.el("b", { "class": "mono" }, [document.createTextNode(String(i + 1).padStart(2, "0") + " ")]),
+          document.createTextNode(g)
+        ]));
+      });
+      guardHost.appendChild(list);
+      guardHost.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:6px" }, [
+        document.createTextNode(d.note || "Every live ENTRY passes all guards in order; any guard can refuse.")]));
+    }).catch(function (e) { guardHost.innerHTML = ""; guardHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // INTELLIGENCE — opportunities, events, missed, next best
+  // =====================================================================
+  function viewIntelligence(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Intelligence")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "The Opportunity Center, market events and the false-negative lab. Candidates are OBSERVED from recorded market data — never generated filler.")]));
+
+    var toolbar = Arena.el("div", { "class": "btn-row", style: "margin-bottom:10px" }, [
+      Arena.el("button", { "class": "btn ghost sm", onclick: function () { viewIntelligenceRefresh(); } }, [document.createTextNode("Refresh")]),
+      Arena.el("span", { id: "opp-fresh" })
+    ]);
+    root.appendChild(toolbar);
+
+    var grid = Arena.el("div", { "class": "grid cols-2" });
+    var oppHost = Arena.el("div", { id: "opp-list" }, [document.createTextNode("Loading…")]);
+    grid.appendChild(card("Opportunity Center", oppHost));
+    var missedHost = Arena.el("div", { id: "missed-list" }, [document.createTextNode("Loading…")]);
+    grid.appendChild(card("Missed opportunities (false-negative lab)", missedHost));
+    root.appendChild(grid);
+
+    var eventsHost = Arena.el("div", { "class": "section-gap", id: "events-host" });
+    root.appendChild(card("Market events", eventsHost));
+    var nextHost = Arena.el("div", { "class": "section-gap", id: "next-best-host" });
+    root.appendChild(card("Next best experiment (research intelligence)", nextHost));
+
+    refreshOpportunities(oppHost);
+    renderMissed(missedHost);
+    renderMarketEvents(eventsHost);
+    renderNextBest(nextHost);
+    startStatusPolling();
+  }
+
+  function viewIntelligenceRefresh() {
+    var root = document.getElementById("main-view");
+    if (root && state.view === "intelligence") { root.innerHTML = ""; viewIntelligence(root); }
+  }
+
+  var OPP_TRANSITIONS = [["Watch", "WATCH"], ["Investigate", "INVESTIGATING"],
+    ["High conviction", "HIGH-CONVICTION SETUP"], ["Papered", "PAPERED"],
+    ["Invalidate", "INVALIDATED"], ["Avoid", "AVOID"]];
+
+  function refreshOpportunities(host) {
+    if (!host) return;
+    Arena.get("/api/opportunities").then(function (d) {
+      host.innerHTML = "";
+      var opps = d.opportunities || [];
+      host.appendChild(freshnessRow(new Date().toISOString()));
+      if (!opps.length) {
+        host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode(
+          "No candidates right now. Candidates appear when observed moves, volume spikes or regime changes cross the attention profile — the centre never invents them.")]));
+        return;
+      }
+      opps.forEach(function (o) {
+        var row = Arena.el("div", { "class": "card", style: "margin:6px 0" }, [
+          Arena.el("div", { "class": "card-head" }, [
+            Arena.el("b", {}, [document.createTextNode(o.identity)]),
+            Arena.stateBadge(o.state),
+            Arena.el("span", { "class": "faint" }, [document.createTextNode("age " + o.age_seconds + "s · evidence " + o.evidence_age_seconds + "s")])
+          ]),
+          Arena.el("div", { "class": "card-body", style: "padding:8px 12px" }, [
+            Arena.el("div", { "class": "faint", style: "font-size:12px" }, [
+              document.createTextNode("trigger: " + (o.trigger || "—") + "  ·  market: " + o.market_id +
+                (o.invalidation_reason ? "  ·  invalidated: " + o.invalidation_reason : ""))]),
+            Arena.el("div", { "class": "btn-row", style: "margin-top:6px;flex-wrap:wrap" },
+              OPP_TRANSITIONS.map(function (t) {
+                var b = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode(t[0])]);
+                b.addEventListener("click", function () {
+                  Arena.post("/api/opportunities/" + encodeURIComponent(o.id) + "/transition", { state: t[1], reason: "user decision" })
+                    .then(function () { refreshOpportunities(host); })
+                    .catch(function (e) { Arena.toast("err", e.message); });
+                });
+                return b;
+              }))
+          ])
+        ]);
+        host.appendChild(row);
+      });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderMissed(host) {
+    Arena.get("/api/research/missed").then(function (d) {
+      host.innerHTML = "";
+      var items = d.missed || [];
+      var stats = d.stats || {};
+      host.appendChild(Arena.el("div", { "class": "faint", style: "font-size:11.5px;margin-bottom:6px" }, [
+        document.createTextNode("total " + (stats.total || 0) + " · knowable " + (stats.knowable || 0))]));
+      if (!items.length) { host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No missed opportunities recorded.")])); return; }
+      items.slice(0, 12).forEach(function (m) {
+        host.appendChild(Arena.el("div", { style: "margin:4px 0" }, [
+          Arena.el("b", {}, [document.createTextNode((m.identity || m.market_id || m.kind || "instrument"))]),
+          Arena.el("span", { "class": "faint", style: "font-size:12px" }, [
+            document.createTextNode(" — " + m.kind + (m.knowable ? " (knowable)" : "") +
+              (m.research_question ? " · " + m.research_question : ""))])
+        ]));
+      });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderMarketEvents(host) {
+    Arena.get("/api/market-events").then(function (d) {
+      host.innerHTML = "";
+      var events = d.events || d.raw_events || [];
+      if (!events.length) { host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No market events recorded.")])); return; }
+      events.slice(0, 20).forEach(function (ev) {
+        host.appendChild(Arena.el("div", { "class": "faint mono", style: "font-size:11.5px;margin:2px 0" }, [
+          document.createTextNode((ev.ts || ev.timestamp || "") + "  " + (ev.kind || ev.trigger || "") + "  " + JSON.stringify(ev.payload || ev.data || ev))
+        ]));
+      });
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderNextBest(host) {
+    Arena.get("/api/research/next-best").then(function (d) {
+      host.innerHTML = "";
+      var suggestions = d.suggestions || [];
+      if (!suggestions.length) { host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No suggestions yet.")])); return; }
+      var table = Arena.el("table", { "class": "table" });
+      table.appendChild(Arena.el("tr", {}, ["Hypothesis", "Motivation", "Expected gain", "Budget"].map(function (h) { return Arena.el("th", {}, [document.createTextNode(h)]); })));
+      suggestions.forEach(function (s) {
+        table.appendChild(Arena.el("tr", {}, [
+          Arena.el("td", {}, [document.createTextNode(s.hypothesis)]),
+          Arena.el("td", { "class": "faint", style: "font-size:12px" }, [document.createTextNode(s.motivation)]),
+          Arena.el("td", { "class": "faint", style: "font-size:12px" }, [document.createTextNode(s.expected_information_gain)]),
+          Arena.el("td", {}, [document.createTextNode(s.compute_budget)])
+        ]));
+      });
+      host.appendChild(table);
+      host.appendChild(Arena.el("div", { "class": "faint", style: "font-size:11px;margin-top:4px" }, [document.createTextNode(d.note || "")]));
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // REPORTS
+  // =====================================================================
+  function viewReports(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Reports")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "Weekly performance report and latency observability. Numbers come from the journal and latency tracker — nothing is synthesised for display.")]));
+
+    var grid = Arena.el("div", { "class": "grid cols-2" });
+    var weeklyHost = Arena.el("div", { id: "report-weekly" }, [document.createTextNode("Loading…")]);
+    grid.appendChild(card("Weekly report", weeklyHost));
+    var latencyHost = Arena.el("div", { id: "report-latency" }, [document.createTextNode("Loading…")]);
+    grid.appendChild(card("Latency observability (hot path)", latencyHost));
+    root.appendChild(grid);
+
+    Arena.get("/api/v2/report/weekly?format=markdown").then(function (d) {
+      weeklyHost.innerHTML = "";
+      var text = d.raw || d.report || JSON.stringify(d, null, 2);
+      weeklyHost.appendChild(Arena.el("pre", { style: "white-space:pre-wrap;font-size:11.5px;max-height:420px;overflow:auto" }, [document.createTextNode(text)]));
+      weeklyHost.appendChild(freshnessRow(new Date().toISOString(), "generated"));
+    }).catch(function (e) { weeklyHost.innerHTML = ""; weeklyHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+
+    Arena.get("/api/latency").then(function (d) {
+      latencyHost.innerHTML = "";
+      var l = d.stages || {};
+      var stages = Object.keys(l).filter(function (k) { return l[k] && typeof l[k] === "object"; });
+      if (!stages.length) { latencyHost.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No latency samples recorded yet.")])); return; }
+      var table = Arena.el("table", { "class": "table" });
+      table.appendChild(Arena.el("tr", {}, ["Stage", "P50", "P95", "P99", "P99.9", "samples", "misses"].map(function (h) { return Arena.el("th", {}, [document.createTextNode(h)]); })));
+      stages.forEach(function (stage) {
+        var s = l[stage];
+        table.appendChild(Arena.el("tr", {}, [
+          Arena.el("td", {}, [document.createTextNode(stage)]),
+          Arena.el("td", {}, [document.createTextNode(s.p50_ms === null || s.p50_ms === undefined ? "—" : String(s.p50_ms))]),
+          Arena.el("td", {}, [document.createTextNode(s.p95_ms === null || s.p95_ms === undefined ? "—" : String(s.p95_ms))]),
+          Arena.el("td", {}, [document.createTextNode(s.p99_ms === null || s.p99_ms === undefined ? "—" : String(s.p99_ms))]),
+          Arena.el("td", {}, [document.createTextNode(s.p999_ms === null || s.p999_ms === undefined ? "—" : String(s.p999_ms))]),
+          Arena.el("td", {}, [document.createTextNode(String(s.count || 0))]),
+          Arena.el("td", {}, [document.createTextNode(String(s.deadline_misses || 0))])
+        ]));
+      });
+      latencyHost.appendChild(table);
+    }).catch(function (e) { latencyHost.innerHTML = ""; latencyHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // SYSTEM control extensions: tasks + backup + research memory
+  // =====================================================================
+  function renderSystemControl(root) {
+    var host = Arena.el("div", { "class": "section-gap" });
+    var tasksHost = Arena.el("div", { id: "sys-tasks" }, [document.createTextNode("Loading…")]);
+    host.appendChild(card("Task center (research, backfill, model work)", tasksHost));
+    var backupHost = Arena.el("div", { id: "sys-backup" }, [document.createTextNode("Loading…")]);
+    host.appendChild(card("Backup & restore", backupHost));
+    root.appendChild(host);
+    renderTaskCenter(tasksHost);
+    renderBackupCenter(backupHost);
+  }
+
+  function renderTaskCenter(host) {
+    Arena.get("/api/tasks").then(function (d) {
+      host.innerHTML = "";
+      var counts = d.counts || {};
+      host.appendChild(Arena.el("div", { "class": "faint", style: "font-size:12px;margin-bottom:6px" }, [
+        document.createTextNode("RUNNING " + (counts.RUNNING || 0) + " · PENDING " + (counts.PENDING || 0) +
+          " · PAUSED " + (counts.PAUSED || 0) + " · COMPLETED " + (counts.COMPLETED || 0) +
+          " · CANCELLED " + (counts.CANCELLED || 0) + " · FAILED " + (counts.FAILED || 0))
+      ]));
+      var tasks = d.tasks || [];
+      if (!tasks.length) { host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No tasks recorded.")])); return; }
+      var table = Arena.el("table", { "class": "table" });
+      table.appendChild(Arena.el("tr", {}, ["Name", "Type", "State", "Progress", "Actions"].map(function (h) { return Arena.el("th", {}, [document.createTextNode(h)]); })));
+      tasks.slice(0, 20).forEach(function (t) {
+        var actions = Arena.el("div", { "class": "btn-row" });
+        [["start", "PENDING"], ["pause", "RUNNING"], ["resume", "PAUSED"], ["cancel", null]].forEach(function (act) {
+          if (act[1] && t.state !== act[1]) return;
+          if (act[0] === "cancel" && ["COMPLETED", "FAILED", "CANCELLED"].indexOf(t.state) >= 0) return;
+          var b = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode(act[0])]);
+          b.addEventListener("click", function () {
+            Arena.post("/api/tasks/" + encodeURIComponent(t.id), { action: act[0] })
+              .then(function () { renderTaskCenter(host); })
+              .catch(function (e) { Arena.toast("err", e.message); });
+          });
+          actions.appendChild(b);
+        });
+        table.appendChild(Arena.el("tr", {}, [
+          Arena.el("td", {}, [document.createTextNode(t.name)]),
+          Arena.el("td", {}, [document.createTextNode(t.type)]),
+          Arena.el("td", {}, [Arena.stateBadge(t.state)]),
+          Arena.el("td", {}, [document.createTextNode(t.progress !== undefined && t.progress !== null ? Math.round(t.progress * 100) + "%" : "—")]),
+          Arena.el("td", {}, [actions])
+        ]));
+      });
+      host.appendChild(table);
+    }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function renderBackupCenter(host) {
+    function paint() {
+      Arena.get("/api/backup/list").then(function (d) {
+        host.innerHTML = "";
+        var row = Arena.el("div", { "class": "btn-row" }, [
+          Arena.el("button", { "class": "btn primary sm", id: "backup-create" }, [document.createTextNode("Create backup")])
+        ]);
+        host.appendChild(row);
+        document.getElementById("backup-create").addEventListener("click", function () {
+          Arena.post("/api/backup/create", {}).then(function (r) {
+            Arena.toast("ok", "Backup created: " + String(r.path || "").split("/").pop()); paint();
+          }).catch(function (e) { Arena.toast("err", e.message); });
+        });
+        var backups = d.backups || [];
+        if (!backups.length) { host.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("No backups yet.")])); return; }
+        backups.forEach(function (b) {
+          var verifyBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Verify")]);
+          var restoreBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Restore")]);
+          var item = Arena.el("div", { style: "display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap" }, [
+            Arena.el("span", { "class": "mono", style: "font-size:11.5px" }, [document.createTextNode(
+              String(b.path || "").split("/").pop() + " · " + (b.bytes || 0) + " B · " + (b.modified_utc || ""))]),
+            Arena.el("span", { style: "flex:1" }),
+            verifyBtn, restoreBtn
+          ]);
+          verifyBtn.addEventListener("click", function () {
+            Arena.post("/api/backup/verify", { path: b.path }).then(function (r) {
+              Arena.toast(r.ok ? "ok" : "err", r.ok ? "Backup verified: archive + integrity refs OK." : "Verification FAILED: " + (r.errors || []).join("; "));
+            }).catch(function (e) { Arena.toast("err", e.message); });
+          });
+          restoreBtn.addEventListener("click", function () {
+            Arena.confirmDialog("Restore backup", "Restore this backup? Current workstation data files will be replaced (a safety backup runs first).", "Restore", true, function () {
+              Arena.post("/api/backup/restore", { path: b.path }).then(function (r) {
+                Arena.toast("ok", "Restored from verified backup (" + (r.restored ? r.restored.length : 0) + " files).");
+              }).catch(function (e) { Arena.toast("err", e.message); });
+            });
+          });
+          host.appendChild(item);
+        });
+      }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+    }
+    paint();
+  }
+
+  // Research memory card appended to the existing Research view.
+  function renderResearchMemory(root) {
+    var memHost = Arena.el("div", { id: "research-memory" }, [document.createTextNode("Loading…")]);
+    root.appendChild(Arena.el("div", { "class": "section-gap" }, [card("Research memory (recorded findings & lineage)", memHost)]));
+    Arena.get("/api/research/memory").then(function (d) {
+      memHost.innerHTML = "";
+      var entries = d.results || d.entries || [];
+      var form = Arena.el("div", { "class": "btn-row", style: "margin-bottom:8px;flex-wrap:wrap" }, [
+        Arena.el("input", { id: "mem-add-summary", placeholder: "Record a finding… (hypothesis + outcome)", style: "min-width:300px" }),
+        Arena.el("button", { "class": "btn ghost sm", id: "mem-add" }, [document.createTextNode("Record")])
+      ]);
+      memHost.appendChild(form);
+      document.getElementById("mem-add").addEventListener("click", function () {
+        var summary = document.getElementById("mem-add-summary").value.trim();
+        if (!summary) return;
+        Arena.post("/api/research/memory", { topic: summary, kind: "finding",
+          payload: { source: "gui" }, provenance: "operator input via GUI", confidence: 0.5 })
+          .then(function () { document.getElementById("mem-add-summary").value = ""; viewResearchRefresh(); })
+          .catch(function (e) { Arena.toast("err", e.message); });
+      });
+      if (!entries.length) { memHost.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("Research memory is empty.")])); return; }
+      entries.slice(0, 12).forEach(function (m) {
+        memHost.appendChild(Arena.el("div", { style: "margin:4px 0" }, [
+          Arena.el("b", { "class": "mono", style: "font-size:11px" }, [document.createTextNode((m.id || "").slice(0, 8) + " ")]),
+          document.createTextNode((m.topic || "") + " — " + (m.kind || "") + (m.payload && m.payload.outcome ? " · " + m.payload.outcome : ""))
+        ]));
+      });
+    }).catch(function (e) { memHost.innerHTML = ""; memHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  function viewResearchRefresh() {
+    var root = document.getElementById("main-view");
+    if (root && state.view === "research") { root.innerHTML = ""; viewResearch(root); }
+  }
+
+  // Extend the existing System and Research views without rewriting them.
+  var _origViewSystem = viewSystem;
+  viewSystem = function (root) { _origViewSystem(root); renderSystemControl(root); };
+  var _origViewResearch = viewResearch;
+  viewResearch = function (root) { _origViewResearch(root); renderResearchMemory(root); };
+
 
   document.addEventListener("DOMContentLoaded", start);
 })();

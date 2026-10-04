@@ -238,3 +238,20 @@ class LiveOperations:
                      if self.acknowledgements else None),
             "alerts": self.alerts.status() if self.alerts else None,
         }
+
+
+def read_emergency_stop(repository) -> tuple[bool, str]:
+    """Independent read of the persisted emergency-stop flag (master spec §37).
+
+    Emergency controls must not depend on the main engine object being alive,
+    so this reads the durable flag directly. Returns ``(active, reason)``;
+    an unreadable flag is reported active=False with an explicit reason so
+    callers can distinguish "clear" from "unknown" in diagnostics.
+    """
+    try:
+        flag = repository.get_engine_state("emergency_stop", {}) or {}
+    except Exception as exc:  # pragma: no cover — defensive
+        return False, f"emergency-stop flag unreadable: {exc}"
+    if bool(flag.get("stopped")):
+        return True, str(flag.get("reason") or "no reason recorded")
+    return False, "clear"

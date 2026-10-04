@@ -78,7 +78,8 @@ class SandboxEngine:
                  alpha_decay=None,
                  hot_path_monitor=None,
                  cold_queue=None,
-                 settings=None):
+                 settings=None,
+                 workstation=None):
         if timeframe not in {"1m", "5m", "15m", "30m"}:
             raise ValueError("Engine supports intraday timeframes")
         self.provider = provider
@@ -115,6 +116,9 @@ class SandboxEngine:
         self.regime_engine = regime_engine
         self.shadow_engine = shadow_engine
         self.event_engine = event_engine
+        # AXIOM-MONEY-PRINTER: research-telemetry hook (opportunity center,
+        # regime bridge). None keeps historic behaviour byte-for-byte.
+        self.workstation = workstation
         self.pause_gate = pause_gate
         self.monitor = monitor
         self.maintenance_scheduler = maintenance_scheduler
@@ -492,8 +496,10 @@ class SandboxEngine:
         self._history[:] = self._history[-limit:]
         self.processed += 1
         self.ledger_mark(candle.close)
+        regime_evaluation = None
         if self.regime_engine is not None:
-            self.regime_engine.evaluate(self._history)
+            regime_evaluation = self.regime_engine.evaluate(self._history)
+        self._workstation_observe(candle, regime_evaluation)
         if self.shadow_engine is not None:
             self.shadow_engine.on_candle(candle)
         self._daily_snapshot(candle)
@@ -518,6 +524,40 @@ class SandboxEngine:
         signal = self.strategy.generate_signal(tuple(self._history))
         self.signals[candle.symbol] = {"signal": signal.value, "timestamp": candle.timestamp.isoformat()}
         self._act(signal, candle, triggers=triggers)
+
+    def _workstation_observe(self, candle, regime_evaluation: dict | None) -> None:
+        """Feed observed candle facts into the intelligence layer.
+
+        Research telemetry only: a failure here must never disturb the
+        trading path. Inputs are OBSERVED values from the candle history —
+        nothing synthetic is invented to force a trigger.
+        """
+        workstation = getattr(self, "workstation", None)
+        if workstation is None:
+            return
+        try:
+            identity = str(getattr(candle, "symbol", "") or "")
+            closes = [c.close for c in self._history[-2:]]
+            price_change_pct = None
+            if len(closes) == 2 and closes[0] > 0:
+                price_change_pct = closes[1] / closes[0] - 1.0
+            volume_ratio = None
+            volumes = [float(getattr(c, "volume", 0.0) or 0.0) for c in self._history]
+            if len(volumes) >= 21:
+                recent = sum(volumes[-5:]) / 5.0
+                prior = sum(volumes[-21:-5]) / 16.0
+                if prior > 0:
+                    volume_ratio = recent / prior
+            bridge = getattr(workstation, "regime_bridge", None)
+            if bridge is not None and regime_evaluation:
+                bridge.observe(identity, regime_evaluation)
+            workstation.opportunities.observe(
+                market_id=str(getattr(workstation.settings, "market", "india")),
+                identity=identity,
+                price_change_pct=price_change_pct,
+                volume_ratio=volume_ratio)
+        except Exception:  # pragma: no cover - telemetry must not break trading
+            logger.exception("workstation observation failed (telemetry only)")
 
     def _strategy_evaluation_due(self, triggers: list[str]) -> bool:
         """Cadence + event triggers decide whether the strategy is evaluated.

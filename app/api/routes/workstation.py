@@ -1,0 +1,919 @@
+"""AXIOM-MONEY-PRINTER workstation API (master spec sections 4-5, 8, 14-16,
+18, 21, 24, 29, 31-40, 57, 58, 67-68, 71).
+
+Every endpoint here is backed by the workstation composition root
+(``app.state.workstation``); nothing is a placeholder. Secrets never appear
+in responses: broker connection metadata, token lifecycle states and masked
+hints only.
+"""
+
+from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+import asyncio
+import json
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from app.api.auth import authenticate
+from app.markets import get_market, list_markets, market_session_state, \
+    parse_instrument_identity
+
+router = APIRouter()
+
+
+def ws(request: Request):
+    workstation = getattr(request.app.state, "workstation", None)
+    if workstation is None:
+        raise HTTPException(503, "workstation services are not initialized")
+    return workstation
+
+
+# =====================================================================
+# MARKETS + SESSIONS (spec sections 5, 143, 144)
+# =====================================================================
+
+@router.get("/api/markets", dependencies=[Depends(authenticate)])
+async def markets(request: Request) -> dict:
+    return {"markets": list_markets(),
+            "selected": getattr(ws(request).settings, "market", "india")}
+
+
+@router.get("/api/markets/{market_id}/session", dependencies=[Depends(authenticate)])
+async def market_session(market_id: str) -> dict:
+    try:
+        return market_session_state(market_id).to_dict()
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+
+
+# =====================================================================
+# UNIVERSES (spec sections 4, 60) — market-scoped, persisted
+# =====================================================================
+
+class UniverseBody(BaseModel):
+    market_id: str
+    name: str = Field(min_length=1, max_length=80)
+    symbols: list[str]
+    note: str | None = None
+
+
+@router.get("/api/universes", dependencies=[Depends(authenticate)])
+async def list_universes(request: Request, market_id: str | None = None) -> dict:
+    return {"universes": ws(request).repository.list_universes(market_id=market_id)}
+
+
+@router.post("/api/universes", dependencies=[Depends(authenticate)])
+async def save_universe(body: UniverseBody, request: Request) -> dict:
+    workstation = ws(request)
+    market_id = body.market_id.strip().lower()
+    try:
+        get_market(market_id)
+    except KeyError as exc:
+        raise HTTPException(422, str(exc))
+    if not body.symbols:
+        raise HTTPException(422, "a universe needs at least one instrument")
+    seen, cleaned = set(), []
+    for raw in body.symbols:
+        parsed = parse_instrument_identity(raw, market_id)
+        if not parsed["valid"]:
+            raise HTTPException(
+                422, f"instrument '{raw}' rejected for market '{market_id}': "
+                     f"{parsed['reason']}")
+        identity = parsed["identity"]
+        if identity not in seen:
+            seen.add(identity)
+            cleaned.append(identity)
+    record = workstation.repository.save_universe(
+        market_id=market_id, name=body.name.strip(), symbols=cleaned, note=body.note)
+    workstation.changes.observe("universe", record["id"],
+                                {"name": record["name"], "size": len(cleaned),
+                                 "market_id": market_id},
+                                evidence="universe saved through the GUI")
+    return record
+
+
+@router.get("/api/universes/{universe_id}", dependencies=[Depends(authenticate)])
+async def get_universe(universe_id: str, request: Request) -> dict:
+    record = ws(request).repository.get_universe(universe_id)
+    if record is None:
+        raise HTTPException(404, "universe not found")
+    return record
+
+
+@router.delete("/api/universes/{universe_id}", dependencies=[Depends(authenticate)])
+async def delete_universe(universe_id: str, request: Request) -> dict:
+    deleted = ws(request).repository.delete_universe(universe_id)
+    if not deleted:
+        raise HTTPException(404, "universe not found")
+    return {"deleted": True, "id": universe_id}
+
+
+@router.get("/api/universes/{universe_id}/export", dependencies=[Depends(authenticate)])
+async def export_universe(universe_id: str, request: Request) -> dict:
+    record = ws(request).repository.get_universe(universe_id)
+    if record is None:
+        raise HTTPException(404, "universe not found")
+    return {"format": "axiom-universe/v1",
+            "market_id": record["market_id"], "name": record["name"],
+            "symbols": record["symbols"], "note": record.get("note"),
+            "exported_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+class UniverseImport(BaseModel):
+    format: str = "axiom-universe/v1"
+    market_id: str
+    name: str
+    symbols: list[str]
+    note: str | None = None
+
+
+@router.post("/api/universes/import", dependencies=[Depends(authenticate)])
+async def import_universe(body: UniverseImport, request: Request) -> dict:
+    if body.format != "axiom-universe/v1":
+        raise HTTPException(422, f"unsupported universe format '{body.format}'")
+    return await save_universe(UniverseBody(market_id=body.market_id, name=body.name,
+                                            symbols=body.symbols, note=body.note),
+                               request)
+
+
+class PinBody(BaseModel):
+    market_id: str
+    identity: str
+
+
+@router.post("/api/universe/pin", dependencies=[Depends(authenticate)])
+async def pin_instrument(body: PinBody, request: Request) -> dict:
+    parsed = parse_instrument_identity(body.identity, body.market_id)
+    if not parsed["valid"]:
+        raise HTTPException(422, f"cannot pin: {parsed['reason']}")
+    ws(request).repository.pin_instrument(body.market_id, parsed["identity"])
+    return {"pinned": parsed["identity"], "market_id": body.market_id}
+
+
+@router.post("/api/universe/unpin", dependencies=[Depends(authenticate)])
+async def unpin_instrument(body: PinBody, request: Request) -> dict:
+    parsed = parse_instrument_identity(body.identity, body.market_id)
+    identity = parsed.get("identity", body.identity)
+    ws(request).repository.unpin_instrument(body.market_id, identity)
+    return {"unpinned": identity, "market_id": body.market_id}
+
+
+@router.get("/api/universe/pins", dependencies=[Depends(authenticate)])
+async def list_pins(request: Request, market_id: str) -> dict:
+    return {"pins": ws(request).repository.list_pinned(market_id)}
+
+
+# =====================================================================
+# WHAT CHANGED (spec section 8)
+# =====================================================================
+
+@router.get("/api/changes", dependencies=[Depends(authenticate)])
+async def changes(request: Request, domain: str | None = None,
+                  limit: int = 100) -> dict:
+    return {"changes": ws(request).changes.recent(domain=domain,
+                                                   limit=min(limit, 500))}
+
+
+# =====================================================================
+# EVENT STREAM (spec section 71) — fetch-streamed, bearer-authenticated
+# =====================================================================
+
+@router.get("/api/stream", dependencies=[Depends(authenticate)])
+async def event_stream(request: Request, topics: str | None = None,
+                       last_seq: int | None = None):
+    workstation = ws(request)
+    wanted = tuple(t.strip() for t in (topics or "").split(",") if t.strip())
+
+    async def generate():
+        if last_seq is not None:
+            for event in workstation.bus.replay_since(last_seq):
+                if not wanted or event["type"] in wanted:
+                    yield _sse(event)
+        async for event in workstation.bus.iterate(wanted, idle_timeout=600):
+            yield _sse(event)
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"cache-control": "no-cache",
+                                      "x-accel-buffering": "no"})
+
+
+@router.get("/api/stream/health", dependencies=[Depends(authenticate)])
+async def stream_health(request: Request) -> dict:
+    return ws(request).bus.health()
+
+
+def _sse(event: dict) -> str:
+    return f"id: {event['seq']}\nevent: {event['type']}\n" \
+           f"data: {json.dumps(event, default=str)}\n\n"
+
+
+# =====================================================================
+# OPPORTUNITY CENTER (spec sections 14, 139, 140)
+# =====================================================================
+
+class ObserveBody(BaseModel):
+    market_id: str
+    identity: str
+    price_change_pct: float | None = None
+    volume_ratio: float | None = None
+    volatility_expansion: bool = False
+    regime_change: str | None = None
+    model_disagreement: bool = False
+    user_focus: bool = False
+    evidence_source: str = "manual"
+
+
+@router.get("/api/opportunities", dependencies=[Depends(authenticate)])
+async def opportunities(request: Request, market_id: str | None = None,
+                        state: str | None = None) -> dict:
+    workstation = ws(request)
+    expired = workstation.opportunities.expire_stale()
+    for opportunity in expired:
+        workstation.expired_recorder.record_expired(
+            opportunity=opportunity.to_dict(now=workstation.opportunities.clock()))
+    return {"opportunities": workstation.opportunities.list(market_id=market_id,
+                                                            state=state),
+            "counts": workstation.opportunities.counts(),
+            "expired_this_call": len(expired)}
+
+
+@router.post("/api/opportunities/observe", dependencies=[Depends(authenticate)])
+async def observe_opportunity(body: ObserveBody, request: Request) -> dict:
+    """Record an OBSERVED trigger. The body must carry real observations —
+    fabricated inputs only produce fabricated research (and are the caller's
+    responsibility); nothing here invents a trigger on its own."""
+    workstation = ws(request)
+    opportunity = workstation.opportunities.observe(
+        market_id=body.market_id, identity=body.identity,
+        price_change_pct=body.price_change_pct, volume_ratio=body.volume_ratio,
+        volatility_expansion=body.volatility_expansion,
+        regime_change=body.regime_change,
+        model_disagreement=body.model_disagreement, user_focus=body.user_focus)
+    if opportunity is None:
+        return {"detected": False,
+                "reason": "no trigger crossed the attention thresholds",
+                "attention_mode": workstation.opportunities.attention_mode}
+    return {"detected": True, "opportunity": opportunity.to_dict(now=time.time())}
+
+
+class TransitionBody(BaseModel):
+    state: str
+    reason: str = ""
+
+
+@router.post("/api/opportunities/{opportunity_id}/transition",
+             dependencies=[Depends(authenticate)])
+async def transition_opportunity(opportunity_id: str, body: TransitionBody,
+                                 request: Request) -> dict:
+    try:
+        opportunity = ws(request).opportunities.transition(
+            opportunity_id, body.state, reason=body.reason)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return opportunity.to_dict(now=time.time())
+
+
+# =====================================================================
+# EVIDENCE STACK + ANALOGUES (spec sections 10, 16, 141)
+# =====================================================================
+
+class EvidenceInput(BaseModel):
+    layer: str
+    kind: str
+    value: dict | None = None
+    provenance: str
+    status: str | None = None
+
+
+@router.get("/api/evidence/{market_id}/{identity}", dependencies=[Depends(authenticate)])
+async def evidence_view(market_id: str, identity: str, request: Request) -> dict:
+    """Assemble the evidence stack for one instrument from recorded data.
+
+    Layers with no backing data are reported UNAVAILABLE with the reason —
+    never fabricated (spec section 93).
+    """
+    workstation = ws(request)
+    stack = workstation.evidence_stack(market_id, identity)
+    closes, volumes = _recorded_series(workstation, identity)
+    if closes:
+        stack.set("market_state", kind="OBSERVED",
+                  value={"bars": len(closes), "last_close": closes[-1],
+                         "source": "recorded candles"},
+                  provenance="history candle store")
+        try:
+            features = workstation.analogues.features_for(closes, volumes or None)
+            stack.set("feature_state", kind="CALCULATED", value=features,
+                      provenance="analogue feature extractor over recorded closes")
+        except ValueError as exc:
+            stack.set("feature_state", kind="CALCULATED", value=None,
+                      provenance="analogue feature extractor",
+                      unavailable_reason=str(exc))
+        try:
+            search = workstation.analogues.search(identity, closes, volumes or None)
+            stack.set("historical_analogues", kind="HISTORICAL",
+                      value={**search.to_dict(),
+                             "summary": workstation.analogues.summarize(search)},
+                      provenance=search.methodology)
+        except ValueError as exc:
+            stack.set("historical_analogues", kind="HISTORICAL", value=None,
+                      provenance="analogue engine", unavailable_reason=str(exc))
+    else:
+        for layer in ("market_state", "feature_state", "historical_analogues"):
+            stack.set(layer, kind="OBSERVED" if layer == "market_state" else "CALCULATED",
+                      value=None, provenance="recorded candles",
+                      unavailable_reason="no recorded bars for this instrument")
+    # Kronos: truthful status only.
+    try:
+        service = getattr(request.app.state, "forecast_service", None)
+        snapshot = service.latest(identity, "1D") if service else None
+    except Exception:
+        snapshot = None
+    if snapshot is not None:
+        stack.set("kronos_forecast", kind="MODEL",
+                  value={"note": "MODEL FORECAST — not observed market data",
+                         "snapshot": getattr(snapshot, "to_dict", lambda: {})()},
+                  provenance="isolated Kronos forecast service")
+    else:
+        stack.set("kronos_forecast", kind="MODEL", value=None,
+                  provenance="isolated Kronos forecast service",
+                  unavailable_reason="no forecast available (weights not "
+                                     "verified or no run yet)")
+    # Risk layer from settings.
+    stack.set("risk", kind="CALCULATED",
+              value={"max_position_value": workstation.settings.max_position_value,
+                     "max_daily_loss": workstation.settings.max_daily_loss,
+                     "max_open_positions": workstation.settings.max_open_positions},
+              provenance="configured hard risk limits")
+    # Strategy evidence + regime: explicit UNAVAILABLE until the research
+    # pipeline feeds them (honest gaps beat fabricated values).
+    stack.set("strategy_evidence", kind="CALCULATED", value=None,
+              provenance="strategy router", unavailable_reason="not evaluated yet")
+    stack.set("regime", kind="CALCULATED", value=None,
+              provenance="regime engine", unavailable_reason="not evaluated yet")
+    return stack.to_dict()
+
+
+@router.post("/api/evidence/{market_id}/{identity}/recommend",
+             dependencies=[Depends(authenticate)])
+async def evidence_recommend(market_id: str, identity: str, request: Request,
+                             state: str, rationale: str = "") -> dict:
+    workstation = ws(request)
+    stack = workstation.evidence_stack(market_id, identity)
+    try:
+        return stack.recommend(state, rationale=rationale or "manual classification")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+class AnalogueBody(BaseModel):
+    market_id: str
+    identity: str
+    lookback: int = 20
+    horizon: int = 5
+    top_k: int = 5
+    include_negatives: bool = True
+
+
+@router.post("/api/analogues/search", dependencies=[Depends(authenticate)])
+async def analogue_search(body: AnalogueBody, request: Request) -> dict:
+    from app.intel.analogues import AnalogueEngine
+
+    workstation = ws(request)
+    closes, volumes = _recorded_series(workstation, body.identity)
+    if not closes:
+        return {"identity": body.identity, "results": [], "sample_size": 0,
+                "limitations": ["no recorded bars for this instrument"],
+                "enough_history": False}
+    engine = AnalogueEngine(lookback=body.lookback, horizon=body.horizon,
+                            top_k=body.top_k)
+    try:
+        search = engine.search(body.identity, closes, volumes or None,
+                               include_negatives=body.include_negatives)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {**search.to_dict(), "summary": engine.summarize(search)}
+
+
+def _recorded_series(workstation, identity: str) -> tuple[list[float], list[float]]:
+    """Best-effort recorded close/volume series for an instrument identity.
+
+    Returns ([], []) when nothing is recorded — callers must treat that as a
+    real absence, never as zero data.
+    """
+    try:
+        from app.history.store import CandleStore
+
+        store = CandleStore(workstation.data_dir / "candles")
+        symbol = identity.split("|")[-1]
+        rows = store.load(symbol, unit="days", interval=1)
+        closes = [float(r["close"]) for r in rows]
+        volumes = [float(r.get("volume", 0.0)) for r in rows]
+        return closes, volumes
+    except Exception:
+        return [], []
+
+
+# =====================================================================
+# RESEARCH MEMORY + MISSED OPPORTUNITIES (spec sections 11, 20, 21)
+# =====================================================================
+
+class MemoryBody(BaseModel):
+    topic: str
+    kind: str
+    payload: dict
+    provenance: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    market_id: str | None = None
+    experiment_id: str | None = None
+
+
+@router.post("/api/research/memory", dependencies=[Depends(authenticate)])
+async def research_memory_add(body: MemoryBody, request: Request) -> dict:
+    memory_id = ws(request).repository.record_research_memory(
+        topic=body.topic, kind=body.kind, payload=body.payload,
+        provenance=body.provenance, confidence=body.confidence,
+        market_id=body.market_id, experiment_id=body.experiment_id)
+    return {"id": memory_id}
+
+
+@router.get("/api/research/memory", dependencies=[Depends(authenticate)])
+async def research_memory_search(request: Request, q: str = "",
+                                 market_id: str | None = None,
+                                 kind: str | None = None, limit: int = 50) -> dict:
+    return {"results": ws(request).repository.search_research_memory(
+        query=q, market_id=market_id, kind=kind, limit=min(limit, 200))}
+
+
+@router.get("/api/research/missed", dependencies=[Depends(authenticate)])
+async def missed_opportunities(request: Request) -> dict:
+    workstation = ws(request)
+    return {"missed": workstation.missed.list(), "stats": workstation.missed.stats()}
+
+
+class MissedBody(BaseModel):
+    kind: str
+    payload: dict
+    knowable: bool
+    market_id: str | None = None
+    identity: str | None = None
+    counterfactual: str | None = None
+    research_question: str | None = None
+
+
+@router.post("/api/research/missed", dependencies=[Depends(authenticate)])
+async def missed_record(body: MissedBody, request: Request) -> dict:
+    try:
+        missed_id = ws(request).missed.record(
+            kind=body.kind, payload=body.payload, knowable=body.knowable,
+            market_id=body.market_id, identity=body.identity,
+            counterfactual=body.counterfactual,
+            research_question=body.research_question)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {"id": missed_id}
+
+
+@router.get("/api/research/next-best", dependencies=[Depends(authenticate)])
+async def next_best_experiment(request: Request) -> dict:
+    """Deterministic next-best-experiment proposal (spec section 20).
+
+    Derived from recorded signals only: unresolved misses, failed experiments
+    and opportunity density. Never fabricates expected information gain.
+    """
+    workstation = ws(request)
+    missed = workstation.missed.list(limit=100)
+    stats = workstation.missed.stats()
+    experiments = workstation.repository.list_experiments(limit=20) \
+        if hasattr(workstation.repository, "list_experiments") else []
+    failed = [e for e in experiments if str(e.get("status", "")).lower() == "failed"]
+    suggestions = []
+    by_kind = stats.get("by_kind", {})
+    if by_kind.get("false_negative"):
+        suggestions.append({
+            "hypothesis": "detection thresholds miss setups that later qualified",
+            "motivation": f"{by_kind['false_negative']} recorded false negatives",
+            "expected_information_gain": "qualitative (threshold sensitivity study)",
+            "compute_budget": "low"})
+    if by_kind.get("late_promotion"):
+        suggestions.append({
+            "hypothesis": "pipeline latency lets opportunities expire before action",
+            "motivation": f"{by_kind['late_promotion']} expired candidates",
+            "expected_information_gain": "qualitative (latency budget audit)",
+            "compute_budget": "low"})
+    if failed:
+        suggestions.append({
+            "hypothesis": f"re-run the last failed experiment "
+                          f"({failed[0].get('experiment_id')}) with diagnostics",
+            "motivation": f"{len(failed)} failed experiments on record",
+            "expected_information_gain": "failure-mode classification",
+            "compute_budget": "medium"})
+    if not suggestions:
+        suggestions.append({"hypothesis": "no research debt recorded",
+                            "motivation": "missed-opportunity store is empty and "
+                                          "no failed experiments",
+                            "expected_information_gain": "none recorded",
+                            "compute_budget": "none"})
+    return {"suggestions": suggestions,
+            "inputs": {"missed_total": stats.get("total", 0),
+                       "failed_experiments": len(failed)},
+            "note": "proposals are deterministic summaries of recorded evidence"}
+
+
+# =====================================================================
+# ATTENTION MODE (spec section 15)
+# =====================================================================
+
+class AttentionBody(BaseModel):
+    mode: str
+
+
+@router.post("/api/settings/attention", dependencies=[Depends(authenticate)])
+async def set_attention(body: AttentionBody, request: Request) -> dict:
+    workstation = ws(request)
+    try:
+        profile = workstation.opportunities.set_attention_mode(body.mode)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    workstation.repository.set_engine_state("attention_mode",
+                                            profile["attention_mode"])
+    workstation.changes.observe("settings", "attention_mode",
+                                {"mode": profile["attention_mode"]},
+                                evidence="operator changed attention mode")
+    return profile
+
+
+# =====================================================================
+# LIVE SESSION STATE MACHINE (spec sections 31-37, 135-137)
+# =====================================================================
+
+@router.get("/api/live/session", dependencies=[Depends(authenticate)])
+async def live_session(request: Request) -> dict:
+    workstation = ws(request)
+    current = workstation.live_sessions.current()
+    derived = workstation.live_sessions.derived_state(
+        workstation.settings, repository=workstation.repository,
+        emergency_stop=workstation.emergency_stop_active())
+    return {"state": current.state, "reason": current.reason,
+            "ts_entered": current.ts_entered,
+            "derived_configuration_state": derived,
+            "emergency_stop_active": workstation.emergency_stop_active(),
+            "states": ["OFF", "CONFIGURED", "READY", "ARMED", "ACTIVE",
+                       "PAUSED", "RECONCILING", "STOPPED", "BLOCKED"],
+            "note": "ARMED/ACTIVE require explicit operator authorization; no "
+                    "restart, recovery or background job can arm live trading"}
+
+
+class ArmBody(BaseModel):
+    confirmation_phrase: str
+
+
+@router.post("/api/live/session/arm", dependencies=[Depends(authenticate)])
+async def live_arm(body: ArmBody, request: Request) -> dict:
+    workstation = ws(request)
+    from app.live.session import LiveTransitionError
+
+    try:
+        snapshot = workstation.live_sessions.arm(
+            workstation.settings, confirmation_phrase=body.confirmation_phrase,
+            repository=workstation.repository)
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+@router.post("/api/live/session/activate", dependencies=[Depends(authenticate)])
+async def live_activate(request: Request) -> dict:
+    from app.live.session import LiveTransitionError
+
+    try:
+        snapshot = ws(request).live_sessions.activate()
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+@router.post("/api/live/session/pause", dependencies=[Depends(authenticate)])
+async def live_pause(request: Request) -> dict:
+    from app.live.session import LiveTransitionError
+
+    try:
+        snapshot = ws(request).live_sessions.pause()
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+@router.post("/api/live/session/resume", dependencies=[Depends(authenticate)])
+async def live_resume(request: Request) -> dict:
+    from app.live.session import LiveTransitionError
+
+    try:
+        snapshot = ws(request).live_sessions.resume()
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+class StopBody(BaseModel):
+    reason: str = "operator stop"
+
+
+@router.post("/api/live/session/stop", dependencies=[Depends(authenticate)])
+async def live_stop(body: StopBody, request: Request) -> dict:
+    snapshot = ws(request).live_sessions.stop(reason=body.reason)
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+@router.post("/api/live/session/disarm", dependencies=[Depends(authenticate)])
+async def live_disarm(request: Request) -> dict:
+    from app.live.session import LiveTransitionError
+
+    try:
+        snapshot = ws(request).live_sessions.disarm()
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+@router.get("/api/live/session/history", dependencies=[Depends(authenticate)])
+async def live_history(request: Request, limit: int = 50) -> dict:
+    return {"history": ws(request).live_sessions.history(limit=min(limit, 200))}
+
+
+@router.get("/api/live/readiness-center", dependencies=[Depends(authenticate)])
+async def live_readiness_center(request: Request) -> dict:
+    from app.live import preflight as live_preflight
+
+    workstation = ws(request)
+    context: dict = {}
+    try:
+        last_ts = workstation.repository.get_engine_state("last_market_data_ts", None)
+        if last_ts:
+            context["last_market_data_ts"] = last_ts
+    except Exception as exc:
+        logger.debug("readiness context without last market data ts: %s", exc)
+    checks = live_preflight.run_readiness_center_checks(
+        workstation.settings, repository=workstation.repository, context=context)
+    return _serialize_readiness(checks)
+
+
+def _serialize_readiness(checks) -> dict:
+    from app.live import preflight as live_preflight
+
+    serialized = []
+    for check in checks:
+        if check.ok:
+            status = "READY"
+        elif check.severity == live_preflight.ERROR:
+            status = "BLOCKED"
+        elif check.severity == live_preflight.WARNING:
+            status = "WARNING"
+        else:
+            status = "UNKNOWN"
+        entry = check.to_dict()
+        entry["status"] = status
+        serialized.append(entry)
+    blocked = [c for c in serialized if c["status"] == "BLOCKED"]
+    unknown = [c for c in serialized if c["status"] == "UNKNOWN"]
+    warnings = [c for c in serialized if c["status"] == "WARNING"]
+    verdict = "READY"
+    if blocked:
+        verdict = "BLOCKED"
+    elif unknown:
+        verdict = "NOT_READY_UNVERIFIED"
+    elif warnings:
+        verdict = "READY_WITH_WARNINGS"
+    return {"verdict": verdict, "checks": serialized,
+            "required_phrase": live_preflight.LIVE_CONFIRM_PHRASE,
+            "counts": {"ready": len(serialized) - len(blocked) - len(unknown) - len(warnings),
+                       "warning": len(warnings), "blocked": len(blocked),
+                       "unknown": len(unknown)}}
+
+
+@router.get("/api/live/start-summary", dependencies=[Depends(authenticate)])
+async def live_start_summary(request: Request) -> dict:
+    workstation = ws(request)
+    return workstation.live_sessions.start_confirmation_summary(
+        workstation.settings, repository=workstation.repository,
+        emergency_stop=workstation.emergency_stop_active())
+
+
+@router.get("/api/live/guard-chain", dependencies=[Depends(authenticate)])
+async def live_guard_chain(request: Request) -> dict:
+    workstation = ws(request)
+    chain = workstation.guard_chain()
+    return {"guards": chain.guard_names,
+            "live_state": workstation.live_sessions.current().state,
+            "note": "every live ENTRY passes all guards in order; exits skip "
+                    "entry-only guards so held positions are never trapped"}
+
+
+@router.get("/api/live/rate-limit", dependencies=[Depends(authenticate)])
+async def live_rate_limit(request: Request) -> dict:
+    limiter = ws(request).rate_limiter
+    return {**limiter.stats(), "current": limiter.counts(),
+            "note": "limits are configurable policy, not eternal constants"}
+
+
+# =====================================================================
+# KRONOS STUDIO (spec section 18)
+# =====================================================================
+
+@router.get("/api/kronos/studio", dependencies=[Depends(authenticate)])
+async def kronos_studio(request: Request) -> dict:
+    return ws(request).studio.overview()
+
+
+class ModelAction(BaseModel):
+    model_id: str
+
+
+@router.post("/api/kronos/studio/download", dependencies=[Depends(authenticate)])
+async def kronos_download(body: ModelAction, request: Request) -> dict:
+    try:
+        return ws(request).studio.download(body.model_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@router.post("/api/kronos/studio/verify", dependencies=[Depends(authenticate)])
+async def kronos_verify(body: ModelAction, request: Request) -> dict:
+    try:
+        return ws(request).studio.verify(body.model_id)
+    except Exception as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.post("/api/kronos/studio/install", dependencies=[Depends(authenticate)])
+async def kronos_install(body: ModelAction, request: Request) -> dict:
+    try:
+        return ws(request).studio.install(body.model_id)
+    except Exception as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.post("/api/kronos/studio/benchmark", dependencies=[Depends(authenticate)])
+async def kronos_benchmark(body: ModelAction, request: Request) -> dict:
+    # No inference runner is attached in this build: the honest result is
+    # NOT_ATTEMPTED (benchmarks are never fabricated).
+    try:
+        return ws(request).studio.benchmark(body.model_id)
+    except Exception as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.post("/api/kronos/studio/activate", dependencies=[Depends(authenticate)])
+async def kronos_activate(body: ModelAction, request: Request) -> dict:
+    try:
+        return ws(request).studio.activate(body.model_id)
+    except Exception as exc:
+        raise HTTPException(422, str(exc))
+
+
+# =====================================================================
+# SYSTEM CONTROL CENTER (spec sections 57, 58, 102)
+# =====================================================================
+
+@router.get("/api/system/control", dependencies=[Depends(authenticate)])
+async def system_control(request: Request) -> dict:
+    workstation = ws(request)
+    from app.monitoring.system import SystemMonitor
+
+    monitor = SystemMonitor(workstation.repository, data_dir=str(workstation.data_dir))
+    try:
+        host = monitor.snapshot()
+    except Exception as exc:
+        host = {"error": f"system snapshot unavailable: {exc}"}
+    return {
+        "host": host,
+        "resources": workstation.governor.snapshot(),
+        "pressure": workstation.governor.under_pressure(),
+        "latency": workstation.latency.overview(),
+        "tasks": workstation.tasks.counts(),
+        "stream": workstation.bus.health(),
+        "components": {
+            "core": "RUNNING",
+            "market_engine": "RUNNING",
+            "kronos": "ISOLATED_WORKER",
+            "database": "RUNNING",
+            "live_session": workstation.live_sessions.current().state,
+            "emergency_stop": workstation.emergency_stop_active(),
+        },
+    }
+
+
+@router.get("/api/tasks", dependencies=[Depends(authenticate)])
+async def tasks_list(request: Request, state: str | None = None) -> dict:
+    return {"tasks": ws(request).tasks.list(state=state),
+            "counts": ws(request).tasks.counts()}
+
+
+class TaskBody(BaseModel):
+    name: str
+    type: str
+    payload: dict | None = None
+
+
+@router.post("/api/tasks", dependencies=[Depends(authenticate)])
+async def task_submit(body: TaskBody, request: Request) -> dict:
+    try:
+        task = ws(request).tasks.submit(body.name, body.type, payload=body.payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return task.to_dict()
+
+
+class TaskAction(BaseModel):
+    action: str  # start | pause | resume | cancel | complete | fail
+
+
+@router.post("/api/tasks/{task_id}", dependencies=[Depends(authenticate)])
+async def task_action(task_id: str, body: TaskAction, request: Request) -> dict:
+    tasks = ws(request).tasks
+    try:
+        if body.action == "start":
+            allowed = tasks.may_start(task_id)
+            return {"started": allowed, "task": tasks.get(task_id)}
+        if body.action == "pause":
+            return tasks.pause(task_id).to_dict()
+        if body.action == "resume":
+            return tasks.resume(task_id).to_dict()
+        if body.action == "cancel":
+            return tasks.cancel(task_id).to_dict()
+        if body.action == "complete":
+            return tasks.complete(task_id).to_dict()
+        if body.action == "fail":
+            return tasks.fail(task_id, "operator marked failed").to_dict()
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    raise HTTPException(422, f"unknown task action '{body.action}'")
+
+
+@router.get("/api/latency", dependencies=[Depends(authenticate)])
+async def latency_overview(request: Request) -> dict:
+    workstation = ws(request)
+    return {"stages": workstation.latency.overview(),
+            "daily": workstation.repository.list_latency_summaries(limit=100)}
+
+
+# =====================================================================
+# BACKUP / RESTORE (spec section 68)
+# =====================================================================
+
+class BackupBody(BaseModel):
+    note: str | None = None
+
+
+@router.post("/api/backup/create", dependencies=[Depends(authenticate)])
+async def backup_create(body: BackupBody, request: Request) -> dict:
+    try:
+        return ws(request).backup.create(note=body.note)
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc))
+
+
+@router.get("/api/backup/list", dependencies=[Depends(authenticate)])
+async def backup_list(request: Request) -> dict:
+    return {"backups": ws(request).backup.list()}
+
+
+class BackupTarget(BaseModel):
+    path: str
+
+
+@router.post("/api/backup/verify", dependencies=[Depends(authenticate)])
+async def backup_verify(body: BackupTarget, request: Request) -> dict:
+    from pathlib import Path
+
+    path = _confine_backup_path(ws(request), body.path)
+    return ws(request).backup.verify(path)
+
+
+@router.post("/api/backup/restore", dependencies=[Depends(authenticate)])
+async def backup_restore(body: BackupTarget, request: Request) -> dict:
+    path = _confine_backup_path(ws(request), body.path)
+    return ws(request).backup.restore(path)
+
+
+def _confine_backup_path(workstation, raw: str):
+    from pathlib import Path
+
+    candidate = Path(raw)
+    backup_dir = workstation.backup.backup_dir.resolve()
+    resolved = candidate.resolve()
+    if not str(resolved).startswith(str(backup_dir)):
+        raise HTTPException(422, "backup path must stay inside the backup directory")
+    if not resolved.exists():
+        raise HTTPException(404, "backup archive not found")
+    return resolved

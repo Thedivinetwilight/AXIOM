@@ -36,6 +36,8 @@ class PaperSimulator:
         self.processed = 0
         self.symbols: list[str] = []
         self._history: dict[str, list[Candle]] = {}
+        # AXIOM-MONEY-PRINTER research-telemetry hook (None = unchanged).
+        self.workstation = None
         # V0.6.1: wall-clock processing latency stages (rolling aggregates only).
         self.latency = {
             "bars": 0,
@@ -243,6 +245,7 @@ class PaperSimulator:
         # One SQLite transaction for fills, account, dedupe cursor and signal orders.
         self.broker._persist(snapshot)
         self.processed += 1
+        self._observe_workstation(candle)
         logger.debug(
             "signal",
             extra={
@@ -252,6 +255,35 @@ class PaperSimulator:
                 "price": candle.close,
             },
         )
+
+    def _observe_workstation(self, candle) -> None:
+        """Feed observed bar facts into the intelligence layer (telemetry).
+
+        Never part of the execution path: any failure is logged and ignored
+        so research observation cannot disturb paper trading.
+        """
+        workstation = getattr(self, "workstation", None)
+        if workstation is None:
+            return
+        try:
+            history = self._history.get(candle.symbol, [])
+            price_change_pct = None
+            if len(history) >= 2 and history[-2].close > 0:
+                price_change_pct = history[-1].close / history[-2].close - 1.0
+            volume_ratio = None
+            volumes = [float(getattr(c, "volume", 0.0) or 0.0) for c in history]
+            if len(volumes) >= 21:
+                recent = sum(volumes[-5:]) / 5.0
+                prior = sum(volumes[-21:-5]) / 16.0
+                if prior > 0:
+                    volume_ratio = recent / prior
+            workstation.opportunities.observe(
+                market_id=str(getattr(workstation.settings, "market", "india")),
+                identity=str(candle.symbol),
+                price_change_pct=price_change_pct,
+                volume_ratio=volume_ratio)
+        except Exception:  # pragma: no cover - telemetry must not break paper
+            logger.exception("workstation observation failed (telemetry only)")
 
     async def _run(self):
         self.state = BotState.RUNNING

@@ -13,7 +13,7 @@ class TestMigrations:
             versions = [row[0] for row in db.execute(
                 "SELECT version FROM schema_version ORDER BY version").fetchall()]
         database.close()
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8], \
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9], \
             "migrations only ever add versions"
 
     def test_final_tables_additive(self, tmp_path):

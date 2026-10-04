@@ -105,6 +105,11 @@ class Settings:
     currency: str = "INR"
     market_calendar: str = "continuous"
     default_symbol: str = "DEMO"
+    # AXIOM-MONEY-PRINTER (master spec sections 4-5, 15): the selected market
+    # scopes universes/calendars/execution context; attention mode tunes
+    # ANALYTICAL thresholds only — it can never relax safety controls.
+    market: str = "india"
+    attention_mode: str = "balanced"  # conservative | balanced | aggressive
     # The engine is intraday-only (1m/5m/15m/30m). A daily default is fine for
     # research/replay, but a live engine cannot consume it — see the live-mode
     # validation below, which refuses instead of silently downgrading.
@@ -149,6 +154,16 @@ class Settings:
     live_order_tag: str = "arena-live"
     live_algo_name: str = ""  # optional X-Algo-Name for exchange-approved algos
     live_confirm: str = field(default="", repr=False)  # must equal LIVE_CONFIRM_PHRASE
+    # --- AXIOM-MONEY-PRINTER (master spec section 39): static-IP compliance.
+    # Upstox enforces that live order traffic originates from user-registered
+    # static IPs; these fields record the REGISTERED values so the readiness
+    # center can surface configuration state. They are metadata, never a
+    # bypass: the broker still rejects unregistered sources itself.
+    upstox_static_ip_primary: str = ""
+    upstox_static_ip_secondary: str = ""
+    # Broker API rate-limit profile for live order traffic (master spec
+    # section 40). Values: REGULAR_ALGO | REGISTERED_ALGO | STANDARD.
+    live_rate_limit_profile: str = "REGULAR_ALGO"
     # --- V2.1 (Arena L-ops): live operations safety rails -------------------
     # ALL of these act on NEW ENTRIES only. Exits and protective stops are
     # never blocked by an operational guard (a guard must not trap the account

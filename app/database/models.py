@@ -271,6 +271,64 @@ CREATE TABLE IF NOT EXISTS hot_path_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_quality_ts ON quality_scores (ts, symbol);
 CREATE INDEX IF NOT EXISTS idx_liquidity_ts ON liquidity_snapshots (ts, symbol);
+
+-- AXIOM-MONEY-PRINTER (master spec v1.0) workstation state. Additive only:
+-- saved market-scoped universes, what-changed deltas, opportunity lifecycle,
+-- research memory, missed opportunities, live session state machine,
+-- latency summaries, background tasks, broker connection METADATA (never
+-- secrets — tokens stay in the secure credential path).
+INSERT OR IGNORE INTO schema_version VALUES (9);
+CREATE TABLE IF NOT EXISTS saved_universes (
+ id TEXT PRIMARY KEY, market_id TEXT NOT NULL, name TEXT NOT NULL,
+ symbols TEXT NOT NULL, note TEXT, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL,
+ UNIQUE (market_id, name)
+);
+CREATE TABLE IF NOT EXISTS universe_pins (
+ market_id TEXT NOT NULL, identity TEXT NOT NULL, pinned_ts TEXT NOT NULL,
+ PRIMARY KEY (market_id, identity)
+);
+CREATE TABLE IF NOT EXISTS state_changes (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, domain TEXT NOT NULL, object_key TEXT NOT NULL,
+ field TEXT NOT NULL, previous TEXT, current TEXT, evidence TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_state_changes_domain ON state_changes (domain, ts);
+CREATE TABLE IF NOT EXISTS opportunities (
+ id TEXT PRIMARY KEY, market_id TEXT NOT NULL, identity TEXT NOT NULL,
+ state TEXT NOT NULL, created_ts TEXT NOT NULL, last_evidence_ts TEXT NOT NULL,
+ updated_ts TEXT NOT NULL, payload TEXT NOT NULL, invalidation_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opportunities_state ON opportunities (state, updated_ts);
+CREATE TABLE IF NOT EXISTS research_memory (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, market_id TEXT, topic TEXT NOT NULL,
+ kind TEXT NOT NULL, payload TEXT NOT NULL, provenance TEXT NOT NULL,
+ confidence REAL NOT NULL, experiment_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_memory_topic ON research_memory (topic, ts);
+CREATE TABLE IF NOT EXISTS missed_opportunities (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL, market_id TEXT,
+ identity TEXT, payload TEXT NOT NULL, knowable INTEGER NOT NULL,
+ counterfactual TEXT, research_question TEXT
+);
+CREATE TABLE IF NOT EXISTS live_sessions (
+ id TEXT PRIMARY KEY, state TEXT NOT NULL, ts_entered TEXT NOT NULL,
+ reason TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_live_sessions_state ON live_sessions (ts_entered);
+CREATE TABLE IF NOT EXISTS latency_summaries (
+ stage TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL,
+ p50_ms REAL NOT NULL, p95_ms REAL NOT NULL, p99_ms REAL NOT NULL,
+ p999_ms REAL NOT NULL, max_ms REAL NOT NULL, deadline_misses INTEGER NOT NULL,
+ PRIMARY KEY (stage, day)
+);
+CREATE TABLE IF NOT EXISTS background_tasks (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, state TEXT NOT NULL,
+ progress REAL NOT NULL, started_ts TEXT NOT NULL, updated_ts TEXT NOT NULL,
+ payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broker_connections (
+ broker TEXT PRIMARY KEY, status TEXT NOT NULL, token_state TEXT NOT NULL,
+ account_hint TEXT, updated_ts TEXT NOT NULL, note TEXT
+);
 """
 
 # ---------------------------------------------------------------------------

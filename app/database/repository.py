@@ -1208,10 +1208,364 @@ class MarketEventRepositoryMixin:
         return d
 
 
+class AxiomWorkstationRepositoryMixin:
+    """AXIOM-MONEY-PRINTER workstation persistence (master spec v1.0).
+
+    Saved universes are market-scoped; state changes are the durable record
+    behind the "what changed?" surface; opportunities carry their own
+    lifecycle; research memory and missed opportunities keep provenance.
+    Live session rows are append-only — the state machine's latest row is the
+    current state, so the audit trail is never rewritten.
+    """
+
+    # ------------------------------------------------------------ universes --
+    def save_universe(self, *, market_id: str, name: str, symbols: list[str],
+                      note: str | None = None) -> dict:
+        universe_id = str(uuid4())
+        ts = _now_iso()
+        payload = encode([str(s) for s in symbols])
+        with self.db.transaction() as db:
+            existing = db.execute(
+                "SELECT id FROM saved_universes WHERE market_id=? AND name=?",
+                (market_id, name)).fetchone()
+            if existing:
+                db.execute(
+                    "UPDATE saved_universes SET symbols=?, note=?, updated_ts=? "
+                    "WHERE id=?", (payload, note, ts, existing["id"]))
+                universe_id = existing["id"]
+            else:
+                db.execute(
+                    "INSERT INTO saved_universes (id, market_id, name, symbols, note,"
+                    " created_ts, updated_ts) VALUES (?,?,?,?,?,?,?)",
+                    (universe_id, market_id, name, payload, note, ts, ts))
+        return {"id": universe_id, "market_id": market_id, "name": name,
+                "symbols": [str(s) for s in symbols], "note": note,
+                "updated_ts": ts}
+
+    def list_universes(self, market_id: str | None = None) -> list[dict]:
+        if market_id:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM saved_universes WHERE market_id=? "
+                    "ORDER BY updated_ts DESC", (market_id,)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM saved_universes ORDER BY updated_ts DESC").fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["symbols"] = json.loads(d["symbols"])
+            except (TypeError, ValueError):
+                d["symbols"] = []
+            out.append(d)
+        return out
+
+    def get_universe(self, universe_id: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute("SELECT * FROM saved_universes WHERE id=?",
+                             (universe_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["symbols"] = json.loads(d["symbols"])
+        except (TypeError, ValueError):
+            d["symbols"] = []
+        return d
+
+    def delete_universe(self, universe_id: str) -> bool:
+        with self.db.transaction() as db:
+            cur = db.execute("DELETE FROM saved_universes WHERE id=?", (universe_id,))
+        return bool(getattr(cur, "rowcount", 0))
+
+    def pin_instrument(self, market_id: str, identity: str) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO universe_pins (market_id, identity, pinned_ts)"
+                " VALUES (?,?,?)", (market_id, identity, _now_iso()))
+
+    def unpin_instrument(self, market_id: str, identity: str) -> None:
+        with self.db.transaction() as db:
+            db.execute("DELETE FROM universe_pins WHERE market_id=? AND identity=?",
+                       (market_id, identity))
+
+    def list_pinned(self, market_id: str) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM universe_pins WHERE market_id=? ORDER BY pinned_ts DESC",
+                (market_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ----------------------------------------------------- what changed -----
+    def record_state_change(self, *, domain: str, object_key: str, field: str,
+                            previous, current, evidence: str | None = None) -> str:
+        change_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO state_changes (id, ts, domain, object_key, field,"
+                " previous, current, evidence) VALUES (?,?,?,?,?,?,?,?)",
+                (change_id, _now_iso(), domain, object_key, field,
+                 None if previous is None else str(previous),
+                 None if current is None else str(current), evidence))
+        return change_id
+
+    def list_state_changes(self, domain: str | None = None, limit: int = 100) -> list[dict]:
+        if domain:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM state_changes WHERE domain=? ORDER BY ts DESC LIMIT ?",
+                    (domain, limit)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM state_changes ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------------------------------------------------- opportunities -----
+    def upsert_opportunity(self, record: dict) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO opportunities (id, market_id, identity, state, created_ts,"
+                " last_evidence_ts, updated_ts, payload, invalidation_reason)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET state=excluded.state,"
+                " last_evidence_ts=excluded.last_evidence_ts,"
+                " updated_ts=excluded.updated_ts, payload=excluded.payload,"
+                " invalidation_reason=excluded.invalidation_reason",
+                (record["id"], record["market_id"], record["identity"], record["state"],
+                 record["created_ts"], record["last_evidence_ts"], record["updated_ts"],
+                 encode(record.get("payload", {})), record.get("invalidation_reason")))
+
+    def list_opportunity_records(self, *, state: str | None = None,
+                           market_id: str | None = None, limit: int = 200) -> list[dict]:
+        query = "SELECT * FROM opportunities"
+        clauses, args = [], []
+        if state:
+            clauses.append("state=?")
+            args.append(state)
+        if market_id:
+            clauses.append("market_id=?")
+            args.append(market_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_ts DESC LIMIT ?"
+        args.append(limit)
+        with self.db.transaction() as db:
+            rows = db.execute(query, tuple(args)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # --------------------------------------------------- research memory ----
+    def record_research_memory(self, *, topic: str, kind: str, payload: dict,
+                               provenance: str, confidence: float,
+                               market_id: str | None = None,
+                               experiment_id: str | None = None) -> str:
+        memory_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO research_memory (id, ts, market_id, topic, kind, payload,"
+                " provenance, confidence, experiment_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                (memory_id, _now_iso(), market_id, topic, kind, encode(payload),
+                 provenance, float(confidence), experiment_id))
+        return memory_id
+
+    def search_research_memory(self, *, query: str = "", market_id: str | None = None,
+                               kind: str | None = None, limit: int = 50) -> list[dict]:
+        clauses, args = [], []
+        if market_id:
+            clauses.append("market_id=?")
+            args.append(market_id)
+        if kind:
+            clauses.append("kind=?")
+            args.append(kind)
+        if query:
+            clauses.append("(topic LIKE ? OR payload LIKE ?)")
+            like = f"%{query}%"
+            args.extend([like, like])
+        sql = "SELECT * FROM research_memory"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(limit)
+        with self.db.transaction() as db:
+            rows = db.execute(sql, tuple(args)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def record_missed_opportunity(self, *, kind: str, payload: dict, knowable: bool,
+                                  market_id: str | None = None, identity: str | None = None,
+                                  counterfactual: str | None = None,
+                                  research_question: str | None = None) -> str:
+        missed_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO missed_opportunities (id, ts, kind, market_id, identity,"
+                " payload, knowable, counterfactual, research_question)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (missed_id, _now_iso(), kind, market_id, identity, encode(payload),
+                 1 if knowable else 0, counterfactual, research_question))
+        return missed_id
+
+    def list_missed_opportunities(self, limit: int = 100) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM missed_opportunities ORDER BY ts DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            d["knowable"] = bool(d.get("knowable"))
+            out.append(d)
+        return out
+
+    # ------------------------------------------------------- live session ---
+    def record_live_session_transition(self, *, state: str, reason: str,
+                                       payload: dict | None = None) -> str:
+        session_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO live_sessions (id, state, ts_entered, reason, payload)"
+                " VALUES (?,?,?,?,?)",
+                (session_id, state, _now_iso(), reason, encode(payload or {})))
+        return session_id
+
+    def current_live_session(self) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM live_sessions ORDER BY ts_entered DESC, rowid DESC"
+                " LIMIT 1").fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except (TypeError, ValueError):
+            d["payload"] = {}
+        return d
+
+    def list_live_sessions(self, limit: int = 50) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM live_sessions ORDER BY ts_entered DESC, rowid DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # ----------------------------------------------------- latency/tasks ----
+    def upsert_latency_summary(self, *, stage: str, day: str, count: int, p50_ms: float,
+                               p95_ms: float, p99_ms: float, p999_ms: float,
+                               max_ms: float, deadline_misses: int) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO latency_summaries (stage, day, count, p50_ms, p95_ms,"
+                " p99_ms, p999_ms, max_ms, deadline_misses) VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(stage, day) DO UPDATE SET count=excluded.count,"
+                " p50_ms=excluded.p50_ms, p95_ms=excluded.p95_ms, p99_ms=excluded.p99_ms,"
+                " p999_ms=excluded.p999_ms, max_ms=excluded.max_ms,"
+                " deadline_misses=excluded.deadline_misses",
+                (stage, day, count, p50_ms, p95_ms, p99_ms, p999_ms, max_ms,
+                 deadline_misses))
+
+    def list_latency_summaries(self, stage: str | None = None, limit: int = 200) -> list[dict]:
+        if stage:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM latency_summaries WHERE stage=? ORDER BY day DESC LIMIT ?",
+                    (stage, limit)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM latency_summaries ORDER BY day DESC LIMIT ?",
+                    (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_task(self, *, task_id: str, name: str, type_: str, state: str,
+                    progress: float, payload: dict | None = None) -> None:
+        ts = _now_iso()
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO background_tasks (id, name, type, state, progress,"
+                " started_ts, updated_ts, payload) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET state=excluded.state,"
+                " progress=excluded.progress, updated_ts=excluded.updated_ts,"
+                " payload=excluded.payload",
+                (task_id, name, type_, state, float(progress), ts, ts,
+                 encode(payload or {})))
+
+    def list_tasks(self, limit: int = 100) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM background_tasks ORDER BY updated_ts DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # ---------------------------------------------- broker connection meta --
+    def upsert_broker_connection(self, *, broker: str, status: str, token_state: str,
+                                 account_hint: str | None = None,
+                                 note: str | None = None) -> None:
+        """Connection METADATA only. Secrets never enter this table."""
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO broker_connections (broker, status, token_state,"
+                " account_hint, updated_ts, note) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(broker) DO UPDATE SET status=excluded.status,"
+                " token_state=excluded.token_state, account_hint=excluded.account_hint,"
+                " updated_ts=excluded.updated_ts, note=excluded.note",
+                (broker, status, token_state, account_hint, _now_iso(), note))
+
+    def get_broker_connection(self, broker: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute("SELECT * FROM broker_connections WHERE broker=?",
+                             (broker,)).fetchone()
+        return dict(row) if row else None
+
+    def list_broker_connections(self) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM broker_connections ORDER BY updated_ts DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
 class Repository(
     MarketEventRepositoryMixin,
     UniverseRepositoryMixin,
     DataPlatformRepositoryMixin,
     ResearchRepositoryMixin,
+    AxiomWorkstationRepositoryMixin,
     _V1RepositoryBase, FinalRepositoryMixin):
     """V1 repository + V2.1 mixins (universe, data platform, research) + 3.0.4 market events."""

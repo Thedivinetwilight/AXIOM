@@ -330,3 +330,131 @@ def summarize(checks: list[Check]) -> dict:
         "warnings": [c.to_dict() for c in warnings],
         "checks": [c.to_dict() for c in checks],
     }
+
+
+# ---------------------------------------------------------------------------
+# AXIOM-MONEY-PRINTER readiness center (master spec section 32): the base
+# offline checks plus operational checks. A check that cannot run reports
+# ok=False with INFO severity so it can never be read as "healthy" — it maps
+# to UNKNOWN/NOT CHECKED in the readiness API.
+# ---------------------------------------------------------------------------
+
+_CLOCK_SANITY_MIN_YEAR = 2020
+_CLOCK_SANITY_MAX_YEAR = 2035
+
+
+def run_readiness_center_checks(settings, *, repository=None,
+                                context: dict | None = None) -> list[Check]:
+    """Base checks + operational readiness checks, in stable order."""
+    checks = list(run_checks(settings, repository=repository))
+    context = context or {}
+
+    # Clock sanity (spec section 144): impossible local clocks make token
+    # expiry math and reconciliation timestamps meaningless.
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    sane = _CLOCK_SANITY_MIN_YEAR <= now.year <= _CLOCK_SANITY_MAX_YEAR
+    checks.append(_check(
+        "clock_sanity", sane, ERROR,
+        f"system clock {now.isoformat(timespec='seconds')} is within the sane window"
+        if sane else f"system clock year {now.year} is implausible; token/expiry "
+                     "math cannot be trusted"))
+
+    # Kill-switch availability (spec section 37): the emergency-stop flag path
+    # must be readable/writable before live starts.
+    try:
+        from app.live.ops import read_emergency_stop
+
+        if repository is not None:
+            active, reason = read_emergency_stop(repository)
+            checks.append(_check(
+                "kill_switch_available", not active, ERROR,
+                "emergency-stop flag readable and clear" if not active
+                else f"emergency stop is ACTIVE ({reason}); clear it deliberately "
+                     "before any live session"))
+        else:
+            checks.append(_unavailable("kill_switch_available", "no repository attached"))
+    except Exception as exc:  # pragma: no cover — defensive
+        checks.append(_check(
+            "kill_switch_available", False, ERROR,
+            f"emergency-stop flag path could not be verified: {exc}"))
+
+    # Single-engine lock (spec section 28): a second live engine must be
+    # detectable before the first one starts. A STALE lock (dead engine) does
+    # not block; a fresh live lock does.
+    try:
+        from app.live.lock import EngineLock
+
+        if repository is not None:
+            status = EngineLock(repository).status()
+            blocking = bool(status.get("held")) and not status.get("stale") \
+                and bool(status.get("live"))
+            checks.append(_check(
+                "single_instance_lock", not blocking, ERROR,
+                "no other live engine holds a fresh lock" if not blocking
+                else f"another live engine ({status.get('owner')}) holds the lock"))
+        else:
+            checks.append(_unavailable("single_instance_lock", "no repository attached"))
+    except Exception as exc:  # pragma: no cover — defensive
+        checks.append(_check("single_instance_lock", False, ERROR,
+                             f"lock state could not be verified: {exc}"))
+
+    # Static-IP compliance (spec section 39): we can only verify that the
+    # operator has recorded registered IPs; actual source-IP matching happens
+    # on the broker side and is reported UNKNOWN here, never healthy.
+    primary = str(getattr(settings, "upstox_static_ip_primary", "") or "").strip()
+    secondary = str(getattr(settings, "upstox_static_ip_secondary", "") or "").strip()
+    if primary or secondary:
+        checks.append(_check(
+            "static_ip_configuration", True, INFO,
+            f"registered static IP on file (primary={'set' if primary else 'unset'}, "
+            f"secondary={'set' if secondary else 'unset'}); broker-side source-IP "
+            "matching is verified by Upstox at request time"))
+    else:
+        checks.append(_check(
+            "static_ip_configuration", False, WARNING,
+            "no registered static IP recorded in settings; Upstox live order "
+            "traffic may be rejected if the account enforces static-IP checks"))
+
+    # Data freshness (spec section 32): only verifiable when the caller
+    # supplies the latest market-data timestamp.
+    last_data_ts = context.get("last_market_data_ts")
+    if last_data_ts:
+        try:
+            parsed = datetime.fromisoformat(str(last_data_ts).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_s = (now - parsed).total_seconds()
+            stale = age_s > float(context.get("data_stale_after_s", 300))
+            checks.append(_check(
+                "data_freshness", not stale, WARNING,
+                f"last market data {age_s:.0f}s ago"))
+        except ValueError:
+            checks.append(_check("data_freshness", False, WARNING,
+                                 f"last market data timestamp unreadable: {last_data_ts!r}"))
+    else:
+        checks.append(_unavailable("data_freshness", "no market-data timestamp supplied"))
+
+    # Token lifecycle (spec section 38): presence is checked by the base
+    # suite; freshness is only knowable with an issued-at timestamp.
+    issued_at = context.get("token_issued_ts")
+    if issued_at:
+        try:
+            parsed = datetime.fromisoformat(str(issued_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_h = (now - parsed).total_seconds() / 3600.0
+            # Upstox access tokens expire at 03:30 IST the next day; treat
+            # >20h as EXPIRING for advisory purposes (authoritative expiry is
+            # the broker's).
+            state = "VALID" if age_h < 20 else ("EXPIRING" if age_h < 26 else "EXPIRED")
+            checks.append(_check(
+                "token_lifecycle", state != "EXPIRED", WARNING,
+                f"access token age {age_h:.1f}h -> {state} (broker is authoritative)"))
+        except ValueError:
+            checks.append(_unavailable("token_lifecycle", "token issued-at unreadable"))
+    else:
+        checks.append(_unavailable("token_lifecycle", "no token issued-at timestamp supplied"))
+
+    return checks

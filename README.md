@@ -1,3 +1,17 @@
+# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0)
+
+> **Current release: 3.2.0 (AXIOM).** The product is now the
+> AXIOM-MONEY-PRINTER workstation (display name **AXIOM**): market-scoped
+> universes, multi-market session clocks, an evidence stack, an opportunity
+> center, research intelligence, Kronos model studio, paper trading and a
+> first-class fail-closed LIVE mode — all through a GUI, no terminal.
+> Read **`AXIOM_PRODUCT_MANUAL.md`** (authoritative) and the engineering
+> spec **`AXIOM-MONEY-PRINTER_MASTER_PROMPT_v1.0.md`**. Documents listed in
+> the manual's "Superseded documents" section describe earlier releases.
+> Everything below this banner is retained 3.1.0-and-earlier release history.
+
+---
+
 # Arena — Quantitative Research & Trading Platform (3.1.0)
 
 > **New here?** [Download `Arena.exe`](../../releases) and double-click it.

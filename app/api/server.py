@@ -19,6 +19,7 @@ from app.api.routes import setup as setup_routes
 from app.api.routes import frontend as frontend_routes
 from app.api.routes import wizard as wizard_routes
 from app.api.routes import app_api as app_api_routes
+from app.api.routes import workstation as workstation_routes
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -38,6 +39,20 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             )
             app.state.repository, app.state.broker = repository, broker
             app.state.simulator = PaperSimulator(broker)
+            # AXIOM-MONEY-PRINTER workstation services share this repository.
+            from app import workstation as workstation_module
+
+            configured = Path(settings.data_dir)
+            if not configured.is_absolute():
+                configured = ROOT / configured
+            app.state.workstation = workstation_module.build(
+                settings, repository, Path(data_dir) if data_dir else configured)
+            try:
+                app.state.workstation.tasks.recover()
+            except Exception as exc:
+                logger.warning("task recovery skipped at startup: %s", exc)
+            # Paper execution feeds the intelligence layer with OBSERVED bars.
+            app.state.simulator.workstation = app.state.workstation
             yield
             await app.state.simulator.stop()
             broker.close()
@@ -109,6 +124,9 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     app.include_router(app_api_routes.router)
     for module in (market, strategies, backtests, paper, v2, market_events):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
+    # AXIOM-MONEY-PRINTER workstation: markets/universes, opportunities,
+    # evidence, live session state machine, Kronos studio, tasks, backups.
+    app.include_router(workstation_routes.router)
     app.state.sandbox_engine = None  # set by the sandbox engine embedding
     app.state.sandbox_broker = None
     return app
