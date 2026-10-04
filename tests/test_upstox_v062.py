@@ -120,6 +120,32 @@ def test_decoder_ignores_unconfigured_instruments():
     assert decoder.decode(response.SerializeToString(), time.time()) == []
 
 
+def test_full_feed_quote_is_observed_and_expires_without_synthesis():
+    provider = UpstoxStream(TOKEN, [KEY], timeframe="1m", mode="full")
+    received = time.time()
+    response = FeedResponse(type=1, currentTs=int(received * 1000))
+    full = response.feeds[KEY].fullFeed.marketFF
+    full.ltpc.ltp, full.ltpc.ltt, full.ltpc.ltq = (
+        500.0, int(received * 1000), 2)
+    level = full.marketLevel.bidAskQuote.add()
+    level.bidP, level.bidQ, level.askP, level.askQ = 499.5, 10, 500.5, 10
+    decoder = UpstoxProtobufDecoder({KEY: SYMBOL}, "full")
+    events = decoder.decode(response.SerializeToString(), received)
+    assert len(events) == 1
+    provider._apply_event(events[0], received)
+
+    quote = provider.quote_for(SYMBOL, now=received + 0.5)
+    assert quote is not None
+    assert quote["provenance"] == "OBSERVED"
+    assert quote["instrument_key"] == KEY
+    assert quote["bid"] == 499.5 and quote["ask"] == 500.5
+    assert provider.quote_for(SYMBOL, now=received + 4.0) is None
+
+    invalid = replace(events[0], bid=0.0, ask=500.5)
+    provider._apply_event(invalid, received)
+    assert provider.quote_for(SYMBOL, now=received + 0.1) is None
+
+
 # ---------------------------------------------------------------- gating
 
 

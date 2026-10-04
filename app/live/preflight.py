@@ -465,7 +465,8 @@ def run_readiness_center_checks(settings, *, repository=None,
     except Exception as exc:  # pragma: no cover — defensive
         checks.append(_check(
             "kill_switch_available", False, ERROR,
-            f"emergency-stop flag path could not be verified: {exc}"))
+            "emergency-stop flag path could not be verified "
+            f"({type(exc).__name__}); activation is blocked"))
 
     # Single-engine lock (spec section 28): a second live engine must be
     # detectable before the first one starts. A STALE lock (dead engine) does
@@ -475,17 +476,32 @@ def run_readiness_center_checks(settings, *, repository=None,
 
         if repository is not None:
             status = EngineLock(repository).status()
-            blocking = bool(status.get("held")) and not status.get("stale") \
-                and bool(status.get("live"))
-            checks.append(_check(
-                "single_instance_lock", not blocking, ERROR,
-                "no other live engine holds a fresh lock" if not blocking
-                else f"another live engine ({status.get('owner')}) holds the lock"))
+            readable = bool(status.get("readable"))
+            atomic = bool(status.get("atomic_supported"))
+            blocking = (not readable or not atomic
+                        or (bool(status.get("held"))
+                            and not status.get("stale")
+                            and bool(status.get("live"))))
+            if not readable:
+                detail = ("live-engine lease state is UNKNOWN/unreadable; "
+                          "activation is blocked")
+            elif not atomic:
+                detail = ("repository does not support an atomic live-engine "
+                          "lease; activation is blocked")
+            elif blocking:
+                detail = (f"another live engine ({status.get('owner')}) "
+                          "holds the lock")
+            else:
+                detail = "atomic lease store is readable; no other fresh live lease"
+            checks.append(_check("single_instance_lock", not blocking,
+                                 ERROR, detail))
         else:
             checks.append(_unavailable("single_instance_lock", "no repository attached"))
     except Exception as exc:  # pragma: no cover — defensive
-        checks.append(_check("single_instance_lock", False, ERROR,
-                             f"lock state could not be verified: {exc}"))
+        checks.append(_check(
+            "single_instance_lock", False, ERROR,
+            "lock state could not be verified "
+            f"({type(exc).__name__}); activation is blocked"))
 
     # Static-IP compliance (FINAL-11/10 §18): a genuine match / mismatch /
     # cannot_check verdict. A detected MISMATCH is a real ERROR (the broker

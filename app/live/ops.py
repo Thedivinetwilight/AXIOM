@@ -15,11 +15,14 @@ alert actually fires, so the paper/sandbox paths are unaffected when
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from app.live.alerts import AlertAcknowledgements, AlertRouter
 from app.live.guards import CanaryGuard, GuardDecision, TokenGuard
 from app.live.watchdog import BreachMonitor, LiveWatchdog
+
+logger = logging.getLogger(__name__)
 
 
 class LiveOperations:
@@ -244,14 +247,23 @@ def read_emergency_stop(repository) -> tuple[bool, str]:
     """Independent read of the persisted emergency-stop flag (master spec §37).
 
     Emergency controls must not depend on the main engine object being alive,
-    so this reads the durable flag directly. Returns ``(active, reason)``;
-    an unreadable flag is reported active=False with an explicit reason so
-    callers can distinguish "clear" from "unknown" in diagnostics.
+    so this reads the durable flag directly. Returns ``(active, reason)``.
+
+    FINAL-11/10 §63: an UNREADABLE flag behaves as STOPPED, never as clear —
+    failing open on the emergency stop would be the worst possible direction.
+    The reason string carries the word "unreadable" so callers can still
+    distinguish "clear" from "fail-closed default" in diagnostics.
     """
     try:
         flag = repository.get_engine_state("emergency_stop", {}) or {}
-    except Exception as exc:  # pragma: no cover — defensive
-        return False, f"emergency-stop flag unreadable: {exc}"
+        if not isinstance(flag, dict):
+            raise TypeError("emergency-stop record has an invalid shape")
+    except Exception as exc:
+        error_type = type(exc).__name__
+        logger.error("EMERGENCY_FLAG_UNREADABLE: fail closed (stopped)",
+                     extra={"error_type": error_type})
+        return True, ("emergency-stop flag unreadable "
+                      f"({error_type}); fail closed")
     if bool(flag.get("stopped")):
         return True, str(flag.get("reason") or "no reason recorded")
     return False, "clear"

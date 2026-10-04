@@ -251,6 +251,25 @@ class TestSessionStateGate:
 # =====================================================================
 
 class TestEmergencyStopSemantics:
+    def test_persisted_emergency_read_fails_closed_without_leaking_error_text(self):
+        class BrokenRepository:
+            def get_engine_state(self, key, default=None):
+                raise RuntimeError("database-password=do-not-expose")
+
+        stopped, reason = read_emergency_stop(BrokenRepository())
+        assert stopped is True
+        assert "unreadable" in reason and "fail closed" in reason
+        assert "do-not-expose" not in reason
+
+    def test_malformed_emergency_record_fails_closed(self):
+        class MalformedRepository:
+            def get_engine_state(self, key, default=None):
+                return "not-a-record"
+
+        stopped, reason = read_emergency_stop(MalformedRepository())
+        assert stopped is True
+        assert "TypeError" in reason
+
     def test_entry_blocked_exit_available_under_emergency_stop(self, repo, armed):
         settings, manager = armed
         epoch = manager.epochs.current()["epoch"]

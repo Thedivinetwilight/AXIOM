@@ -79,6 +79,10 @@ def owner_id(*, pid: int | None = None, host: str | None = None) -> str:
     return f"{host or socket.gethostname()}:{pid or os.getpid()}"
 
 
+class LockStateUnavailable(RuntimeError):
+    """The durable owner state could not be safely established."""
+
+
 class EngineLock:
     """Acquire / heartbeat / release the single-engine lock, durably."""
 
@@ -98,15 +102,22 @@ class EngineLock:
             return None
         try:
             raw = self.repository.get_engine_state(LOCK_KEY, None)
-        except Exception:
+        except Exception as exc:
+            raise LockStateUnavailable(
+                f"lease state read failed ({type(exc).__name__})") from exc
+        if raw is None:
             return None
         if not isinstance(raw, dict) or not raw.get("owner"):
-            return None
-        return LockState(owner=str(raw.get("owner")), pid=int(raw.get("pid") or 0),
-                         host=str(raw.get("host") or "?"),
-                         started_ts=str(raw.get("started_ts") or ""),
-                         heartbeat_ts=str(raw.get("heartbeat_ts") or ""),
-                         live=bool(raw.get("live", True)))
+            raise LockStateUnavailable("lease record has an invalid shape")
+        try:
+            return LockState(owner=str(raw["owner"]),
+                             pid=int(raw.get("pid") or 0),
+                             host=str(raw.get("host") or "?"),
+                             started_ts=str(raw.get("started_ts") or ""),
+                             heartbeat_ts=str(raw.get("heartbeat_ts") or ""),
+                             live=bool(raw.get("live", True)))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise LockStateUnavailable("lease record is malformed") from exc
 
     def _save(self, state: LockState) -> None:
         if self.repository is None:
@@ -119,7 +130,10 @@ class EngineLock:
             return True
         heartbeat = _parse(existing.heartbeat_ts)
         if heartbeat is None:
-            return True
+            # A missing/corrupt heartbeat is UNKNOWN, not proof of death.
+            # Treating it as stale would permit a live-engine takeover without
+            # evidence that the previous owner stopped.
+            return False
         now = now or self._now()
         return (now - heartbeat) > timedelta(seconds=self.stale_after_seconds)
 
@@ -137,13 +151,32 @@ class EngineLock:
         now = now or self._now()
         now_iso = now.isoformat()
         stale_before = (now - timedelta(seconds=self.stale_after_seconds)).isoformat()
+        acquire_lease = (getattr(self.repository, "try_acquire_lease", None)
+                         if self.repository is not None else None)
 
-        if self.repository is not None and hasattr(self.repository,
-                                                   "try_acquire_lease"):
-            result = self.repository.try_acquire_lease(
-                LOCK_KEY, self.owner, pid=os.getpid(),
-                host=socket.gethostname(), live=self.live, now_ts=now_iso,
-                stale_before_ts=stale_before)
+        # A read-then-write fallback is not atomic and therefore cannot own a
+        # real-money engine. Missing lease support is a refusal, not a reason to
+        # weaken the single-owner contract.
+        if self.live and not callable(acquire_lease):
+            logger.error("LIVE_LEASE_ATOMICITY_UNAVAILABLE")
+            return LockDecision(
+                False, "atomic live-engine lease unavailable; refusing live start")
+
+        if callable(acquire_lease):
+            try:
+                result = acquire_lease(
+                    LOCK_KEY, self.owner, pid=os.getpid(),
+                    host=socket.gethostname(), live=self.live, now_ts=now_iso,
+                    stale_before_ts=stale_before)
+            except Exception as exc:
+                logger.error("LIVE_LEASE_ACQUIRE_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                return LockDecision(
+                    False, "live-engine lease could not be verified; refusing start")
+            if not isinstance(result, dict) or "acquired" not in result:
+                logger.error("LIVE_LEASE_ACQUIRE_INVALID_RESULT")
+                return LockDecision(
+                    False, "live-engine lease returned an invalid result; refusing start")
             if result["acquired"]:
                 self.held = True
                 detail = "lock acquired"
@@ -185,9 +218,15 @@ class EngineLock:
                 "no casual force bypass.",
                 existing=existing)
 
-        # Repository without lease support (older databases): fall back to
-        # the legacy in-state lock. Same semantics, weaker atomicity.
-        existing = self._load()
+        # Paper/test repositories without lease support may use legacy state;
+        # unlike LIVE, they cannot own an execution lease.
+        try:
+            existing = self._load()
+        except LockStateUnavailable as exc:
+            logger.error("ENGINE_LOCK_STATE_UNREADABLE",
+                         extra={"error_type": type(exc).__name__})
+            return LockDecision(False,
+                                "engine lock state unreadable; refusing start")
         if existing is not None and existing.owner != self.owner:
             if self.is_stale(existing, now=now):
                 # a crashed engine must never block a restart
@@ -255,26 +294,56 @@ class EngineLock:
             return False
 
     def status(self, *, now=None) -> dict:
-        """What an operator/dashboard needs to know about the lock."""
+        """What an operator/dashboard needs to know about the lock.
+
+        An unreadable lease is UNKNOWN, never "no owner". The readiness gate
+        consumes ``readable`` and ``atomic_supported`` and blocks activation
+        when either proof is unavailable.
+        """
         now = now or self._now()
-        lease = None
-        if self.repository is not None and hasattr(self.repository, "read_lease"):
-            lease = self.repository.read_lease(LOCK_KEY)
-        if lease is not None:
-            existing = LockState(owner=lease["owner"], pid=lease.get("pid") or 0,
-                                 host=lease.get("host") or "?",
-                                 started_ts=lease.get("started_ts") or "",
-                                 heartbeat_ts=lease.get("heartbeat_ts") or "",
-                                 live=lease.get("live", True))
-        else:
-            existing = self._load()
-        if existing is None:
-            return {"held": False, "stale": None, "owner": None,
+        atomic_supported = callable(
+            getattr(self.repository, "try_acquire_lease", None)
+            if self.repository is not None else None)
+        if self.repository is None:
+            return {"held": None, "known": False, "readable": False,
+                    "atomic_supported": False, "stale": None, "owner": None,
                     "heartbeat_ts": None, "heartbeat_age_seconds": None,
+                    "stale_after_seconds": self.stale_after_seconds,
+                    "error_type": "RepositoryUnavailable"}
+        try:
+            read_lease = getattr(self.repository, "read_lease", None)
+            lease = read_lease(LOCK_KEY) if callable(read_lease) else None
+            if lease is not None:
+                if not isinstance(lease, dict) or not lease.get("owner"):
+                    raise LockStateUnavailable("lease record has an invalid shape")
+                existing = LockState(
+                    owner=str(lease["owner"]), pid=int(lease.get("pid") or 0),
+                    host=str(lease.get("host") or "?"),
+                    started_ts=str(lease.get("started_ts") or ""),
+                    heartbeat_ts=str(lease.get("heartbeat_ts") or ""),
+                    live=bool(lease.get("live", True)))
+            else:
+                existing = self._load()
+        except Exception as exc:
+            logger.error("ENGINE_LOCK_STATUS_UNAVAILABLE",
+                         extra={"error_type": type(exc).__name__})
+            return {"held": None, "known": False, "readable": False,
+                    "atomic_supported": atomic_supported, "stale": None,
+                    "owner": None, "heartbeat_ts": None,
+                    "heartbeat_age_seconds": None,
+                    "stale_after_seconds": self.stale_after_seconds,
+                    "error_type": type(exc).__name__}
+        if existing is None:
+            return {"held": False, "known": True, "readable": True,
+                    "atomic_supported": atomic_supported, "stale": None,
+                    "owner": None, "heartbeat_ts": None,
+                    "heartbeat_age_seconds": None,
                     "stale_after_seconds": self.stale_after_seconds}
         heartbeat = _parse(existing.heartbeat_ts)
         age = ((now - heartbeat).total_seconds() if heartbeat else None)
-        return {"held": True, "stale": self.is_stale(existing, now=now),
+        return {"held": True, "known": True, "readable": True,
+                "atomic_supported": atomic_supported,
+                "stale": self.is_stale(existing, now=now),
                 "owner": existing.owner, "pid": existing.pid,
                 "host": existing.host, "live": existing.live,
                 "started_ts": existing.started_ts,

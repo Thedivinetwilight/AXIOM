@@ -20,8 +20,11 @@ deliberate: an observer that can also act is much harder to reason about.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 FINAL_STATUSES = {"FILLED", "CANCELLED", "REJECTED"}
 WORKING_STATUSES = {"SUBMITTED", "OPEN", "PARTIALLY_FILLED", "CANCEL_UNKNOWN"}
@@ -53,6 +56,19 @@ class Finding:
                 "message": self.message, "payload": self.payload}
 
 
+def _unavailable_finding(source: str, error_type: str) -> Finding:
+    """Report monitoring blindness as an operational failure, never "healthy".
+
+    Exception messages are intentionally omitted: storage/transport exceptions
+    can contain credentials, URLs, or local paths. The source and exception
+    class are enough to locate the failing boundary without leaking secrets.
+    """
+    return Finding(
+        "WATCHDOG_DATA_UNAVAILABLE", CRITICAL,
+        f"watchdog could not verify {source}; live safety status is UNKNOWN",
+        {"source": source, "error_type": str(error_type)})
+
+
 class LiveWatchdog:
     """Observation-only checks over durable state. Never raises to the caller."""
 
@@ -72,18 +88,34 @@ class LiveWatchdog:
         self.unacked_critical_minutes = int(unacked_critical_minutes)
         self.reconcile_silence_minutes = int(reconcile_silence_minutes)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._order_read_error: str | None = None
+
+    def _live(self) -> bool:
+        return bool(getattr(self.broker, "LIVE", False))
 
     # -- individual checks ---------------------------------------------------
 
     def _open_orders(self) -> list[dict]:
-        """Working orders from the mode-appropriate audit table."""
+        """Working orders from the mode-appropriate audit table.
+
+        A failed live audit-table read is UNKNOWN, not an empty order book.
+        ``check_stuck_orders`` converts the recorded failure into a CRITICAL
+        finding so it reaches both the API and the configured alert router.
+        """
+        self._order_read_error = None
         if self.repository is None:
+            if self._live():
+                self._order_read_error = "RepositoryUnavailable"
             return []
-        live = bool(getattr(self.broker, "LIVE", False))
+        live = self._live()
         try:
             listed = (self.repository.list_live_orders(limit=500) if live
                       else self.repository.list_sandbox_orders(limit=500))
-        except Exception:
+        except Exception as exc:
+            self._order_read_error = type(exc).__name__
+            logger.error("WATCHDOG_ORDER_READ_FAILED",
+                         extra={"error_type": self._order_read_error,
+                                "mode": "live" if live else "sandbox"})
             return []
         return [order for order in listed
                 if str(order.get("status", "")).upper() in WORKING_STATUSES]
@@ -98,9 +130,16 @@ class LiveWatchdog:
         """
         now = now or self._now()
         findings: list[Finding] = []
-        for order in self._open_orders():
+        orders = self._open_orders()
+        if self._order_read_error is not None:
+            return [_unavailable_finding("live order audit" if self._live()
+                                         else "sandbox order audit",
+                                         self._order_read_error)]
+        for order in orders:
             created = _parse(order.get("created_ts") or order.get("updated_ts"))
             if created is None:
+                findings.append(_unavailable_finding(
+                    "working-order timestamp", "MissingOrInvalidTimestamp"))
                 continue
             age_min = (now - created).total_seconds() / 60.0
             if age_min >= self.stuck_order_minutes:
@@ -124,8 +163,18 @@ class LiveWatchdog:
         """A broker that failed closed must be surfaced loudly."""
         broker = self.broker
         if broker is None or not hasattr(broker, "available"):
+            if self._live():
+                return [_unavailable_finding("live broker availability",
+                                             "BrokerStatusUnavailable")]
             return []
-        if getattr(broker, "available"):
+        try:
+            available = bool(getattr(broker, "available"))
+        except Exception as exc:
+            logger.error("WATCHDOG_BROKER_STATUS_READ_FAILED",
+                         extra={"error_type": type(exc).__name__})
+            return [_unavailable_finding("live broker availability",
+                                         type(exc).__name__)]
+        if available:
             return []
         return [Finding(
             "BROKER_DISABLED", CRITICAL,
@@ -137,13 +186,22 @@ class LiveWatchdog:
     def check_unresolved_intents(self, *, now: datetime | None = None) -> list[Finding]:
         """Intents stuck in UNKNOWN/UNRESOLVED need a human."""
         journal = getattr(self, "intent_journal", None)
-        if journal is None or self.repository is None:
+        if journal is None:
+            if self._live():
+                return [_unavailable_finding("submission-intent journal",
+                                             "JournalUnavailable")]
             return []
+        if self.repository is None:
+            return [_unavailable_finding("submission-intent journal",
+                                         "RepositoryUnavailable")]
         findings: list[Finding] = []
         try:
             unresolved = journal.unresolved()
-        except Exception:
-            return []
+        except Exception as exc:
+            logger.error("WATCHDOG_INTENT_JOURNAL_READ_FAILED",
+                         extra={"error_type": type(exc).__name__})
+            return [_unavailable_finding("submission-intent journal",
+                                         type(exc).__name__)]
         now = now or self._now()
         for entry in unresolved:
             intent_id = entry.get("intent_id") if isinstance(entry, dict) else str(entry)
@@ -162,11 +220,23 @@ class LiveWatchdog:
     def check_reconcile_liveness(self, *, now: datetime | None = None) -> list[Finding]:
         """Reconciliation going quiet is the classic silent 24/7 failure."""
         if self.repository is None:
+            if self._live():
+                return [_unavailable_finding("reconciliation liveness",
+                                             "RepositoryUnavailable")]
             return []
         now = now or self._now()
-        last = self.repository.get_engine_state("last_reconcile_at")
+        try:
+            last = self.repository.get_engine_state("last_reconcile_at")
+        except Exception as exc:
+            logger.error("WATCHDOG_RECONCILE_STAMP_READ_FAILED",
+                         extra={"error_type": type(exc).__name__})
+            return [_unavailable_finding("reconciliation liveness",
+                                         type(exc).__name__)]
         stamp = _parse(last.get("ts") if isinstance(last, dict) else last)
         if stamp is None:
+            if self._live():
+                return [_unavailable_finding("reconciliation liveness",
+                                             "MissingOrInvalidStamp")]
             return []
         age_min = (now - stamp).total_seconds() / 60.0
         if age_min >= self.reconcile_silence_minutes:
@@ -185,14 +255,23 @@ class LiveWatchdog:
         meta-kinds (the notifications about alerts) are never counted, so this
         can never feed itself.
         """
-        if not self.unacked_critical_minutes or self.acknowledgements is None:
+        if not self.unacked_critical_minutes:
+            return []
+        if self.acknowledgements is None:
+            if self._live():
+                return [_unavailable_finding(
+                    "critical-alert acknowledgement state",
+                    "AcknowledgementStoreUnavailable")]
             return []
         now = now or self._now()
         try:
             outstanding = self.acknowledgements.outstanding_critical(
                 older_than_minutes=self.unacked_critical_minutes, now=now)
-        except Exception:
-            return []
+        except Exception as exc:
+            logger.error("WATCHDOG_ACKNOWLEDGEMENT_READ_FAILED",
+                         extra={"error_type": type(exc).__name__})
+            return [_unavailable_finding("critical-alert acknowledgement state",
+                                         type(exc).__name__)]
         return [Finding(
             "UNACKNOWLEDGED_ALERT", CRITICAL,
             f"CRITICAL alert {item['kind']} from {item['age_minutes']:.0f} min ago "
@@ -205,6 +284,9 @@ class LiveWatchdog:
 
     def check_token(self, *, now: datetime | None = None) -> list[Finding]:
         if self.token_guard is None:
+            if self._live():
+                return [_unavailable_finding(
+                    "credential freshness", "TokenGuardUnavailable")]
             return []
         now = now or self._now()
         decision = self.token_guard.check(now=now)
@@ -236,8 +318,16 @@ class LiveWatchdog:
                       self.check_unacknowledged_critical):
             try:
                 findings.extend(check(now=now))
-            except Exception:
-                continue
+            except Exception as exc:
+                # Observation is allowed to be non-fatal to the trading loop,
+                # but a failed check must be visible to operators and cannot
+                # be silently interpreted as a clean system.
+                logger.error("WATCHDOG_CHECK_FAILED",
+                             extra={"check": getattr(check, "__name__", "unknown"),
+                                    "error_type": type(exc).__name__})
+                findings.append(_unavailable_finding(
+                    getattr(check, "__name__", "watchdog check"),
+                    type(exc).__name__))
         return findings
 
 

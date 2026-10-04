@@ -415,18 +415,105 @@ class TestWatchdog:
         assert {"STUCK_ORDER", "BROKER_DISABLED", "RECONCILE_STALLED"} <= kinds
         database.close()
 
-    def test_inspect_tolerates_a_broken_check(self, tmp_path):
+    def test_inspect_tolerates_a_broken_check_but_reports_unknown(self, tmp_path):
         repository, database = repo(tmp_path)
 
         class Exploding:
             @property
             def available(self):
-                raise RuntimeError("boom")
+                raise RuntimeError("credential=must-not-be-logged")
 
         watchdog = LiveWatchdog(repository, broker=Exploding(), now_fn=lambda: NOW)
-        watchdog.observe = None  # not used here
-        assert isinstance(watchdog.inspect(now=NOW), list)  # no raise
+        findings = watchdog.inspect(now=NOW)
+        assert isinstance(findings, list)  # monitoring failure does not crash loop
+        unavailable = [f for f in findings
+                       if f.kind == "WATCHDOG_DATA_UNAVAILABLE"]
+        assert unavailable
+        assert all("must-not-be-logged" not in str(f.to_dict())
+                   for f in unavailable)
         database.close()
+
+    def test_failed_live_order_read_is_a_critical_unknown(self):
+        class BrokenRepository:
+            def list_live_orders(self, limit):
+                raise RuntimeError("token=must-not-be-logged")
+
+        class Live:
+            LIVE = True
+
+        watchdog = LiveWatchdog(BrokenRepository(), broker=Live())
+        findings = watchdog.check_stuck_orders(now=NOW)
+        assert len(findings) == 1
+        assert findings[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert findings[0].severity == "CRITICAL"
+        assert findings[0].payload["source"] == "live order audit"
+        assert findings[0].payload["error_type"] == "RuntimeError"
+        assert "must-not-be-logged" not in str(findings[0].to_dict())
+
+    def test_malformed_working_order_timestamp_is_not_silently_ignored(self):
+        class Repository:
+            def list_live_orders(self, limit):
+                return [{"id": "order-1", "status": "OPEN",
+                         "created_ts": "not-a-timestamp"}]
+
+        class Live:
+            LIVE = True
+
+        watchdog = LiveWatchdog(Repository(), broker=Live())
+        findings = watchdog.check_stuck_orders(now=NOW)
+        assert findings[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert findings[0].payload["source"] == "working-order timestamp"
+
+    def test_failed_intent_journal_read_is_not_reported_as_clean(self):
+        class Journal:
+            def unresolved(self):
+                raise RuntimeError("token=must-not-be-logged")
+
+        class Live:
+            LIVE = True
+
+        watchdog = LiveWatchdog(object(), broker=Live())
+        watchdog.intent_journal = Journal()
+        findings = watchdog.check_unresolved_intents(now=NOW)
+        assert findings[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert findings[0].severity == "CRITICAL"
+        assert findings[0].payload["source"] == "submission-intent journal"
+        assert "must-not-be-logged" not in str(findings[0].to_dict())
+
+    def test_failed_reconciliation_and_ack_reads_are_visible(self):
+        class BrokenRepository:
+            def get_engine_state(self, key, default=None):
+                raise RuntimeError("db-password=must-not-be-logged")
+
+        class BrokenAcks:
+            def outstanding_critical(self, **kwargs):
+                raise RuntimeError("webhook-token=must-not-be-logged")
+
+        class Live:
+            LIVE = True
+
+        watchdog = LiveWatchdog(BrokenRepository(), broker=Live(),
+                                acknowledgements=BrokenAcks(),
+                                now_fn=lambda: NOW)
+        reconcile = watchdog.check_reconcile_liveness(now=NOW)
+        alerts = watchdog.check_unacknowledged_critical(now=NOW)
+        assert reconcile[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert alerts[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert "must-not-be-logged" not in str(reconcile + alerts)
+
+    def test_missing_live_token_and_ack_monitors_are_unknown(self):
+        class Live:
+            LIVE = True
+            available = True
+
+        watchdog = LiveWatchdog(object(), broker=Live(), now_fn=lambda: NOW)
+        token = watchdog.check_token(now=NOW)
+        acks = watchdog.check_unacknowledged_critical(now=NOW)
+        assert token[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert token[0].payload["source"] == "credential freshness"
+        assert acks[0].kind == "WATCHDOG_DATA_UNAVAILABLE"
+        assert acks[0].payload["source"] == \
+            "critical-alert acknowledgement state"
 
 
 class TestBreachMonitor:
@@ -795,6 +882,69 @@ class TestEngineIntegration:
         database.close()
         ops_db.close()
 
+    def test_unreadable_emergency_flag_stops_engine_check(self, tmp_path):
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        original = repository.get_engine_state
+
+        def broken(key, default=None):
+            if key == "emergency_stop":
+                raise RuntimeError("password=must-not-be-logged")
+            return original(key, default)
+
+        repository.get_engine_state = broken
+        assert engine._check_emergency() is True
+        database.close()
+
+    def test_lost_live_lease_stops_loop_before_processing_or_submitting(
+            self, tmp_path):
+        from app.live.lock import EngineLock
+
+        ops, ops_repo, ops_db = TestLiveOperationsFacade()._ops(tmp_path)
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, ops)
+
+        class OneCandleProvider:
+            symbols = ["RELIANCE"]
+
+            async def stream(self, symbols, timeframe):
+                yield Candle(timestamp=NOW, open=100, high=101, low=99,
+                             close=100, volume=1000, symbol="RELIANCE")
+
+        engine.provider = OneCandleProvider()
+        processed = []
+        engine.process_candle = lambda candle: processed.append(candle)
+        engine.live_lock = EngineLock(repository, live=True, owner="owner:1")
+        repository.heartbeat_lease = lambda *args, **kwargs: False
+
+        result = engine.run(max_candles=1)
+        assert processed == []
+        assert recording.submitted == []
+        assert engine.state == "BLOCKED_LEASE_LOST"
+        assert any(event["kind"] == "ENGINE_BLOCKED_LEASE_LOST"
+                   for event in repository.list_system_events())
+        assert result["engine_lock"]["held"] is False
+        engine._submit("BUY", 1.0, 100.0,
+                       Candle(timestamp=NOW, open=100, high=101, low=99,
+                              close=100, volume=1000, symbol="RELIANCE"))
+        assert recording.submitted == []
+        database.close()
+        ops_db.close()
+
+    def test_malformed_emergency_flag_stops_engine_check(self, tmp_path):
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        original = repository.get_engine_state
+
+        def malformed(key, default=None):
+            if key == "emergency_stop":
+                return ["not", "a", "mapping"]
+            return original(key, default)
+
+        repository.get_engine_state = malformed
+        assert engine._check_emergency() is True
+        database.close()
+
     def test_ops_tick_triggers_the_emergency_stop_on_a_breach(self, tmp_path):
         from app.live.watchdog import BreachMonitor
 
@@ -837,6 +987,133 @@ class TestEngineIntegration:
                         volume=1000, symbol="RELIANCE")
         engine._submit("BUY", 1.0, 100.0, candle)
         assert recording.submitted == [("BUY", 1.0, 100.0)]
+        database.close()
+
+    @pytest.mark.parametrize("gate", ["net_edge", "entry_timing", "alpha_decay"])
+    def test_entry_gate_exception_refuses_without_broker_call(self, tmp_path, gate):
+        from types import SimpleNamespace
+        from app.strategies.base import Signal
+
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        candle = Candle(timestamp=NOW, open=100, high=101, low=99, close=100,
+                        volume=1000, symbol="RELIANCE")
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("credential=must-not-be-logged")
+
+        # Ensure each parametrized failure is reached after all preceding
+        # gates have passed; the only fault is the named final decision.
+        engine.net_edge_gate.evaluate = lambda **kwargs: SimpleNamespace(
+            passes=True, gross_expected=2.0, net_expected=1.0,
+            threshold=0.0, reason="pass")
+        engine.quality_scorer.score = lambda **kwargs: SimpleNamespace()
+        engine.quality_scorer.passes = lambda result: True
+        engine.entry_timing.evaluate = lambda **kwargs: SimpleNamespace(
+            action="TRADE_NOW", reasons=[])
+        engine.alpha_decay.should_trade = lambda *args, **kwargs: (True, "pass")
+        if gate == "net_edge":
+            engine.net_edge_gate.evaluate = fail
+        elif gate == "entry_timing":
+            engine.entry_timing.evaluate = fail
+        else:
+            engine.alpha_decay.should_trade = fail
+
+        engine._act(Signal.BUY, candle)
+        assert recording.submitted == []
+        failure = next(event for event in repository.list_system_events()
+                       if event["kind"] == "ENTRY_GATE_FAILURE")
+        assert failure["payload"]["gate"] == gate
+        assert failure["payload"]["error_type"] == "RuntimeError"
+        assert "must-not-be-logged" not in str(failure)
+        database.close()
+
+    def test_live_entry_refuses_missing_bid_ask_instead_of_fabricating_spread(
+            self, tmp_path):
+        from app.strategies.base import Signal
+
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        recording.LIVE = True
+        candle = Candle(timestamp=NOW, open=100, high=101, low=99, close=100,
+                        volume=1000, symbol="RELIANCE")
+        engine._act(Signal.BUY, candle)
+        assert recording.submitted == []
+        failure = next(event for event in repository.list_system_events()
+                       if event["kind"] == "ENTRY_GATE_FAILURE")
+        assert failure["payload"]["gate"] == "liquidity"
+        assert failure["payload"]["error_type"] == "ValueError"
+        database.close()
+
+    def test_live_entry_uses_fresh_observed_quote_without_permanently_disabling(
+            self, tmp_path):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from app.data.market_events import MarketEvent
+        from app.data.upstox_stream import UpstoxStream
+        from app.strategies.base import Signal
+
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        recording.LIVE = True
+        engine.sizing_fraction = 0.05
+        provider = UpstoxStream(
+            "mock-market-token", ["NSE_EQ|INE002A01018"],
+            timeframe="1m", mode="full")
+        quote_received = datetime.now(timezone.utc)
+        provider._on_tick(MarketEvent(
+            provider="upstox", instrument_key="NSE_EQ|INE002A01018",
+            kind="live", received_at=quote_received,
+            exchange_ts=quote_received, ltp=100.0, bid=99.95, ask=100.05),
+            "RELIANCE", quote_received.timestamp(), 100.0, 100.0)
+        engine.provider = provider
+        engine.net_edge_gate.evaluate = lambda **kwargs: SimpleNamespace(
+            passes=True, gross_expected=2.0, net_expected=1.0,
+            threshold=0.0, reason="pass")
+        engine.quality_scorer.score = lambda **kwargs: SimpleNamespace()
+        engine.quality_scorer.passes = lambda result: True
+        engine.entry_timing.evaluate = lambda **kwargs: SimpleNamespace(
+            action="TRADE_NOW", reasons=[])
+        engine.alpha_decay.should_trade = lambda *args, **kwargs: (True, "pass")
+        candle = Candle(timestamp=NOW, open=100, high=101, low=99, close=100,
+                        volume=1000, symbol="RELIANCE")
+
+        engine._act(Signal.BUY, candle)
+        assert len(recording.submitted) == 1
+        assert recording.submitted[0][0] == "BUY"
+        failures = [event for event in repository.list_system_events()
+                    if event["kind"] == "ENTRY_GATE_FAILURE"]
+        assert failures == []
+        database.close()
+
+    def test_live_entry_refuses_stale_observed_quote(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        from app.data.market_events import MarketEvent
+        from app.data.upstox_stream import UpstoxStream
+        from app.strategies.base import Signal
+
+        engine, recording, repository, database, Candle = self._engine(
+            tmp_path, None)
+        recording.LIVE = True
+        now = datetime.now(timezone.utc)
+        received = now - timedelta(seconds=10)
+        provider = UpstoxStream(
+            "mock-market-token", ["NSE_EQ|INE002A01018"],
+            timeframe="1m", mode="full")
+        provider._on_tick(MarketEvent(
+            provider="upstox", instrument_key="NSE_EQ|INE002A01018",
+            kind="live", received_at=received, exchange_ts=received,
+            ltp=100.0, bid=99.95, ask=100.05),
+            "RELIANCE", received.timestamp(), 100.0, 100.0)
+        engine.provider = provider
+        candle = Candle(timestamp=now, open=100, high=101, low=99, close=100,
+                        volume=1000, symbol="RELIANCE")
+
+        engine._act(Signal.BUY, candle)
+        assert recording.submitted == []
+        failure = next(event for event in repository.list_system_events()
+                       if event["kind"] == "ENTRY_GATE_FAILURE")
+        assert failure["payload"]["gate"] == "liquidity"
         database.close()
 
 
@@ -2323,6 +2600,87 @@ class TestSingleEngineLock:
         assert status["held"] is True and status["stale"] is False
         assert status["heartbeat_age_seconds"] == pytest.approx(90, abs=1)
         assert lock.status(now=now + timedelta(hours=2))["stale"] is True
+        database.close()
+
+    def test_live_lock_refuses_repository_without_atomic_lease_api(self):
+        from app.live.lock import EngineLock
+
+        class LegacyRepository:
+            def get_engine_state(self, key, default=None):
+                return default
+
+            def set_engine_state(self, key, value):
+                return None
+
+        lock = EngineLock(LegacyRepository(), live=True, owner="live:1")
+        decision = lock.acquire(now=NOW)
+        assert decision.granted is False
+        assert "atomic" in decision.reason
+        status = lock.status(now=NOW)
+        assert status["readable"] is True
+        assert status["atomic_supported"] is False
+
+    def test_unreadable_live_lease_refuses_start_and_reports_unknown(self):
+        from app.live.lock import EngineLock
+
+        class BrokenRepository:
+            def try_acquire_lease(self, *args, **kwargs):
+                raise RuntimeError("db-secret=must-not-leak")
+
+            def read_lease(self, name):
+                raise RuntimeError("db-secret=must-not-leak")
+
+            def get_engine_state(self, key, default=None):
+                raise RuntimeError("db-secret=must-not-leak")
+
+        lock = EngineLock(BrokenRepository(), live=True, owner="live:1")
+        decision = lock.acquire(now=NOW)
+        assert decision.granted is False
+        assert "must-not-leak" not in decision.reason
+        status = lock.status(now=NOW)
+        assert status["readable"] is False and status["known"] is False
+        assert status["held"] is None
+        assert "must-not-leak" not in str(status)
+
+    def test_corrupt_heartbeat_is_not_treated_as_proof_of_stale_owner(
+            self, tmp_path):
+        from app.live.lock import EngineLock, LOCK_KEY
+
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(
+            tmp_path, name="corrupt-heartbeat.db", owner="host-a:1")
+        assert first.acquire(now=now).granted
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET heartbeat_ts=? WHERE name=?",
+                ("not-a-timestamp", LOCK_KEY))
+        second = EngineLock(repository, live=True, owner="host-b:2")
+        decision = second.acquire(now=now + timedelta(days=10))
+        assert decision.granted is False
+        status = second.status(now=now + timedelta(days=10))
+        assert status["held"] is True and status["stale"] is False
+        assert status["heartbeat_age_seconds"] is None
+        database.close()
+
+    def test_preflight_blocks_when_lease_read_is_unknown(self, tmp_path):
+        from app.live.preflight import ERROR, run_readiness_center_checks
+
+        repository, database = repo(tmp_path, "unreadable-lease.db")
+
+        class BrokenLeaseView:
+            def __getattr__(self, name):
+                return getattr(repository, name)
+
+            def read_lease(self, name):
+                raise RuntimeError("database unavailable")
+
+        checks = run_readiness_center_checks(
+            TestPreflightChecks()._live_settings(),
+            repository=BrokenLeaseView())
+        check = next(item for item in checks
+                     if item.name == "single_instance_lock")
+        assert check.ok is False and check.severity == ERROR
+        assert "UNKNOWN/unreadable" in check.detail
         database.close()
 
     def test_the_engine_refuses_to_run_beside_another_live_engine(self, tmp_path):

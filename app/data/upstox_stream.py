@@ -32,6 +32,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import logging
+import math
 from random import random
 import re
 import time
@@ -281,6 +282,10 @@ class UpstoxStream(WebSocketProvider):
         self._keys = keys
         self._symbol_for = dict(zip(keys, symbols))
         self.symbols = symbols
+        # Best-bid/ask remains a separate observed quote from OHLC candles; it
+        # is never synthesized into candle data. The engine consumes only a
+        # fresh quote through ``quote_for`` for live liquidity checks.
+        self.last_quotes: dict[str, dict] = {}
         self.timeframe, self.mode = timeframe, mode
         self._authorize_url = authorize_url
         self.max_backoff, self.stale_after = max_backoff, stale_after
@@ -399,12 +404,57 @@ class UpstoxStream(WebSocketProvider):
             "instrument_key": event.instrument_key,
             "exchange_ts": event.exchange_ts.isoformat(),
             "ltp": price,
+            "bid": event.bid,
+            "ask": event.ask,
             "kind": event.kind,
         }
+        if event.bid is not None and event.ask is not None:
+            try:
+                bid, ask = float(event.bid), float(event.ask)
+                if (not math.isfinite(bid) or not math.isfinite(ask)
+                        or bid <= 0 or ask < bid):
+                    raise ValueError("invalid observed bid/ask")
+                self.last_quotes[symbol] = {
+                    "symbol": symbol,
+                    "instrument_key": event.instrument_key,
+                    "bid": bid,
+                    "ask": ask,
+                    "exchange_ts": event.exchange_ts.isoformat(),
+                    "received_at": event.received_at.timestamp(),
+                    "provenance": "OBSERVED",
+                    "provider": event.provider,
+                }
+            except (TypeError, ValueError, OverflowError):
+                # Do not let an invalid new quote leave an older quote looking
+                # current. The engine will refuse a live entry until a valid
+                # quote arrives.
+                self.last_quotes.pop(symbol, None)
         logger.debug(
             "UPSTOX_TICK",
             extra={"symbol": symbol, "ltp": price, "kind": event.kind},
         )
+
+    def quote_for(self, symbol: str, *, max_age_seconds: float = 3.0,
+                  now: float | None = None) -> dict | None:
+        """Return a fresh, observed bid/ask pair; never derive one from LTP.
+
+        ``None`` means quote evidence is absent or stale. Consumers must not
+        substitute a model spread for live execution.
+        """
+        quote = self.last_quotes.get(str(symbol))
+        if quote is None:
+            return None
+        try:
+            age = (time.time() if now is None else float(now)) - float(
+                quote["received_at"])
+            maximum = float(max_age_seconds)
+            if not math.isfinite(age) or not math.isfinite(maximum):
+                return None
+            if age < 0 or maximum <= 0 or age > maximum:
+                return None
+            return {**quote, "age_seconds": round(age, 3)}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
 
     def _relevant_market_open(self) -> bool | None:
         """Map segment statuses to open/closed for the subscribed instruments.

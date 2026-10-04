@@ -340,8 +340,18 @@ class SandboxEngine:
         return {"stopped": False}
 
     def _check_emergency(self) -> bool:
-        flag = self.repository.get_engine_state("emergency_stop", {}) or {}
-        return bool(flag.get("stopped"))
+        try:
+            flag = self.repository.get_engine_state("emergency_stop", {}) or {}
+            if not isinstance(flag, dict):
+                raise TypeError("emergency-stop record has an invalid shape")
+            return bool(flag.get("stopped"))
+        except Exception as exc:
+            # FINAL-11/10 §63: an unreadable or malformed emergency flag must
+            # behave as STOPPED, never as clear (fail closed). Do not log
+            # exception text; a driver may include sensitive connection data.
+            logger.error("EMERGENCY_FLAG_UNREADABLE: treating as stopped",
+                         extra={"error_type": type(exc).__name__})
+            return True
 
     # -- main loop -----------------------------------------------------------
 
@@ -418,6 +428,8 @@ class SandboxEngine:
                         except Exception:  # maintenance must never kill the loop
                             logger.exception("maintenance job failed")
                     self._ops_tick()
+                    if self.state == "BLOCKED_LEASE_LOST":
+                        break
                     self.process_candle(candle)
                     if max_candles is not None and self.processed >= max_candles:
                         break
@@ -442,13 +454,35 @@ class SandboxEngine:
         reconciliation going quiet) happen precisely while nothing is being
         traded. Never raises: an operations check must not break the loop.
         """
-        if self.live_ops is None:
-            return
         now = now or datetime.now(timezone.utc)
         live_lock = getattr(self, "live_lock", None)
         if live_lock is not None:
-            # proving this engine is alive is what makes a stale lock harmless
-            live_lock.heartbeat(now=now)
+            # Proving this engine is alive is what makes a stale lock harmless.
+            # A lost/unreadable LIVE lease deauthorizes this engine immediately;
+            # it may not continue processing signals under stale ownership.
+            try:
+                heartbeat_ok = bool(live_lock.heartbeat(now=now))
+            except Exception as exc:
+                heartbeat_ok = False
+                heartbeat_error = type(exc).__name__
+            else:
+                heartbeat_error = "HeartbeatRefused"
+            if bool(getattr(live_lock, "live", False)) and not heartbeat_ok:
+                self.state = "BLOCKED_LEASE_LOST"
+                try:
+                    self.repository.record_system_event(
+                        "ENGINE_BLOCKED_LEASE_LOST",
+                        {"owner": getattr(live_lock, "owner", None),
+                         "error_type": heartbeat_error,
+                         "ts": now.isoformat()})
+                except Exception as exc:
+                    logger.error("ENGINE_LEASE_LOSS_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(exc).__name__})
+                logger.critical("ENGINE_BLOCKED_LEASE_LOST",
+                                extra={"error_type": heartbeat_error})
+                return
+        if self.live_ops is None:
+            return
         try:
             findings = self.live_ops.observe(now=now)
             self._auto_cancel_escalated_stuck_orders(findings)
@@ -686,6 +720,29 @@ class SandboxEngine:
                      reason=reason)
         return True
 
+    def _reject_entry_gate_failure(self, gate: str, candle, exc: Exception) -> None:
+        """Fail closed when an entry-only decision cannot be established.
+
+        Record the gate and exception class, not the exception message (which
+        can expose secrets, URLs, or local paths from an adapter/driver).
+        Failure to persist this diagnostic never turns a refused entry into an
+        order.
+        """
+        self.rejected_by_risk += 1
+        payload = {"gate": gate, "symbol": getattr(candle, "symbol", None),
+                   "error_type": type(exc).__name__,
+                   "ts": (candle.timestamp.isoformat()
+                          if getattr(candle, "timestamp", None) else None)}
+        try:
+            self.repository.record_system_event("ENTRY_GATE_FAILURE", payload)
+        except Exception as audit_exc:
+            logger.error("ENTRY_GATE_FAILURE_AUDIT_UNAVAILABLE",
+                         extra={"gate": gate,
+                                "error_type": type(audit_exc).__name__})
+        logger.error("ENTRY_GATE_FAILURE: refusing new risk",
+                     extra={"gate": gate, "symbol": payload["symbol"],
+                            "error_type": payload["error_type"]})
+
     def _act(self, signal, candle, triggers=None) -> None:
         from app.strategies.base import Signal
 
@@ -820,11 +877,30 @@ class SandboxEngine:
             # Use candle bid/ask if available, else estimate
             bid = getattr(candle, "bid", None)
             ask = getattr(candle, "ask", None)
-            # If no bid/ask, synthesize from close and spread config
-            if bid is None or ask is None:
-                # Use configured spread as proxy
+            # Synthetic spread estimates are acceptable for local simulation,
+            # never for real-money execution. A live order must obtain a fresh,
+            # provenance-labelled quote from the market-data provider.
+            if bool(getattr(self.broker, "LIVE", False)):
+                quote_reader = getattr(self.provider, "quote_for", None)
+                if not callable(quote_reader):
+                    raise ValueError("live quote provider is unavailable")
+                quote = quote_reader(candle.symbol, max_age_seconds=3.0)
+                if not isinstance(quote, dict) or \
+                        quote.get("provenance") != "OBSERVED":
+                    raise ValueError("fresh observed live bid/ask evidence unavailable")
+                expected_key = self.instrument_keys.get(candle.symbol)
+                if not expected_key or quote.get("instrument_key") != expected_key:
+                    raise ValueError("live quote instrument identity mismatch")
+                received_at = float(quote.get("received_at"))
+                quote_age = time.time() - received_at
+                if not 0 <= quote_age <= 3.0:
+                    raise ValueError("live quote is stale or has an invalid timestamp")
+                bid, ask = float(quote["bid"]), float(quote["ask"])
+                if bid <= 0 or ask < bid:
+                    raise ValueError("live quote has invalid bid/ask values")
+            elif bid is None or ask is None:
                 mid = float(candle.close)
-                half = mid * 0.0001  # 1 bps half-spread default
+                half = mid * 0.0001  # simulation-only 1 bps half-spread estimate
                 bid, ask = mid - half, mid + half
             liq_snap = self.liquidity_intel.assess(candle.symbol, bid=bid, ask=ask, last_price=float(candle.close), volume=float(getattr(candle, "volume", 0) or 0), volatility=vol if 'vol' in locals() else None, timestamp=time.time())
             # Store for later use in quality/net edge
@@ -835,8 +911,8 @@ class SandboxEngine:
                 return
         except Exception as exc:
             liq_snap = None
-            import logging as _lg2
-            _lg2.getLogger("bot.engine").debug("liquidity_check_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("liquidity", candle, exc)
+            return
 
         # --- 3.0.5: net edge gate (immediately before hard risk, fail closed) ---
         try:
@@ -873,8 +949,8 @@ class SandboxEngine:
                 self.repository.record_system_event("NET_EDGE_REJECT", {"symbol": candle.symbol, "gross": net_res.gross_expected, "net": net_res.net_expected, "threshold": net_res.threshold, "reason": net_res.reason})
                 return
         except Exception as exc:
-            import logging as _lg3
-            _lg3.getLogger("bot.engine").debug("net_edge_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("net_edge", candle, exc)
+            return
 
         # --- 3.0.5: trade quality scorer (ranking/context, not overriding hard risk) ---
         try:
@@ -949,8 +1025,8 @@ class SandboxEngine:
                 self.repository.record_system_event("ENTRY_TIMING_WAIT", {"symbol": candle.symbol, "preferred": timing_decision.preferred_entry, "reason": timing_decision.reasons})
                 return
         except Exception as exc:
-            import logging as _lg5
-            _lg5.getLogger("bot.engine").debug("entry_timing_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("entry_timing", candle, exc)
+            return
 
         # --- 3.0.5: alpha decay check ---
         try:
@@ -959,8 +1035,8 @@ class SandboxEngine:
                 self.repository.record_system_event("ALPHA_DECAY_REJECT", {"symbol": candle.symbol, "reason": reason})
                 return
         except Exception as exc:
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug("ignored", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("alpha_decay", candle, exc)
+            return
 
         instrument_key = self.instrument_keys.get(candle.symbol)
         if instrument_key is None:
@@ -1045,6 +1121,23 @@ class SandboxEngine:
                 allocated_capital: float | None = None,
                 estimated_fees: float = 0.0) -> None:
         triggers = triggers or []
+        # A LIVE engine that no longer owns its atomic lease must not submit
+        # through a stale session. The replacement owner reconciles the account
+        # before taking over; this process has no authority to alter it.
+        live_lock = getattr(self, "live_lock", None)
+        if (live_lock is not None and bool(getattr(live_lock, "live", False))
+                and not bool(getattr(live_lock, "held", False))):
+            try:
+                self.repository.record_system_event(
+                    "ENGINE_ORDER_BLOCKED_LEASE_LOST",
+                    {"side": side, "reason": reason,
+                     "ts": candle.timestamp.isoformat()})
+            except Exception as exc:
+                logger.error("ENGINE_ORDER_BLOCKED_AUDIT_UNAVAILABLE",
+                             extra={"error_type": type(exc).__name__})
+            logger.critical("ENGINE_ORDER_BLOCKED_LEASE_LOST",
+                            extra={"side": side})
+            return
         # FINAL-11/10 §12: the emergency stop blocks NEW RISK (entries) but
         # must never trap a held position — risk-reducing exits stay allowed.
         # The pause gate likewise blocks ENTRIES but never exits.

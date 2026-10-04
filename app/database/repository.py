@@ -415,7 +415,8 @@ class _V1RepositoryBase:
                 "THEN engine_lease.started_ts ELSE excluded.started_ts END, "
                 "heartbeat_ts=excluded.heartbeat_ts, live=excluded.live "
                 "WHERE engine_lease.owner=excluded.owner "
-                "OR engine_lease.heartbeat_ts < ?",
+                "OR (datetime(engine_lease.heartbeat_ts) IS NOT NULL "
+                "AND datetime(engine_lease.heartbeat_ts) < datetime(?))",
                 (name, owner, pid, host, now_ts, now_ts, int(bool(live)),
                  stale_before_ts))
             acquired = cur.rowcount > 0
