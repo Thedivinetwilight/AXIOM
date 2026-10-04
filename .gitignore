@@ -20,9 +20,12 @@ results/*
 *.safetensors
 *.pt
 *.pth
-*.bin
 *.onnx
-models/
+# Weight files are runtime artefacts — but never ignore Python source:
+# `*.bin` and a bare `models/` once swallowed app/models/studio.py.
+*.bin
+!app/**/*.bin
+/models/
 .cache/axiom/
 
 # PyInstaller build output (build_exe.py writes these)
