@@ -278,3 +278,22 @@ class TestSystemPage:
         assert profile["attention_mode"] == "conservative"
         assert client.post("/api/settings/attention",
                            json={"mode": "reckless"}).status_code == 422
+
+    def test_update_center_controls(self, client):
+        status = client.get("/api/system/update/status").json()
+        assert status["current"] and status["staged"] == []
+        # An unsafe artifact name is refused, not silently sanitized.
+        bad = client.post("/api/system/update/download",
+                          json={"url": "https://example.invalid/x",
+                                "filename": "../escape"})
+        assert bad.status_code == 200 and bad.json()["status"] == "DOWNLOAD_FAILED"
+        # Verification outside the updates directory is refused.
+        refused = client.post("/api/system/update/verify",
+                              json={"path": "/etc/passwd",
+                                    "expected_sha256": "0" * 64})
+        assert refused.status_code == 200
+        assert refused.json()["status"] == "VERIFY_REFUSED"
+        # Install with nothing prepared is refused.
+        install = client.post("/api/system/update/install")
+        assert install.status_code == 200
+        assert install.json()["status"] == "INSTALL_REFUSED"

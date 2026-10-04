@@ -2283,9 +2283,49 @@
     host.appendChild(card("Task center (research, backfill, model work)", tasksHost));
     var backupHost = Arena.el("div", { id: "sys-backup" }, [document.createTextNode("Loading…")]);
     host.appendChild(card("Backup & restore", backupHost));
+    var updateHost = Arena.el("div", { id: "sys-update" }, [document.createTextNode("Loading…")]);
+    host.appendChild(card("Update AXIOM (check → download → verify → prepare → install)", updateHost));
     root.appendChild(host);
     renderTaskCenter(tasksHost);
     renderBackupCenter(backupHost);
+    renderUpdateCenter(updateHost);
+  }
+
+  function renderUpdateCenter(host) {
+    function paint(extra) {
+      Arena.get("/api/system/update/status").then(function (d) {
+        host.innerHTML = "";
+        host.appendChild(Arena.el("div", { "class": "faint", style: "font-size:12px" }, [
+          document.createTextNode("running version " + d.current +
+            (d.manifest ? " · staged: " + d.manifest.artifact + " (" + d.manifest.status + ")"
+                        : " · no update staged"))]
+        ));
+        if (extra) host.appendChild(Arena.el("div", { "class": "hint", style: "font-size:12px;margin:4px 0" }, [document.createTextNode(extra)]));
+        var row = Arena.el("div", { "class": "btn-row", style: "margin-top:8px;flex-wrap:wrap" });
+        var checkBtn = Arena.el("button", { "class": "btn ghost sm", id: "update-check" }, [document.createTextNode("Check for update")]);
+        checkBtn.addEventListener("click", function () {
+          checkBtn.disabled = true;
+          Arena.get("/api/system/update/check").then(function (r) {
+            paint(r.status + (r.latest ? " — latest " + r.latest + " (current " + r.current + ")" : "") + (r.detail ? " — " + r.detail : ""));
+          }).catch(function (e) { paint("check failed: " + e.message); });
+        });
+        row.appendChild(checkBtn);
+        var prepBtn = Arena.el("button", { "class": "btn ghost sm", id: "update-install" }, [document.createTextNode("Install staged update")]);
+        prepBtn.addEventListener("click", function () {
+          Arena.confirmDialog("Install update", "Replace the current executable with the staged, verified artifact? A restart is required afterwards.", "Install", true, function () {
+            Arena.post("/api/system/update/install", {}).then(function (r) {
+              Arena.toast(r.ok ? "ok" : "err", r.status + (r.detail ? " — " + r.detail : ""));
+              paint();
+            }).catch(function (e) { Arena.toast("err", e.message); });
+          });
+        });
+        row.appendChild(prepBtn);
+        host.appendChild(row);
+        host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:6px" }, [
+          document.createTextNode("Downloads land in data/updates/ and are verified by SHA-256 before install; nothing here executes downloaded code.")]));
+      }).catch(function (e) { host.innerHTML = ""; host.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+    }
+    paint();
   }
 
   function renderTaskCenter(host) {

@@ -917,3 +917,51 @@ def _confine_backup_path(workstation, raw: str):
     if not resolved.exists():
         raise HTTPException(404, "backup archive not found")
     return resolved
+
+
+# =====================================================================
+# GUI UPDATE SYSTEM (spec section 69): CHECK→DOWNLOAD→VERIFY→PREPARE→INSTALL
+# =====================================================================
+
+class UpdateDownloadBody(BaseModel):
+    url: str
+    filename: str
+
+
+class UpdateVerifyBody(BaseModel):
+    path: str
+    expected_sha256: str
+
+
+class UpdatePrepareBody(BaseModel):
+    path: str
+
+
+@router.get("/api/system/update/check", dependencies=[Depends(authenticate)])
+async def update_check(request: Request) -> dict:
+    return ws(request).updater.check()
+
+
+@router.post("/api/system/update/download", dependencies=[Depends(authenticate)])
+async def update_download(body: UpdateDownloadBody, request: Request) -> dict:
+    return ws(request).updater.download(body.url, filename=body.filename)
+
+
+@router.post("/api/system/update/verify", dependencies=[Depends(authenticate)])
+async def update_verify(body: UpdateVerifyBody, request: Request) -> dict:
+    return ws(request).updater.verify(body.path, body.expected_sha256)
+
+
+@router.post("/api/system/update/prepare", dependencies=[Depends(authenticate)])
+async def update_prepare(body: UpdatePrepareBody, request: Request) -> dict:
+    return ws(request).updater.prepare(body.path)
+
+
+@router.post("/api/system/update/install", dependencies=[Depends(authenticate)])
+async def update_install(request: Request) -> dict:
+    return ws(request).updater.install()
+
+
+@router.get("/api/system/update/status", dependencies=[Depends(authenticate)])
+async def update_status(request: Request) -> dict:
+    return ws(request).updater.status()

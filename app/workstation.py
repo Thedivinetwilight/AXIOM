@@ -27,6 +27,7 @@ from app.system.backup import BackupManager
 from app.system.latency import LatencyTracker
 from app.system.resources import ResourceGovernor
 from app.system.tasks import TaskCenter
+from app.system.updater import UpdateManager
 
 
 @dataclass
@@ -48,6 +49,7 @@ class Workstation:
     backup: BackupManager
     analogues: AnalogueEngine
     regime_bridge: RegimeBridge
+    updater: UpdateManager
 
     def guard_chain(self, *, emergency_stop: bool = False,
                     recent_intent_ids: set | None = None):
@@ -111,12 +113,19 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
                            else _db_path(settings), backup_dir=data_dir / "backups")
     market_id = str(getattr(settings, "market", "india") or "india")
     regime_bridge = RegimeBridge(changes, opportunities, market_id=market_id)
+    import sys as _sys
+
+    from app import __version__ as _version
+    updater = UpdateManager(
+        data_dir / "updates", current_version=_version,
+        target_path=Path(_sys.executable) if getattr(_sys, "frozen", False) else None)
     return Workstation(
         settings=settings, repository=repository, data_dir=data_dir, bus=bus,
         changes=changes, opportunities=opportunities, missed=missed,
         expired_recorder=expired, latency=latency, governor=governor, tasks=tasks,
         live_sessions=live_sessions, rate_limiter=rate_limiter, studio=studio,
-        backup=backup, analogues=AnalogueEngine(), regime_bridge=regime_bridge)
+        backup=backup, analogues=AnalogueEngine(), regime_bridge=regime_bridge,
+        updater=updater)
 
 
 def _db_path(settings: Settings) -> Path:

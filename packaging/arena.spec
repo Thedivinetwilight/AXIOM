@@ -111,6 +111,14 @@ for pattern in (
 
 block_cipher = None
 
+# ctypes is used ONLY for the Windows MessageBox fallback in app.instance /
+# arena.py (guarded by os.name checks there). Where the interpreter has no
+# _ctypes extension (source-built frozen toolchain without libffi) the module
+# cannot be scanned, so exclude it — the runtime code already degrades
+# gracefully. Windows CI builds have _ctypes and keep ctypes bundled.
+import importlib.util as _ilu
+_ctypes_excludes = [] if _ilu.find_spec("_ctypes") else ["ctypes", "ctypes.util"]
+
 a = Analysis(
     [str(ROOT / "arena.py")],
     pathex=[str(ROOT)],
@@ -135,7 +143,7 @@ a = Analysis(
         "notebook",
         "pandas.tests",
         "numpy.tests",
-    ],
+    ] + _ctypes_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
