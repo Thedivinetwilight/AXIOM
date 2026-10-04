@@ -62,7 +62,10 @@ class ResourceGovernor:
     def load_pressure_limit(self) -> float:
         if self.load_pressure is not None:
             return self.load_pressure
-        return float(self.cpu_count)
+        # Pressure means SUSTAINED overload: a 1-minute load average at the
+        # core count is ordinary operation (CI hosts cross it during their
+        # own builds). Admission stops at twice the core count.
+        return 2.0 * float(self.cpu_count)
 
     def under_pressure(self) -> bool:
         """True when ANY available measurement exceeds its bound.

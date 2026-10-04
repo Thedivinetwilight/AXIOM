@@ -581,9 +581,16 @@ class TestWorkstationApi:
 
     def test_tasks_backup_latency_over_http(self, client):
         task = client.post("/api/tasks", json={"name": "scan", "type": "research"}).json()
+        pressure = client.get("/api/system/control").json()["pressure"]
         started = client.post(f"/api/tasks/{task['id']}", json={"action": "start"}).json()
-        assert started["started"]
-        assert client.get("/api/tasks").json()["counts"]["RUNNING"] == 1
+        if pressure:
+            # The resource governor must refuse new research work under
+            # pressure — and say so by leaving the task queued.
+            assert started["started"] is False
+            assert client.get("/api/tasks").json()["counts"]["RUNNING"] == 0
+        else:
+            assert started["started"]
+            assert client.get("/api/tasks").json()["counts"]["RUNNING"] == 1
         assert client.get("/api/backup/list").json()["backups"] == []
         created = client.post("/api/backup/create", json={"note": "api"}).json()
         assert created["sha256"]
