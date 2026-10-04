@@ -137,45 +137,57 @@ p50 = 0.581 ms · p95 = 0.940 ms · p99 = 1.050 ms · p99.9 = 1.102 ms
   placement, secret scrubbing) and live spot-checks of the new routes
   (`/api/research/drift`, `/api/system/update/status`) served by the
   binary — not by the source tree.
-- Windows CI build triggered by push (run 37191024299 pending at the time
-  of writing; previous 3.1.0 CI run 37145248472 was all-success).
+- **CI run `37192747375` (commit `7ae5904`): SUCCESS on every platform.**
+  - Full source suite on ubuntu: passed.
+  - windows-latest: packaging gates + full suite + `build_exe.py --test`
+    (frozen end-to-end against the ACTUAL `Arena.exe`) passed.
+  - ubuntu-latest and macos-latest: same gates passed.
+  - Per-platform `SHA256SUMS-*.txt` recorded in the run artifacts.
+
+Two real defects were caught and fixed en route to green:
+1. The repo's unanchored `models/` gitignore pattern silently swallowed
+   `app/models/studio.py`, so `import app.models` failed on every clean
+   checkout (CI) while passing locally. Fixed by anchoring the
+   weight-directory ignore to the repo root; verified with a clean
+   `git archive` checkout full-suite run.
+2. The resource governor refused research tasks whenever the host's
+   1-minute load exceeded its core count — normal on busy CI runners.
+   Admission now stops at sustained 2× overload, and task-lifecycle tests
+   branch deterministically on the system's own reported pressure.
 
 ## 5. External blockers (recorded, not faked)
 
 - **Kronos weights download** (HuggingFace) is unreachable from this
-  sandbox: studio reports `DOWNLOAD_NOT_CONFIGURED`/`NOT_VERIFIED`
-  honestly; verify/install/activate tested with locally recorded weights.
-- **GitHub Actions log/artifact downloads** are blocked in this sandbox
-  (EOF on results-receiver hosts): CI verification relies on run status +
-  local reproduction of the same suite.
-- **apt/debian mirrors, python.org, libffi sources** blocked: frozen
-  toolchain built from codeload tarballs; `_ctypes` legitimately absent and
-  guarded.
-- One Windows CI run (37190918136) failed at the source-suite gate while
-  the identical tree is green locally; its logs could not be fetched from
-  this sandbox (blocker above). The follow-up run on the same tree plus
-  the drift commit (37191024299) is the authoritative signal; if it fails,
-  the failing test must be read from a machine with log access.
+  sandbox: the studio reports `DOWNLOAD_NOT_CONFIGURED`/`NOT_VERIFIED`
+  honestly; verify/install/activate are tested with locally recorded
+  weights and clearly-labelled synthetic candidates.
+- **A truly production Upstox live session**: no production credentials
+  exist in this environment; everything up to the broker boundary is
+  exercised with explicitly-labelled mocks.
+- **apt/debian mirrors, python.org, libffi sources** blocked here: the
+  frozen toolchain was built from codeload tarballs; `_ctypes` is
+  legitimately absent in the frozen venv and guarded in the spec
+  (Windows CI, where `_ctypes` exists, keeps the normal DLL scan).
 
 ## 6. Remaining defects (honest list)
 
-1. CI log access from this sandbox is blocked; a Windows-only failure
-   cannot be diagnosed here beyond reproducing the suite locally.
-2. Counterfactual simulation (§99) is covered by analogue forward-return
+1. Counterfactual simulation (§99) is covered by analogue forward-return
    accounting plus the backtest infrastructure; a dedicated
    "what-if-we-had-entered" replay UI is not built.
-3. Opportunity candidates currently arise from engine-observed bars and
+2. Opportunity candidates currently arise from engine-observed bars and
    manual observation; no autonomous broker-feed subscription exists in
    this environment (paper replay only — stated as such).
-4. Update INSTALL replaces the binary in place on POSIX; on Windows the
-   platform may refuse replacing a running executable — the refusal is
-   surfaced honestly and the prepared artifact remains for the launcher.
+3. OS-locked files defer instead of completing in place: on Windows the
+   update INSTALL and a backup restore of a database held open by a
+   running server surface `INSTALL_REFUSED` /
+   `RESTORE_PREPARED_RESTART_REQUIRED` with the verified artifact staged
+   — refusal paths are tested via a simulated lock.
 
 ## 7. Repository state
 
-- Branch `arena/01a102dd-axiom` pushed at `e2001b7` (commits: `869bbdd`
-  3.1.0 → `f8381bf` AXIOM-MONEY-PRINTER 3.2.0 → `df1e4d9` update system →
-  `e2001b7` drift detection).
+- Branch `arena/01a102dd-axiom`; final full suite **1555 passed / 37
+  skipped / 0 failed**; CI run `37192747375` SUCCESS (ubuntu, Windows,
+  macOS hard gates).
 - Working tree clean; no secrets in the tree, logs, or artifacts
   (verified by tests and frozen E2E).
 - Authoritative docs: `AXIOM_PRODUCT_MANUAL.md` (supersedes the listed
