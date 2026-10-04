@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config.settings import Settings
+from app.intel.agreement import AgreementLedger, load_votes
 from app.intel.analogues import AnalogueEngine
 from app.intel.evidence import EvidenceStack
 from app.intel.missed import ExpiredCandidateRecorder, MissedOpportunityRecorder
@@ -50,6 +51,7 @@ class Workstation:
     analogues: AnalogueEngine
     regime_bridge: RegimeBridge
     updater: UpdateManager
+    agreement: "AgreementLedger"
 
     def guard_chain(self, *, emergency_stop: bool = False,
                     recent_intent_ids: set | None = None):
@@ -125,7 +127,15 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
         expired_recorder=expired, latency=latency, governor=governor, tasks=tasks,
         live_sessions=live_sessions, rate_limiter=rate_limiter, studio=studio,
         backup=backup, analogues=AnalogueEngine(), regime_bridge=regime_bridge,
-        updater=updater)
+        updater=updater, agreement=_agreement_ledger(data_dir))
+
+
+def _agreement_ledger(data_dir: Path) -> AgreementLedger:
+    """Agreement votes persist across restarts (§29); a missing or damaged
+    file simply starts the ledger empty."""
+    ledger = AgreementLedger()
+    load_votes(Path(data_dir) / "agreement_votes.json", ledger)
+    return ledger
 
 
 def _db_path(settings: Settings) -> Path:

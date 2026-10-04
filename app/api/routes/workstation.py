@@ -225,7 +225,9 @@ class ObserveBody(BaseModel):
     volume_ratio: float | None = None
     volatility_expansion: bool = False
     regime_change: str | None = None
-    model_disagreement: bool = False
+    # None -> derive from the agreement ledger (spec §98); explicit values
+    # from real observations are still honoured.
+    model_disagreement: bool | None = None
     user_focus: bool = False
     evidence_source: str = "manual"
 
@@ -250,12 +252,17 @@ async def observe_opportunity(body: ObserveBody, request: Request) -> dict:
     fabricated inputs only produce fabricated research (and are the caller's
     responsibility); nothing here invents a trigger on its own."""
     workstation = ws(request)
+    disagreement = body.model_disagreement
+    if disagreement is None:
+        # Derived, never invented: the ledger's latest multi-source verdict.
+        disagreement = workstation.agreement.summary(
+            body.market_id, body.identity).get("verdict") == "DISAGREEMENT"
     opportunity = workstation.opportunities.observe(
         market_id=body.market_id, identity=body.identity,
         price_change_pct=body.price_change_pct, volume_ratio=body.volume_ratio,
         volatility_expansion=body.volatility_expansion,
         regime_change=body.regime_change,
-        model_disagreement=body.model_disagreement, user_focus=body.user_focus)
+        model_disagreement=disagreement, user_focus=body.user_focus)
     if opportunity is None:
         return {"detected": False,
                 "reason": "no trigger crossed the attention thresholds",
@@ -409,17 +416,14 @@ def _recorded_series(workstation, identity: str) -> tuple[list[float], list[floa
     Returns ([], []) when nothing is recorded — callers must treat that as a
     real absence, never as zero data.
     """
-    try:
-        from app.history.store import CandleStore
+    from app.history.store import CandleStore
 
-        store = CandleStore(workstation.data_dir / "candles")
-        symbol = identity.split("|")[-1]
-        rows = store.load(symbol, unit="days", interval=1)
-        closes = [float(r["close"]) for r in rows]
-        volumes = [float(r.get("volume", 0.0)) for r in rows]
-        return closes, volumes
-    except Exception:
-        return [], []
+    store = CandleStore(workstation.data_dir / "candles")
+    symbol = identity.split("|")[-1]
+    rows = store.read_range(symbol, unit="days", interval=1)
+    closes = [float(r["close"]) for r in rows]
+    volumes = [float(r.get("volume", 0.0)) for r in rows]
+    return closes, volumes
 
 
 # =====================================================================
@@ -979,3 +983,88 @@ async def research_drift(market_id: str, identity: str, request: Request) -> dic
     closes, _ = _recorded_series(workstation, identity)
     report = DriftDetector().evaluate(identity, closes)
     return report.to_dict()
+
+
+# =====================================================================
+# MODEL AGREEMENT / DISAGREEMENT (spec section 98)
+# =====================================================================
+
+class AgreementVoteBody(BaseModel):
+    market_id: str
+    identity: str
+    stances: dict                       # source -> -1 | 0 | +1
+    horizon: int = Field(default=5, ge=1)
+    regime: str | None = None
+    provenance: str = "unspecified"
+
+
+@router.post("/api/research/agreement", dependencies=[Depends(authenticate)])
+async def research_agreement_vote(body: AgreementVoteBody, request: Request) -> dict:
+    from app.intel.agreement import save_votes
+
+    workstation = ws(request)
+    try:
+        record = workstation.agreement.record(
+            body.market_id, body.identity, body.stances, horizon=body.horizon,
+            regime=body.regime, provenance=body.provenance)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    save_votes(workstation.data_dir / "agreement_votes.json",
+               workstation.agreement)
+    return {"ok": True, "record": record.to_dict(),
+            "summary": workstation.agreement.summary(body.market_id,
+                                                     body.identity,
+                                                     body.horizon)}
+
+
+@router.get("/api/research/agreement", dependencies=[Depends(authenticate)])
+async def research_agreement_summary(market_id: str, identity: str,
+                                     request: Request,
+                                     horizon: int | None = None) -> dict:
+    return ws(request).agreement.summary(market_id, identity, horizon)
+
+
+@router.get("/api/research/agreement/watchlist",
+            dependencies=[Depends(authenticate)])
+async def research_agreement_watchlist(request: Request) -> dict:
+    items = ws(request).agreement.disagreement_watchlist()
+    return {"count": len(items), "disagreements": items,
+            "note": "disagreement is surfaced for research attention, "
+                    "never treated as a failure"}
+
+
+# =====================================================================
+# COUNTERFACTUAL SIMULATION (spec section 99)
+# =====================================================================
+
+class CounterfactualBody(BaseModel):
+    market_id: str
+    identity: str
+    entry_index: int = Field(ge=0)
+    horizon: int = Field(default=5, ge=1)
+    size: float = Field(default=1.0, gt=0)
+    timing_offsets: list[int] = [-2, -1, 1, 2]
+    sizes: list[float] = [0.5, 2.0]
+
+
+@router.post("/api/research/counterfactual",
+             dependencies=[Depends(authenticate)])
+async def research_counterfactual(body: CounterfactualBody,
+                                  request: Request) -> dict:
+    from app.intel.counterfactual import CounterfactualSimulator
+
+    workstation = ws(request)
+    closes, _ = _recorded_series(workstation, body.identity)
+    if not closes:
+        return {"identity": body.identity, "label": "NO_DATA",
+                "variants": [],
+                "note": "no recorded bars for this instrument — nothing was "
+                        "simulated and nothing was fabricated"}
+    try:
+        result = CounterfactualSimulator(closes).compare(
+            body.entry_index, horizon=body.horizon, size=body.size,
+            timing_offsets=tuple(body.timing_offsets),
+            sizes=tuple(body.sizes))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {"identity": body.identity, "market_id": body.market_id, **result}

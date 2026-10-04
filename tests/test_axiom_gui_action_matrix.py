@@ -316,3 +316,27 @@ class TestSystemPage:
         report = client.get("/api/research/drift?market_id=india&identity=NSE|RELIANCE").json()
         assert report["verdict"] in {"STABLE", "DRIFT_DETECTED", "INSUFFICIENT_DATA"}
         assert report["verdict"] == "INSUFFICIENT_DATA"  # no recorded bars yet
+
+
+class TestResearchAddons:
+    """GUI cards: model agreement (§98) + counterfactual lab (§99)."""
+
+    def test_agreement_card_flow(self, client):
+        refused = client.post("/api/research/agreement", json={
+            "market_id": "india", "identity": "NSE|RELIANCE",
+            "stances": {"STRATEGY": 1}})
+        assert refused.status_code == 422          # one source: no comparison
+        voted = client.post("/api/research/agreement", json={
+            "market_id": "india", "identity": "NSE|RELIANCE",
+            "stances": {"STRATEGY": 1, "ANALOGUE": -1}, "horizon": 5}).json()
+        assert voted["summary"]["verdict"] == "DISAGREEMENT"
+        watch = client.get("/api/research/agreement/watchlist").json()
+        assert watch["count"] == 1
+        assert "never treated as a failure" in watch["note"]
+
+    def test_counterfactual_card_flow(self, client):
+        no_data = client.post("/api/research/counterfactual", json={
+            "market_id": "india", "identity": "NSE|ABSENT",
+            "entry_index": 0}).json()
+        assert no_data["label"] == "NO_DATA"
+        assert no_data["variants"] == []           # nothing fabricated

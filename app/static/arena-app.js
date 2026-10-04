@@ -751,6 +751,16 @@
     loadBacktestHistory(savedBody);
     loadExperiments(expBody);
 
+    // ---- model agreement + counterfactual research (spec §98, §99)
+    var agreeGrid = Arena.el("div", { "class": "grid cols-2 section-gap" });
+    var agreeBody = Arena.el("div", { id: "agreement-center" });
+    agreeGrid.appendChild(card("Model agreement / disagreement", agreeBody));
+    var cfBody = Arena.el("div", { id: "counterfactual-lab" });
+    agreeGrid.appendChild(card("Counterfactual lab (what-if, SIMULATED)", cfBody));
+    root.appendChild(agreeGrid);
+    renderAgreementCenter(agreeBody);
+    renderCounterfactualLab(cfBody);
+
     // fill catalogs
     Arena.get("/strategies").then(function (d) {
       (d.strategies || d || []).forEach(function (s) {
@@ -2437,6 +2447,165 @@
         ]));
       });
     }).catch(function (e) { memHost.innerHTML = ""; memHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // MODEL AGREEMENT / DISAGREEMENT + COUNTERFACTUAL LAB (spec §98, §99)
+  // =====================================================================
+  function labField(label, input) {
+    return Arena.el("div", { "class": "field" }, [
+      Arena.el("label", {}, [document.createTextNode(label)]), input]);
+  }
+  function labChip(tone, text) {
+    return Arena.el("span", { "class": ("badge " + (tone || "")).trim() }, [document.createTextNode(text)]);
+  }
+  function labSelect(id, options, current) {
+    var s = Arena.el("select", { id: id });
+    options.forEach(function (o) {
+      s.appendChild(Arena.el("option", { value: o[0] }, [document.createTextNode(o[1])]));
+    });
+    s.value = current;
+    return s;
+  }
+
+  function renderAgreementCenter(host) {
+    host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
+      "Records the directional stance of each evidence source (strategy, analogues, statistical baseline, " +
+      "Kronos, regime-conditioned models) for one instrument and horizon. Disagreement is surfaced as a " +
+      "research question — never treated as a failure and never collapsed into one score.")]));
+    host.appendChild(Arena.el("p", { "class": "faint", style: "font-size:11px" }, [document.createTextNode(
+      "What this changes: one vote is stored in the research ledger (survives restarts). It cannot move money, " +
+      "touch risk limits or arm live trading. Wrong votes are corrected by recording a newer vote.")]));
+
+    var identity = Arena.el("input", { id: "agree-identity", placeholder: "e.g. NSE|RELIANCE", value: "NSE|RELIANCE" });
+    var horizon = Arena.el("input", { id: "agree-horizon", type: "number", value: "5", min: "1", style: "width:70px" });
+    var marketSel = labSelect("agree-market", [["india", "India"], ["us", "US"], ["japan", "Japan"],
+      ["uk", "UK"], ["hk", "HK"], ["sg", "Singapore"], ["global", "Global"]], "india");
+    var row = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:8px" }, [
+      labField("Instrument", identity), labField("Market", marketSel), labField("Horizon (bars)", horizon)]);
+    host.appendChild(row);
+
+    var sourceSel = {};
+    var sources = [["STRATEGY", "Strategy model"], ["ANALOGUE", "Historical analogues"],
+      ["STATISTICAL_BASELINE", "Statistical baseline"], ["KRONOS", "Kronos forecast"],
+      ["REGIME_CONDITIONED", "Regime-conditioned model"]];
+    var stanceRow = Arena.el("div", { "class": "grid cols-2", style: "gap:6px;margin-bottom:8px" });
+    sources.forEach(function (s) {
+      var sel = labSelect("agree-src-" + s[0], [["1", "bullish"], ["0", "no edge"], ["-1", "bearish"]], "0");
+      sourceSel[s[0]] = sel;
+      stanceRow.appendChild(labField(s[1], sel));
+    });
+    host.appendChild(stanceRow);
+
+    var recordBtn = Arena.el("button", { "class": "btn primary", id: "agree-record" }, [document.createTextNode("Record stances")]);
+    var out = Arena.el("div", { id: "agree-summary", style: "margin-top:8px" });
+    host.appendChild(Arena.el("div", { "class": "btn-row" }, [recordBtn]));
+    host.appendChild(out);
+
+    recordBtn.addEventListener("click", function () {
+      var stances = {};
+      sources.forEach(function (s) { stances[s[0]] = parseInt(sourceSel[s[0]].value, 10); });
+      Arena.setBusy(recordBtn, true, "Recording…");
+      Arena.post("/api/research/agreement", {
+        market_id: marketSel.value, identity: identity.value.trim(),
+        stances: stances, horizon: parseInt(horizon.value, 10) || 5,
+        provenance: "operator input via GUI"
+      }).then(function (d) {
+        Arena.setBusy(recordBtn, false);
+        paintAgreeSummary(out, d.summary);
+      }).catch(function (e) {
+        Arena.setBusy(recordBtn, false);
+        out.innerHTML = ""; bannerInto(out, "err", "Vote refused", e.message);
+      });
+    });
+
+    Arena.get("/api/research/agreement/watchlist").then(function (d) {
+      if (!d.count) return;
+      var list = Arena.el("div", { style: "margin-top:8px" }, [
+        Arena.el("b", {}, [document.createTextNode("Disagreement radar (" + d.count + ")")])]);
+      d.disagreements.forEach(function (item) {
+        list.appendChild(Arena.el("div", { "class": "muted", style: "font-size:11.5px" }, [
+          document.createTextNode(item.identity + " — " + item.detail)]));
+      });
+      host.appendChild(list);
+    }).catch(function () { });
+
+    function paintAgreeSummary(target, s) {
+      target.innerHTML = "";
+      var tone = s.verdict === "DISAGREEMENT" ? "warn" : (s.verdict === "INSUFFICIENT" ? "" : "ok");
+      target.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-bottom:6px" }, [labChip(tone, s.verdict)]));
+      target.appendChild(Arena.el("div", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(s.detail)]));
+      var rows = Object.keys(s.stances || {}).map(function (src) {
+        var v = s.stances[src];
+        return Arena.el("div", { style: "font-size:11.5px" }, [
+          Arena.el("b", { "class": "mono" }, [document.createTextNode(src)]),
+          document.createTextNode(": " + (v > 0 ? "bullish" : v < 0 ? "bearish" : "no edge"))]);
+      });
+      target.appendChild(Arena.el("div", { style: "margin-top:4px" }, rows));
+    }
+  }
+
+  function renderCounterfactualLab(host) {
+    host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
+      "What-if arithmetic on RECORDED bars only: earlier/later entry, different sizing, or no-trade — each " +
+      "variant is labelled SIMULATED. Nothing here is observed reality and nothing is extrapolated beyond " +
+      "recorded history (the request is refused instead).")]));
+    host.appendChild(Arena.el("p", { "class": "faint", style: "font-size:11px" }, [document.createTextNode(
+      "What can go wrong: treating a simulation as a prediction. It cannot place orders; the only recovery " +
+      "needed is to ignore it.")]));
+
+    var identity = Arena.el("input", { id: "cf-identity", placeholder: "e.g. NSE|RELIANCE", value: "NSE|RELIANCE" });
+    var entry = Arena.el("input", { id: "cf-entry", type: "number", value: "0", min: "0", style: "width:80px" });
+    var horizon = Arena.el("input", { id: "cf-horizon", type: "number", value: "5", min: "1", style: "width:70px" });
+    var size = Arena.el("input", { id: "cf-size", type: "number", value: "1", min: "0.01", step: "0.1", style: "width:70px" });
+    var cfMarket = labSelect("cf-market", [["india", "India"], ["us", "US"], ["japan", "Japan"],
+      ["uk", "UK"], ["hk", "HK"], ["sg", "Singapore"], ["global", "Global"]], "india");
+    host.appendChild(Arena.el("div", { "class": "grid cols-2", style: "gap:6px;margin-bottom:8px" }, [
+      labField("Instrument", identity), labField("Market", cfMarket)]));
+    host.appendChild(Arena.el("div", { "class": "grid cols-2", style: "gap:6px;margin-bottom:8px" }, [
+      labField("Entry bar index", entry), labField(" ", Arena.el("span"))]));
+    host.appendChild(Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:8px" }, [
+      labField("Horizon (bars)", horizon), labField("Size multiplier", size)]));
+
+    var runBtn = Arena.el("button", { "class": "btn primary", id: "cf-run" }, [document.createTextNode("Simulate variants")]);
+    var out = Arena.el("div", { id: "cf-result", style: "margin-top:8px" });
+    host.appendChild(Arena.el("div", { "class": "btn-row" }, [runBtn]));
+    host.appendChild(out);
+
+    runBtn.addEventListener("click", function () {
+      Arena.setBusy(runBtn, true, "Simulating…");
+      Arena.post("/api/research/counterfactual", {
+        market_id: cfMarket.value, identity: identity.value.trim(),
+        entry_index: parseInt(entry.value, 10) || 0,
+        horizon: parseInt(horizon.value, 10) || 5,
+        size: parseFloat(size.value) || 1.0
+      }).then(function (d) {
+        Arena.setBusy(runBtn, false);
+        out.innerHTML = "";
+        if (d.label === "NO_DATA") {
+          bannerInto(out, "err", "No recorded bars", d.note);
+          return;
+        }
+        out.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-bottom:6px" }, [labChip("warn", d.label)]));
+        var table = Arena.el("table", { "class": "table" });
+        table.appendChild(Arena.el("tr", {}, ["Variant", "Return %", "Max DD %", "Label"].map(function (h) {
+          return Arena.el("th", {}, [document.createTextNode(h)]); })));
+        (d.variants || []).forEach(function (v) {
+          table.appendChild(Arena.el("tr", {}, [
+            Arena.el("td", {}, [document.createTextNode(v.name)]),
+            Arena.el("td", { "class": "mono" }, [document.createTextNode(v.return_pct.toFixed(3))]),
+            Arena.el("td", { "class": "mono" }, [document.createTextNode(v.max_drawdown_pct.toFixed(3))]),
+            Arena.el("td", {}, [labChip("", v.label)])
+          ]));
+        });
+        out.appendChild(table);
+        out.appendChild(Arena.el("p", { "class": "faint", style: "font-size:11px;margin-top:6px" },
+          [document.createTextNode(d.note)]));
+      }).catch(function (e) {
+        Arena.setBusy(runBtn, false);
+        out.innerHTML = ""; bannerInto(out, "err", "Simulation refused", e.message);
+      });
+    });
   }
 
   function viewResearchRefresh() {
