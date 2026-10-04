@@ -561,6 +561,76 @@ def cmd_engine(args) -> int:
             },
         }, indent=2, default=str), flush=True)
 
+    # FINAL-11/10 §3–§6: in live mode the engine NEVER holds the live broker.
+    # It receives a facade whose only submission route is the
+    # LiveExecutionGateway (intent → epoch → session state → emergency-stop
+    # semantics → phrase → broker identity → guard chain → durable audit).
+    execution_broker = broker
+    if broker_mode == "UPSTOX_LIVE":
+        from app.live.gateway import LiveExecutionGateway
+        from app.live.gateway_broker import GatewayRoutedBroker
+        from app.live.guard_chain import default_chain
+        from app.live.ops import read_emergency_stop
+        from app.live.session import LiveSessionManager
+
+        session_manager = LiveSessionManager(repository)
+
+        def _live_risk_context():
+            """Fresh risk picture for every submission; any error inside the
+            gateway's wrapper turns this into a fail-closed refusal."""
+            stopped, _why = read_emergency_stop(repository)
+            snap = broker.ledger.snapshot()
+            exposure = float(snap.get("position_quantity", 0.0) or 0.0) * float(
+                snap.get("mark") or snap.get("position_avg_price") or 0.0)
+            realized = float(snap.get("realized_pnl", 0.0) or 0.0)
+            daily_limit = float(settings.max_daily_loss or 0.0)
+            equity = float(snap.get("equity") or 0.0)
+            peak = float(repository.get_engine_state("peak_equity", 0.0) or 0.0)
+            dd_limit = float(getattr(settings, "live_max_equity_drawdown", 0.0)
+                             or 0.0)
+            return {
+                "emergency_stop": bool(stopped),
+                "current_exposure": exposure,
+                "daily_loss_breached": bool(
+                    daily_limit and realized <= -daily_limit),
+                "drawdown_breached": bool(
+                    dd_limit and peak and equity
+                    and (peak - equity) / peak >= dd_limit),
+                # The canary ramp is enforced upstream by live_ops.entry_guard
+                # (which blocks or reduces each ramped entry); the chain flag
+                # stays False unless an external process raises it.
+                "canary_exhausted": False,
+            }
+
+        gateway = LiveExecutionGateway(
+            settings=settings, repository=repository,
+            session_manager=session_manager, broker=broker,
+            guard_chain=default_chain(
+                settings=settings,
+                max_entry_age_s=float(getattr(settings, "live_max_entry_age_s",
+                                              30.0) or 30.0)),
+            epochs=session_manager.epochs,
+            emergency_stop_reader=read_emergency_stop,
+            context_provider=_live_risk_context)
+        first_key = (getattr(provider, "_keys", None) or [""])[0]
+        execution_broker = GatewayRoutedBroker(
+            broker, gateway,
+            market_id=str(first_key).split("|")[0] or "UNKNOWN",
+            strategy_id="engine",
+            universe=str(getattr(settings, "market_universe", "") or ""))
+        print(json.dumps({
+            "ok": True,
+            "execution_gateway": {
+                "enabled": True,
+                "session_state": session_manager.current().state,
+                "epoch": (session_manager.epochs.current() or {}).get("epoch"),
+                "epoch_valid": bool((session_manager.epochs.current() or {})
+                                    .get("valid")),
+                "note": "every live order is authorized by the execution "
+                        "gateway before it can reach the broker",
+            },
+        }, indent=2, default=str), flush=True)
+
     event_engine = EventDrivenDecisionEngine(
         move_threshold=settings.event_move_threshold,
         volume_spike=settings.event_volume_spike)
@@ -583,7 +653,7 @@ def cmd_engine(args) -> int:
     engine = SandboxEngine(
         provider=provider,
         strategy=create_strategy("momentum", {"period": 2, "threshold": 0.0}),
-        broker=broker,
+        broker=execution_broker,
         repository=repository,
         risk_limits=HardRiskLimits.from_settings(settings),
         journal=LearningJournal(repository),
@@ -598,9 +668,13 @@ def cmd_engine(args) -> int:
         stop_loss=float(settings.stop_loss or 0.0),
         take_profit=float(settings.take_profit or 0.0),
     )
+    if broker_mode == "UPSTOX_LIVE":
+        # Live intents must carry the strategy that actually decided them;
+        # the router can swap strategies at runtime, so resolve at submit.
+        execution_broker._strategy_id = lambda: getattr(
+            getattr(engine, "strategy", None), "name", "engine")
     try:
-        status = engine.run(max_candles=args.max_candles,
-                            force_lock=bool(getattr(args, "force_live_lock", False)))
+        status = engine.run(max_candles=args.max_candles)
         print(json.dumps(status, indent=2, allow_nan=False, default=str))
         return 0 if status["state"] in {"RUNNING", "STOPPED"} else 1
     except KeyboardInterrupt:
@@ -1083,6 +1157,19 @@ def cmd_sandbox_test(args) -> int:
     except SandboxRequestError as exc:
         summary["probe"] = str(exc)
     if summary["credential_accepted"] and args.place_order:
+        # FINAL-11/10 §60: this CLI path may only ever touch the SANDBOX. A
+        # live order must never be placed from a CLI flag — real-money
+        # submission exists only through the live execution gateway. Refuse
+        # loudly rather than submit if the broker is not provably sandbox.
+        if getattr(broker, "LIVE", False) or \
+                getattr(broker, "MODE", "") != "UPSTOX_SANDBOX":
+            summary["order_placed"] = False
+            summary["refused"] = (
+                "CLI --place-order is sandbox-only; a live broker was "
+                "detected, so no order was submitted. Live orders exist "
+                "only through the live execution gateway.")
+            print(json.dumps(summary, indent=2, default=str))
+            return 2
         intent = broker.submit("BUY", args.quantity, 0, order_type="MARKET",
                                instrument_key=args.instrument)
         fills = broker.reconcile()

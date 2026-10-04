@@ -345,14 +345,16 @@ class SandboxEngine:
 
     # -- main loop -----------------------------------------------------------
 
-    def run(self, *, max_candles: int | None = None, force_lock: bool = False):
+    def run(self, *, max_candles: int | None = None):
         """Consume the provider stream until it ends / max_candles / stop flag.
 
         Refuses to start when another LIVE engine is heartbeating against the
         same database: two live engines on one account double every entry.
+        FINAL-11/10 §15: ownership is an atomic lease; there is no force
+        bypass, only provably-stale takeover.
         """
         if self.live_lock is not None:
-            decision = self.live_lock.acquire(force=force_lock)
+            decision = self.live_lock.acquire()
             if not decision.granted:
                 self.state = "REFUSED_DUPLICATE_ENGINE"
                 self.repository.record_system_event(
@@ -1043,13 +1045,21 @@ class SandboxEngine:
                 allocated_capital: float | None = None,
                 estimated_fees: float = 0.0) -> None:
         triggers = triggers or []
-        # emergency stop blocks EVERYTHING (entries AND protective exits);
-        # the pause gate blocks ENTRIES but never risk-reducing exits.
+        # FINAL-11/10 §12: the emergency stop blocks NEW RISK (entries) but
+        # must never trap a held position — risk-reducing exits stay allowed.
+        # The pause gate likewise blocks ENTRIES but never exits.
         if self._check_emergency():
+            if side != "SELL":
+                self.repository.record_system_event(
+                    "EXECUTION_STOPPED_SKIP",
+                    {"side": side, "reason": reason,
+                     "ts": candle.timestamp.isoformat()})
+                return
             self.repository.record_system_event(
-                "EXECUTION_STOPPED_SKIP", {"side": side, "reason": reason,
-                                           "ts": candle.timestamp.isoformat()})
-            return
+                "EXECUTION_STOPPED_EXIT_ALLOWED",
+                {"side": side, "reason": reason,
+                 "note": "emergency stop active; risk-reducing exit permitted",
+                 "ts": candle.timestamp.isoformat()})
         if (self.pause_gate is not None and self.pause_gate.is_paused("execution")
                 and side == "BUY"):
             self.repository.record_system_event(

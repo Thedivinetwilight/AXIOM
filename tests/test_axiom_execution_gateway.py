@@ -44,6 +44,27 @@ def live_settings(**overrides):
     return Settings(**values)
 
 
+class _MockLedger:
+    """Tiny ledger the engine can size against (cash only, no position)."""
+
+    cash = 1_000_000.0
+    position_quantity = 0.0
+    position_avg_price = 0.0
+    mark = 0.0
+    realized_pnl = 0.0
+    fees = 0.0
+
+    def equity(self) -> float:
+        return self.cash
+
+    def snapshot(self) -> dict:
+        return {"cash": self.cash, "position_quantity": self.position_quantity,
+                "position_avg_price": self.position_avg_price,
+                "realized_pnl": self.realized_pnl,
+                "unrealized_pnl": 0.0, "fees": self.fees,
+                "equity": self.equity(), "mark": self.mark}
+
+
 class MockLiveBroker:
     """Production-shaped MOCK, explicitly labelled. Counts every call."""
 
@@ -53,15 +74,22 @@ class MockLiveBroker:
     def __init__(self, *, fail: Exception | None = None):
         self.calls: list[dict] = []
         self.fail = fail
+        self.ledger = _MockLedger()
 
     def submit(self, side, quantity, price, *, order_type="MARKET",
-               intent_id=None, symbol=None, instrument_key=None):
+               intent_id=None, symbol=None, instrument_key=None, **extra):
         self.calls.append({"side": side, "quantity": quantity, "price": price,
                            "order_type": order_type, "intent_id": intent_id,
                            "symbol": symbol})
         if self.fail is not None:
             raise self.fail
         return f"mock-order-{len(self.calls)}"
+
+    def open_orders(self):
+        return []
+
+    def reconcile(self):
+        return []
 
 
 class MockPaperBroker:
@@ -454,3 +482,145 @@ def test_configuration_hash_is_deterministic():
     assert configuration_hash(settings) == configuration_hash(live_settings())
     assert configuration_hash(settings) != configuration_hash(
         live_settings(max_daily_loss=1.0))
+
+
+# =====================================================================
+# the gateway-routed broker facade (FINAL-11/10 §3/§4 engine wiring)
+# =====================================================================
+
+RISK_CONTEXT = {"current_exposure": 0.0, "daily_loss_breached": False,
+                "drawdown_breached": False, "emergency_stop": False,
+                "canary_exhausted": False}
+
+
+class TestGatewayRoutedBroker:
+    """The engine's broker facade must make every refusal un-submittable."""
+
+    def _facade(self, repo, manager, settings, broker):
+        from app.live.gateway_broker import GatewayRoutedBroker
+
+        gateway = LiveExecutionGateway(
+            settings=settings, repository=repo, session_manager=manager,
+            broker=broker, guard_chain=default_chain(settings=settings),
+            epochs=manager.epochs, emergency_stop_reader=read_emergency_stop,
+            account_scope="upstox-test-account",
+            context_provider=lambda: dict(RISK_CONTEXT))
+        return GatewayRoutedBroker(
+            broker, gateway, market_id="NSE_EQ", strategy_id="strat-v1",
+            account_scope="upstox-test-account", universe="core")
+
+    def test_authorized_entry_reaches_the_broker_exactly_once(self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        order_id = facade.submit("BUY", 10, 2900.0, intent_id="sig-1",
+                                 instrument_key="NSE_EQ|INE002A01018")
+        assert order_id == "mock-order-1"
+        assert len(broker.calls) == 1
+        assert broker.calls[0]["side"] == "BUY"
+
+    def test_no_epoch_means_no_entry(self, repo, armed):
+        settings, manager = armed
+        manager.epochs.invalidate(reason="disarmed under test")
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("BUY", 10, 2900.0, intent_id="sig-2",
+                          instrument_key="NSE_EQ|INE002A01018")
+        assert exc.value.layer == "AUTHORIZATION EPOCH"
+        assert broker.calls == []
+
+    def test_inactive_session_blocks_entries_with_zero_broker_calls(self, repo):
+        settings = live_settings()
+        manager = LiveSessionManager(repo)          # session is OFF
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        with pytest.raises(GatewayRefusal):
+            facade.submit("BUY", 1, 100.0, intent_id="sig-3",
+                          instrument_key="NSE_EQ|X")
+        assert broker.calls == []
+
+    def test_emergency_stop_blocks_entries_but_not_exits(self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        repo.set_engine_state("emergency_stop",
+                              {"stopped": True, "reason": "drill"})
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("BUY", 10, 100.0, intent_id="sig-4",
+                          instrument_key="NSE_EQ|X")
+        assert exc.value.layer == "EMERGENCY STOP"
+        assert broker.calls == []                    # entry never left
+        order_id = facade.submit("SELL", 10, 100.0, intent_id="sig-5",
+                                 instrument_key="NSE_EQ|X")
+        assert order_id and len(broker.calls) == 1   # exit escapes the stop
+
+    def test_guard_chain_refusal_never_reaches_the_broker(self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        ctx = dict(RISK_CONTEXT, daily_loss_breached=True)
+        facade.gateway.context_provider = lambda: ctx
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("BUY", 10, 100.0, intent_id="sig-6",
+                          instrument_key="NSE_EQ|X")
+        assert exc.value.layer == "GUARD CHAIN"
+        assert broker.calls == []
+
+    # ----------------------------------------------- engine-level wiring ----
+
+    def _engine_with_facade(self, repo, facade):
+        from datetime import datetime, timezone
+
+        from app.data.models import Candle
+        from app.engine.sandbox_engine import SandboxEngine
+        from app.learning.journal import LearningJournal
+        from app.risk.limits import HardRiskLimits
+        from app.strategies import create_strategy
+
+        class Provider:
+            symbols = ["RELIANCE"]
+
+        engine = SandboxEngine(
+            provider=Provider(),
+            strategy=create_strategy("momentum", {"period": 2,
+                                                  "threshold": 0.0}),
+            broker=facade, repository=repo, journal=LearningJournal(repo),
+            risk_limits=HardRiskLimits(max_position_value=10_000),
+            timeframe="1m",
+            instrument_keys={"RELIANCE": "NSE_EQ|INE002A01018"})
+        engine.daily = None
+        candle = Candle(timestamp=datetime.now(timezone.utc), open=100,
+                        high=101, low=99, close=100, volume=1000,
+                        symbol="RELIANCE")
+        engine._history.append(candle)
+        return engine, candle
+
+    def test_engine_entry_never_reaches_broker_when_session_off(self, repo):
+        settings = live_settings()
+        manager = LiveSessionManager(repo)
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        engine, candle = self._engine_with_facade(repo, facade)
+        engine._submit("BUY", 1.0, 100.0, candle)   # refused inside gateway
+        assert broker.calls == []
+        assert engine.submitted == 0
+
+    def test_engine_protective_exit_survives_the_emergency_stop(self, repo,
+                                                                 armed):
+        # FINAL-11/10 §12: the stop blocks new risk at the engine layer, but
+        # a risk-reducing exit still flows through the gateway to the broker.
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        engine, candle = self._engine_with_facade(repo, facade)
+        repo.set_engine_state("emergency_stop", {"stopped": True,
+                                                 "reason": "breach"})
+        engine._submit("BUY", 1.0, 100.0, candle)
+        assert broker.calls == []                    # entry blocked by engine
+        engine._submit("SELL", 1.0, 100.0, candle,
+                       reason="PROTECTIVE_STOP_LOSS")
+        assert len(broker.calls) == 1                # exit still escapes
+        kinds = {e["kind"] for e in repo.list_system_events(limit=100)}
+        assert "EXECUTION_STOPPED_SKIP" in kinds
+        assert "EXECUTION_STOPPED_EXIT_ALLOWED" in kinds

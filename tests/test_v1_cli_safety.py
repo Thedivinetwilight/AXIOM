@@ -130,6 +130,56 @@ class TestSandboxTestReadsTokenAfterSettingsLoad:
         assert "configuration rejected" in capsys.readouterr().out
 
 
+class TestCliCanNeverPlaceALiveOrder:
+    """FINAL-11/10 §60: the CLI's --place-order may only ever touch the
+    sandbox. If the broker is (by any path) a LIVE one, the command must
+    refuse and submit nothing — real-money orders exist only through the
+    live execution gateway. This counts broker.submit calls to prove it.
+    """
+
+    def test_a_live_broker_is_refused_with_zero_submissions(self, monkeypatch,
+                                                             capsys):
+        import app.__main__ as cli
+        import app.brokers.sandbox as sbx
+        from app.config.settings import Settings
+
+        submitted: list = []
+
+        class FakeLiveBroker:
+            LIVE = True
+            MODE = "UPSTOX_LIVE"
+
+            def __init__(self, *a, **k):
+                pass
+
+            def _request(self, *a, **k):
+                return {}
+
+            def submit(self, *a, **k):  # pragma: no cover - must never run
+                submitted.append((a, k))
+                raise AssertionError("a CLI flag must never place a live order")
+
+        settings = dataclasses.replace(Settings(),
+                                       upstox_sandbox_access_token="t")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
+        monkeypatch.setattr(sbx, "UpstoxSandboxBroker", FakeLiveBroker)
+        # force the probe to read "credential accepted" so we reach the
+        # place-order branch — the refusal must still hold there.
+        monkeypatch.setattr(sbx, "classify_history_probe",
+                            lambda resp: {"credential_accepted": True,
+                                          "http_status": 404,
+                                          "class": "order_not_found",
+                                          "codes": []})
+        monkeypatch.delenv("UPSTOX_SANDBOX_ACCESS_TOKEN", raising=False)
+
+        args = argparse.Namespace(instrument="NSE_EQ|INE002A01018",
+                                  place_order=True, quantity=1)
+        assert cli.cmd_sandbox_test(args) == 2
+        out = capsys.readouterr().out
+        assert "sandbox-only" in out
+        assert submitted == []          # nothing was ever sent to the broker
+
+
 class TestLocalPaperNeverConstructsTheSandboxBroker:
     """The one-week paper test runs BROKER=LOCAL_PAPER with DATA_SOURCE=upstox.
     Upstox is then a MARKET DATA source only; no order-mutating broker may exist.

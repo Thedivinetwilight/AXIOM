@@ -395,8 +395,12 @@ class UpstoxSandboxBroker:
     def submit(self, side: str, quantity: float, price: float, *,
                order_type: str = "MARKET", intent_id: str | None = None,
                symbol: str | None = None,
-               instrument_key: str | None = None) -> str:
+               instrument_key: str | None = None, **extra) -> str:
         """Place one sandbox order; returns OUR id (idempotent per intent_id).
+
+        ``extra`` carries provenance metadata (strategy, reason, …) that the
+        live gateway consumes to build a complete ExecutionIntent; the sandbox
+        broker ignores it so paper behaviour stays byte-for-byte identical.
 
         3.0.1 crash-safety: the intent is durably persisted (DURABLY_PERSISTED)
         BEFORE the remote call, marked SUBMISSION_ATTEMPTED before the POST and
