@@ -134,7 +134,8 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
             governor=governor,
             live_active=lambda: live_sessions.current().state in
             ("ARMED", "ACTIVE", "RECONCILING"),
-            market_open=_pinned_market_open(repository)))
+            market_open=_pinned_market_open(repository),
+            repository=repository))
 
 
 def _pinned_market_open(repository):

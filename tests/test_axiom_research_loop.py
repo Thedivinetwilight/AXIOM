@@ -105,6 +105,75 @@ class TestResearchScheduler:
             ResearchScheduler(daily_experiment_quota=-1)
 
 
+class TestDurableResearchQuota:
+    """FINAL-11/10 §37: the daily research quota is DURABLE. A restart, a
+    crash, or a new process can never reset it — a fresh scheduler over the
+    same database must see what the previous one consumed."""
+
+    def _repo(self, tmp_path):
+        from app.database.database import Database
+        from app.database.repository import Repository
+
+        database = Database(f"sqlite:///{tmp_path / 'quota.db'}")
+        return Repository(database), database
+
+    def test_quota_survives_a_restart(self, tmp_path):
+        repository, database = self._repo(tmp_path)
+        first = ResearchScheduler(daily_experiment_quota=2,
+                                  repository=repository)
+        assert first.admit()["admitted"]
+        assert first.admit()["admitted"]
+        # "restart": a brand-new scheduler instance over the same database
+        second = ResearchScheduler(daily_experiment_quota=2,
+                                   repository=repository)
+        refused = second.admit()
+        assert refused["admitted"] is False
+        assert refused["verdict"] == "REFUSED_QUOTA_EXCEEDED"
+        assert refused["quota_used"] == 2
+        assert second.status()["durable"] is True
+        database.close()
+
+    def test_crash_mid_day_keeps_the_used_count(self, tmp_path):
+        repository, database = self._repo(tmp_path)
+        now = time.time()
+        crashed = ResearchScheduler(daily_experiment_quota=3,
+                                    repository=repository)
+        assert crashed.admit(now=now)["admitted"]  # one used, then "crash"
+        revived = ResearchScheduler(daily_experiment_quota=3,
+                                    repository=repository)
+        decision = revived.admit(now=now)
+        assert decision["admitted"] and decision["quota_used"] == 2
+        assert revived.status(now=now)["quota_used"] == 2
+        database.close()
+
+    def test_durable_quota_resets_next_day(self, tmp_path):
+        repository, database = self._repo(tmp_path)
+        now = time.time()
+        today = ResearchScheduler(daily_experiment_quota=1,
+                                  repository=repository)
+        assert today.admit(now=now)["admitted"]
+        assert today.admit(now=now)["admitted"] is False
+        tomorrow = ResearchScheduler(daily_experiment_quota=1,
+                                     repository=repository)
+        assert tomorrow.admit(now=now + 86400)["admitted"]
+        database.close()
+
+    def test_unreadable_quota_record_fails_closed(self):
+        class BrokenRepo:
+            def get_engine_state(self, key, default=None):
+                raise RuntimeError("database corrupt")
+
+            def set_engine_state(self, key, value):
+                raise RuntimeError("database corrupt")
+
+        scheduler = ResearchScheduler(daily_experiment_quota=5,
+                                      repository=BrokenRepo())
+        decision = scheduler.admit()
+        assert decision["admitted"] is False
+        assert decision["verdict"] == "REFUSED_QUOTA_EXCEEDED"
+        assert "unreadable" in decision["reason"]
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     for key in ("API_TOKEN", "DATABASE_URL", "DATA_DIR", "ARENA_HOME",
