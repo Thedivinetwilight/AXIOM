@@ -620,6 +620,85 @@ class TestPreflightChecks:
         json.dumps(summarize(run_checks(self._live_settings())))
 
 
+class TestStaticIpVerdict:
+    """FINAL-11/10 §18: the static-IP readiness check is a GENUINE
+    match / mismatch / cannot_check verdict — never a fabricated pass."""
+
+    def _settings(self, **kwargs):
+        base = dict(broker="UPSTOX_LIVE", mode="LIVE", live_trading=True,
+                    live_confirm="I-ACCEPT-REAL-MONEY-RISK",
+                    upstox_live_access_token="t", max_position_value=10_000,
+                    max_open_positions=1, max_daily_loss=500,
+                    max_trades_per_day=3, data_source="upstox",
+                    market_calendar="nse-session", default_timeframe="5m",
+                    database_url="sqlite:///trading_live.db")
+        base.update(kwargs)
+        return Settings(**base)
+
+    def test_not_configured_is_honest_not_a_pass(self):
+        from app.live.preflight import static_ip_verdict
+
+        verdict = static_ip_verdict(self._settings())
+        assert verdict["state"] == "not_configured"
+        assert verdict["detected"] is None
+
+    def test_match_when_egress_ip_is_registered(self):
+        from app.live.preflight import static_ip_verdict
+
+        settings = self._settings(upstox_static_ip_primary="203.0.113.7")
+        verdict = static_ip_verdict(settings,
+                                    fetch_public_ip=lambda timeout: "203.0.113.7")
+        assert verdict["state"] == "match"
+
+    def test_mismatch_is_an_error_not_a_warning(self):
+        from app.live.preflight import run_readiness_center_checks, ERROR
+
+        settings = self._settings(upstox_static_ip_primary="203.0.113.7")
+        checks = run_readiness_center_checks(
+            settings, context={"static_ip": {"state": "mismatch",
+                                             "registered": ["203.0.113.7"],
+                                             "detected": "198.51.100.9",
+                                             "detail": "wrong source IP"}})
+        check = next(c for c in checks if c.name == "static_ip_configuration")
+        assert check.ok is False and check.severity == ERROR
+
+    def test_cannot_check_is_reported_never_fabricated_as_match(self):
+        from app.live.preflight import static_ip_verdict
+
+        settings = self._settings(upstox_static_ip_primary="203.0.113.7")
+        verdict = static_ip_verdict(settings,
+                                    fetch_public_ip=lambda timeout: None)
+        assert verdict["state"] == "cannot_check"
+        assert verdict["detected"] is None
+
+    def test_a_failing_probe_is_cannot_check(self):
+        from app.live.preflight import static_ip_verdict
+
+        def boom(timeout):
+            raise RuntimeError("egress blocked")
+
+        settings = self._settings(upstox_static_ip_primary="203.0.113.7")
+        assert static_ip_verdict(settings, fetch_public_ip=boom)["state"] == \
+            "cannot_check"
+
+    def test_readiness_check_stays_optional_but_mismatch_is_an_error(
+            self, tmp_path):
+        from app.live.preflight import run_readiness_center_checks
+
+        repository, database = repo(tmp_path, "staticip.db")
+        settings = self._settings(upstox_static_ip_primary="203.0.113.7",
+                                  database_url=f"sqlite:///{tmp_path}/staticip.db")
+        checks = run_readiness_center_checks(
+            settings, repository=repository,
+            context={"static_ip": {"state": "match",
+                                   "registered": ["203.0.113.7"],
+                                   "detected": "203.0.113.7",
+                                   "detail": "registered"}})
+        check = next(c for c in checks if c.name == "static_ip_configuration")
+        assert check.ok is True and check.required is False
+        database.close()
+
+
 class TestEngineIntegration:
     """The rails must bind to the real engine paths, not just exist."""
 

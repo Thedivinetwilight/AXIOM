@@ -61,6 +61,84 @@ def _unavailable(name: str, why: str) -> Check:
                  detail=f"not checked: {why}")
 
 
+# ---------------------------------------------------------------------------
+# Static-IP verification (FINAL-11/10 §18): a GENUINE three-outcome check.
+#
+# Upstox live order APIs may only be called from a source IP registered with
+# the account. The only way to know our source IP is to ask the outside
+# world, which is environment-dependent (NAT, proxies, blocked egress). So
+# the verdict is one of:
+#
+#   "match"         detected public egress IP IS one of the registered IPs
+#   "mismatch"      detected public egress IP is NOT registered → the broker
+#                   WILL reject live orders; this is a real, actionable fault
+#   "cannot_check"  the public egress IP could not be determined (offline,
+#                   NAT, blocked egress). Reported honestly — never "match".
+#   "not_configured" no registered IP on file, so there is nothing to match.
+#
+# The probe is injectable so tests (and offline environments) never depend on
+# a live network round-trip; the default probe fails safe to None.
+def static_ip_verdict(settings, *, fetch_public_ip=None,
+                      timeout: float = 2.0) -> dict:
+    primary = str(getattr(settings, "upstox_static_ip_primary", "") or "").strip()
+    secondary = str(getattr(settings, "upstox_static_ip_secondary", "") or "").strip()
+    registered = [ip for ip in (primary, secondary) if ip]
+    if not registered:
+        return {"state": "not_configured", "registered": [], "detected": None,
+                "detail": "no registered static IP on file; live order traffic "
+                          "may be rejected if the account enforces static-IP "
+                          "checks"}
+    fetcher = fetch_public_ip or _default_public_ip_probe
+    try:
+        detected = fetcher(timeout=timeout)
+    except Exception:
+        detected = None
+    if not detected:
+        return {"state": "cannot_check", "registered": registered,
+                "detected": None,
+                "detail": "registered static IP on file but the public egress "
+                          "IP could not be determined (offline / NAT / blocked "
+                          "egress); verification deferred to the broker, which "
+                          "rejects mismatched source IPs at request time"}
+    if str(detected) in registered:
+        return {"state": "match", "registered": registered,
+                "detected": str(detected),
+                "detail": f"detected public egress IP {detected} is registered "
+                          "with the broker"}
+    return {"state": "mismatch", "registered": registered,
+            "detected": str(detected),
+            "detail": f"detected public egress IP {detected} is NOT among the "
+                      f"registered IPs ({', '.join(registered)}); live orders "
+                      "will be rejected until this host's IP is registered"}
+
+
+def _default_public_ip_probe(timeout: float = 2.0) -> str | None:
+    """Best-effort public egress IP via an echo service. Returns None on ANY
+    failure — a probe that cannot run must never be mistaken for a match."""
+    import ipaddress
+
+    try:
+        import httpx
+
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip",
+                    "https://api.my-ip.io/v2/ip.txt"):
+            try:
+                response = httpx.get(url, timeout=timeout, follow_redirects=True)
+                if response.status_code == 200:
+                    candidate = response.text.strip()
+                    # Only a valid PUBLIC address is a usable signal; a NAT'd
+                    # private address tells us nothing about the broker's view.
+                    ip = ipaddress.ip_address(candidate)
+                    if not (ip.is_private or ip.is_loopback or ip.is_link_local
+                            or ip.is_unspecified):
+                        return str(ip)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 def run_checks(settings, *, repository=None) -> list[Check]:
     """All offline live-readiness checks, in a stable order.
 
@@ -409,22 +487,25 @@ def run_readiness_center_checks(settings, *, repository=None,
         checks.append(_check("single_instance_lock", False, ERROR,
                              f"lock state could not be verified: {exc}"))
 
-    # Static-IP compliance (spec section 39): we can only verify that the
-    # operator has recorded registered IPs; actual source-IP matching happens
-    # on the broker side and is reported UNKNOWN here, never healthy.
-    primary = str(getattr(settings, "upstox_static_ip_primary", "") or "").strip()
-    secondary = str(getattr(settings, "upstox_static_ip_secondary", "") or "").strip()
-    if primary or secondary:
-        checks.append(_check(
-            "static_ip_configuration", True, INFO,
-            f"registered static IP on file (primary={'set' if primary else 'unset'}, "
-            f"secondary={'set' if secondary else 'unset'}); broker-side source-IP "
-            "matching is verified by Upstox at request time"))
-    else:
-        checks.append(_check(
-            "static_ip_configuration", False, WARNING,
-            "no registered static IP recorded in settings; Upstox live order "
-            "traffic may be rejected if the account enforces static-IP checks"))
+    # Static-IP compliance (FINAL-11/10 §18): a genuine match / mismatch /
+    # cannot_check verdict. A detected MISMATCH is a real ERROR (the broker
+    # will reject orders); cannot_check / not_configured stay optional so an
+    # offline host is not blocked from arming, but neither is ever reported
+    # as a verified match.
+    ip_verdict = context.get("static_ip") or static_ip_verdict(settings)
+    state = ip_verdict.get("state")
+    if state == "match":
+        checks.append(_optional_check(
+            "static_ip_configuration", True, INFO, ip_verdict["detail"]))
+    elif state == "mismatch":
+        checks.append(_optional_check(
+            "static_ip_configuration", False, ERROR, ip_verdict["detail"]))
+    elif state == "not_configured":
+        checks.append(_optional_check(
+            "static_ip_configuration", False, WARNING, ip_verdict["detail"]))
+    else:  # cannot_check
+        checks.append(_optional_check(
+            "static_ip_configuration", False, INFO, ip_verdict["detail"]))
 
     # Data freshness (spec section 32): only verifiable when the caller
     # supplies the latest market-data timestamp.
