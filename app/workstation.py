@@ -14,6 +14,7 @@ from pathlib import Path
 from app.config.settings import Settings
 from app.intel.agreement import AgreementLedger, load_votes
 from app.intel.analogues import AnalogueEngine
+from app.intel.research_loop import ResearchScheduler
 from app.intel.evidence import EvidenceStack
 from app.intel.missed import ExpiredCandidateRecorder, MissedOpportunityRecorder
 from app.intel.opportunity import OpportunityCenter
@@ -52,6 +53,7 @@ class Workstation:
     regime_bridge: RegimeBridge
     updater: UpdateManager
     agreement: "AgreementLedger"
+    research_scheduler: "ResearchScheduler"
 
     def guard_chain(self, *, emergency_stop: bool = False,
                     recent_intent_ids: set | None = None):
@@ -127,7 +129,31 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
         expired_recorder=expired, latency=latency, governor=governor, tasks=tasks,
         live_sessions=live_sessions, rate_limiter=rate_limiter, studio=studio,
         backup=backup, analogues=AnalogueEngine(), regime_bridge=regime_bridge,
-        updater=updater, agreement=_agreement_ledger(data_dir))
+        updater=updater, agreement=_agreement_ledger(data_dir),
+        research_scheduler=ResearchScheduler(
+            governor=governor,
+            live_active=lambda: live_sessions.current().state in
+            ("ARMED", "ACTIVE", "RECONCILING"),
+            market_open=_pinned_market_open(repository)))
+
+
+def _pinned_market_open(repository):
+    """Session awareness for the research scheduler (§97): the market of the
+    pinned universe decides the window. No pin -> None (unknown, reported
+    honestly — never a guessed open/closed)."""
+    def probe() -> bool | None:
+        try:
+            from app.markets import list_markets, market_session_state
+
+            for market in list_markets():
+                market_id = market["market_id"]
+                if repository is not None and repository.list_pinned(market_id):
+                    state = market_session_state(market_id)
+                    return state.status in ("OPEN", "ALWAYS")
+        except Exception:
+            return None
+        return None
+    return probe
 
 
 def _agreement_ledger(data_dir: Path) -> AgreementLedger:

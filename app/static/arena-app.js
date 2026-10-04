@@ -604,15 +604,32 @@
   function alertsPanel(compact) {
     var box = document.createElement("div");
     var host = Arena.el("div", { id: compact ? "cc-alerts" : "alerts-list" });
+    if (!compact) {
+      // Category filter (spec §56): All + every category the backend names.
+      var cats = ["all", "live_ops", "risk", "kronos", "research", "market_event", "system"];
+      var filterRow = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:8px" });
+      var current = { cat: "all" };
+      cats.forEach(function (c) {
+        filterRow.appendChild(Arena.el("button", { "class": "btn ghost sm", id: "alert-cat-" + c }, [
+          document.createTextNode(c === "all" ? "All" : c.replace("_", " "))
+        ]));
+        filterRow.lastChild.addEventListener("click", function () {
+          current.cat = c;
+          loadAlerts(host, 200, c === "all" ? null : c);
+        });
+      });
+      box.appendChild(filterRow);
+    }
     box.appendChild(host);
     loadAlerts(host, compact ? 6 : 200);
     return box;
   }
 
-  function loadAlerts(host, limit) {
+  function loadAlerts(host, limit, category) {
     host.innerHTML = "";
     host.appendChild(Arena.el("div", { "class": "muted" }, [document.createTextNode("Loading alerts…")]));
-    Arena.get("/api/v2/alerts?limit=" + limit).then(function (d) {
+    var url = "/api/v2/alerts?limit=" + limit + (category ? "&category=" + encodeURIComponent(category) : "");
+    Arena.get(url).then(function (d) {
       host.innerHTML = "";
       var alerts = d.alerts || [];
       if (!alerts.length) {
@@ -622,9 +639,13 @@
         ]));
         return;
       }
+      if (d.note) {
+        host.appendChild(Arena.el("div", { "class": "banner warn" }, [document.createTextNode(d.note)]));
+      }
       var tbl = Arena.el("table", { "class": "table" });
       tbl.appendChild(Arena.el("thead", {}, [Arena.el("tr", {}, [
-        Arena.el("th", {}, [document.createTextNode("Severity")]), Arena.el("th", {}, [document.createTextNode("Kind")]),
+        Arena.el("th", {}, [document.createTextNode("Severity")]), Arena.el("th", {}, [document.createTextNode("Category")]),
+        Arena.el("th", {}, [document.createTextNode("Kind")]),
         Arena.el("th", {}, [document.createTextNode("Message")]), Arena.el("th", {}, [document.createTextNode("When")]),
         Arena.el("th", {}, [document.createTextNode("")])
       ])]));
@@ -637,11 +658,12 @@
           : Arena.el("button", { "class": "btn ghost sm", onclick: function (ev) {
               Arena.post("/api/v2/alerts/ack", { ids: [a.id], by: "ui" }).then(function () {
                 Arena.toast("ok", "Alert acknowledged.");
-                loadAlerts(host, limit);
+                loadAlerts(host, limit, category);
               }).catch(function (e) { Arena.toast("err", e.message); });
             } }, [document.createTextNode("Acknowledge")]);
         body.appendChild(Arena.el("tr", {}, [
           Arena.el("td", {}, [sev]),
+          Arena.el("td", {}, [Arena.el("span", { "class": "badge neutral" }, [document.createTextNode(a.category || "system")])]),
           Arena.el("td", { "class": "mono" }, [document.createTextNode(a.kind || "—")]),
           Arena.el("td", {}, [document.createTextNode(a.message || a.detail || "")]),
           Arena.el("td", { "class": "mono faint" }, [document.createTextNode(Arena.timeAgo(a.timestamp || a.ts))]),
@@ -760,6 +782,12 @@
     root.appendChild(agreeGrid);
     renderAgreementCenter(agreeBody);
     renderCounterfactualLab(cfBody);
+
+    var schedGrid = Arena.el("div", { "class": "grid cols-2 section-gap" });
+    var schedBody = Arena.el("div", { id: "research-schedule" });
+    schedGrid.appendChild(card("Research scheduler (bounded loop)", schedBody));
+    root.appendChild(schedGrid);
+    renderResearchSchedule(schedBody);
 
     // fill catalogs
     Arena.get("/strategies").then(function (d) {
@@ -2604,6 +2632,68 @@
       }).catch(function (e) {
         Arena.setBusy(runBtn, false);
         out.innerHTML = ""; bannerInto(out, "err", "Simulation refused", e.message);
+      });
+    });
+  }
+
+  function renderResearchSchedule(host) {
+    host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
+      "The autonomous loop (observe → detect → explain → compare → hypothesize → test → validate → remember → " +
+      "recommend → monitor → review → improve) is bounded: a daily experiment quota, the resource governor and " +
+      "trading-critical windows outrank research throughput. During critical windows only opportunity analysis " +
+      "and reconciliation checks stay admissible.")]));
+    var statusHost = Arena.el("div", { id: "sched-status" }, [document.createTextNode("Loading schedule…")]);
+    host.appendChild(statusHost);
+    var admitBtn = Arena.el("button", { "class": "btn ghost sm", id: "sched-admit" }, [
+      document.createTextNode("Request admission for a backtest")]);
+    var verdict = Arena.el("div", { id: "sched-verdict", style: "margin-top:6px" });
+    host.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-top:8px" }, [admitBtn]));
+    host.appendChild(verdict);
+
+    function paint(d) {
+      statusHost.innerHTML = "";
+      var kv = Arena.el("dl", { "class": "kv" });
+      [["Day (UTC)", d.day], ["Quota", d.quota_used + " / " + d.quota_limit],
+       ["Trading-critical window", d.trading_critical_window ? "YES — research yields" : "no"],
+       ["Market open (pinned)", d.market_open === null ? "unknown (no pinned universe)" : (d.market_open ? "yes" : "no")]
+      ].forEach(function (pair) {
+        kv.appendChild(Arena.el("dt", {}, [document.createTextNode(pair[0])]));
+        kv.appendChild(Arena.el("dd", {}, [document.createTextNode(String(pair[1]))]));
+      });
+      statusHost.appendChild(kv);
+      var pol = d.policy || {};
+      var chips = [["Historical research", pol.expand_historical_research], ["Backtests", pol.run_backtests],
+        ["Model training", pol.train_or_evaluate_models], ["Reports", pol.refresh_reports],
+        ["Opportunity analysis", pol.opportunity_analysis]];
+      var row = Arena.el("div", { "class": "btn-row", style: "margin-top:6px;flex-wrap:wrap" });
+      chips.forEach(function (c) {
+        row.appendChild(labChip(c[1] ? "ok" : "warn", c[0] + ": " + (c[1] ? "allowed" : "held")));
+      });
+      statusHost.appendChild(row);
+    }
+
+    function refresh() {
+      Arena.get("/api/research/schedule").then(paint).catch(function (e) {
+        statusHost.innerHTML = "";
+        statusHost.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)]));
+      });
+    }
+    refresh();
+
+    admitBtn.addEventListener("click", function () {
+      Arena.setBusy(admitBtn, true, "Asking scheduler…");
+      Arena.post("/api/research/schedule/admit", { kind: "backtest" }).then(function (d) {
+        Arena.setBusy(admitBtn, false);
+        verdict.innerHTML = "";
+        if (d.admitted) {
+          bannerInto(verdict, "ok", "Admitted", "quota now " + d.quota_used + "/" + d.quota_limit + " for " + d.day);
+        } else {
+          bannerInto(verdict, "warn", d.verdict, d.reason);
+        }
+        refresh();
+      }).catch(function (e) {
+        Arena.setBusy(admitBtn, false);
+        verdict.innerHTML = ""; bannerInto(verdict, "err", "Admission failed", e.message);
       });
     });
   }

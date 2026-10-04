@@ -341,6 +341,34 @@ class AlertRouter:
                 "dedup_seconds": self.dedup_seconds}
 
 
+# Alert categories (spec §56): durable kinds are grouped so operators can
+# filter the feed. Unknown kinds fall back to "system" — a missing category
+# is honest, a fabricated one is not.
+ALERT_CATEGORIES = ("live_ops", "risk", "kronos", "research", "market_event",
+                    "system")
+
+_CATEGORY_RULES = (
+    (("STUCK_ORDER", "TOKEN_", "DRILL_", "ENTRY_", "RECONCILE",
+      "UNRESOLVED_INTENT", "BROKER_", "UNACKNOWLEDGED_ALERT", "ALERT_",
+      "LIVE_", "ORDER_", "ARM_", "GUARD_", "CANARY", "WATCHDOG"), "live_ops"),
+    (("DAILY_LOSS", "DRAWDOWN", "EQUITY_", "RISK_", "LOSS_", "BREACH",
+      "EXPOSURE", "POSITION_LIMIT", "CONCENTRATION"), "risk"),
+    (("KRONOS", "MODEL_", "FORECAST", "DRIFT"), "kronos"),
+    (("RESEARCH", "EXPERIMENT", "ANALOGUE", "OPPORTUNITY", "MISSED",
+      "STRATEGY_"), "research"),
+    (("MARKET_", "FEED_", "QUOTE", "CANDLE", "DATA_GAP"), "market_event"),
+)
+
+
+def category_for(kind: str) -> str:
+    """Deterministic category for an alert kind (spec §56)."""
+    text = str(kind or "").upper()
+    for prefixes, category in _CATEGORY_RULES:
+        if any(text.startswith(prefix) for prefix in prefixes):
+            return category
+    return "system"
+
+
 def recent_alerts(repository, limit: int = 50, *, acknowledgements=None) -> list[dict]:
     """Alerts from the durable sink, newest first (dashboard/report helper).
 
@@ -364,8 +392,10 @@ def recent_alerts(repository, limit: int = 50, *, acknowledgements=None) -> list
         payload = event.get("payload") or {}
         event_id = event.get("id")
         ack = state.get(event_id) or {}
+        kind = payload.get("kind", "?")
         alerts.append({"id": event_id, "ts": event.get("ts"),
-                       "kind": payload.get("kind", "?"),
+                       "kind": kind,
+                       "category": category_for(kind),
                        "severity": payload.get("severity", "INFO"),
                        "message": payload.get("message", ""),
                        "acknowledged": bool(ack),

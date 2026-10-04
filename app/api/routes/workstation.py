@@ -986,6 +986,24 @@ async def research_drift(market_id: str, identity: str, request: Request) -> dic
 
 
 # =====================================================================
+# RESEARCH SCHEDULER — BOUNDED LOOP (spec sections 96, 97)
+# =====================================================================
+
+class ResearchAdmitBody(BaseModel):
+    kind: str = "backtest"
+
+
+@router.get("/api/research/schedule", dependencies=[Depends(authenticate)])
+async def research_schedule(request: Request) -> dict:
+    return ws(request).research_scheduler.status()
+
+
+@router.post("/api/research/schedule/admit", dependencies=[Depends(authenticate)])
+async def research_schedule_admit(body: ResearchAdmitBody, request: Request) -> dict:
+    return ws(request).research_scheduler.admit(body.kind)
+
+
+# =====================================================================
 # MODEL AGREEMENT / DISAGREEMENT (spec section 98)
 # =====================================================================
 

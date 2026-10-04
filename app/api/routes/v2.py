@@ -291,23 +291,37 @@ async def report(request: Request, period: str = "weekly",
 
 
 @router.get("/alerts")
-async def alerts(request: Request, limit: int = 50):
+async def alerts(request: Request, limit: int = 50, category: str | None = None):
     """Operational alerts from the durable sink (V2.1 L-ops).
 
     Read-only and additive: alerts are recorded by the engine's AlertRouter in
     ``system_events`` (kind ALERT), so this endpoint works even while no engine
     process is running. ``limit`` is clamped to keep the response bounded. Each
-    alert carries its durable ``id`` and whether a human has acknowledged it —
-    an acknowledged alarm and an unattended one are very different states.
+    alert carries its durable ``id``, its category (spec §56) and whether a
+    human has acknowledged it — an acknowledged alarm and an unattended one are
+    very different states. ``category`` filters to one of the spec's alert
+    categories; an unknown category filters to nothing (never a guess).
     """
-    from app.live.alerts import recent_alerts
+    from app.live.alerts import ALERT_CATEGORIES, recent_alerts
 
     repository = _repo(request)
     bounded = max(1, min(int(limit), 500))
     listed = recent_alerts(repository, limit=bounded)
+    if category is not None:
+        wanted = str(category).strip().lower()
+        if wanted not in ALERT_CATEGORIES:
+            return {"alerts": [], "source": "system_events/ALERT",
+                    "category_filter": wanted,
+                    "note": f"unknown category {wanted!r}; expected one of "
+                            f"{', '.join(ALERT_CATEGORIES)}",
+                    "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
+                    "unacknowledged_critical": 0}
+        listed = [alert for alert in listed if alert["category"] == wanted]
     return {
         "alerts": listed,
         "source": "system_events/ALERT",
+        "category_filter": category,
+        "categories": list(ALERT_CATEGORIES),
         "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
         "unacknowledged_critical": sum(
             1 for alert in listed

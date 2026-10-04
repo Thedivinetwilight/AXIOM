@@ -340,3 +340,52 @@ class TestResearchAddons:
             "entry_index": 0}).json()
         assert no_data["label"] == "NO_DATA"
         assert no_data["variants"] == []           # nothing fabricated
+
+
+class TestAlertCategories:
+    """Spec §56: categories on the alert feed + honest filtering."""
+
+    def test_category_mapping_is_deterministic(self):
+        from app.live.alerts import category_for
+
+        assert category_for("STUCK_ORDER") == "live_ops"
+        assert category_for("TOKEN_EXPIRING") == "live_ops"
+        assert category_for("DAILY_LOSS_BREACH") == "risk"
+        assert category_for("EQUITY_DRAWDOWN_BREACH") == "risk"
+        assert category_for("KRONOS_FORECAST_MISSED") == "kronos"
+        assert category_for("OPPORTUNITY_EXPIRED") == "research"
+        assert category_for("MARKET_DATA_GAP") == "market_event"
+        assert category_for("SOMETHING_NEW") == "system"
+
+    def test_alerts_filter_by_category_over_http(self, client):
+        from app.live.alerts import AlertRouter
+
+        router = AlertRouter(client.app.state.repository, min_severity="WARNING")
+        router.emit("STUCK_ORDER", "CRITICAL", "order stuck in test")
+        router.emit("DAILY_LOSS_BREACH", "CRITICAL", "daily loss breach in test")
+        all_alerts = client.get("/api/v2/alerts").json()
+        categories = {a["category"] for a in all_alerts["alerts"]}
+        assert {"live_ops", "risk"} <= categories
+        risk_only = client.get("/api/v2/alerts?category=risk").json()
+        assert risk_only["alerts"]
+        assert all(a["category"] == "risk" for a in risk_only["alerts"])
+        assert risk_only["unacknowledged_critical"] == len(risk_only["alerts"])
+
+    def test_unknown_category_is_honest_not_guessed(self, client):
+        response = client.get("/api/v2/alerts?category=wizard").json()
+        assert response["alerts"] == []
+        assert "unknown category" in response["note"]
+
+
+class TestResearchSchedulerSurface:
+    """GUI card: bounded research loop (§96) + session-aware policy (§97)."""
+
+    def test_schedule_card_flow(self, client):
+        status = client.get("/api/research/schedule").json()
+        assert status["loop_steps"][0] == "OBSERVE"
+        assert status["loop_steps"][-1] == "IMPROVE"
+        admitted = client.post("/api/research/schedule/admit",
+                               json={"kind": "backtest"}).json()
+        assert admitted["admitted"] and admitted["quota_used"] == 1
+        refreshed = client.get("/api/research/schedule").json()
+        assert refreshed["quota_used"] == 1
