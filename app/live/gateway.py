@@ -375,7 +375,7 @@ class LiveExecutionGateway:
                 intent.side, intent.quantity,
                 intent.price if intent.price is not None else 0,
                 order_type=intent.order_type, intent_id=intent.intent_id,
-                symbol=intent.identity)
+                symbol=intent.identity, instrument_key=intent.identity)
         except Exception as exc:
             self._audit("LIVE_INTENT_FAILED",
                         {"intent_id": intent.intent_id,
