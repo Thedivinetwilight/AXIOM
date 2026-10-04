@@ -406,6 +406,36 @@ class TestBackupRestore:
         assert result["restored"] is False
         assert not verification["ok"] or "refused" in result["note"]
 
+    def test_locked_target_yields_honest_restart_required(self, tmp_path, monkeypatch):
+        """Windows keeps open SQLite files locked against rename. The swap
+        failure path must stage the verified database, never fake success."""
+        from pathlib import Path as _Path
+
+        db_path = self._seeded_db(tmp_path)
+        manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
+        created = manager.create()
+        real_replace = _Path.replace
+
+        def refusing_replace(self, target):
+            if self.name.endswith(".restore-staging") and \
+                    str(target).endswith("trading_bot.db"):
+                raise PermissionError(32, "The process cannot access the file")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(_Path, "replace", refusing_replace)
+        result = manager.restore(created["path"])
+        assert result["restored"] is False
+        assert result["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
+        pending = _Path(result["pending_database"])
+        assert pending.exists() and pending.name.endswith(".restore-pending")
+        # The staged file is itself a valid SQLite database.
+        import sqlite3
+        connection = sqlite3.connect(pending)
+        try:
+            assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            connection.close()
+
 
 # =====================================================================
 # Kronos Studio (spec 18)

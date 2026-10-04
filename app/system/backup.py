@@ -182,9 +182,22 @@ class BackupManager:
             return {"restored": False, "verification": verification,
                     "note": f"staged database failed integrity ({integrity}); untouched"}
         previous = self.db_path.with_suffix(self.db_path.suffix + ".pre-restore")
-        if self.db_path.exists():
-            self.db_path.replace(previous)
-        staging.replace(self.db_path)
+        try:
+            if self.db_path.exists():
+                self.db_path.replace(previous)
+            staging.replace(self.db_path)
+        except OSError as exc:
+            # Windows refuses to rename a file an open connection holds.
+            # The honest outcome: the verified database stays staged and is
+            # applied on next start — never a fake success.
+            pending = self.db_path.with_suffix(self.db_path.suffix + ".restore-pending")
+            staging.replace(pending)
+            return {"restored": False, "verification": verification,
+                    "status": "RESTORE_PREPARED_RESTART_REQUIRED",
+                    "pending_database": str(pending),
+                    "note": f"the operating system refused the live swap ({exc}); "
+                            f"the verified database is staged at {pending.name} "
+                            f"and must be applied with AXIOM stopped"}
         return {"restored": True, "verification": verification,
                 "previous_database": str(previous) if previous.exists() else None,
                 "note": "restore complete; the previous database is preserved "

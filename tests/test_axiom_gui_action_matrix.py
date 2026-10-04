@@ -261,7 +261,15 @@ class TestSystemPage:
         assert verified["ok"] is True
         restored = client.post("/api/backup/restore",
                                json={"path": created["path"]}).json()
-        assert restored["restored"], "restore must report what it restored"
+        # POSIX swaps the live database in place; Windows refuses to rename
+        # a file an open connection holds — the honest outcome there is a
+        # verified, staged restore applied with AXIOM stopped. Both are
+        # intended behaviours; a silent failure is not.
+        if restored["restored"]:
+            assert "previous_database" in restored
+        else:
+            assert restored["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
+            assert restored["pending_database"].endswith(".restore-pending")
         traversal = client.post("/api/backup/restore",
                                 json={"path": "/etc/passwd"})
         assert traversal.status_code == 422
