@@ -355,3 +355,7 @@ body.axiom-focus .topbar,
 body.axiom-focus .sidenav,
 body.axiom-focus .statusbar { display: none; }
 body.axiom-focus .main { padding: 12px 16px; }
+
+/* Workspace customization (spec §61): maximize + collapse */
+.card.maximized { grid-column: 1 / -1; }
+.card-body.collapsed { display: none; }

@@ -404,10 +404,52 @@
     return Arena.el("h2", { style: "font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:#7d89a3;margin:26px 0 10px" }, [document.createTextNode(text)]);
   }
 
+  // Workspace customization (spec §61): per-card collapse/maximize state is
+  // persisted; named layouts apply bundles of these preferences.
+  function cardSlug(title) {
+    return String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 48);
+  }
+  function cardPrefs() {
+    try { return JSON.parse(localStorage.getItem("axiom_card_prefs")) || {}; }
+    catch (e) { return {}; }
+  }
+  function saveCardPrefs(prefs) {
+    localStorage.setItem("axiom_card_prefs", JSON.stringify(prefs));
+  }
+
   function card(title, bodyNode, actions) {
-    var head = Arena.el("div", { "class": "card-head" }, [Arena.el("h3", {}, [document.createTextNode(title)])]);
-    if (actions) { head.appendChild(Arena.el("span", { "class": "grow" })); actions.forEach(function (a) { head.appendChild(a); }); }
-    return Arena.el("div", { "class": "card" }, [head, Arena.el("div", { "class": "card-body" }, [bodyNode])]);
+    var slug = cardSlug(title);
+    var prefs = cardPrefs()[slug] || {};
+    var bodyWrap = Arena.el("div", { "class": "card-body" + (prefs.collapsed ? " collapsed" : "") }, [bodyNode]);
+    var collapseBtn = Arena.el("button", {
+      "class": "btn ghost sm", "aria-label": "Collapse " + title,
+      style: "padding:0 6px;font-size:11px"
+    }, [document.createTextNode(prefs.collapsed ? "▸" : "▾")]);
+    collapseBtn.addEventListener("click", function () {
+      var all = cardPrefs();
+      var mine = all[slug] || {};
+      mine.collapsed = !bodyWrap.classList.contains("collapsed");
+      all[slug] = mine; saveCardPrefs(all);
+      bodyWrap.classList.toggle("collapsed", mine.collapsed);
+      collapseBtn.textContent = mine.collapsed ? "▸" : "▾";
+    });
+    var maxBtn = Arena.el("button", {
+      "class": "btn ghost sm", "aria-label": "Maximize " + title,
+      style: "padding:0 6px;font-size:11px"
+    }, [document.createTextNode("⤢")]);
+    var head = Arena.el("div", { "class": "card-head" }, [
+      Arena.el("h3", {}, [document.createTextNode(title)]),
+      Arena.el("span", { "class": "grow" }), collapseBtn, maxBtn]);
+    if (actions) { actions.forEach(function (a) { head.appendChild(a); }); }
+    var box = Arena.el("div", { "class": "card" + (prefs.maximized ? " maximized" : "") }, [head, bodyWrap]);
+    maxBtn.addEventListener("click", function () {
+      var all = cardPrefs();
+      var mine = all[slug] || {};
+      mine.maximized = !box.classList.contains("maximized");
+      all[slug] = mine; saveCardPrefs(all);
+      box.classList.toggle("maximized", mine.maximized);
+    });
+    return box;
   }
 
   function stat(label, value, subText, kind, nodeOverride) {
@@ -1378,6 +1420,19 @@
 
   var stream = { lastSeq: 0, connected: false, retryDelay: 2000 };
 
+  // High-frequency stream updates are coalesced per target (spec §64): the
+  // first request in a 120 ms window schedules one refresh; bursts collapse
+  // into it instead of re-rendering unchanged objects per event.
+  var _coalescePending = {};
+  function coalescedRefresh(key, fn) {
+    if (_coalescePending[key]) return;
+    _coalescePending[key] = true;
+    setTimeout(function () {
+      _coalescePending[key] = false;
+      try { fn(); } catch (e) { /* a failed paint must not break the stream */ }
+    }, 120);
+  }
+
   // ------------------------------------------------------------- stream ----
   function connectStream() {
     var url = "/api/stream?last_seq=" + stream.lastSeq;
@@ -1423,17 +1478,31 @@
     if (msg.type === "opportunity.detected") {
       var opp = msg.payload || {};
       Arena.toast("info", "New candidate observed: " + (opp.identity || "instrument"));
-      if (state.view === "intelligence") refreshOpportunities(document.getElementById("opp-list"));
+      if (state.view === "intelligence") {
+        coalescedRefresh("opportunities", function () {
+          refreshOpportunities(document.getElementById("opp-list"));
+        });
+      }
     }
     if (msg.type === "state.changed") {
       Arena.toast("info", "What changed: " + ((msg.payload || {}).domain || "state") + "/" + ((msg.payload || {}).object_key || ""));
-      if (state.view === "markets") whatChangedFeed(document.getElementById("mk-changed"), "");
+      if (state.view === "markets") {
+        coalescedRefresh("what-changed", function () {
+          whatChangedFeed(document.getElementById("mk-changed"), "");
+        });
+      }
     }
     if (msg.type === "opportunity.transition" && state.view === "intelligence") {
-      refreshOpportunities(document.getElementById("opp-list"));
+      coalescedRefresh("opportunities", function () {
+        refreshOpportunities(document.getElementById("opp-list"));
+      });
     }
-    if (msg.type && msg.type.indexOf("task.") === 0) refreshTasksBadge();
-    if (msg.type === "live.session") refreshLiveChip();
+    if (msg.type && msg.type.indexOf("task.") === 0) {
+      coalescedRefresh("tasks-badge", refreshTasksBadge);
+    }
+    if (msg.type === "live.session") {
+      coalescedRefresh("live-chip", refreshLiveChip);
+    }
   }
 
   function setConnBadge(stateName) {
@@ -2550,6 +2619,9 @@
   // =====================================================================
   function renderSystemControl(root) {
     var host = Arena.el("div", { "class": "section-gap" });
+    var layoutHost = Arena.el("div", { id: "sys-layouts" });
+    host.appendChild(card("Workspace layouts (save · duplicate · reset)", layoutHost));
+    renderLayoutManager(layoutHost);
     var tasksHost = Arena.el("div", { id: "sys-tasks" }, [document.createTextNode("Loading…")]);
     host.appendChild(card("Task center (research, backfill, model work)", tasksHost));
     var backupHost = Arena.el("div", { id: "sys-backup" }, [document.createTextNode("Loading…")]);
@@ -2560,6 +2632,122 @@
     renderTaskCenter(tasksHost);
     renderBackupCenter(backupHost);
     renderUpdateCenter(updateHost);
+  }
+
+  // Named workspace layouts (spec §61): persisted bundles of card
+  // collapse/maximize preferences plus the chart layout. Built-in presets
+  // ship with the product; saved layouts can be duplicated, applied,
+  // deleted and reset.
+  var BUILTIN_LAYOUTS = {
+    "Intraday Hunt": { chart: { layout: 4 }, cards: {} },
+    "Research Lab": { chart: { layout: 2 },
+      cards: { "model-agreement-disagreement": { maximized: true } } },
+    "Kronos Analysis": { chart: { layout: 1 },
+      cards: { "model-pipeline": { maximized: true } } },
+    "Portfolio": { chart: { layout: 1 },
+      cards: { "positions-orders-trades": { maximized: true } } },
+    "Presentation": { chart: { layout: 1 },
+      cards: { "backup-restore": { collapsed: true },
+                 "task-center-research-backfill-model-work": { collapsed: true },
+                 "update-axiom-check-download-verify-prepare-install": { collapsed: true } } }
+  };
+
+  function savedLayouts() {
+    try { return JSON.parse(localStorage.getItem("axiom_named_layouts")) || {}; }
+    catch (e) { return {}; }
+  }
+  function storeLayouts(layouts) {
+    localStorage.setItem("axiom_named_layouts", JSON.stringify(layouts));
+  }
+  function applyNamedLayout(name) {
+    var builtins = BUILTIN_LAYOUTS;
+    var layout = savedLayouts()[name] || builtins[name];
+    if (!layout) { Arena.toast("err", "Layout " + name + " does not exist."); return false; }
+    if (layout.chart && [1, 2, 4, 6, 8].indexOf(layout.chart.layout) >= 0) {
+      var cfg = chartConfig();
+      cfg.layout = layout.chart.layout;
+      while (cfg.panels.length < cfg.layout) cfg.panels.push({ identity: "", unit: "days", interval: 1 });
+      saveChartConfig(cfg);
+    }
+    var prefs = cardPrefs();
+    Object.keys(layout.cards || {}).forEach(function (slug) {
+      prefs[slug] = Object.assign({}, prefs[slug], layout.cards[slug]);
+    });
+    saveCardPrefs(prefs);
+    localStorage.setItem("axiom_active_layout", name);
+    Arena.toast("ok", "Layout applied: " + name + " (re-open pages to see every change).");
+    show(state.view);
+    return true;
+  }
+
+  function renderLayoutManager(host) {
+    function paint() {
+      host.innerHTML = "";
+      host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
+        "A layout bundles card collapse/maximize preferences and the chart grid. Layouts persist in this " +
+        "browser; Reset restores the built-in presets and clears saved ones.")]));
+      var active = localStorage.getItem("axiom_active_layout") || "";
+      var names = Object.keys(BUILTIN_LAYOUTS).concat(Object.keys(savedLayouts()));
+      var list = Arena.el("div");
+      names.forEach(function (name) {
+        var isBuiltin = Object.prototype.hasOwnProperty.call(BUILTIN_LAYOUTS, name);
+        var applyBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Apply")]);
+        applyBtn.addEventListener("click", function () { applyNamedLayout(name); });
+        var dupBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Duplicate")]);
+        dupBtn.addEventListener("click", function () {
+          var layouts = savedLayouts();
+          var source = layouts[name] || BUILTIN_LAYOUTS[name];
+          var copyName = name + " copy"; var i = 2;
+          while (layouts[copyName] || BUILTIN_LAYOUTS[copyName]) { copyName = name + " copy " + (i++); }
+          layouts[copyName] = JSON.parse(JSON.stringify(source));
+          storeLayouts(layouts); paint();
+        });
+        var row = Arena.el("div", { style: "display:flex;gap:8px;align-items:center;margin:4px 0;flex-wrap:wrap" }, [
+          Arena.el("span", { "class": "mono", style: "font-size:11.5px" }, [
+            document.createTextNode(name + (isBuiltin ? " (built-in)" : "") + (name === active ? " · active" : ""))]),
+          Arena.el("span", { style: "flex:1" }), applyBtn, dupBtn]);
+        if (!isBuiltin) {
+          var delBtn = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("Delete")]);
+          delBtn.addEventListener("click", function () {
+            var layouts = savedLayouts(); delete layouts[name]; storeLayouts(layouts); paint();
+          });
+          row.appendChild(delBtn);
+        }
+        list.appendChild(row);
+      });
+      host.appendChild(list);
+
+      var nameInput = Arena.el("input", { id: "layout-new-name", placeholder: "e.g. My morning desk", style: "min-width:220px" });
+      var saveBtn = Arena.el("button", { "class": "btn primary sm", id: "layout-save" }, [document.createTextNode("Save current as…")]);
+      saveBtn.addEventListener("click", function () {
+        var name = nameInput.value.trim();
+        if (!name) { Arena.toast("err", "Give the layout a name first."); return; }
+        var layouts = savedLayouts();
+        layouts[name] = { chart: { layout: chartConfig().layout }, cards: cardPrefs() };
+        storeLayouts(layouts);
+        localStorage.setItem("axiom_active_layout", name);
+        nameInput.value = "";
+        Arena.toast("ok", "Saved layout: " + name);
+        paint();
+      });
+      var resetBtn = Arena.el("button", { "class": "btn ghost sm", id: "layout-reset" }, [document.createTextNode("Reset to defaults")]);
+      resetBtn.addEventListener("click", function () {
+        Arena.confirmDialog("Reset workspace layouts",
+          "What it does: deletes every saved layout and clears card preferences. " +
+          "What changes: the workspace returns to the built-in presets. " +
+          "What can go wrong: nothing — saved layouts are only display preferences. " +
+          "Recovery: re-create saved layouts; built-in presets are never removed.",
+          "Reset", true, function () {
+          storeLayouts({});
+          localStorage.removeItem("axiom_card_prefs");
+          localStorage.removeItem("axiom_active_layout");
+          Arena.toast("ok", "Workspace reset to defaults.");
+          show(state.view); paint();
+        });
+      });
+      host.appendChild(Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-top:8px" }, [nameInput, saveBtn, resetBtn]));
+    }
+    paint();
   }
 
   function renderUpdateCenter(host) {
