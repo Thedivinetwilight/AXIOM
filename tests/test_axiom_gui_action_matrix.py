@@ -389,3 +389,39 @@ class TestResearchSchedulerSurface:
         assert admitted["admitted"] and admitted["quota_used"] == 1
         refreshed = client.get("/api/research/schedule").json()
         assert refreshed["quota_used"] == 1
+
+
+class TestChartWorkspace:
+    """GUI charts (spec §49): recorded candles only, honest empty state."""
+
+    @staticmethod
+    def _seed(client, symbol, count):
+        from datetime import datetime, timedelta, timezone
+
+        from app.history.store import CandleStore
+
+        store = CandleStore(client.app.state.workstation.data_dir / "candles")
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        store.upsert_candles(symbol, "days", 1, [
+            {"ts": (start + timedelta(days=i)).isoformat(),
+             "open": 100 + i, "high": 102 + i, "low": 99 + i,
+             "close": 101 + i, "volume": 5} for i in range(count)])
+
+    def test_empty_chart_state_is_honest(self, client):
+        body = client.get("/api/candles/india/NSE|NEVER_RECORDED").json()
+        assert body["count"] == 0 and body["candles"] == []
+        assert body["source"] == "none recorded"
+
+    def test_chart_serves_recorded_candles(self, client):
+        self._seed(client, "CHARTY", 12)
+        body = client.get("/api/candles/india/NSE|CHARTY").json()
+        assert body["count"] == 12
+        assert body["source"] == "recorded candles (OBSERVED)"
+        assert body["candles"][-1]["close"] == 101 + 11
+
+    def test_chart_limit_is_bounded(self, client):
+        self._seed(client, "CHARTY2", 30)
+        body = client.get("/api/candles/india/NSE|CHARTY2?limit=10").json()
+        assert body["count"] == 10
+        # the tail of the series — newest bars, chronological
+        assert body["candles"][-1]["close"] > body["candles"][0]["close"]

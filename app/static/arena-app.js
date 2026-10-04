@@ -43,6 +43,12 @@
       buildShell();
       show(state.view);
       startPolling();
+      document.addEventListener("keydown", function (ev) {
+        if (ev.key !== "F" && ev.key !== "f") return;
+        var t = ev.target;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+        toggleFocusMode();
+      });
     }).catch(function (e) {
       mainEl.innerHTML = "";
       mainEl.appendChild(Arena.el("div", { "class": "banner err", style: "max-width:560px;margin:60px auto" }, [
@@ -1646,6 +1652,10 @@
     var instrumentHost = Arena.el("div", { id: "mk-instrument", "class": "section-gap" });
     root.appendChild(card("Instrument workspace", instrumentHost));
 
+    var chartHost = Arena.el("div", { id: "mk-charts", "class": "section-gap" });
+    root.appendChild(card("Chart workspace", chartHost));
+    renderChartWorkspace(chartHost);
+
     var changedHost = Arena.el("div", { id: "mk-changed" });
     root.appendChild(Arena.el("div", { "class": "section-gap" }, [card("What changed", changedHost)]));
     whatChangedFeed(changedHost, "");
@@ -1767,7 +1777,7 @@
       var chips = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
       (u.symbols || []).forEach(function (sym) {
         chips.appendChild(Arena.el("button", { "class": "btn ghost sm", id: "instr-" + sym.replace(/[^A-Za-z0-9]/g, "_"),
-          onclick: function () { renderInstrumentDetail(u.market_id, sym); } }, [document.createTextNode(sym)]));
+          onclick: function () { renderInstrumentDetail(u.market_id, sym); linkChartSymbol(sym); } }, [document.createTextNode(sym)]));
       });
       if (!(u.symbols || []).length) chips.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode("Universe has no symbols.")]));
       host.appendChild(chips);
@@ -1851,6 +1861,189 @@
         }
       }).catch(function () {});
     }).catch(function (e) { detail.innerHTML = ""; detail.appendChild(Arena.el("span", { "class": "faint" }, [document.createTextNode(e.message)])); });
+  }
+
+  // =====================================================================
+  // CHART WORKSPACE (spec §49: layouts 1/2/4/6/8, linked panels, focus F)
+  // =====================================================================
+  function chartConfig() {
+    var raw = localStorage.getItem("axiom_chart_layout");
+    try {
+      var cfg = JSON.parse(raw);
+      if (cfg && [1, 2, 4, 6, 8].indexOf(cfg.layout) >= 0 && Array.isArray(cfg.panels)) return cfg;
+    } catch (e) { /* fall through to default */ }
+    return { layout: 1, panels: [{ identity: "", unit: "days", interval: 1 }] };
+  }
+  function saveChartConfig(cfg) {
+    localStorage.setItem("axiom_chart_layout", JSON.stringify(cfg));
+  }
+
+  function renderChartWorkspace(host) {
+    host.innerHTML = "";
+    var cfg = chartConfig();
+    host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
+      "Charts render RECORDED candles only — an empty chart means nothing is recorded, never a silent zero. " +
+      "Panels are linked: picking a symbol in the instrument workspace updates panel 1, and the layout choice " +
+      "is saved. Press F to toggle focus mode (minimal UI).")]));
+
+    var bar = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:8px" });
+    bar.appendChild(Arena.el("span", { "class": "faint", style: "align-self:center" }, [document.createTextNode("Layout:")]));
+    [1, 2, 4, 6, 8].forEach(function (n) {
+      bar.appendChild(Arena.el("button", {
+        "class": "btn sm " + (cfg.layout === n ? "primary" : "ghost"),
+        id: "chart-layout-" + n,
+        onclick: function () {
+          var c = chartConfig(); c.layout = n;
+          while (c.panels.length < n) c.panels.push({ identity: c.panels[0] ? c.panels[0].identity : "", unit: "days", interval: 1 });
+          saveChartConfig(c); renderChartWorkspace(host);
+        }
+      }, [document.createTextNode(String(n))]));
+    });
+    var focusBtn = Arena.el("button", { "class": "btn ghost sm", id: "chart-focus", style: "margin-left:auto" },
+      [document.createTextNode("Focus mode (F)")]);
+    focusBtn.addEventListener("click", toggleFocusMode);
+    bar.appendChild(focusBtn);
+    host.appendChild(bar);
+
+    var grid = Arena.el("div", { "class": "chart-grid cols-" + cfg.layout, id: "chart-grid" });
+    for (var i = 0; i < cfg.layout; i++) {
+      var panel = cfg.panels[i] || { identity: "", unit: "days", interval: 1 };
+      grid.appendChild(buildChartPanel(i, panel));
+    }
+    host.appendChild(grid);
+  }
+
+  function buildChartPanel(index, panel) {
+    var box = Arena.el("div", { "class": "chart-panel", id: "chart-panel-" + index });
+    var ident = Arena.el("input", { id: "chart-symbol-" + index, placeholder: "e.g. NSE|RELIANCE", value: panel.identity || "", style: "min-width:160px" });
+    var unit = Arena.el("select", { id: "chart-unit-" + index });
+    [["days", "1D"]].forEach(function (u) {
+      unit.appendChild(Arena.el("option", { value: u[0] }, [document.createTextNode(u[1])]));
+    });
+    unit.value = panel.unit || "days";
+    var refresh = Arena.el("button", { "class": "btn ghost sm", id: "chart-refresh-" + index }, [document.createTextNode("Load")]);
+    var chartHost = Arena.el("div", { id: "chart-canvas-" + index, "class": "chart-canvas" });
+    var head = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:6px" }, [
+      Arena.el("span", { "class": "faint", style: "align-self:center" }, [document.createTextNode("#" + (index + 1))]),
+      ident, unit, refresh]);
+    box.appendChild(head);
+    box.appendChild(chartHost);
+
+    function load() {
+      var symbol = ident.value.trim();
+      if (!symbol) {
+        chartHost.innerHTML = "";
+        chartHost.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("Enter an instrument identity to chart.")]));
+        return;
+      }
+      var market = localStorage.getItem("axiom_market") || "india";
+      chartHost.innerHTML = "";
+      chartHost.appendChild(Arena.el("div", { "class": "muted" }, [document.createTextNode("Loading recorded bars…")]));
+      Arena.get("/api/candles/" + encodeURIComponent(market) + "/" + encodeURIComponent(symbol) +
+        "?unit=" + encodeURIComponent(unit.value) + "&interval=1&limit=300").then(function (d) {
+        var cfg = chartConfig();
+        cfg.panels[index] = { identity: symbol, unit: unit.value, interval: 1 };
+        saveChartConfig(cfg);
+        chartHost.innerHTML = "";
+        if (!d.count) {
+          chartHost.appendChild(Arena.el("div", { "class": "empty" }, [
+            document.createTextNode("No recorded bars for " + symbol + " — nothing was synthesised.")]));
+          return;
+        }
+        drawCandleChart(chartHost, d.candles, symbol);
+      }).catch(function (e) {
+        chartHost.innerHTML = "";
+        chartHost.appendChild(Arena.el("div", { "class": "banner err" }, [document.createTextNode(e.message)]));
+      });
+    }
+    refresh.addEventListener("click", load);
+    if (panel.identity) load();
+    return box;
+  }
+
+  function linkChartSymbol(symbol) {
+    var cfg = chartConfig();
+    if (!cfg.panels.length) cfg.panels.push({ identity: symbol, unit: "days", interval: 1 });
+    cfg.panels[0] = { identity: symbol, unit: (cfg.panels[0] && cfg.panels[0].unit) || "days", interval: 1 };
+    saveChartConfig(cfg);
+    var input = document.getElementById("chart-symbol-0");
+    if (input) {
+      input.value = symbol;
+      var refresh = document.getElementById("chart-refresh-0");
+      if (refresh) refresh.click();
+    }
+  }
+
+  function drawCandleChart(container, candles, label) {
+    var W = 640, H = 240, padL = 46, padR = 8, padT = 10, padB = 34, volH = 40;
+    var highs = candles.map(function (c) { return c.high; });
+    var lows = candles.map(function (c) { return c.low; });
+    var vols = candles.map(function (c) { return c.volume || 0; });
+    var max = Math.max.apply(null, highs), min = Math.min.apply(null, lows);
+    var maxVol = Math.max.apply(null, vols) || 1;
+    if (max === min) { max += 1; min -= 1; }
+    var priceH = H - padT - padB - volH;
+    var step = (W - padL - padR) / candles.length;
+    var bw = Math.max(1.5, step * 0.6);
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", String(H));
+
+    function y(price) { return padT + (1 - (price - min) / (max - min)) * priceH; }
+    // gridlines + price axis (5 levels)
+    for (var g = 0; g <= 4; g++) {
+      var price = min + (max - min) * g / 4;
+      var gy = y(price);
+      var line = document.createElementNS(ns, "line");
+      line.setAttribute("x1", padL); line.setAttribute("x2", W - padR);
+      line.setAttribute("y1", gy); line.setAttribute("y2", gy);
+      line.setAttribute("stroke", "rgba(148,163,184,.14)");
+      svg.appendChild(line);
+      var txt = document.createElementNS(ns, "text");
+      txt.setAttribute("x", padL - 6); txt.setAttribute("y", gy + 3);
+      txt.setAttribute("text-anchor", "end");
+      txt.setAttribute("fill", "#8ea0b5"); txt.setAttribute("font-size", "9");
+      txt.textContent = price.toFixed(price >= 1000 ? 0 : 2);
+      svg.appendChild(txt);
+    }
+    candles.forEach(function (c, i) {
+      var x = padL + i * step + (step - bw) / 2;
+      var up = c.close >= c.open;
+      var color = up ? "#10b981" : "#f43f5e";
+      var wick = document.createElementNS(ns, "line");
+      wick.setAttribute("x1", x + bw / 2); wick.setAttribute("x2", x + bw / 2);
+      wick.setAttribute("y1", y(c.high)); wick.setAttribute("y2", y(c.low));
+      wick.setAttribute("stroke", color); wick.setAttribute("stroke-width", "1");
+      svg.appendChild(wick);
+      var body = document.createElementNS(ns, "rect");
+      var top = y(Math.max(c.open, c.close)), bot = y(Math.min(c.open, c.close));
+      body.setAttribute("x", x); body.setAttribute("y", top);
+      body.setAttribute("width", bw);
+      body.setAttribute("height", Math.max(1, bot - top));
+      body.setAttribute("fill", up ? "rgba(16,185,129,.85)" : "rgba(244,63,94,.85)");
+      svg.appendChild(body);
+      // volume lane
+      var vh = (c.volume || 0) / maxVol * volH;
+      var vol = document.createElementNS(ns, "rect");
+      vol.setAttribute("x", x); vol.setAttribute("width", bw);
+      vol.setAttribute("y", H - padB - vh); vol.setAttribute("height", Math.max(0.5, vh));
+      vol.setAttribute("fill", "rgba(56,189,248,.35)");
+      svg.appendChild(vol);
+    });
+    var first = candles[0], last = candles[candles.length - 1];
+    var cap = Arena.el("div", { "class": "faint", style: "font-size:10.5px;margin-top:2px" }, [
+      document.createTextNode(label + " · " + candles.length + " recorded bars · " +
+        (first.ts || "") + " → " + (last.ts || "") + " · OBSERVED only")]);
+    container.appendChild(svg);
+    container.appendChild(cap);
+  }
+
+  function toggleFocusMode() {
+    document.body.classList.toggle("axiom-focus");
+    Arena.toast("ok", document.body.classList.contains("axiom-focus")
+      ? "Focus mode on — press F to restore the shell." : "Focus mode off.");
   }
 
   // =====================================================================

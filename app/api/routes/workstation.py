@@ -1004,6 +1004,31 @@ async def research_schedule_admit(body: ResearchAdmitBody, request: Request) -> 
 
 
 # =====================================================================
+# RECORDED CANDLES FOR CHARTS (spec sections 49, 6)
+# =====================================================================
+
+@router.get("/api/candles/{market_id}/{identity}",
+            dependencies=[Depends(authenticate)])
+async def recorded_candles(market_id: str, identity: str, request: Request,
+                           unit: str = "days", interval: int = 1,
+                           limit: int = 300) -> dict:
+    """Recorded candles only — never resampled from nothing, never
+    interpolated, never synthesised. An empty result means no recording."""
+    workstation = ws(request)
+    from app.history.store import CandleStore
+
+    store = CandleStore(workstation.data_dir / "candles")
+    symbol = identity.split("|")[-1]
+    rows = store.read_range(symbol, unit=unit, interval=interval)
+    bounded = max(1, min(int(limit), 2000))
+    tail = rows[-bounded:]
+    return {"market_id": market_id, "identity": identity, "unit": unit,
+            "interval": interval, "count": len(tail),
+            "candles": tail,
+            "source": "recorded candles (OBSERVED)" if tail else "none recorded"}
+
+
+# =====================================================================
 # MODEL AGREEMENT / DISAGREEMENT (spec section 98)
 # =====================================================================
 
