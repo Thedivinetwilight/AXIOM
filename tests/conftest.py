@@ -10,6 +10,39 @@ def bars():
     return sample(count=300)
 
 
+class _DeterministicResourceGovernor:
+    """Test-only pressure source; never samples the host running CI."""
+
+    def __init__(self, *, pressure: bool):
+        self._pressure = bool(pressure)
+        self.trading_critical = False
+
+    def under_pressure(self) -> bool:
+        return self._pressure
+
+
+@pytest.fixture
+def quota_admission_client(client):
+    """Isolate quota tests from real CI-host load/disk pressure.
+
+    Pressure admission has separate explicit tests using a pressured governor;
+    quota tests should measure quota behavior, not the runner's transient disk.
+    """
+    workstation = client.app.state.workstation
+    workstation.research_scheduler.governor = _DeterministicResourceGovernor(
+        pressure=False)
+    return client
+
+
+@pytest.fixture
+def pressure_admission_client(client):
+    """Exercise the real HTTP refusal path under explicit resource pressure."""
+    workstation = client.app.state.workstation
+    workstation.research_scheduler.governor = _DeterministicResourceGovernor(
+        pressure=True)
+    return client
+
+
 @pytest.fixture
 def zero_cost():
     return ExecutionConfig(

@@ -151,10 +151,18 @@ class TaskCenter:
             tasks = [t for t in tasks if t.state == state]
         return [t.to_dict(now=self.clock()) for t in tasks[:limit]]
 
-    def counts(self) -> dict:
-        out: dict[str, int] = {}
-        for task in self._tasks.values():
-            out[task.state] = out.get(task.state, 0) + 1
+    def counts(self) -> dict[str, int]:
+        """Return a complete, deterministic count for every public task state.
+
+        Zero-count states are part of the API contract too: callers should not
+        have to infer whether a valid state is unsupported or simply empty.
+        Snapshot under the same lock used for state transitions so counts are
+        internally consistent while workers update tasks concurrently.
+        """
+        out = {state: 0 for state in STATES}
+        with self._lock:
+            for task in self._tasks.values():
+                out[task.state] += 1
         return out
 
     def recover(self) -> int:

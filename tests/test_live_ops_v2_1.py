@@ -8,6 +8,7 @@ transport and everything else is pure.
 
 import json
 from datetime import datetime, timedelta, timezone
+from queue import Empty
 
 import httpx
 import pytest
@@ -22,6 +23,34 @@ from app.live.preflight import ERROR, WARNING, run_checks, summarize
 from app.live.watchdog import BreachMonitor, LiveWatchdog
 
 NOW = datetime(2026, 10, 2, 9, 15, tzinfo=timezone.utc)
+
+
+def _race_live_engine_lease_worker(database_url, index, now_iso, barrier, queue):
+    """Spawn-safe worker for the cross-process atomic lease race test.
+
+    This must remain at module scope: macOS and Windows use spawn semantics,
+    which cannot pickle a target nested inside the pytest test method.
+    """
+    from app.database.database import Database
+    from app.database.repository import Repository
+    from app.live.lock import EngineLock
+
+    database = None
+    try:
+        database = Database(database_url)
+        repository = Repository(database)
+        lock = EngineLock(repository, live=True, owner=f"racer-{index}")
+        barrier.wait(timeout=30)
+        decision = lock.acquire(now=datetime.fromisoformat(now_iso))
+        queue.put((index, bool(decision.granted), None))
+    except BaseException as exc:
+        # Report the worker error to the parent before re-raising so a failed
+        # subprocess cannot masquerade as an ordinary losing contender.
+        queue.put((index, False, type(exc).__name__))
+        raise
+    finally:
+        if database is not None:
+            database.close()
 
 
 def repo(tmp_path, name="lops.db"):
@@ -2537,38 +2566,55 @@ class TestSingleEngineLock:
         database.close()
 
     def test_two_racing_engines_yield_exactly_one_owner(self, tmp_path):
-        # FINAL-11/10 §15 atomicity: the lease is decided by ONE conditional
-        # SQL statement, so N simultaneous *processes* with separate
-        # connections produce exactly one win — the true two-starts race.
+        # FINAL-11/10 §15 atomicity: independent spawn-started processes use
+        # separate database connections and contend at the same barrier. The
+        # conditional SQL lease must grant exactly one owner on every OS.
         import multiprocessing
 
         db_path = tmp_path / "race.db"
         repository, database = repo(tmp_path, "race.db")  # creates the schema
-        now = datetime.now(timezone.utc)
-
-        def _race(index, queue):
-            from app.database.database import Database
-            from app.database.repository import Repository
-            from app.live.lock import EngineLock
-
-            db = Database(f"sqlite:///{db_path}")
-            rep = Repository(db)
-            lock = EngineLock(rep, live=True, owner=f"racer-{index}")
-            decision = lock.acquire(now=now)
-            queue.put((index, decision.granted))
-            db.close()
-
-        queue = multiprocessing.Queue()
-        processes = [multiprocessing.Process(target=_race, args=(i, queue))
-                     for i in range(6)]
-        for proc in processes:
-            proc.start()
-        for proc in processes:
-            proc.join(30)
-        results = [queue.get(timeout=10) for _ in processes]
-        winners = [index for index, granted in results if granted]
-        assert len(winners) == 1, f"expected exactly one owner, got {winners}"
-        database.close()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        context = multiprocessing.get_context("spawn")
+        queue = context.Queue()
+        contenders = 6
+        barrier = context.Barrier(contenders)
+        database_url = f"sqlite:///{db_path}"
+        processes = [
+            context.Process(
+                target=_race_live_engine_lease_worker,
+                args=(database_url, index, now_iso, barrier, queue))
+            for index in range(contenders)
+        ]
+        results = []
+        try:
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(45)
+            still_running = [process for process in processes if process.is_alive()]
+            if still_running:
+                for process in still_running:
+                    process.terminate()
+                for process in still_running:
+                    process.join(5)
+                pytest.fail("spawned lease contenders did not finish within 45 seconds")
+            assert [process.exitcode for process in processes] == [0] * contenders
+            try:
+                results = [queue.get(timeout=10) for _ in processes]
+            except Empty:
+                pytest.fail("a lease contender exited without reporting its result")
+            errors = [(index, error) for index, _, error in results if error]
+            assert not errors, f"lease contender errors: {errors}"
+            winners = [index for index, granted, _ in results if granted]
+            assert len(winners) == 1, f"expected exactly one owner, got {winners}"
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                process.join(5)
+            queue.close()
+            queue.join_thread()
+            database.close()
 
     def test_paper_engines_are_never_blocked(self, tmp_path):
         now = datetime.now(timezone.utc)

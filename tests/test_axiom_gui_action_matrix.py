@@ -380,14 +380,14 @@ class TestAlertCategories:
 class TestResearchSchedulerSurface:
     """GUI card: bounded research loop (§96) + session-aware policy (§97)."""
 
-    def test_schedule_card_flow(self, client):
-        status = client.get("/api/research/schedule").json()
+    def test_schedule_card_flow(self, quota_admission_client):
+        status = quota_admission_client.get("/api/research/schedule").json()
         assert status["loop_steps"][0] == "OBSERVE"
         assert status["loop_steps"][-1] == "IMPROVE"
-        admitted = client.post("/api/research/schedule/admit",
-                               json={"kind": "backtest"}).json()
+        admitted = quota_admission_client.post(
+            "/api/research/schedule/admit", json={"kind": "backtest"}).json()
         assert admitted["admitted"] and admitted["quota_used"] == 1
-        refreshed = client.get("/api/research/schedule").json()
+        refreshed = quota_admission_client.get("/api/research/schedule").json()
         assert refreshed["quota_used"] == 1
 
 

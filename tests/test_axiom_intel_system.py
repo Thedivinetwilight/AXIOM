@@ -30,7 +30,7 @@ from app.state.changes import ChangeEngine
 from app.system.backup import BackupManager
 from app.system.latency import LatencyTracker, track
 from app.system.resources import ResourceGovernor
-from app.system.tasks import TaskCenter
+from app.system.tasks import STATES as TASK_STATES, TaskCenter
 
 
 @pytest.fixture()
@@ -321,6 +321,19 @@ class TestLatency:
 # =====================================================================
 
 class TestTaskCenter:
+    def test_counts_are_complete_for_every_valid_state(self):
+        tasks = TaskCenter()
+        assert tasks.counts() == {state: 0 for state in TASK_STATES}
+
+        task = tasks.submit("scan", "research")
+        queued = tasks.counts()
+        assert set(queued) == set(TASK_STATES)
+        assert queued["QUEUED"] == 1 and queued["RUNNING"] == 0
+
+        assert tasks.may_start(task.task_id)
+        running = tasks.counts()
+        assert running["QUEUED"] == 0 and running["RUNNING"] == 1
+
     def test_lifecycle(self, repo):
         tasks = TaskCenter(repo)
         task = tasks.submit("walk-forward sweep", "research")
@@ -583,14 +596,16 @@ class TestWorkstationApi:
         task = client.post("/api/tasks", json={"name": "scan", "type": "research"}).json()
         pressure = client.get("/api/system/control").json()["pressure"]
         started = client.post(f"/api/tasks/{task['id']}", json={"action": "start"}).json()
+        task_counts = client.get("/api/tasks").json()["counts"]
+        assert set(task_counts) == set(TASK_STATES)
         if pressure:
             # The resource governor must refuse new research work under
             # pressure — and say so by leaving the task queued.
             assert started["started"] is False
-            assert client.get("/api/tasks").json()["counts"]["RUNNING"] == 0
+            assert task_counts["RUNNING"] == 0
         else:
             assert started["started"]
-            assert client.get("/api/tasks").json()["counts"]["RUNNING"] == 1
+            assert task_counts["RUNNING"] == 1
         assert client.get("/api/backup/list").json()["backups"] == []
         created = client.post("/api/backup/create", json={"note": "api"}).json()
         assert created["sha256"]

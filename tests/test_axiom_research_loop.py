@@ -194,12 +194,22 @@ class TestSchedulerApi:
         assert status["loop_steps"][0] == "OBSERVE"
         assert "bounded" in status["note"]
 
-    def test_admit_consumes_quota_over_http(self, client):
-        first = client.post("/api/research/schedule/admit",
-                            json={"kind": "backtest"}).json()
+    def test_admit_consumes_quota_over_http(self, quota_admission_client):
+        first = quota_admission_client.post(
+            "/api/research/schedule/admit", json={"kind": "backtest"}).json()
         assert first["admitted"] and first["quota_used"] == 1
-        again = client.get("/api/research/schedule").json()
+        again = quota_admission_client.get("/api/research/schedule").json()
         assert again["quota_used"] == 1
+
+    def test_resource_pressure_refuses_http_admission_without_spending_quota(
+            self, pressure_admission_client):
+        decision = pressure_admission_client.post(
+            "/api/research/schedule/admit", json={"kind": "backtest"}).json()
+        assert decision["admitted"] is False
+        assert decision["verdict"] == "REFUSED_RESOURCE_PRESSURE"
+        assert decision["quota_used"] == 0
+        status = pressure_admission_client.get("/api/research/schedule").json()
+        assert status["quota_used"] == 0
 
     def test_critical_window_visible_via_api_when_live_active(self, client):
         # A live session cannot be activated without full readiness, but the
