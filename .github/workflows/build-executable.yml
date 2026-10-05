@@ -97,7 +97,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E "^(FAILED|ERROR)" pytest-output.txt | head -25 | while IFS= read -r line; do
+          grep -E "^(FAILED|ERROR)" pytest-output.txt | awk 'NR <= 25' | while IFS= read -r line; do
             echo "::error title=Suite failure::${line}"
           done
           exit 1
@@ -177,48 +177,42 @@ jobs:
         if: failure() && steps.fullsuite.outcome == 'failure'
         shell: bash
         run: |
-          grep -E "^(FAILED|ERROR)" pytest-output.txt | head -25 | while IFS= read -r line; do
+          grep -E "^(FAILED|ERROR)" pytest-output.txt | awk 'NR <= 25' | while IFS= read -r line; do
             echo "::error title=Suite failure on ${{ matrix.os }}::${line}"
           done
-          python - <<'PY'
-          from pathlib import Path
-          import os
-          import xml.etree.ElementTree as ET
-
-          lines = Path("pytest-output.txt").read_text(
-              encoding="utf-8", errors="replace").splitlines()
-          tail = lines[-20:]
-          for line in tail:
-              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error title=Full-suite output on ${{ matrix.os }}::{safe}")
-
-          report = Path("pytest-results.xml")
-          if report.exists():
-              try:
-                  root = ET.parse(report).getroot()
-              except ET.ParseError as exc:
-                  print(f"::error title=Pytest report parse failed::{exc}")
-              else:
-                  for case in root.iter("testcase"):
-                      failure = case.find("failure")
-                      if failure is None:
-                          failure = case.find("error")
-                      if failure is not None:
-                          message = " ".join((failure.get("message") or failure.text or "").split())
-                          name = case.get("classname", "") + "::" + case.get("name", "unknown")
-                          safe = message[:350].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                          print(f"::error title=Pytest failure::{name} — {safe}")
-          else:
-              print("::error title=Pytest report missing::pytest-results.xml was not written")
-
-          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary_path:
-              with open(summary_path, "a", encoding="utf-8") as summary:
-                  summary.write("\n### Full-suite diagnostic tail\n\n```text\n")
-                  summary.write("\n".join(tail))
-                  summary.write("\n```\n")
-          PY
           exit 1
+
+      - name: Annotate Windows pytest failure details
+        if: always() && matrix.os == 'windows-latest' && steps.fullsuite.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f pytest-output.txt ]; then
+            tail -n 20 pytest-output.txt | while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              printf '::error title=Windows pytest output::%s\n' "$safe"
+            done
+          fi
+          if [ -f pytest-results.xml ]; then
+            python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pytest-results.xml").getroot()
+          for case in root.iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is not None:
+                  name = (case.get("classname", "") + "::" +
+                          case.get("name", "unknown"))
+                  message = " ".join((failure.get("message") or
+                                      failure.text or "").split())[:350]
+                  message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Pytest failure::{name} — {message}")
+          PY
+          else
+            echo "::error title=Windows pytest output::JUnit report is missing"
+          fi
 
       - name: Upload failed Windows full-suite output
         if: failure() && matrix.os == 'windows-latest' && steps.fullsuite.outcome == 'failure'
