@@ -21,7 +21,7 @@ def main() -> int:
         from PySide6.QtGui import QPainter, QPen
         from PySide6.QtWidgets import (
             QApplication, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-            QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
+            QInputDialog, QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
             QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
         )
     except ImportError as exc:
@@ -476,14 +476,20 @@ def main() -> int:
         def _on_emergency_stop(self):
             answer = QMessageBox.question(
                 self, "EMERGENCY STOP",
-                "Halt trading and cancel open sandbox orders?\n"
-                "(Persisted; survives restarts until explicitly resumed.)")
+                "Persist the emergency stop, revoke live entry authorization, and request cancellation of working orders?\n"
+                "Positions are never auto-closed; live risk-reducing exits remain enabled. The flag survives restarts.")
             if answer == QMessageBox.Yes:
                 self._safe(self.client.emergency_stop, {})
                 self._refresh()
 
         def _on_resume(self):
-            self._safe(self.client.resume, {})
+            phrase, accepted = QInputDialog.getText(
+                self, "Clear emergency stop",
+                "If live trading is configured, enter the exact configured LIVE confirmation phrase. "
+                "Leave blank only for paper mode:")
+            if not accepted:
+                return
+            self._safe(lambda: self.client.resume(phrase), {})
             self._refresh()
 
     app = QApplication([])

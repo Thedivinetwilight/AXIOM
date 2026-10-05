@@ -389,23 +389,31 @@ class _V1RepositoryBase:
     # cutoff: an existing owner whose heartbeat is older than the cutoff is
     # provably gone and may be replaced; a fresh owner never is.
     def try_acquire_lease(self, name: str, owner: str, *, pid: int, host: str,
-                          live: bool, now_ts: str, stale_before_ts: str) -> dict:
+                          live: bool, now_ts: str, stale_before_ts: str,
+                          stale_proof: dict | None = None) -> dict:
         """Attempt to own lease ``name``. Returns {acquired, existing}.
 
-        The decision is ONE conditional upsert: ownership goes to the caller
-        only when the row is absent, already theirs, or provably stale
-        (heartbeat older than ``stale_before_ts``). Two racers cannot both
-        satisfy the WHERE clause for the same committed row, so exactly one
-        wins. There is no force bypass.
+        The owner decision remains ONE conditional upsert. A different LIVE
+        owner can only be replaced when EngineLock supplies a proof tuple
+        (owner, PID, host, heartbeat) that it checked as locally dead; the
+        upsert compares every proof field again, closing the race between that
+        OS check and the database write. A fresh, remote, malformed, or
+        still-alive owner is never displaced by heartbeat age alone.
         """
+        proof = stale_proof if isinstance(stale_proof, dict) else {}
+        proof_owner = str(proof.get("owner") or "")
+        proof_pid = int(proof.get("pid") or -1)
+        proof_host = str(proof.get("host") or "")
+        proof_heartbeat = str(proof.get("heartbeat_ts") or "")
         with self.db.transaction() as db:
             row = db.execute(
-                "SELECT owner, heartbeat_ts, live FROM engine_lease WHERE name=?",
-                (name,)).fetchone()
+                "SELECT owner, pid, host, started_ts, heartbeat_ts, live "
+                "FROM engine_lease WHERE name=?", (name,)).fetchone()
             existing = None
             if row:
-                existing = {"owner": row[0], "heartbeat_ts": row[1],
-                            "live": bool(row[2])}
+                existing = {"owner": row[0], "pid": row[1], "host": row[2],
+                            "started_ts": row[3], "heartbeat_ts": row[4],
+                            "live": bool(row[5])}
             cur = db.execute(
                 "INSERT INTO engine_lease (name, owner, pid, host, started_ts, "
                 "heartbeat_ts, live) VALUES (?,?,?,?,?,?,?) "
@@ -414,17 +422,29 @@ class _V1RepositoryBase:
                 "started_ts=CASE WHEN engine_lease.owner=excluded.owner "
                 "THEN engine_lease.started_ts ELSE excluded.started_ts END, "
                 "heartbeat_ts=excluded.heartbeat_ts, live=excluded.live "
-                "WHERE engine_lease.owner=excluded.owner "
-                "OR (datetime(engine_lease.heartbeat_ts) IS NOT NULL "
+                "WHERE (engine_lease.owner=excluded.owner "
+                "AND engine_lease.pid=excluded.pid "
+                "AND engine_lease.host=excluded.host) "
+                "OR engine_lease.live=0 "
+                "OR (engine_lease.owner=? AND engine_lease.pid=? "
+                "AND engine_lease.host=? AND engine_lease.heartbeat_ts=? "
+                "AND datetime(engine_lease.heartbeat_ts) IS NOT NULL "
                 "AND datetime(engine_lease.heartbeat_ts) < datetime(?))",
                 (name, owner, pid, host, now_ts, now_ts, int(bool(live)),
+                 proof_owner, proof_pid, proof_host, proof_heartbeat,
                  stale_before_ts))
             acquired = cur.rowcount > 0
-            renewed = bool(acquired and existing and existing["owner"] == owner)
+            renewed = bool(
+                acquired and existing and existing["owner"] == owner
+                and existing["pid"] == pid and existing["host"] == host)
+            took_over_stale = bool(
+                acquired and existing and existing["live"] and not renewed
+                and proof_owner == existing["owner"]
+                and proof_pid == existing["pid"]
+                and proof_host == existing["host"]
+                and proof_heartbeat == existing["heartbeat_ts"])
             return {"acquired": acquired, "existing": existing,
-                    "renewed": renewed,
-                    "took_over_stale": bool(acquired and existing
-                                            and existing["owner"] != owner)}
+                    "renewed": renewed, "took_over_stale": took_over_stale}
 
     def heartbeat_lease(self, name: str, owner: str, *, now_ts: str) -> bool:
         """Refresh the heartbeat ONLY if we still own the lease."""

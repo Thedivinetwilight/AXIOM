@@ -8,8 +8,9 @@ the operator, never stored server-side beyond the running process settings).
 """
 
 from app import __version__
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from app.api.auth import authenticate, loopback_or_bearer
 from app.live.alerts import recent_alerts
@@ -233,15 +234,57 @@ async def engine_stop(request: Request):
         {"stopped": True, "ts": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).isoformat(), "reason": "dashboard"},
     )
+    workstation = getattr(request.app.state, "workstation", None)
+    if workstation is not None:
+        current = workstation.live_sessions.current()
+        if current.state in {"ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+            workstation.live_sessions.block(reason="emergency stop: dashboard")
     return result
 
 
+class EngineResumeBody(BaseModel):
+    confirmation_phrase: str = ""
+
+
 @router.post("/engine/resume", dependencies=[Depends(authenticate)])
-async def engine_resume(request: Request):
+async def engine_resume(request: Request, body: EngineResumeBody | None = None):
     repository = request.app.state.repository
-    repository.set_engine_state("emergency_stop", {"stopped": False})
-    repository.record_system_event("ENGINE_RESUME_REQUESTED", {"source": "dashboard"})
-    return {"stopped": False}
+    workstation = getattr(request.app.state, "workstation", None)
+    settings = getattr(request.app.state, "settings", None)
+    from app.config.settings import LIVE_CONFIRM_PHRASE
+
+    live_configured = bool(
+        settings is not None and (
+            getattr(settings, "live_trading", False)
+            or str(getattr(settings, "mode", "")).upper() == "LIVE"
+            or str(getattr(settings, "broker", "")).upper() == "UPSTOX_LIVE"))
+    if live_configured and (body is None
+                            or body.confirmation_phrase != LIVE_CONFIRM_PHRASE):
+        raise HTTPException(
+            409, "Clearing a live emergency stop requires the exact confirmation phrase.")
+    manager = getattr(workstation, "live_sessions", None) if workstation else None
+    current = manager.current() if manager is not None else None
+    try:
+        if current is not None and current.state in {
+                "ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+            # Revoke the old epoch before clearing the kill switch. Resuming
+            # the flag alone must not restart a persisted ACTIVE session.
+            manager.block(reason="emergency stop clear requires fresh ARM")
+        repository.set_engine_state("emergency_stop", {
+            "stopped": False, "reason": "cleared by dashboard; fresh ARM required"})
+        repository.record_system_event(
+            "ENGINE_RESUME_REQUESTED", {"source": "dashboard",
+                                         "fresh_arm_required": True})
+        if (manager is not None and manager.current().state == "BLOCKED"
+                and "emergency stop" in manager.current().reason.lower()):
+            current = manager.release_block(
+                destination="STOPPED",
+                reason="emergency stop cleared; fresh ARM and ACTIVATE required")
+        return {"stopped": False,
+                "live_session": current.state if current is not None else None,
+                "fresh_arm_required": True}
+    except Exception as exc:
+        raise HTTPException(503, "Emergency-stop clear could not be confirmed.") from exc
 
 
 @router.get("/dashboard", response_class=HTMLResponse, include_in_schema=False,

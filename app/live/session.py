@@ -28,10 +28,13 @@ Hard rules enforced here and by tests:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.config.settings import LIVE_CONFIRM_PHRASE
 from app.live import preflight as live_preflight
+
+logger = logging.getLogger("bot.live.session")
 
 OFF = "OFF"
 CONFIGURED = "CONFIGURED"
@@ -81,14 +84,62 @@ class LiveSnapshot:
 
 
 class LiveSessionManager:
-    def __init__(self, repository, bus=None):
+    def __init__(self, repository, bus=None, *, engine_supervisor=None):
         self.repository = repository
         self.bus = bus
+        self.engine_supervisor = engine_supervisor
+        self._last_settings = None
         # Authorization epochs (§6 FINAL-11/10): activation mints a fresh
         # epoch; stop/disarm/block invalidate it. Durable, so a stale engine
         # process cannot reuse a superseded authorization.
         from app.live.gateway import AuthorizationEpochs
         self.epochs = AuthorizationEpochs(repository) if repository is not None else None
+
+    def _supervisor_context(self) -> dict:
+        """Prove the real engine process owns a reconciled live lease."""
+        if self.engine_supervisor is not None:
+            try:
+                return self.engine_supervisor.readiness_context()
+            except Exception as exc:
+                raise LiveTransitionError(
+                    "the supervised live engine is not ready "
+                    f"({type(exc).__name__}); activation is refused") from exc
+        if self.repository is None:
+            raise LiveTransitionError(
+                "activation requires a repository-backed live-engine supervisor")
+        from app.live.lock import EngineLock, _pid_alive
+
+        lease = EngineLock(self.repository, live=True).status()
+        try:
+            runtime = self.repository.get_engine_state("live_engine_runtime", {}) or {}
+        except Exception as exc:
+            raise LiveTransitionError(
+                "supervised runtime state is unreadable; activation is refused") from exc
+        age = lease.get("heartbeat_age_seconds")
+        verified = (
+            lease.get("readable") is True
+            and lease.get("atomic_supported") is True
+            and lease.get("held") is True and lease.get("live") is True
+            and lease.get("stale") is False
+            and lease.get("owner_liveness") == "alive"
+            and isinstance(age, (int, float))
+            and age <= lease.get("stale_after_seconds", 0)
+            and _pid_alive(int(lease.get("pid") or 0)) is True
+            and isinstance(runtime, dict) and runtime.get("state") == "READY"
+            and runtime.get("owner") == lease.get("owner")
+            and runtime.get("pid") == lease.get("pid")
+            and runtime.get("host") == lease.get("host")
+            and bool(runtime.get("reconciled_at")))
+        if not verified:
+            raise LiveTransitionError(
+                "a live engine with a fresh lease and completed reconciliation "
+                "is required before activation")
+        return {"supervisor_verified": True,
+                "supervisor_lease_owner": lease["owner"],
+                "supervisor_pid": lease["pid"],
+                "supervisor_host": lease["host"],
+                "last_market_data_ts": self.repository.get_engine_state(
+                    "last_market_data_ts")}
 
     # ------------------------------------------------------------ current --
     def current(self) -> LiveSnapshot:
@@ -113,11 +164,20 @@ class LiveSessionManager:
         configured = self._configuration_complete(settings)
         if not configured:
             return OFF if not self._any_live_intent(settings) else CONFIGURED
-        checks = live_preflight.run_checks(settings, repository=repository)
-        hard_fail = any((not c.ok) and c.severity == live_preflight.ERROR for c in checks)
+        context = {}
+        if self.engine_supervisor is not None:
+            try:
+                context = self.engine_supervisor.readiness_context()
+            except Exception:
+                # A failed supervisor proof remains visible as BLOCKED in the
+                # readiness contract whenever a live lease is held; never
+                # synthesize a ready context for the UI.
+                context = {}
+        readiness = self.readiness(
+            settings, repository=repository or self.repository, context=context)
         if reconciliation_blocked:
             return RECONCILING
-        if hard_fail:
+        if readiness["verdict"] in ("BLOCKED", "BLOCKED_UNVERIFIED"):
             return BLOCKED
         return READY
 
@@ -138,8 +198,11 @@ class LiveSessionManager:
                 and confirm == LIVE_CONFIRM_PHRASE)
 
     # -------------------------------------------------------- readiness ---
-    def readiness(self, settings, *, repository=None) -> dict:
-        checks = live_preflight.run_checks(settings, repository=repository)
+    def readiness(self, settings, *, repository=None,
+                  context: dict | None = None) -> dict:
+        """Full operational readiness, including UNKNOWN-as-blocking checks."""
+        checks = live_preflight.run_readiness_center_checks(
+            settings, repository=repository, context=context)
         serialized = []
         for check in checks:
             if check.ok:
@@ -196,7 +259,7 @@ class LiveSessionManager:
 
     # ------------------------------------------------------- transitions --
     def arm(self, settings, *, confirmation_phrase: str, repository=None,
-            actor: str = "gui") -> LiveSnapshot:
+            actor: str = "gui", context: dict | None = None) -> LiveSnapshot:
         """Explicit operator authorization: READY -> ARMED.
 
         Refuses unless the readiness contract passes. This is the ONLY path
@@ -206,6 +269,11 @@ class LiveSessionManager:
         if confirmation_phrase != LIVE_CONFIRM_PHRASE:
             raise LiveTransitionError(
                 "Arming live trading requires the explicit confirmation phrase.")
+        current = self.current()
+        if current.state not in (OFF, CONFIGURED, READY, STOPPED):
+            raise LiveTransitionError(
+                f"Cannot arm live trading from state {current.state}; "
+                "resolve or explicitly release the current session first.")
         if self.repository is not None:
             from app.live.ops import read_emergency_stop
 
@@ -216,7 +284,11 @@ class LiveSessionManager:
             if stopped:
                 raise LiveTransitionError(
                     f"Cannot arm while the emergency stop is active ({why}).")
-        readiness = self.readiness(settings, repository=repository or self.repository)
+        # A real supervisor/lease must exist before the state can be armed;
+        # an ACTIVE/READY database value alone is not runtime proof.
+        context = self._supervisor_context()
+        readiness = self.readiness(
+            settings, repository=repository or self.repository, context=context)
         if readiness["verdict"] in ("BLOCKED", "BLOCKED_UNVERIFIED"):
             offenders = readiness["required_blocked"] + readiness["required_unknown"]
             raise LiveTransitionError(
@@ -224,23 +296,39 @@ class LiveSessionManager:
                 + "; ".join(offenders or ["unknown blocker"])
                 + (" — a required check is UNKNOWN and must block"
                    if readiness["verdict"] == "BLOCKED_UNVERIFIED" else ""))
+        self._last_settings = settings
         return self._transition(ARMED, f"operator arming by {actor} after readiness "
                                        f"verdict {readiness['verdict']}",
                                 payload={"verdict": readiness["verdict"]})
 
-    def activate(self, *, actor: str = "gui") -> LiveSnapshot:
-        """ARMED -> ACTIVE. Requires prior explicit arming; never from OFF/READY.
+    def activate(self, *, settings=None, actor: str = "gui",
+                 context: dict | None = None) -> LiveSnapshot:
+        """ARMED -> ACTIVE after the COMPLETE readiness contract is rechecked.
 
-        Activation mints a FRESH authorization epoch (§6): a stale engine
-        holding the previous epoch can no longer submit, and a restart never
-        silently reuses an old authorization.
+        Activation requires prior explicit arming, never from OFF/READY. It
+        mints a FRESH authorization epoch; the engine/supervisor context is
+        supplied by the trusted workstation service, not by the request body.
         """
         current = self.current()
         if current.state != ARMED:
             raise LiveTransitionError(
                 f"Cannot activate live trading from state {current.state}; "
                 "explicit arming is required first.")
-        snapshot = self._transition(ACTIVE, f"operator start by {actor}")
+        settings = settings or self._last_settings
+        if settings is None:
+            raise LiveTransitionError(
+                "Activation cannot re-verify readiness without current settings.")
+        context = self._supervisor_context()
+        readiness = self.readiness(
+            settings, repository=self.repository, context=context)
+        if readiness["verdict"] in ("BLOCKED", "BLOCKED_UNVERIFIED"):
+            offenders = readiness["required_blocked"] + readiness["required_unknown"]
+            raise LiveTransitionError(
+                "Activation refused by the current readiness contract: "
+                + "; ".join(offenders or ["unknown blocker"]))
+        self._last_settings = settings
+        snapshot = self._transition(ACTIVE, f"operator start by {actor}",
+                                    payload={"readiness": readiness["verdict"]})
         if self.epochs is not None:
             self.epochs.activate(actor=actor)
         return snapshot
@@ -251,11 +339,25 @@ class LiveSessionManager:
             raise LiveTransitionError(f"Cannot pause from state {current.state}")
         return self._transition(PAUSED, reason)
 
-    def resume(self) -> LiveSnapshot:
+    def resume(self, *, settings=None, context: dict | None = None) -> LiveSnapshot:
         current = self.current()
         if current.state != PAUSED:
             raise LiveTransitionError(f"Cannot resume from state {current.state}")
-        snapshot = self._transition(ACTIVE, "operator resume")
+        settings = settings or self._last_settings
+        if settings is None:
+            raise LiveTransitionError(
+                "Resume cannot re-verify readiness without current settings.")
+        context = self._supervisor_context()
+        readiness = self.readiness(
+            settings, repository=self.repository, context=context)
+        if readiness["verdict"] in ("BLOCKED", "BLOCKED_UNVERIFIED"):
+            offenders = readiness["required_blocked"] + readiness["required_unknown"]
+            raise LiveTransitionError(
+                "Resume refused by the current readiness contract: "
+                + "; ".join(offenders or ["unknown blocker"]))
+        self._last_settings = settings
+        snapshot = self._transition(ACTIVE, "operator resume",
+                                    payload={"readiness": readiness["verdict"]})
         if self.epochs is not None:
             # Resuming IS an activation: fresh epoch, stale intents refused.
             self.epochs.activate(actor="resume")
@@ -276,14 +378,21 @@ class LiveSessionManager:
         return self._transition(BLOCKED, f"reconciliation ended with: {outcome}")
 
     def stop(self, *, reason: str = "operator stop", keep_configuration: bool = True) -> LiveSnapshot:
-        """Explicit stop. Clears authorization; configuration may remain."""
+        """Explicit stop. Clears authorization; configuration may remain.
+
+        The durable stop request lets the child drain when its position/order
+        book is flat. If any risk remains it retains its lease and continues
+        risk-reducing management; the control plane never kills it.
+        """
         current = self.current()
         if current.state == OFF:
-            return current
-        snapshot = self._transition(STOPPED, reason)
+            snapshot = current
+        else:
+            snapshot = self._transition(STOPPED, reason)
         if self.epochs is not None:
             self.epochs.invalidate(reason=f"session stopped: {reason}")
-        if not keep_configuration:
+        self._request_supervisor_stop(reason)
+        if not keep_configuration and snapshot.state != OFF:
             self._transition(OFF, "configuration cleared after stop")
             return self.current()
         return snapshot
@@ -291,6 +400,7 @@ class LiveSessionManager:
     def disarm(self, *, reason: str = "operator disarm") -> LiveSnapshot:
         current = self.current()
         if current.state in (OFF, STOPPED):
+            self._request_supervisor_stop(reason)
             return current
         if current.state in (ACTIVE, PAUSED, RECONCILING):
             raise LiveTransitionError(
@@ -298,6 +408,7 @@ class LiveSessionManager:
         snapshot = self._transition(STOPPED, reason)
         if self.epochs is not None:
             self.epochs.invalidate(reason=f"session disarmed: {reason}")
+        self._request_supervisor_stop(reason)
         return snapshot
 
     def block(self, *, reason: str) -> LiveSnapshot:
@@ -305,6 +416,7 @@ class LiveSessionManager:
         snapshot = self._transition(BLOCKED, reason)
         if self.epochs is not None:
             self.epochs.invalidate(reason=f"session blocked: {reason}")
+        self._request_supervisor_stop(reason)
         return snapshot
 
     def release_block(self, *, destination: str | None = None,
@@ -312,6 +424,15 @@ class LiveSessionManager:
         current = self.current()
         if current.state != BLOCKED:
             raise LiveTransitionError(f"Not blocked (state {current.state})")
+        try:
+            from app.live.ops import read_emergency_stop
+
+            stopped, why = read_emergency_stop(self.repository)
+        except Exception:
+            stopped, why = True, "emergency-stop state unavailable"
+        if stopped:
+            raise LiveTransitionError(
+                f"Cannot release the block while the emergency stop is active ({why}).")
         target = destination or READY
         if target not in _AUTOMATIC[BLOCKED]:
             raise LiveTransitionError(f"BLOCKED cannot be released to {target}")
@@ -319,7 +440,47 @@ class LiveSessionManager:
             raise LiveTransitionError(
                 "Releasing a block can never re-arm or re-activate directly; "
                 "operator authorization is required again.")
-        return self._transition(target, reason)
+        snapshot = self._transition(target, reason)
+        self._request_supervisor_stop(
+            "emergency stop cleared; fresh ARM and ACTIVATE are required")
+        return snapshot
+
+    def recover_after_restart(self) -> LiveSnapshot:
+        """Recover conservatively when the operator control plane restarts.
+
+        A prior explicit ACTIVE state is not carried through a control-plane
+        restart. The engine is moved to STOPPED, its authorization epoch is
+        invalidated, and any surviving child is asked to drain. Existing
+        positions remain managed by the child through risk-reducing paths.
+        No startup recovery path can create ARMED or ACTIVE.
+        """
+        current = self.current()
+        if current.state in (ARMED, ACTIVE, PAUSED, RECONCILING):
+            current = self._transition(
+                STOPPED,
+                "control-plane restart requires a fresh explicit ARM cycle")
+            if self.epochs is not None:
+                self.epochs.invalidate(reason="control-plane restart recovery")
+        self._request_supervisor_stop("control-plane startup recovery")
+        return current
+
+    def _request_supervisor_stop(self, reason: str) -> None:
+        supervisor = self.engine_supervisor
+        if supervisor is None:
+            return
+        try:
+            supervisor.request_stop(reason=reason)
+        except Exception as exc:
+            # The durable session state above independently blocks new entries.
+            # Surface the failed notification for diagnosis; never roll the
+            # safety transition back or replace it with a force-kill.
+            try:
+                self.repository.record_system_event(
+                    "LIVE_ENGINE_STOP_SIGNAL_FAILED",
+                    {"reason": str(reason), "error_type": type(exc).__name__})
+            except Exception as audit_exc:
+                logger.error("LIVE_ENGINE_STOP_FAILURE_AUDIT_UNAVAILABLE",
+                             extra={"error_type": type(audit_exc).__name__})
 
     # -------------------------------------------------------------- start --
     def start_confirmation_summary(self, settings, *, repository=None,

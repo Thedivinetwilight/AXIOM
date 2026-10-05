@@ -46,6 +46,67 @@ def live_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def _seed_readiness_inputs(repository):
+    """Provide truthful, fresh fixture observations; never use live credentials."""
+    now = datetime.now().astimezone().isoformat()
+    repository.set_engine_state("last_market_data_ts", now)
+    repository.set_engine_state("live_token_verified", {"verified_at": now})
+    return now
+
+
+class _FixtureReadySupervisor:
+    """Explicit test double for an engine that has reconciled and owns a lease."""
+
+    def __init__(self, repository):
+        self.repository = repository
+
+    def readiness_context(self):
+        from app.live.lock import EngineLock
+
+        lease = EngineLock(self.repository, live=True).status()
+        runtime = self.repository.get_engine_state("live_engine_runtime", {}) or {}
+        control = self.repository.get_engine_state("live_engine_control", {}) or {}
+        if (control.get("stop_requested") is True
+                or lease.get("held") is not True
+                or lease.get("live") is not True
+                or lease.get("stale") is not False
+                or runtime.get("state") != "READY"
+                or runtime.get("owner") != lease.get("owner")
+                or runtime.get("pid") != lease.get("pid")
+                or runtime.get("host") != lease.get("host")):
+            raise RuntimeError("fixture engine is not supervised and reconciled")
+        return {"supervisor_verified": True,
+                "supervisor_lease_owner": lease["owner"],
+                "supervisor_pid": lease["pid"],
+                "supervisor_host": lease["host"],
+                "last_market_data_ts": self.repository.get_engine_state(
+                    "last_market_data_ts")}
+
+    def request_stop(self, *, reason="fixture stop"):
+        control = self.repository.get_engine_state("live_engine_control", {}) or {}
+        self.repository.set_engine_state("live_engine_control", {
+            **control, "stop_requested": True, "reason": reason})
+        return {"running": True, "stop_requested": True}
+
+
+def _ready_live_manager(repository):
+    from app.live.lock import EngineLock
+
+    now = _seed_readiness_inputs(repository)
+    lock = EngineLock(repository, live=True)
+    assert lock.acquire().granted
+    lease = lock.status()
+    repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+    repository.set_engine_state("live_engine_control", {
+        "stop_requested": False, "generation": 1})
+    repository.set_engine_state("live_engine_runtime", {
+        "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
+        "host": lease["host"], "reconciled_at": now})
+    manager = LiveSessionManager(
+        repository, engine_supervisor=_FixtureReadySupervisor(repository))
+    return manager, lock
+
+
 # =====================================================================
 # Markets registry + session engine (spec 5, 143, 144)
 # =====================================================================
@@ -175,7 +236,7 @@ class TestLiveStateMachine:
             manager.arm(live_settings(), confirmation_phrase=LIVE_CONFIRM_PHRASE)
 
     def test_full_explicit_lifecycle(self, repo):
-        manager = LiveSessionManager(repo)
+        manager, _lock = _ready_live_manager(repo)
         settings = live_settings()
         snapshot = manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE)
         assert snapshot.state == ARMED
@@ -197,24 +258,26 @@ class TestLiveStateMachine:
         """Spec 136: a restarted core retains an EXPLICITLY granted state.
         A fresh manager must never derive ARMED/ACTIVE on its own — the only
         path in is the operator's arm() call."""
-        pristine = LiveSessionManager(repo)
+        pristine, _lock = _ready_live_manager(repo)
         assert pristine.current().state == OFF
         pristine.arm(live_settings(), confirmation_phrase=LIVE_CONFIRM_PHRASE)
 
-        reborn = LiveSessionManager(repo)
+        reborn = LiveSessionManager(
+            repo, engine_supervisor=pristine.engine_supervisor)
         assert reborn.current().state == ARMED          # persisted history
         assert reborn.derived_state(live_settings()) == READY  # not ACTIVE
         # A NEW install (empty database) can never wake up armed.
         empty_db = Database("sqlite:///:memory:")
         empty_repo = Repository(empty_db)
         try:
+            _seed_readiness_inputs(empty_repo)
             assert LiveSessionManager(empty_repo).current().state == OFF
             assert LiveSessionManager(empty_repo).derived_state(live_settings()) == READY
         finally:
             empty_db.close()
 
     def test_stop_clears_to_stopped_not_back_to_active(self, repo):
-        manager = LiveSessionManager(repo)
+        manager, _lock = _ready_live_manager(repo)
         manager.arm(live_settings(), confirmation_phrase=LIVE_CONFIRM_PHRASE)
         manager.activate()
         manager.stop()
@@ -222,7 +285,7 @@ class TestLiveStateMachine:
         assert LiveSessionManager(repo).current().state == STOPPED
 
     def test_emergency_block_beats_everything(self, repo):
-        manager = LiveSessionManager(repo)
+        manager, _lock = _ready_live_manager(repo)
         manager.arm(live_settings(), confirmation_phrase=LIVE_CONFIRM_PHRASE)
         manager.activate()
         assert manager.block(reason="breach monitor").state == BLOCKED
@@ -243,6 +306,7 @@ class TestLiveStateMachine:
                                       max_position_value=0, max_daily_loss=0,
                                       max_exposure=None)
         assert manager.derived_state(intent_only) == "CONFIGURED"
+        _seed_readiness_inputs(repo)
         assert manager.derived_state(live_settings()) == READY
         assert manager.derived_state(live_settings(), emergency_stop=True) == BLOCKED
 

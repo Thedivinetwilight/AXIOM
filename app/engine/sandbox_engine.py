@@ -92,6 +92,8 @@ class SandboxEngine:
         self.evaluate_every = max(1, int(evaluate_every))
         self.sizing_fraction = float(sizing_fraction)
         self.state = "STOPPED"
+        self._live_emergency_handled = False
+        self._live_drain_cancellation_attempted = False
         self.processed = 0
         self.submitted = 0
         self.rejected_by_risk = 0
@@ -312,23 +314,51 @@ class SandboxEngine:
     # -- safety --------------------------------------------------------------
 
     def emergency_stop(self, reason: str = "manual") -> dict:
-        """Persisted emergency stop: cancels open sandbox orders and halts."""
+        """Persist the kill switch, revoke live entry authority, and cancel orders.
+
+        For a LIVE broker the gateway facade routes every cancellation through
+        its durable lease/audit boundary. The live process remains available to
+        manage risk-reducing exits; this method does not close positions.
+        """
         self.repository.set_engine_state(
-            "emergency_stop", {"stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
-                               "reason": reason}
-        )
+            "emergency_stop", {"stopped": True,
+                               "ts": datetime.now(timezone.utc).isoformat(),
+                               "reason": reason})
         self.repository.record_system_event("EMERGENCY_STOP", {"reason": reason})
+        if bool(getattr(self.broker, "LIVE", False)):
+            sessions = getattr(getattr(self.broker, "gateway", None), "sessions", None)
+            if sessions is not None:
+                try:
+                    sessions.block(reason=f"emergency stop: {reason}")
+                except Exception as exc:
+                    logger.error("LIVE_SESSION_BLOCK_FAILED",
+                                 extra={"error_type": type(exc).__name__})
         cancelled = []
-        for intent_id, state in list(self.broker.orders.items()):
-            if state.status in FINAL_STATUSES:
+        try:
+            orders = list(getattr(self.broker, "orders", {}).items())
+        except Exception as exc:
+            orders = []
+            logger.error("EMERGENCY_ORDER_LIST_UNAVAILABLE",
+                         extra={"error_type": type(exc).__name__})
+        for intent_id, order in orders:
+            if getattr(order, "status", "UNKNOWN") in FINAL_STATUSES:
                 continue
             try:
                 self.broker.cancel(intent_id)
-                cancelled.append(state.our_id)
-            except Exception as exc:  # never hide a cancel failure
-                self.repository.record_system_event(
-                    "CANCEL_FAILURE", {"order": state.our_id, "error": type(exc).__name__}
-                )
+                cancelled.append(getattr(order, "our_id", str(intent_id)))
+            except Exception as exc:  # cancellation failure remains visible
+                try:
+                    self.repository.record_system_event(
+                        "CANCEL_FAILURE",
+                        {"order": getattr(order, "our_id", str(intent_id)),
+                         "error_type": type(exc).__name__})
+                except Exception as audit_exc:
+                    logger.error("CANCEL_FAILURE_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.error("EMERGENCY_CANCEL_FAILED",
+                             extra={"error_type": type(exc).__name__})
+        self._live_emergency_handled = True
+        self._live_drain_cancellation_attempted = True
         self.state = "EMERGENCY_STOPPED"
         logger.error("EMERGENCY_STOP", extra={"reason": reason})
         return {"stopped": True, "cancelled": cancelled}
@@ -338,6 +368,32 @@ class SandboxEngine:
         self.repository.record_system_event("ENGINE_RESUME", {})
         self.state = "STOPPED"
         return {"stopped": False}
+
+    def _publish_live_runtime(self, state: str, *, error_type: str | None = None) -> None:
+        """Publish the supervised process state used by readiness checks.
+
+        READY is written only after this process owns the atomic lease and a
+        successful startup reconciliation has stamped ``last_reconcile_at``.
+        Sensitive exception text is never persisted.
+        """
+        lock = getattr(self, "live_lock", None)
+        if lock is None or not bool(getattr(lock, "live", False)):
+            return
+        import os
+        import socket
+
+        payload = {"state": str(state), "owner": getattr(lock, "owner", ""),
+                   "pid": os.getpid(), "host": socket.gethostname(),
+                   "updated_at": datetime.now(timezone.utc).isoformat(),
+                   "error_type": error_type}
+        reconcile = self.repository.get_engine_state("last_reconcile_at", {}) or {}
+        if isinstance(reconcile, dict):
+            payload["reconciled_at"] = reconcile.get("ts")
+        if state == "READY" and not payload.get("reconciled_at"):
+            raise RuntimeError("live runtime READY requires a reconciliation stamp")
+        self.repository.record_system_event(
+            f"LIVE_ENGINE_RUNTIME_{str(state).upper()}", payload)
+        self.repository.set_engine_state("live_engine_runtime", payload)
 
     def _check_emergency(self) -> bool:
         try:
@@ -353,6 +409,85 @@ class SandboxEngine:
                          extra={"error_type": type(exc).__name__})
             return True
 
+    def _live_control(self) -> dict:
+        """Read child stop state; database uncertainty means stop requested."""
+        try:
+            control = self.repository.get_engine_state("live_engine_control", {}) or {}
+            if not isinstance(control, dict):
+                raise TypeError("live-engine control has an invalid shape")
+            return control
+        except Exception as exc:
+            logger.error("LIVE_CONTROL_UNREADABLE: draining fail-closed",
+                         extra={"error_type": type(exc).__name__})
+            return {"stop_requested": True, "unreadable": True}
+
+    def _live_session_state(self) -> str:
+        try:
+            row = self.repository.current_live_session()
+            return str(row.get("state", "UNKNOWN")) if row else "OFF"
+        except Exception as exc:
+            logger.error("LIVE_SESSION_UNREADABLE: entries disabled",
+                         extra={"error_type": type(exc).__name__})
+            return "BLOCKED"
+
+    def _cancel_open_live_orders(self, *, reason: str) -> list[str]:
+        """Request cancels through the live gateway, preserving unknown outcomes."""
+        cancelled = []
+        try:
+            orders = list(getattr(self.broker, "orders", {}).items())
+        except Exception as exc:
+            logger.error("LIVE_DRAIN_ORDER_LIST_UNAVAILABLE",
+                         extra={"error_type": type(exc).__name__})
+            return cancelled
+        for intent_id, order in orders:
+            if getattr(order, "status", "UNKNOWN") in FINAL_STATUSES:
+                continue
+            order_id = getattr(order, "our_id", str(intent_id))
+            try:
+                result = self.broker.cancel(intent_id)
+                cancelled.append(str(order_id))
+                self.repository.record_system_event(
+                    "LIVE_DRAIN_CANCEL_RESULT",
+                    {"order": str(order_id), "intent_id": str(intent_id),
+                     "reason": str(reason),
+                     "status": (result.get("status") if isinstance(result, dict)
+                                else "UNKNOWN")})
+            except Exception as exc:
+                try:
+                    self.repository.record_system_event(
+                        "LIVE_DRAIN_CANCEL_FAILED",
+                        {"order": str(order_id), "intent_id": str(intent_id),
+                         "reason": str(reason),
+                         "error_type": type(exc).__name__})
+                except Exception as audit_exc:
+                    logger.error("LIVE_DRAIN_CANCEL_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.error("LIVE_DRAIN_CANCEL_FAILED",
+                             extra={"error_type": type(exc).__name__})
+        return cancelled
+
+    def _live_book_flat(self) -> bool:
+        """Require reconciled, locally flat positions and no unresolved orders."""
+        try:
+            # Reconcile before declaring drain complete: a local order status
+            # is not enough to prove that the remote broker has stopped working.
+            self.reconcile()
+            open_orders = self.broker.open_orders()
+            if open_orders:
+                return False
+            ledger = self.broker.ledger
+            quantity = float(getattr(ledger, "position_quantity", 0.0))
+            if not (quantity == quantity and abs(quantity) <= 1e-9):
+                return False
+            if self.intent_journal is not None and self.intent_journal.unresolved():
+                return False
+            return True
+        except Exception as exc:
+            # Unknown remote outcome, position, or database state is NOT flat.
+            logger.error("LIVE_DRAIN_FLATNESS_UNKNOWN",
+                         extra={"error_type": type(exc).__name__})
+            return False
+
     # -- main loop -----------------------------------------------------------
 
     def run(self, *, max_candles: int | None = None):
@@ -363,6 +498,20 @@ class SandboxEngine:
         FINAL-11/10 §15: ownership is an atomic lease; there is no force
         bypass, only provably-stale takeover.
         """
+        broker_is_live = bool(getattr(self.broker, "LIVE", False))
+        if broker_is_live and max_candles is not None:
+            self.state = "BLOCKED_BOUNDED_LIVE_RUN"
+            return {"ok": False,
+                    "reason": "a live engine must not exit after a bounded candle count",
+                    **self.status()}
+        if broker_is_live and (self.live_lock is None
+                               or not bool(getattr(self.live_lock, "live", False))):
+            self.state = "BLOCKED_LEASE_UNAVAILABLE"
+            logger.critical("LIVE_ENGINE_REFUSED_WITHOUT_ATOMIC_LEASE")
+            return {"ok": False,
+                    "reason": "live execution requires a supervised atomic lease",
+                    **self.status()}
+        decision = None
         if self.live_lock is not None:
             decision = self.live_lock.acquire()
             if not decision.granted:
@@ -413,35 +562,318 @@ class SandboxEngine:
                     return {"ok": False,
                             "reason": "stale takeover: reconciliation failed",
                             "lock": decision.to_dict(), **self.status()}
+        live_owned = bool(self.live_lock is not None
+                          and getattr(self.live_lock, "live", False))
+        if live_owned:
+            # A new process never inherits an old ACTIVE/PAUSED epoch. Even a
+            # successful lease takeover is only permission to reconcile, not
+            # permission to resume entries; the operator must ARM/ACTIVATE anew.
+            try:
+                sessions = getattr(
+                    getattr(self.broker, "gateway", None), "sessions", None)
+                if sessions is None:
+                    from app.live.session import LiveSessionManager
+
+                    sessions = LiveSessionManager(self.repository)
+                previous = sessions.current()
+                if previous.state in {"ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                    sessions.stop(
+                        reason="engine process restart requires fresh ARM and ACTIVATE")
+            except Exception as exc:
+                self.state = "BLOCKED_SESSION_RECOVERY_FAILED"
+                logger.error("LIVE_SESSION_RECOVERY_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                try:
+                    self.live_lock.release()
+                except Exception as release_exc:
+                    logger.error("LIVE_LEASE_RELEASE_FAILED",
+                                 extra={"error_type": type(release_exc).__name__})
+                return {"ok": False,
+                        "reason": "could not invalidate prior live authorization",
+                        **self.status()}
+        if live_owned and not (decision and decision.took_over_stale):
+            # A fresh process must reconcile the broker account before the
+            # supervisor can call it READY. Unknown remote state is not a safe
+            # starting point for real-money execution.
+            try:
+                self.reconcile()
+            except Exception as exc:
+                self.state = "BLOCKED_STARTUP_RECONCILE_FAILED"
+                logger.error("LIVE_STARTUP_RECONCILE_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                try:
+                    self._publish_live_runtime(
+                        "FAILED", error_type=type(exc).__name__)
+                except Exception as state_exc:
+                    logger.error("LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                 extra={"error_type": type(state_exc).__name__})
+                self.live_lock.release()
+                return {"ok": False,
+                        "reason": "live startup reconciliation failed; refusing to trade",
+                        **self.status()}
+        if live_owned:
+            try:
+                self._publish_live_runtime("STARTING")
+            except Exception as exc:
+                self.state = "BLOCKED_RUNTIME_STATE_UNAVAILABLE"
+                logger.error("LIVE_RUNTIME_START_STATE_UNAVAILABLE",
+                             extra={"error_type": type(exc).__name__})
+                self.live_lock.release()
+                return {"ok": False,
+                        "reason": "could not persist supervised runtime state",
+                        **self.status()}
         self.state = "RUNNING"
+        runtime_ready = False
         try:
             import asyncio
+            import inspect
+
+            drain_completed = asyncio.Event()
+            lease_lost = asyncio.Event()
+
+            async def close_provider():
+                close = getattr(self.provider, "close", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+
+            async def watch_live_control():
+                """Observe stop/lease state without relying on another candle."""
+                last_ops_tick = 0.0
+                last_flatness_check = 0.0
+                last_cancel_retry = 0.0
+                while live_owned:
+                    now = time.monotonic()
+                    if now - last_ops_tick >= 5.0:
+                        self._ops_tick()
+                        last_ops_tick = now
+                    if self.state == "BLOCKED_LEASE_LOST":
+                        lease_lost.set()
+                        try:
+                            await close_provider()
+                        except Exception as exc:
+                            logger.error("LIVE_PROVIDER_CLOSE_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                        return
+
+                    emergency = self._check_emergency()
+                    control = self._live_control()
+                    stop_requested = control.get("stop_requested") is True
+                    if emergency and not self._live_emergency_handled:
+                        reason = "persisted emergency stop"
+                        try:
+                            flag = self.repository.get_engine_state(
+                                "emergency_stop", {}) or {}
+                            if isinstance(flag, dict) and flag.get("reason"):
+                                reason = str(flag["reason"])
+                        except Exception as exc:
+                            logger.warning("LIVE_EMERGENCY_REASON_UNAVAILABLE",
+                                           extra={"error_type": type(exc).__name__})
+                        self.emergency_stop(reason=reason)
+                    draining = emergency or stop_requested
+                    if not draining:
+                        self._live_drain_cancellation_attempted = False
+                    elif not self._live_drain_cancellation_attempted:
+                        if not emergency:
+                            self._cancel_open_live_orders(
+                                reason=str(control.get("reason") or "supervisor stop"))
+                            self._live_drain_cancellation_attempted = True
+                        last_cancel_retry = now
+                    elif last_cancel_retry == 0.0:
+                        # Emergency handling may have made the first attempt
+                        # on the candle task before this watcher started.
+                        last_cancel_retry = now
+
+                    if draining and now - last_flatness_check >= 5.0:
+                        last_flatness_check = now
+                        if self._live_book_flat():
+                            self.state = ("EMERGENCY_STOPPED" if emergency
+                                          else "STOPPED")
+                            drain_completed.set()
+                            try:
+                                await close_provider()
+                            except Exception as exc:
+                                logger.error("LIVE_PROVIDER_CLOSE_FAILED",
+                                             extra={"error_type": type(exc).__name__})
+                            return
+                        if now - last_cancel_retry >= 30.0:
+                            drain_reason = control.get("reason") or (
+                                "persisted emergency stop" if emergency
+                                else "supervisor stop")
+                            self._cancel_open_live_orders(
+                                reason=str(drain_reason))
+                            last_cancel_retry = now
+                    await asyncio.sleep(0.5)
 
             async def consume():
-                async for candle in self.provider.stream(self.provider.symbols, self.timeframe):
-                    if self._check_emergency():
-                        self.state = "EMERGENCY_STOPPED"
-                        break
-                    if self.maintenance_scheduler is not None:
+                nonlocal runtime_ready
+                control_task = (asyncio.create_task(watch_live_control())
+                                if live_owned else None)
+                try:
+                    while True:
                         try:
-                            self.maintenance_scheduler.run_due()
-                        except Exception:  # maintenance must never kill the loop
-                            logger.exception("maintenance job failed")
-                    self._ops_tick()
-                    if self.state == "BLOCKED_LEASE_LOST":
-                        break
-                    self.process_candle(candle)
-                    if max_candles is not None and self.processed >= max_candles:
-                        break
+                            async for candle in self.provider.stream(
+                                    self.provider.symbols, self.timeframe):
+                                emergency = self._check_emergency()
+                                if emergency and not live_owned:
+                                    self.state = "EMERGENCY_STOPPED"
+                                    break
+                                if emergency and not self._live_emergency_handled:
+                                    self.emergency_stop(
+                                        reason="persisted emergency stop")
+                                if self.maintenance_scheduler is not None:
+                                    try:
+                                        self.maintenance_scheduler.run_due()
+                                    except Exception:  # maintenance must never kill the loop
+                                        logger.exception("maintenance job failed")
+                                self._ops_tick()
+                                if self.state == "BLOCKED_LEASE_LOST":
+                                    lease_lost.set()
+                                    break
+                                if live_owned:
+                                    try:
+                                        feed = self.provider.metrics()
+                                        if (feed.get("market_open") is True
+                                                and not feed.get("stale_feed")):
+                                            completed_at = candle.available_at(self.timeframe)
+                                            self.repository.set_engine_state(
+                                                "last_market_data_ts",
+                                                completed_at.isoformat())
+                                            if not runtime_ready:
+                                                self._publish_live_runtime("READY")
+                                                runtime_ready = True
+                                    except Exception as exc:
+                                        # Readiness depends on durable, fresh
+                                        # market data as well as reconciliation.
+                                        logger.error(
+                                            "LIVE_RUNTIME_READINESS_FAILED",
+                                            extra={"error_type": type(exc).__name__})
+                                        self.state = "BLOCKED_RUNTIME_READINESS_FAILED"
+                                        await close_provider()
+                                        break
+                                    control = self._live_control()
+                                    session_state = self._live_session_state()
+                                    risk_only = (
+                                        emergency
+                                        or control.get("stop_requested") is True
+                                        or session_state != "ACTIVE")
+                                else:
+                                    risk_only = False
+                                self.process_candle(
+                                    candle, risk_reducing_only=risk_only)
+                                if max_candles is not None and self.processed >= max_candles:
+                                    break
+                        except Exception as exc:
+                            if not live_owned:
+                                raise
+                            logger.error("LIVE_PROVIDER_STREAM_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                            try:
+                                self.repository.record_system_event(
+                                    "LIVE_PROVIDER_STREAM_FAILED",
+                                    {"error_type": type(exc).__name__})
+                            except Exception as audit_exc:
+                                logger.error("LIVE_PROVIDER_FAILURE_AUDIT_UNAVAILABLE",
+                                             extra={"error_type": type(audit_exc).__name__})
+                            # A data-stream failure invalidates entry authority,
+                            # but leaves the process alive to retain the lease
+                            # and manage a risk-reducing exit after recovery.
+                            try:
+                                sessions = getattr(
+                                    getattr(self.broker, "gateway", None),
+                                    "sessions", None)
+                                if sessions is None:
+                                    from app.live.session import LiveSessionManager
+
+                                    sessions = LiveSessionManager(self.repository)
+                                if sessions.current().state in {
+                                        "ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                                    sessions.block(
+                                        reason=("live market-data stream failed; "
+                                                "fresh ARM required"))
+                            except Exception as block_exc:
+                                logger.error("LIVE_STREAM_SESSION_BLOCK_FAILED",
+                                             extra={"error_type": type(block_exc).__name__})
+                            try:
+                                self._publish_live_runtime(
+                                    "FAILED", error_type=type(exc).__name__)
+                            except Exception as state_exc:
+                                logger.error("LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                             extra={"error_type": type(state_exc).__name__})
+                            runtime_ready = False
+                        else:
+                            if (live_owned and broker_is_live
+                                    and not drain_completed.is_set()
+                                    and not lease_lost.is_set()
+                                    and (max_candles is None
+                                         or self.processed < max_candles)):
+                                # A clean iterator end without an explicit drain
+                                # is still a provider failure, not permission to
+                                # keep an ACTIVE authorization silently.
+                                self.state = "BLOCKED_PROVIDER_STREAM_ENDED"
+                                try:
+                                    sessions = getattr(
+                                        getattr(self.broker, "gateway", None),
+                                        "sessions", None)
+                                    if sessions is None:
+                                        from app.live.session import LiveSessionManager
+
+                                        sessions = LiveSessionManager(self.repository)
+                                    if sessions.current().state in {
+                                            "ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                                        sessions.block(
+                                            reason=("live market-data stream ended; "
+                                                    "fresh ARM required"))
+                                except Exception as block_exc:
+                                    logger.error(
+                                        "LIVE_STREAM_SESSION_BLOCK_FAILED",
+                                        extra={"error_type": type(block_exc).__name__})
+                                try:
+                                    self._publish_live_runtime(
+                                        "FAILED", error_type="StreamEnded")
+                                except Exception as state_exc:
+                                    logger.error(
+                                        "LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                        extra={"error_type": type(state_exc).__name__})
+                                runtime_ready = False
+
+                        if (not live_owned or drain_completed.is_set()
+                                or lease_lost.is_set()
+                                or (max_candles is not None
+                                    and (self.processed >= max_candles
+                                         or not broker_is_live))):
+                            break
+                        # A live stream ending unexpectedly is not permission to
+                        # release the account lease or resume trading. Re-open
+                        # it after a bounded delay; session blocking above keeps
+                        # the gateway entry path closed.
+                        await asyncio.sleep(2.0)
+                finally:
+                    if control_task is not None:
+                        control_task.cancel()
+                        try:
+                            await control_task
+                        except asyncio.CancelledError:
+                            pass
 
             asyncio.run(consume())
             self.reconcile()
-            self._maybe_evaluate(force=self._seen_closed)
+            if not live_owned:
+                self._maybe_evaluate(force=self._seen_closed)
             if self.monitor is not None:
                 self.monitor.snapshot()
         finally:
             if self.state == "RUNNING":
                 self.state = "STOPPED"
+            if live_owned:
+                final_runtime = ("STOPPED" if self.state in
+                                 ("STOPPED", "EMERGENCY_STOPPED") else "FAILED")
+                try:
+                    self._publish_live_runtime(final_runtime)
+                except Exception as exc:
+                    logger.error("LIVE_RUNTIME_SHUTDOWN_STATE_FAILED",
+                                 extra={"error_type": type(exc).__name__})
             if self.live_lock is not None:
                 self.live_lock.release()
         return self.status()
@@ -548,7 +980,7 @@ class SandboxEngine:
                 logger.exception("STUCK_ORDER_AUTO_CANCEL_FAILED")
         return cancelled
 
-    def process_candle(self, candle) -> None:
+    def process_candle(self, candle, *, risk_reducing_only: bool = False) -> None:
         metrics = self.provider.metrics()
         if not metrics.get("market_open", False):
             self._seen_closed = True
@@ -583,8 +1015,15 @@ class SandboxEngine:
             candle, self._history, self.regime_engine) \
             if self.event_engine is not None else []
         triggers = [decision.trigger for decision in self.last_events]
-        # protective exits run FIRST and independently of strategy signals
+        # Protective exits run FIRST and independently of strategy signals.
+        # While live authorization is absent or stop/drain is requested, no
+        # strategy, allocator, or learning path may create new risk.
         self._check_protective_exits(candle)
+        if risk_reducing_only:
+            self.signals[candle.symbol] = {
+                "signal": "HOLD", "timestamp": candle.timestamp.isoformat(),
+                "reason": "live risk-reducing-only mode"}
+            return
         if self.processed % self.evaluate_every == 0:
             self._maybe_evaluate(force=True)  # scheduled rolling batch
         self.regime = classify_regime_safe(self._history)

@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
 import time
 from dataclasses import dataclass, field, asdict
 from uuid import uuid4
@@ -91,6 +93,7 @@ class ExecutionIntent:
     model_revision: str = ""
     authorization_epoch: int | None = None
     build_identity: str = ""
+    cancel_order_id: str | None = None
     intent_id: str = field(default_factory=lambda: uuid4().hex)
     created_ts: float = field(default_factory=time.time)
 
@@ -117,6 +120,8 @@ class ExecutionIntent:
                     problems.append(f"ENTRY intent requires {name}")
             if self.authorization_epoch is None:
                 problems.append("ENTRY intent requires an authorization epoch")
+        if self.purpose == "CANCEL" and not str(self.cancel_order_id or "").strip():
+            problems.append("CANCEL intent requires the target order id")
         if not problems and self.purpose == "ENTRY" and self.side == "SELL" \
                 and self.quantity and not self.universe:
             # An entry SELL without portfolio context cannot be risk-checked
@@ -128,7 +133,8 @@ class ExecutionIntent:
         """Deterministic identity for duplicate detection."""
         payload = json.dumps(
             [self.purpose, self.market_id, self.identity, self.side,
-             float(self.quantity), self.order_type, self.signal_id or ""],
+             float(self.quantity), self.order_type, self.signal_id or "",
+             self.cancel_order_id or ""],
             sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -218,7 +224,8 @@ class LiveExecutionGateway:
     def __init__(self, *, settings, repository, session_manager, broker,
                  guard_chain=None, epochs: AuthorizationEpochs | None = None,
                  emergency_stop_reader=None, account_scope: str = "",
-                 context_provider=None, clock=time.time, memory: int = 256):
+                 context_provider=None, lease_owner: str | None = None,
+                 clock=time.time, memory: int = 256):
         self.settings = settings
         self.repository = repository
         self.sessions = session_manager
@@ -227,6 +234,12 @@ class LiveExecutionGateway:
         self.epochs = epochs or AuthorizationEpochs(repository, clock=clock)
         self.emergency_stop_reader = emergency_stop_reader
         self.account_scope = str(account_scope or "")
+        from app.live.lock import owner_id
+
+        # A real-money submission must be made by the process that owns the
+        # current durable live-engine lease. Default identity is host+PID;
+        # tests/supervisors may pass the exact owner explicitly.
+        self.lease_owner = str(lease_owner or owner_id())
         #: callable() -> dict of live context (exposure, breaches, canary);
         #: failures are treated as UNKNOWN and fail closed in the chain.
         self.context_provider = context_provider
@@ -286,10 +299,52 @@ class LiveExecutionGateway:
             self._refuse("SESSION STATE",
                          f"entries require ACTIVE; session is {state}", intent)
         if intent.purpose in RISK_MANAGEMENT_PURPOSES and \
-                state not in ("ACTIVE", "PAUSED", "RECONCILING"):
+                state not in ("ARMED", "ACTIVE", "PAUSED", "RECONCILING",
+                              "STOPPED", "BLOCKED"):
             self._refuse("SESSION STATE",
                          f"risk management requires a live session; state is {state}",
                          intent)
+        if intent.purpose in ACTIVE_REQUIRED_PURPOSES:
+            try:
+                control = self.repository.get_engine_state(
+                    "live_engine_control", {}) or {}
+                if not isinstance(control, dict):
+                    raise TypeError("malformed control record")
+            except Exception as exc:
+                self._refuse("LIVE ENGINE CONTROL",
+                             f"live-engine control is unavailable ({type(exc).__name__})",
+                             intent)
+            if control.get("stop_requested") is True:
+                self._refuse("LIVE ENGINE CONTROL",
+                             "live engine is draining; new risk is disabled", intent)
+
+        # 3b — live-engine lease (§15). This is re-read at the FINAL live
+        # submission boundary; an ACTIVE database state or stale process-local
+        # boolean is not authority. A held position can still exit after an
+        # operator STOP, provided this same engine retains its healthy lease.
+        from app.live.lock import EngineLock
+
+        lease = EngineLock(self.repository, live=True,
+                           owner=self.lease_owner).status()
+        age = lease.get("heartbeat_age_seconds")
+        lease_ok = (
+            lease.get("readable") is True
+            and lease.get("atomic_supported") is True
+            and lease.get("held") is True
+            and lease.get("live") is True
+            and lease.get("owner") == self.lease_owner
+            and lease.get("pid") == os.getpid()
+            and lease.get("host") == socket.gethostname()
+            and lease.get("stale") is False
+            and lease.get("owner_liveness") == "alive"
+            and isinstance(age, (int, float))
+            and age <= lease.get("stale_after_seconds", 0))
+        if not lease_ok:
+            self._refuse(
+                "ENGINE LEASE",
+                "this process does not hold a readable, fresh atomic live-engine "
+                "lease; refusing submission",
+                intent)
 
         # 4 — emergency-stop semantics (§12): stop NEW RISK, never trap exits
         if self.emergency_stop_reader is not None:
@@ -320,8 +375,11 @@ class LiveExecutionGateway:
                          f"intent account {intent.account_scope!r} does not match "
                          f"gateway account {self.account_scope!r}", intent)
 
-        # 7 — guard chain is the real final gate (§10)
-        if self.guard_chain is not None:
+        # 7 — entry guard chain is the real final gate (§10). These checks
+        # are intentionally ENTRY-only: stale alpha, liquidity, model, or
+        # sizing context must never prevent cancellation or a risk-reducing
+        # exit from an already-held position.
+        if intent.purpose == "ENTRY" and self.guard_chain is not None:
             order = {"side": intent.side, "quantity": intent.quantity,
                      "intent": intent.purpose, "order_type": intent.order_type,
                      "price": intent.price, "symbol": intent.identity,
@@ -336,11 +394,11 @@ class LiveExecutionGateway:
                 try:
                     context.update(self.context_provider())
                 except Exception as exc:
-                    # Risk state UNKNOWN -> fail closed. A submission while
-                    # the risk picture cannot be read is never authorized.
+                    # Risk state UNKNOWN -> fail closed for any decision that
+                    # adds risk. Exits/cancels do not depend on this context.
                     self._refuse("GUARD CHAIN",
-                                 f"risk context unreadable ({exc}); refusing "
-                                 "rather than executing with UNKNOWN risk state",
+                                 f"risk context unreadable ({type(exc).__name__}); "
+                                 "refusing rather than executing with UNKNOWN risk state",
                                  intent)
             verdict = self.guard_chain.evaluate(order, context)
             if not verdict.allowed:
@@ -351,7 +409,8 @@ class LiveExecutionGateway:
 
         # 8 — duplicate detection (§22 idempotency)
         fingerprint = intent.fingerprint()
-        if fingerprint in self._recent_fingerprints:
+        if fingerprint in self._recent_fingerprints and intent.purpose not in {
+                "CANCEL", "RECONCILE"}:
             self._refuse("DUPLICATE CHECK",
                          "an identical intent was already authorized recently",
                          intent)
@@ -365,24 +424,68 @@ class LiveExecutionGateway:
                      "strategy_id": intent.strategy_id,
                      "signal_id": intent.signal_id,
                      "configuration_hash": intent.configuration_hash,
-                     "build_identity": intent.build_identity})
+                     "build_identity": intent.build_identity,
+                     "cancel_order_id": intent.cancel_order_id})
 
-        # 10 — submission. The ONLY broker call site in the live path.
+        # 10 — final broker operation. A normal order has exactly one submit
+        # call. A CANCEL is routed to the broker's cancel method through this
+        # same authorization/audit boundary; the facade never exposes a direct
+        # cancellation bypass.
         self._recent_fingerprints.append(fingerprint)
         self.broker_calls += 1
         try:
-            order_id = self.broker.submit(
-                intent.side, intent.quantity,
-                intent.price if intent.price is not None else 0,
-                order_type=intent.order_type, intent_id=intent.intent_id,
-                symbol=intent.identity, instrument_key=intent.identity)
+            if intent.purpose == "CANCEL":
+                cancel = getattr(self.broker, "cancel", None)
+                if not callable(cancel):
+                    self._refuse("BROKER IDENTITY",
+                                 "live broker does not expose a cancel operation",
+                                 intent)
+                cancel_result = cancel(str(intent.cancel_order_id))
+                order_id = str(intent.cancel_order_id)
+            elif intent.purpose == "RECONCILE":
+                reconcile = getattr(self.broker, "reconcile", None)
+                if not callable(reconcile):
+                    self._refuse("BROKER IDENTITY",
+                                 "live broker does not expose reconciliation",
+                                 intent)
+                reconcile_result = reconcile()
+                order_id = "reconcile"
+                cancel_result = None
+            else:
+                cancel_result = None
+                order_id = self.broker.submit(
+                    intent.side, intent.quantity,
+                    intent.price if intent.price is not None else 0,
+                    order_type=intent.order_type, intent_id=intent.intent_id,
+                    symbol=intent.identity, instrument_key=intent.identity)
         except Exception as exc:
             self._audit("LIVE_INTENT_FAILED",
                         {"intent_id": intent.intent_id,
+                         "purpose": intent.purpose,
                          "error_type": type(exc).__name__})
             raise
+        if intent.purpose == "CANCEL":
+            self._audit("LIVE_ORDER_CANCEL_RESULT",
+                        {"intent_id": intent.intent_id,
+                         "target_order_id": str(intent.cancel_order_id),
+                         "result": cancel_result})
+            return {"authorized": True, "submitted": False,
+                    "cancelled": cancel_result, "order_id": order_id,
+                    "intent_id": intent.intent_id, "purpose": intent.purpose,
+                    "epoch": intent.authorization_epoch}
+        if intent.purpose == "RECONCILE":
+            self._audit("LIVE_RECONCILIATION_RESULT",
+                        {"intent_id": intent.intent_id,
+                         "result_count": (len(reconcile_result)
+                                          if hasattr(reconcile_result, "__len__")
+                                          else None)})
+            return {"authorized": True, "submitted": False,
+                    "reconciled": reconcile_result,
+                    "intent_id": intent.intent_id, "purpose": intent.purpose,
+                    "epoch": intent.authorization_epoch}
         self._audit("LIVE_INTENT_SUBMITTED",
-                    {"intent_id": intent.intent_id, "order_id": str(order_id)})
+                    {"intent_id": intent.intent_id, "order_id": str(order_id),
+                     "purpose": intent.purpose})
         return {"authorized": True, "submitted": True, "order_id": str(order_id),
                 "intent_id": intent.intent_id, "purpose": intent.purpose,
                 "epoch": intent.authorization_epoch}

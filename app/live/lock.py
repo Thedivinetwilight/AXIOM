@@ -79,6 +79,40 @@ def owner_id(*, pid: int | None = None, host: str | None = None) -> str:
     return f"{host or socket.gethostname()}:{pid or os.getpid()}"
 
 
+def _pid_alive(pid: int) -> bool | None:
+    """Best-effort local PID proof; None means it cannot be established."""
+    if int(pid or 0) <= 0:
+        return None
+    if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+        try:
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            still_active = 259
+            handle = ctypes.windll.kernel32.OpenProcess(
+                process_query_limited_information, False, int(pid))
+            if not handle:
+                return None
+            try:
+                code = ctypes.c_ulong(still_active)
+                ok = ctypes.windll.kernel32.GetExitCodeProcess(
+                    handle, ctypes.byref(code))
+                return bool(ok) and code.value == still_active
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+
+
 class LockStateUnavailable(RuntimeError):
     """The durable owner state could not be safely established."""
 
@@ -124,18 +158,44 @@ class EngineLock:
             return
         self.repository.set_engine_state(LOCK_KEY, state.to_dict())
 
-    def is_stale(self, existing: LockState | None, *, now=None) -> bool:
-        """A lock with no recent heartbeat is stale (its process is gone)."""
+    def _stale_proof(self, existing: LockState | None, *, now=None) -> dict:
+        """Return explicit heartbeat + host/PID proof for a stale LIVE owner.
+
+        A stale timestamp alone is insufficient: a paused process or network
+        partition may still own real-money state. Automatic takeover is only
+        possible for a local owner whose PID is demonstrably gone. A remote
+        host, malformed heartbeat, reused/live PID, or liveness-probe error is
+        UNKNOWN and must not be converted into "stale".
+        """
         if existing is None:
-            return True
+            return {"proven": True, "reason": "no existing owner", "liveness": "none"}
         heartbeat = _parse(existing.heartbeat_ts)
         if heartbeat is None:
-            # A missing/corrupt heartbeat is UNKNOWN, not proof of death.
-            # Treating it as stale would permit a live-engine takeover without
-            # evidence that the previous owner stopped.
-            return False
+            return {"proven": False, "reason": "heartbeat timestamp is unknown",
+                    "liveness": "unknown"}
         now = now or self._now()
-        return (now - heartbeat) > timedelta(seconds=self.stale_after_seconds)
+        age = (now - heartbeat).total_seconds()
+        if age <= self.stale_after_seconds:
+            return {"proven": False, "reason": "heartbeat is fresh",
+                    "liveness": "alive", "age_seconds": max(0.0, age)}
+        if existing.host != socket.gethostname():
+            return {"proven": False,
+                    "reason": "remote owner PID cannot be verified on this host",
+                    "liveness": "unknown", "age_seconds": age}
+        alive = _pid_alive(existing.pid)
+        if alive is False:
+            return {"proven": True, "reason": "stale heartbeat and local PID is absent",
+                    "liveness": "dead", "age_seconds": age}
+        if alive is True:
+            return {"proven": False, "reason": "heartbeat is stale but local PID is alive",
+                    "liveness": "alive", "age_seconds": age}
+        return {"proven": False, "reason": "local PID liveness could not be verified",
+                "liveness": "unknown", "age_seconds": age}
+
+    def is_stale(self, existing: LockState | None, *, now=None) -> bool:
+        """True only when heartbeat AND local process-death proof are present."""
+        return bool(self._stale_proof(existing, now=now)["proven"])
+
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -162,12 +222,57 @@ class EngineLock:
             return LockDecision(
                 False, "atomic live-engine lease unavailable; refusing live start")
 
+        stale_proof = None
+        if self.live and callable(acquire_lease):
+            try:
+                read_lease = getattr(self.repository, "read_lease", None)
+                if not callable(read_lease):
+                    raise LockStateUnavailable("lease read API is unavailable")
+                prior = read_lease(LOCK_KEY)
+            except Exception as exc:
+                logger.error("LIVE_LEASE_PRECHECK_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                return LockDecision(
+                    False, "live-engine lease owner could not be verified; refusing start")
+            if prior is not None:
+                if not isinstance(prior, dict) or not prior.get("owner"):
+                    return LockDecision(
+                        False, "live-engine lease record is malformed; refusing start")
+                same_process = (
+                    prior.get("owner") == self.owner
+                    and int(prior.get("pid") or 0) == os.getpid()
+                    and str(prior.get("host") or "") == socket.gethostname())
+                if not same_process and prior.get("live", True):
+                    prior_state = LockState(
+                        owner=str(prior["owner"]), pid=int(prior.get("pid") or 0),
+                        host=str(prior.get("host") or "?"),
+                        started_ts=str(prior.get("started_ts") or ""),
+                        heartbeat_ts=str(prior.get("heartbeat_ts") or ""),
+                        live=True)
+                    proof = self._stale_proof(prior_state, now=now)
+                    if not proof["proven"]:
+                        logger.warning("LIVE_LEASE_TAKEOVER_REFUSED",
+                                       extra={"owner": prior_state.owner,
+                                              "reason": proof["reason"],
+                                              "liveness": proof["liveness"]})
+                        return LockDecision(
+                            False,
+                            f"another LIVE engine ({prior_state.owner}) holds the "
+                            "lease; running two live engines against one account "
+                            "would double every entry. Takeover is refused because "
+                            f"the owner cannot be proven stopped: {proof['reason']}",
+                            existing=prior_state)
+                    stale_proof = {
+                        "owner": prior_state.owner, "pid": prior_state.pid,
+                        "host": prior_state.host,
+                        "heartbeat_ts": prior_state.heartbeat_ts}
+
         if callable(acquire_lease):
             try:
                 result = acquire_lease(
                     LOCK_KEY, self.owner, pid=os.getpid(),
                     host=socket.gethostname(), live=self.live, now_ts=now_iso,
-                    stale_before_ts=stale_before)
+                    stale_before_ts=stale_before, stale_proof=stale_proof)
             except Exception as exc:
                 logger.error("LIVE_LEASE_ACQUIRE_FAILED",
                              extra={"error_type": type(exc).__name__})
@@ -219,7 +324,8 @@ class EngineLock:
                 self.held = True
                 return LockDecision(True, "lock acquired (non-live coexists)")
             existing = LockState(
-                owner=existing_row["owner"], pid=int(existing_row.get("pid") or 0),
+                owner=str(existing_row["owner"]),
+                pid=int(existing_row.get("pid") or 0),
                 host=str(existing_row.get("host") or "?"),
                 started_ts=str(existing_row.get("started_ts") or ""),
                 heartbeat_ts=str(existing_row.get("heartbeat_ts") or ""),
@@ -356,9 +462,12 @@ class EngineLock:
                     "stale_after_seconds": self.stale_after_seconds}
         heartbeat = _parse(existing.heartbeat_ts)
         age = ((now - heartbeat).total_seconds() if heartbeat else None)
+        proof = self._stale_proof(existing, now=now)
         return {"held": True, "known": True, "readable": True,
                 "atomic_supported": atomic_supported,
-                "stale": self.is_stale(existing, now=now),
+                "stale": bool(proof["proven"]),
+                "stale_proof_reason": proof["reason"],
+                "owner_liveness": proof["liveness"],
                 "owner": existing.owner, "pid": existing.pid,
                 "host": existing.host, "live": existing.live,
                 "started_ts": existing.started_ts,

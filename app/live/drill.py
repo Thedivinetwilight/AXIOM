@@ -456,7 +456,15 @@ def _step_single_engine_lock(ctx: _Context) -> Step:
     # FINAL-11/10 §15: force is NOT a casual bypass — against a fresh
     # heartbeat it must be refused too.
     forced = second.acquire(now=now, force=True)
-    # after the stale window a crashed engine must never block a restart
+    # Model a crash that is provably local and absent; an old timestamp alone
+    # no longer authorizes takeover while the PID is still alive or remote.
+    import socket
+    from app.live.lock import LOCK_KEY
+    with ctx.database.transaction() as connection:
+        connection.execute(
+            "UPDATE engine_lease SET pid=?, host=?, heartbeat_ts=? WHERE name=?",
+            (2_147_483_647, socket.gethostname(),
+             (now - timedelta(minutes=30)).isoformat(), LOCK_KEY))
     revived = third.acquire(now=now + timedelta(minutes=30))
     # and a paper/sandbox engine is never blocked by a live lock
     paper = non_live.acquire(now=now)

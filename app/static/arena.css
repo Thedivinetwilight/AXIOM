@@ -340,9 +340,22 @@ input[readonly] { color: var(--muted); }
 @media (max-width: 900px) {
   .chart-grid.cols-2, .chart-grid.cols-4, .chart-grid.cols-6, .chart-grid.cols-8 { grid-template-columns: 1fr; }
 }
-.chart-panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; background: rgba(15,23,42,.35); min-width: 0; }
+.chart-panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; background: rgba(15,23,42,.35); min-width: 0; transition: border-color .12s, opacity .12s; }
+.chart-panel.chart-dragging { opacity: .55; }
+.chart-panel.chart-drop-target { border-color: #38bdf8; box-shadow: 0 0 0 1px rgba(56,189,248,.35); }
+.chart-panel-head { align-items: center; }
+.chart-drag-handle { cursor: grab; touch-action: none; }
+.chart-drag-handle:active { cursor: grabbing; }
+.chart-panel-number { min-width: 22px; }
+.chart-size-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; font-size: 10.5px; color: #8ea0b5; }
+.chart-size-row input[type=range] { width: min(170px, 42vw); accent-color: #38bdf8; }
 .chart-canvas { min-height: 120px; }
-.chart-canvas svg { display: block; }
+.chart-canvas svg { display: block; max-width: 100%; touch-action: pan-y; }
+.chart-crosshair { stroke: #fbbf24; stroke-width: 1; stroke-dasharray: 4 3; opacity: .9; }
+.chart-crosshair-horizontal { opacity: .5; }
+.chart-hover-readout { min-height: 15px; margin-top: 2px; color: #fbbf24; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.chart-caption { font-size: 10.5px; margin-top: 2px; }
+@media (max-width: 480px) { .chart-size-row { flex-wrap: wrap; } .chart-size-row input[type=range] { flex: 1; min-width: 120px; } }
 
 /* Focus mode: F collapses the shell around the workspace (spec §49). */
 body.axiom-focus .app {

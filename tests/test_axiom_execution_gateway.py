@@ -9,7 +9,9 @@ real exchange (no automated test may ever place a production order).
 
 from __future__ import annotations
 
+import socket
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -56,6 +58,9 @@ class _MockLedger:
 
     def equity(self) -> float:
         return self.cash
+
+    def unrealized(self) -> float:
+        return 0.0
 
     def snapshot(self) -> dict:
         return {"cash": self.cash, "position_quantity": self.position_quantity,
@@ -105,11 +110,89 @@ def repo(tmp_path):
     return Repository(database)
 
 
+class _FixtureReadySupervisor:
+    """Test double for a child that owns a fresh, reconciled live lease.
+
+    The broker in this module is an in-memory mock and no test places an order
+    at an exchange. Readiness is nevertheless backed by the same durable lease,
+    runtime identity, reconciliation stamp, market-data time and token record
+    required by the production state machine.
+    """
+
+    def __init__(self, repository):
+        self.repository = repository
+
+    def readiness_context(self):
+        from app.live.lock import EngineLock
+
+        lease = EngineLock(self.repository, live=True).status()
+        runtime = self.repository.get_engine_state("live_engine_runtime", {}) or {}
+        control = self.repository.get_engine_state("live_engine_control", {}) or {}
+        if (control.get("stop_requested") is True
+                or lease.get("held") is not True or lease.get("live") is not True
+                or lease.get("stale") is not False
+                or runtime.get("state") != "READY"
+                or runtime.get("owner") != lease.get("owner")
+                or runtime.get("pid") != lease.get("pid")
+                or runtime.get("host") != lease.get("host")):
+            raise RuntimeError("fixture engine has no reconciled live lease")
+        return {"supervisor_verified": True,
+                "supervisor_lease_owner": lease["owner"],
+                "supervisor_pid": lease["pid"],
+                "supervisor_host": lease["host"],
+                "last_market_data_ts": self.repository.get_engine_state(
+                    "last_market_data_ts")}
+
+    def request_stop(self, *, reason="fixture stop"):
+        control = self.repository.get_engine_state("live_engine_control", {}) or {}
+        self.repository.set_engine_state("live_engine_control", {
+            **control, "stop_requested": True, "reason": reason})
+        return {"running": True, "stop_requested": True}
+
+
+def _install_fixture_live_engine(repository):
+    from app.live.lock import EngineLock
+
+    now = datetime.now(timezone.utc).isoformat()
+    lock = EngineLock(repository, live=True)
+    assert lock.acquire().granted
+    lease = lock.status()
+    repository.set_engine_state("last_market_data_ts", now)
+    repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+    repository.set_engine_state("live_token_verified", {"verified_at": now})
+    repository.set_engine_state("live_engine_control", {
+        "stop_requested": False, "generation": 1})
+    repository.set_engine_state("live_engine_runtime", {
+        "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
+        "host": lease["host"], "reconciled_at": now})
+    return lock, _FixtureReadySupervisor(repository)
+
+
+def _restart_fixture_live_engine(repository):
+    """Model a drained child followed by a newly supervised child generation."""
+    from app.live.lock import EngineLock
+
+    now = datetime.now(timezone.utc).isoformat()
+    control = repository.get_engine_state("live_engine_control", {}) or {}
+    repository.set_engine_state("live_engine_control", {
+        "stop_requested": False,
+        "generation": int(control.get("generation", 0)) + 1})
+    lease = EngineLock(repository, live=True).status()
+    assert lease.get("held") is True and lease.get("live") is True
+    repository.set_engine_state("last_market_data_ts", now)
+    repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+    repository.set_engine_state("live_token_verified", {"verified_at": now})
+    repository.set_engine_state("live_engine_runtime", {
+        "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
+        "host": lease["host"], "reconciled_at": now})
+
+
 @pytest.fixture()
 def armed(repo):
-    """A fully authorized live session: ARMED -> ACTIVE with a fresh epoch."""
+    """A mock broker plus a supervised, reconciled fixture engine."""
     settings = live_settings()
-    manager = LiveSessionManager(repo)
+    _lock, supervisor = _install_fixture_live_engine(repo)
+    manager = LiveSessionManager(repo, engine_supervisor=supervisor)
     manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE,
                 repository=repo)
     manager.activate(actor="test")
@@ -145,6 +228,37 @@ def entry_intent(epoch, **overrides):
 # =====================================================================
 
 class TestGatewayHappyPath:
+    def test_active_session_without_its_live_lease_never_calls_broker(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        lease = repo.read_lease("engine_lock")
+        assert lease and repo.release_lease("engine_lock", lease["owner"])
+        broker = MockLiveBroker()
+        gateway = make_gateway(repo, manager, settings, broker)
+
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "ENGINE LEASE"
+        assert gateway.broker_calls == 0
+        assert broker.calls == []
+
+    def test_lease_owned_by_another_process_never_calls_broker(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        with repo.db.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET owner=?, pid=?, host=? WHERE name=?",
+                ("another-host:9999", 9999, "another-host", "engine_lock"))
+        broker = MockLiveBroker()
+        gateway = make_gateway(repo, manager, settings, broker)
+
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "ENGINE LEASE"
+        assert gateway.broker_calls == 0
+        assert broker.calls == []
+
     def test_authorized_entry_reaches_the_broker_exactly_once(self, repo, armed):
         settings, manager = armed
         epoch = manager.epochs.current()["epoch"]
@@ -185,6 +299,8 @@ class TestAuthorizationEpochs:
         settings, manager = armed
         stale_epoch = manager.epochs.current()["epoch"]
         manager.stop(reason="cycle 1 done")
+        # Model completion of the supervised drain and a fresh child generation.
+        _restart_fixture_live_engine(repo)
         # re-arm + re-activate mints a FRESH epoch
         manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE,
                     repository=repo)
@@ -225,7 +341,8 @@ class TestAuthorizationEpochs:
 class TestSessionStateGate:
     def test_entry_refused_when_not_active(self, repo):
         settings = live_settings()
-        manager = LiveSessionManager(repo)
+        _lock, supervisor = _install_fixture_live_engine(repo)
+        manager = LiveSessionManager(repo, engine_supervisor=supervisor)
         manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE,
                     repository=repo)
         manager.epochs.activate(actor="test")          # epoch exists...
@@ -301,6 +418,24 @@ class TestEmergencyStopSemantics:
             gateway.submit(entry_intent(epoch))
         assert exc.value.layer == "EMERGENCY STOP"
         assert gateway.broker_calls == 0
+
+    def test_reconcile_purpose_never_becomes_an_order_submission(self,
+                                                               repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        reconciliations = []
+        broker.reconcile = lambda: (reconciliations.append("read") or [])
+        gateway = make_gateway(repo, manager, settings, broker)
+        intent = ExecutionIntent(purpose="RECONCILE", market_id="india",
+                                 identity="NSE|RELIANCE", side="BUY", quantity=1)
+
+        result = gateway.submit(intent)
+
+        assert result["authorized"] is True
+        assert result["submitted"] is False
+        assert reconciliations == ["read"]
+        assert broker.calls == []
+        assert gateway.broker_calls == 1
 
 
 # =====================================================================
@@ -586,6 +721,56 @@ class TestGatewayRoutedBroker:
         assert exc.value.layer == "GUARD CHAIN"
         assert broker.calls == []
 
+    def test_cancel_uses_gateway_and_remains_available_during_emergency(self,
+                                                                       repo, armed):
+        from types import SimpleNamespace
+
+        settings, manager = armed
+        broker = MockLiveBroker()
+        broker.orders = {"working-1": SimpleNamespace(
+            symbol="NSE|X", side="BUY", quantity=1.0, price=100.0,
+            status="OPEN", our_id="mock-working-1")}
+        broker.cancel_calls = []
+        broker.cancel = lambda order_id: (
+            broker.cancel_calls.append(order_id) or {"status": "CANCELLED"})
+        facade = self._facade(repo, manager, settings, broker)
+        # A stop invalidates the epoch and sets the durable drain request, but
+        # it must not block a cancellation routed through the gateway.
+        manager.block(reason="emergency stop: test")
+        repo.set_engine_state("emergency_stop", {
+            "stopped": True, "reason": "test"})
+        facade.gateway.context_provider = lambda: (_ for _ in ()).throw(
+            RuntimeError("entry risk context unavailable"))
+        result = facade.cancel("working-1")
+        assert result["status"] == "CANCELLED"
+        assert broker.cancel_calls == ["working-1"]
+        assert broker.calls == []  # no submit path was called
+        assert facade.gateway.broker_calls == 1
+        events = [e["kind"] for e in repo.list_system_events(limit=50)]
+        assert "LIVE_INTENT_AUTHORIZED" in events
+        assert "LIVE_ORDER_CANCEL_RESULT" in events
+
+    def test_cancel_refuses_without_the_owned_live_lease(self, repo, armed):
+        from types import SimpleNamespace
+        from app.live.lock import EngineLock
+
+        settings, manager = armed
+        broker = MockLiveBroker()
+        broker.orders = {"working-2": SimpleNamespace(
+            symbol="NSE|X", side="BUY", quantity=1.0, price=100.0,
+            status="OPEN", our_id="mock-working-2")}
+        broker.cancel_calls = []
+        broker.cancel = lambda order_id: (
+            broker.cancel_calls.append(order_id) or {"status": "CANCELLED"})
+        facade = self._facade(repo, manager, settings, broker)
+        lease = EngineLock(repo, live=True).status()
+        assert repo.release_lease("engine_lock", lease["owner"])
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.cancel("working-2")
+        assert exc.value.layer == "ENGINE LEASE"
+        assert broker.cancel_calls == []
+        assert facade.gateway.broker_calls == 0
+
     # ----------------------------------------------- engine-level wiring ----
 
     def _engine_with_facade(self, repo, facade):
@@ -624,6 +809,23 @@ class TestGatewayRoutedBroker:
         engine._submit("BUY", 1.0, 100.0, candle)   # refused inside gateway
         assert broker.calls == []
         assert engine.submitted == 0
+
+    def test_live_risk_only_candle_never_evaluates_strategy_entries(self,
+                                                                   repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        engine, candle = self._engine_with_facade(repo, facade)
+        engine.provider.metrics = lambda: {
+            "market_open": True, "stale_feed": False}
+        strategy_calls = []
+        engine.strategy.generate_signal = lambda history: (
+            strategy_calls.append(len(history)) or type("Signal", (), {"value": "BUY"})())
+        engine.process_candle(candle, risk_reducing_only=True)
+        assert strategy_calls == []
+        assert broker.calls == []
+        assert engine.submitted == 0
+        assert engine.signals[candle.symbol]["reason"] == "live risk-reducing-only mode"
 
     def test_engine_protective_exit_survives_the_emergency_stop(self, repo,
                                                                  armed):

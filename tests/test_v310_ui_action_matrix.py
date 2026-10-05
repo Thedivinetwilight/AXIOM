@@ -177,6 +177,30 @@ class TestResearchControls:
         assert "moving_average" in names and "momentum" in names
 
 
+class TestInstrumentPinControls:
+    def test_pin_and_unpin_buttons_change_the_saved_instrument_state(self, armed):
+        client, token, _ = armed
+        payload = {"market_id": "india", "identity": "NSE|RELIANCE"}
+        pinned = client.post("/api/universe/pin", json=payload,
+                             headers=headers(token))
+        assert pinned.status_code == 200
+        assert pinned.json()["pinned"] == payload["identity"]
+        listing = client.get("/api/universe/pins?market_id=india",
+                             headers=headers(token))
+        assert listing.status_code == 200
+        assert any(row["identity"] == payload["identity"]
+                   for row in listing.json()["pins"])
+
+        unpinned = client.post("/api/universe/unpin", json=payload,
+                               headers=headers(token))
+        assert unpinned.status_code == 200
+        assert unpinned.json()["unpinned"] == payload["identity"]
+        listing = client.get("/api/universe/pins?market_id=india",
+                             headers=headers(token))
+        assert all(row["identity"] != payload["identity"]
+                   for row in listing.json()["pins"])
+
+
 class TestSettingsControls:
     def test_save_button_writes_and_reports_restart(self, armed):
         client, token, _ = armed

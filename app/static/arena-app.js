@@ -1903,6 +1903,8 @@
           .catch(function (e) { Arena.toast("err", e.message); });
       });
       actions.appendChild(missedBtn);
+      addInstrumentPinControl(actions, marketId, function () { return identity; },
+        "instrument " + identity);
       detail.appendChild(actions);
 
       var analogHost = Arena.el("div", { "class": "section-gap" });
@@ -1935,6 +1937,9 @@
   // =====================================================================
   // CHART WORKSPACE (spec §49: layouts 1/2/4/6/8, linked panels, focus F)
   // =====================================================================
+  var chartRegistry = Object.create(null);
+  var draggedChartPanel = null;
+
   function chartConfig() {
     var raw = localStorage.getItem("axiom_chart_layout");
     try {
@@ -1949,11 +1954,14 @@
 
   function renderChartWorkspace(host) {
     host.innerHTML = "";
+    chartRegistry = Object.create(null);
+    draggedChartPanel = null;
     var cfg = chartConfig();
     host.appendChild(Arena.el("p", { "class": "muted", style: "font-size:11.5px" }, [document.createTextNode(
       "Charts render RECORDED candles only — an empty chart means nothing is recorded, never a silent zero. " +
-      "Panels are linked: picking a symbol in the instrument workspace updates panel 1, and the layout choice " +
-      "is saved. Press F to toggle focus mode (minimal UI).")]));
+      "Picking a symbol in the instrument workspace updates panel 1; panel layout and height are saved. " +
+      "Crosshairs are time-linked. Drag or move panels to reorder, resize their chart height, and pin instruments. " +
+      "Press F for focus mode.")]));
 
     var bar = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:8px" });
     bar.appendChild(Arena.el("span", { "class": "faint", style: "align-self:center" }, [document.createTextNode("Layout:")]));
@@ -1977,55 +1985,249 @@
     var grid = Arena.el("div", { "class": "chart-grid cols-" + cfg.layout, id: "chart-grid" });
     for (var i = 0; i < cfg.layout; i++) {
       var panel = cfg.panels[i] || { identity: "", unit: "days", interval: 1 };
-      grid.appendChild(buildChartPanel(i, panel));
+      grid.appendChild(buildChartPanel(i, panel, cfg.layout, host));
     }
     host.appendChild(grid);
   }
 
-  function buildChartPanel(index, panel) {
-    var box = Arena.el("div", { "class": "chart-panel", id: "chart-panel-" + index });
-    var ident = Arena.el("input", { id: "chart-symbol-" + index, placeholder: "e.g. NSE|RELIANCE", value: panel.identity || "", style: "min-width:160px" });
-    var unit = Arena.el("select", { id: "chart-unit-" + index });
+  function chartPanelHeight(value) {
+    var height = parseInt(value, 10);
+    if (!Number.isFinite(height)) return 320;
+    return Math.max(260, Math.min(560, Math.round(height / 20) * 20));
+  }
+
+  function reorderChartPanels(from, to, host) {
+    var cfg = chartConfig();
+    if (!Number.isInteger(from) || !Number.isInteger(to)
+        || from < 0 || to < 0 || from >= cfg.layout || to >= cfg.layout
+        || from === to) return;
+    while (cfg.panels.length < cfg.layout) {
+      cfg.panels.push({ identity: "", unit: "days", interval: 1, height: 320 });
+    }
+    var visible = cfg.panels.slice(0, cfg.layout);
+    var hidden = cfg.panels.slice(cfg.layout);
+    var moved = visible.splice(from, 1)[0];
+    visible.splice(to, 0, moved);
+    cfg.panels = visible.concat(hidden);
+    saveChartConfig(cfg);
+    renderChartWorkspace(host);
+  }
+
+  function addInstrumentPinControl(container, marketId, identityProvider, label) {
+    var button = Arena.el("button", { "class": "btn ghost sm", type: "button",
+      "aria-label": "Pin or unpin " + label }, [document.createTextNode("Checking pin…")]);
+    var requestSerial = 0;
+
+    function refresh() {
+      var serial = ++requestSerial;
+      var identity = String(identityProvider() || "").trim();
+      if (!identity) {
+        button.disabled = true;
+        button.textContent = "Pin";
+        button.dataset.identity = "";
+        button.dataset.pinned = "false";
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "Checking pin…";
+      Arena.get("/api/universe/pins?market_id=" + encodeURIComponent(marketId))
+        .then(function (result) {
+          if (serial !== requestSerial
+              || String(identityProvider() || "").trim() !== identity) return;
+          var pins = result.pins || [];
+          var pinned = pins.some(function (pin) {
+            return String(pin.identity || pin) === identity;
+          });
+          button.dataset.identity = identity;
+          button.dataset.pinned = pinned ? "true" : "false";
+          button.setAttribute("aria-pressed", pinned ? "true" : "false");
+          button.title = pinned ? "Unpin this instrument from the workspace"
+                                : "Pin this instrument to the workspace";
+          button.textContent = pinned ? "Unpin" : "Pin";
+          button.disabled = false;
+        }).catch(function (error) {
+          if (serial !== requestSerial) return;
+          button.disabled = true;
+          button.textContent = "Pin status unavailable";
+          button.title = error.message || "Could not read the saved pin state.";
+        });
+    }
+
+    button.addEventListener("click", function () {
+      var identity = String(identityProvider() || "").trim();
+      if (!identity || button.disabled) return;
+      if (button.dataset.identity !== identity) { refresh(); return; }
+      var pinned = button.dataset.pinned === "true";
+      button.disabled = true;
+      button.textContent = pinned ? "Unpinning…" : "Pinning…";
+      Arena.post(pinned ? "/api/universe/unpin" : "/api/universe/pin",
+        { market_id: marketId, identity: identity }).then(function () {
+        Arena.toast("ok", (pinned ? "Unpinned " : "Pinned ") + identity + ".");
+        refresh();
+      }).catch(function (error) {
+        Arena.toast("err", error.message);
+        refresh();
+      });
+    });
+
+    if (container) container.appendChild(button);
+    refresh();
+    return { button: button, refresh: refresh };
+  }
+
+  function buildChartPanel(index, panel, layout, workspaceHost) {
+    panel = panel || { identity: "", unit: "days", interval: 1 };
+    var box = Arena.el("div", { "class": "chart-panel", id: "chart-panel-" + index,
+      "data-chart-index": String(index) });
+    var ident = Arena.el("input", { id: "chart-symbol-" + index,
+      placeholder: "e.g. NSE|RELIANCE", value: panel.identity || "",
+      style: "min-width:160px", "aria-label": "Instrument identity for chart " + (index + 1) });
+    var unit = Arena.el("select", { id: "chart-unit-" + index,
+      "aria-label": "Candle interval for chart " + (index + 1) });
     [["days", "1D"]].forEach(function (u) {
       unit.appendChild(Arena.el("option", { value: u[0] }, [document.createTextNode(u[1])]));
     });
     unit.value = panel.unit || "days";
-    var refresh = Arena.el("button", { "class": "btn ghost sm", id: "chart-refresh-" + index }, [document.createTextNode("Load")]);
+    var refresh = Arena.el("button", { "class": "btn ghost sm", id: "chart-refresh-" + index,
+      type: "button" }, [document.createTextNode("Load")]);
+    var marketId = localStorage.getItem("axiom_market") || "india";
+    var pinControl = addInstrumentPinControl(null, marketId,
+      function () { return ident.value; }, "chart instrument " + (index + 1));
     var chartHost = Arena.el("div", { id: "chart-canvas-" + index, "class": "chart-canvas" });
-    var head = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap;margin-bottom:6px" }, [
-      Arena.el("span", { "class": "faint", style: "align-self:center" }, [document.createTextNode("#" + (index + 1))]),
-      ident, unit, refresh]);
+    var dragHandle = Arena.el("button", { "class": "btn ghost sm chart-drag-handle",
+      type: "button", draggable: "true", title: "Drag to reorder this chart",
+      "aria-label": "Drag to reorder chart panel " + (index + 1) },
+      [document.createTextNode("↕")]);
+    dragHandle.addEventListener("dragstart", function (event) {
+      draggedChartPanel = index;
+      box.classList.add("chart-dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", String(index));
+      }
+    });
+    dragHandle.addEventListener("dragend", function () {
+      draggedChartPanel = null;
+      box.classList.remove("chart-dragging", "chart-drop-target");
+    });
+    box.addEventListener("dragover", function (event) {
+      if (draggedChartPanel === null) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      box.classList.add("chart-drop-target");
+    });
+    box.addEventListener("dragleave", function () {
+      box.classList.remove("chart-drop-target");
+    });
+    box.addEventListener("drop", function (event) {
+      event.preventDefault();
+      box.classList.remove("chart-drop-target");
+      var from = draggedChartPanel;
+      if (event.dataTransfer) {
+        var transferred = parseInt(event.dataTransfer.getData("text/plain"), 10);
+        if (Number.isInteger(transferred)) from = transferred;
+      }
+      draggedChartPanel = null;
+      reorderChartPanels(from, index, workspaceHost);
+    });
+
+    var moveEarlier = Arena.el("button", { "class": "btn ghost sm", type: "button",
+      title: "Move chart earlier", "aria-label": "Move chart panel " + (index + 1) + " earlier" },
+      [document.createTextNode("↑")]);
+    moveEarlier.disabled = index === 0;
+    moveEarlier.addEventListener("click", function () {
+      reorderChartPanels(index, index - 1, workspaceHost);
+    });
+    var moveLater = Arena.el("button", { "class": "btn ghost sm", type: "button",
+      title: "Move chart later", "aria-label": "Move chart panel " + (index + 1) + " later" },
+      [document.createTextNode("↓")]);
+    moveLater.disabled = index >= layout - 1;
+    moveLater.addEventListener("click", function () {
+      reorderChartPanels(index, index + 1, workspaceHost);
+    });
+
+    var head = Arena.el("div", { "class": "btn-row chart-panel-head",
+      style: "flex-wrap:wrap;margin-bottom:6px" }, [
+      dragHandle,
+      Arena.el("span", { "class": "faint chart-panel-number" },
+        [document.createTextNode("#" + (index + 1))]),
+      moveEarlier, moveLater, ident, unit, refresh, pinControl.button
+    ]);
+    var height = chartPanelHeight(panel.height);
+    var heightInput = Arena.el("input", { type: "range", min: "260", max: "560",
+      step: "20", value: String(height), id: "chart-height-" + index,
+      "aria-label": "Chart panel " + (index + 1) + " height" });
+    heightInput.value = String(height);
+    var heightLabel = Arena.el("span", { id: "chart-height-value-" + index,
+      "class": "faint mono" }, [document.createTextNode(height + " px")]);
+    var sizeRow = Arena.el("div", { "class": "chart-size-row" }, [
+      Arena.el("label", { "for": "chart-height-" + index },
+        [document.createTextNode("Chart height")]), heightInput, heightLabel
+    ]);
+    heightInput.addEventListener("input", function () {
+      height = chartPanelHeight(heightInput.value);
+      heightInput.value = String(height);
+      heightLabel.textContent = height + " px";
+      var cfg = chartConfig();
+      while (cfg.panels.length <= index) {
+        cfg.panels.push({ identity: "", unit: "days", interval: 1, height: 320 });
+      }
+      cfg.panels[index].height = height;
+      saveChartConfig(cfg);
+      var existing = chartRegistry[index];
+      if (existing) drawCandleChart(existing.container, existing.candles,
+        existing.label, index, height);
+    });
+    ident.addEventListener("change", pinControl.refresh);
+    refresh.addEventListener("click", load);
     box.appendChild(head);
+    box.appendChild(sizeRow);
     box.appendChild(chartHost);
 
+    var loadSerial = 0;
     function load() {
+      var request = ++loadSerial;
       var symbol = ident.value.trim();
+      delete chartRegistry[index];
+      clearSharedCrosshair();
       if (!symbol) {
         chartHost.innerHTML = "";
-        chartHost.appendChild(Arena.el("div", { "class": "empty" }, [document.createTextNode("Enter an instrument identity to chart.")]));
+        chartHost.appendChild(Arena.el("div", { "class": "empty" },
+          [document.createTextNode("Enter an instrument identity to chart.")]));
         return;
       }
       var market = localStorage.getItem("axiom_market") || "india";
       chartHost.innerHTML = "";
-      chartHost.appendChild(Arena.el("div", { "class": "muted" }, [document.createTextNode("Loading recorded bars…")]));
+      chartHost.appendChild(Arena.el("div", { "class": "muted" },
+        [document.createTextNode("Loading recorded bars…")]));
       Arena.get("/api/candles/" + encodeURIComponent(market) + "/" + encodeURIComponent(symbol) +
-        "?unit=" + encodeURIComponent(unit.value) + "&interval=1&limit=300").then(function (d) {
+        "?unit=" + encodeURIComponent(unit.value) + "&interval=1&limit=300").then(function (data) {
+        if (request !== loadSerial
+            || document.getElementById("chart-panel-" + index) !== box) return;
         var cfg = chartConfig();
-        cfg.panels[index] = { identity: symbol, unit: unit.value, interval: 1 };
+        while (cfg.panels.length <= index) {
+          cfg.panels.push({ identity: "", unit: "days", interval: 1, height: 320 });
+        }
+        cfg.panels[index] = { identity: symbol, unit: unit.value, interval: 1,
+          height: chartPanelHeight(heightInput.value) };
         saveChartConfig(cfg);
         chartHost.innerHTML = "";
-        if (!d.count) {
+        if (!data.count) {
           chartHost.appendChild(Arena.el("div", { "class": "empty" }, [
             document.createTextNode("No recorded bars for " + symbol + " — nothing was synthesised.")]));
           return;
         }
-        drawCandleChart(chartHost, d.candles, symbol);
-      }).catch(function (e) {
+        drawCandleChart(chartHost, data.candles, symbol, index,
+          chartPanelHeight(heightInput.value));
+      }).catch(function (error) {
+        if (request !== loadSerial
+            || document.getElementById("chart-panel-" + index) !== box) return;
         chartHost.innerHTML = "";
-        chartHost.appendChild(Arena.el("div", { "class": "banner err" }, [document.createTextNode(e.message)]));
+        chartHost.appendChild(Arena.el("div", { "class": "banner err" },
+          [document.createTextNode(error.message)]));
       });
     }
-    refresh.addEventListener("click", load);
+
     if (panel.identity) load();
     return box;
   }
@@ -2043,11 +2245,72 @@
     }
   }
 
-  function drawCandleChart(container, candles, label) {
-    var W = 640, H = 240, padL = 46, padR = 8, padT = 10, padB = 34, volH = 40;
-    var highs = candles.map(function (c) { return c.high; });
-    var lows = candles.map(function (c) { return c.low; });
-    var vols = candles.map(function (c) { return c.volume || 0; });
+  function clearSharedCrosshair() {
+    Object.keys(chartRegistry).forEach(function (key) {
+      var chart = chartRegistry[key];
+      chart.vertical.setAttribute("visibility", "hidden");
+      chart.horizontal.setAttribute("visibility", "hidden");
+      chart.readout.textContent = chart.readoutHint;
+    });
+  }
+
+  function nearestChartCandle(chart, timestamp, sourceIndex, sourceCount) {
+    var target = Date.parse(String(timestamp || ""));
+    var bestIndex = -1;
+    var bestDistance = Infinity;
+    if (Number.isFinite(target)) {
+      chart.candles.forEach(function (candle, index) {
+        var time = Date.parse(String(candle.ts || ""));
+        if (!Number.isFinite(time)) return;
+        var distance = Math.abs(time - target);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = index;
+        }
+      });
+    } else {
+      bestIndex = chart.candles.findIndex(function (candle) {
+        return String(candle.ts || "") === String(timestamp || "");
+      });
+    }
+    if (bestIndex >= 0) return bestIndex;
+    var fraction = sourceCount > 1 ? sourceIndex / (sourceCount - 1) : 0;
+    return Math.max(0, Math.min(chart.candles.length - 1,
+      Math.round(fraction * (chart.candles.length - 1))));
+  }
+
+  function syncSharedCrosshair(timestamp, sourceIndex, sourceCount, yFraction) {
+    var fraction = Math.max(0, Math.min(1, yFraction));
+    Object.keys(chartRegistry).forEach(function (key) {
+      var chart = chartRegistry[key];
+      if (!chart.candles.length) return;
+      var index = nearestChartCandle(chart, timestamp, sourceIndex, sourceCount);
+      var candle = chart.candles[index];
+      var x = chart.padL + index * chart.step + chart.step / 2;
+      var y = chart.padT + fraction * chart.priceH;
+      chart.vertical.setAttribute("x1", x);
+      chart.vertical.setAttribute("x2", x);
+      chart.horizontal.setAttribute("y1", y);
+      chart.horizontal.setAttribute("y2", y);
+      chart.vertical.setAttribute("visibility", "visible");
+      chart.horizontal.setAttribute("visibility", "visible");
+      chart.readout.textContent = String(candle.ts || "timestamp unavailable") +
+        " · O " + chart.formatPrice(candle.open) +
+        " H " + chart.formatPrice(candle.high) +
+        " L " + chart.formatPrice(candle.low) +
+        " C " + chart.formatPrice(candle.close) +
+        " · V " + chart.formatPrice(candle.volume || 0);
+    });
+  }
+
+  function drawCandleChart(container, candles, label, panelIndex, height) {
+    container.innerHTML = "";
+    candles = Array.isArray(candles) ? candles : [];
+    if (!candles.length) return;
+    var W = 640, H = chartPanelHeight(height), padL = 46, padR = 8, padT = 10, padB = 34, volH = 40;
+    var highs = candles.map(function (c) { return Number(c.high); });
+    var lows = candles.map(function (c) { return Number(c.low); });
+    var vols = candles.map(function (c) { return Number(c.volume) || 0; });
     var max = Math.max.apply(null, highs), min = Math.min.apply(null, lows);
     var maxVol = Math.max.apply(null, vols) || 1;
     if (max === min) { max += 1; min -= 1; }
@@ -2059,6 +2322,9 @@
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     svg.setAttribute("width", "100%");
     svg.setAttribute("height", String(H));
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Recorded candle chart for " + label +
+      ". Move the pointer to inspect and synchronize bars across chart panels.");
 
     function y(price) { return padT + (1 - (price - min) / (max - min)) * priceH; }
     // gridlines + price axis (5 levels)
@@ -2079,34 +2345,80 @@
     }
     candles.forEach(function (c, i) {
       var x = padL + i * step + (step - bw) / 2;
-      var up = c.close >= c.open;
+      var up = Number(c.close) >= Number(c.open);
       var color = up ? "#10b981" : "#f43f5e";
       var wick = document.createElementNS(ns, "line");
       wick.setAttribute("x1", x + bw / 2); wick.setAttribute("x2", x + bw / 2);
-      wick.setAttribute("y1", y(c.high)); wick.setAttribute("y2", y(c.low));
+      wick.setAttribute("y1", y(Number(c.high))); wick.setAttribute("y2", y(Number(c.low)));
       wick.setAttribute("stroke", color); wick.setAttribute("stroke-width", "1");
       svg.appendChild(wick);
       var body = document.createElementNS(ns, "rect");
-      var top = y(Math.max(c.open, c.close)), bot = y(Math.min(c.open, c.close));
+      var top = y(Math.max(Number(c.open), Number(c.close)));
+      var bot = y(Math.min(Number(c.open), Number(c.close)));
       body.setAttribute("x", x); body.setAttribute("y", top);
       body.setAttribute("width", bw);
       body.setAttribute("height", Math.max(1, bot - top));
       body.setAttribute("fill", up ? "rgba(16,185,129,.85)" : "rgba(244,63,94,.85)");
       svg.appendChild(body);
       // volume lane
-      var vh = (c.volume || 0) / maxVol * volH;
+      var vh = (Number(c.volume) || 0) / maxVol * volH;
       var vol = document.createElementNS(ns, "rect");
       vol.setAttribute("x", x); vol.setAttribute("width", bw);
       vol.setAttribute("y", H - padB - vh); vol.setAttribute("height", Math.max(0.5, vh));
       vol.setAttribute("fill", "rgba(56,189,248,.35)");
       svg.appendChild(vol);
     });
+
+    var vertical = document.createElementNS(ns, "line");
+    vertical.setAttribute("class", "chart-crosshair");
+    vertical.setAttribute("x1", padL); vertical.setAttribute("x2", padL);
+    vertical.setAttribute("y1", padT); vertical.setAttribute("y2", padT + priceH);
+    vertical.setAttribute("visibility", "hidden");
+    vertical.setAttribute("pointer-events", "none");
+    svg.appendChild(vertical);
+    var horizontal = document.createElementNS(ns, "line");
+    horizontal.setAttribute("class", "chart-crosshair chart-crosshair-horizontal");
+    horizontal.setAttribute("x1", padL); horizontal.setAttribute("x2", W - padR);
+    horizontal.setAttribute("y1", padT); horizontal.setAttribute("y2", padT);
+    horizontal.setAttribute("visibility", "hidden");
+    horizontal.setAttribute("pointer-events", "none");
+    svg.appendChild(horizontal);
+
+    var readoutHint = "Move over a chart to inspect the recorded bar across all panels.";
+    var readout = Arena.el("div", { "class": "chart-hover-readout", "aria-live": "off" },
+      [document.createTextNode(readoutHint)]);
     var first = candles[0], last = candles[candles.length - 1];
-    var cap = Arena.el("div", { "class": "faint", style: "font-size:10.5px;margin-top:2px" }, [
+    var cap = Arena.el("div", { "class": "faint chart-caption" }, [
       document.createTextNode(label + " · " + candles.length + " recorded bars · " +
         (first.ts || "") + " → " + (last.ts || "") + " · OBSERVED only")]);
     container.appendChild(svg);
+    container.appendChild(readout);
     container.appendChild(cap);
+
+    function formatPrice(value) {
+      var number = Number(value);
+      return Number.isFinite(number) ? number.toFixed(Math.abs(number) >= 10000 ? 0 : 2) : "—";
+    }
+    var chart = { container: container, svg: svg, candles: candles, label: label,
+      padL: padL, padT: padT, priceH: priceH, step: step,
+      vertical: vertical, horizontal: horizontal, readout: readout,
+      readoutHint: readoutHint, formatPrice: formatPrice };
+    chartRegistry[panelIndex] = chart;
+
+    svg.addEventListener("pointermove", function (event) {
+      var rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      var x = (event.clientX - rect.left) * W / rect.width;
+      if (x < padL || x > W - padR) { clearSharedCrosshair(); return; }
+      var index = Math.max(0, Math.min(candles.length - 1,
+        Math.floor((x - padL) / step)));
+      var yPosition = (event.clientY - rect.top) * H / rect.height;
+      var yFraction = Math.max(0, Math.min(1, (yPosition - padT) / priceH));
+      syncSharedCrosshair(candles[index].ts || String(index), index,
+        candles.length, yFraction);
+    });
+    svg.addEventListener("pointerleave", clearSharedCrosshair);
+    svg.addEventListener("pointercancel", clearSharedCrosshair);
   }
 
   function toggleFocusMode() {
@@ -2346,16 +2658,26 @@
     host.innerHTML = "";
     var row = Arena.el("div", { "class": "btn-row", style: "flex-wrap:wrap" });
     var emergencyActions = [
+      ["GLOBAL EMERGENCY STOP", "/api/live/emergency-stop",
+       { reason: "emergency stop from GUI" },
+       "What it does: persists the global emergency-stop flag, invalidates live authorization, and asks the supervised engine to cancel working orders. " +
+       "What changes: new risk is blocked immediately; the engine stays alive for risk-reducing exits until the live book is reconciled flat. " +
+       "What can go wrong: a broker/network failure can leave cancellation unconfirmed, which remains visible and keeps the child draining. " +
+       "Positions are never auto-closed. Recovery requires the exact configured confirmation phrase, then a fresh ARM and ACTIVATE."],
+      ["Clear emergency stop (fresh ARM required)", "/api/live/emergency-stop/clear", {},
+       "What it does: clears the persisted emergency flag only after the exact configured confirmation phrase. " +
+       "What changes: this does not resume a session or restore an old authorization epoch; the session remains STOPPED. " +
+       "Recovery requires fresh ARM and ACTIVATE after readiness passes.", "clear"],
       ["Pause live (new orders)", "/api/live/session/pause", {},
        "What it does: live order submission stops immediately. " +
        "What changes: the session moves to PAUSED; positions and already-submitted orders are untouched. " +
        "What can go wrong: open orders keep working at the broker while paused — watch them. " +
        "Recovery: Resume from this panel; nothing is lost."],
       ["Stop live session", "/api/live/session/stop", { reason: "emergency stop from GUI" },
-       "What it does: ends the live session (STOPPED) and blocks new live orders. " +
-       "What changes: returning to live later requires a fresh ARM cycle through the full readiness contract. " +
-       "What can go wrong: orders already at the broker are not cancelled by this button — reconciliation reports them. " +
-       "Recovery: re-arm after readiness passes; reconciliation covers the gap."],
+       "What it does: ends the live session (STOPPED), invalidates its entry epoch, and asks the supervised child to drain safely. " +
+       "What changes: the child requests cancellation through the live gateway and continues risk-reducing management until flat. " +
+       "What can go wrong: unconfirmed orders or open positions keep the child and its lease alive; positions are not auto-closed. " +
+       "Recovery: re-arm after readiness passes; the child must finish draining first."],
       ["Stop paper engine (cancels open orders)", "/paper/stop", {},
        "What it does: stops the paper engine and cancels open paper orders. " +
        "What changes: simulated trading halts until the engine is started again; the journal is preserved. " +
@@ -2366,10 +2688,23 @@
       var b = Arena.el("button", { "class": "btn sm danger", id: "emg-" + action[0].replace(/[^a-z0-9]+/g, "-").toLowerCase() }, [document.createTextNode(action[0])]);
       b.addEventListener("click", function () {
         Arena.confirmDialog("Emergency action", action[3], "Execute", true, function () {
-          Arena.post(action[1], action[2]).then(function (r) {
+          var body = Object.assign({}, action[2] || {});
+          if (action[4] === "clear") {
+            var phrase = window.prompt(
+              "Enter the exact configured LIVE confirmation phrase to clear the emergency stop:");
+            if (phrase === null) return;
+            body.confirmation_phrase = phrase;
+          }
+          b.disabled = true;
+          Arena.post(action[1], body).then(function (r) {
             Arena.toast("ok", "Executed: " + (r.state || r.message || "done"));
             refreshLiveChip();
-          }).catch(function (e) { Arena.toast("err", e.message); });
+            renderLivePanel(document.getElementById("live-panel"));
+            renderEmergency(host);
+          }).catch(function (e) {
+            Arena.toast("err", e.message);
+            b.disabled = false;
+          });
         });
       });
       row.appendChild(b);

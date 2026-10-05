@@ -2492,6 +2492,16 @@ class TestSingleEngineLock:
         repository, database = repo(tmp_path, name)
         return EngineLock(repository, **kwargs), repository, database
 
+    def _prove_dead_local_owner(self, repository, database):
+        """Model a crashed PID on this host; stale time alone is insufficient."""
+        import socket
+        from app.live.lock import LOCK_KEY
+
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET pid=?, host=? WHERE name=?",
+                (2_147_483_647, socket.gethostname(), LOCK_KEY))
+
     def test_a_second_live_engine_is_refused(self, tmp_path):
         now = datetime.now(timezone.utc)
         first, repository, database = self._lock(tmp_path, owner="host-a:1")
@@ -2521,9 +2531,60 @@ class TestSingleEngineLock:
         second = first.__class__(repository, live=True, owner="host-b:2",
                                  stale_after_seconds=180)
         first.acquire(now=now)                      # then the process dies
+        self._prove_dead_local_owner(repository, database)
         decision = second.acquire(now=now + timedelta(minutes=5))
         assert decision.granted is True
         assert second.status(now=now + timedelta(minutes=5))["owner"] == "host-b:2"
+        database.close()
+
+    def test_reused_owner_label_cannot_renew_from_a_different_pid(self, tmp_path):
+        import socket
+        from app.live.lock import EngineLock, LOCK_KEY
+
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(
+            tmp_path, name="same-owner.db", owner="stable-label")
+        assert first.acquire(now=now).granted
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET pid=?, host=? WHERE name=?",
+                (2_147_483_646, socket.gethostname(), LOCK_KEY))
+        second = EngineLock(repository, live=True, owner="stable-label")
+        decision = second.acquire(now=now)
+        assert decision.granted is False
+        assert "two live engines" in decision.reason
+        database.close()
+
+    def test_stale_heartbeat_with_live_local_pid_is_not_takeover_proof(
+            self, tmp_path):
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(
+            tmp_path, name="live-pid.db", owner="host-a:1")
+        second = first.__class__(repository, live=True, owner="host-b:2")
+        assert first.acquire(now=now).granted
+        decision = second.acquire(now=now + timedelta(hours=2))
+        assert decision.granted is False
+        assert "local PID is alive" in decision.reason
+        database.close()
+
+    def test_stale_remote_owner_is_not_automatically_taken_over(self, tmp_path):
+        import socket
+        from app.live.lock import LOCK_KEY
+
+        now = datetime.now(timezone.utc)
+        first, repository, database = self._lock(
+            tmp_path, name="remote-owner.db", owner="remote:1")
+        assert first.acquire(now=now).granted
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET host=?, heartbeat_ts=? WHERE name=?",
+                ("unreachable-host", (now - timedelta(hours=2)).isoformat(),
+                 LOCK_KEY))
+        second = first.__class__(repository, live=True, owner="local:2")
+        decision = second.acquire(now=now)
+        assert decision.granted is False
+        assert "remote owner PID cannot be verified" in decision.reason
+        assert socket.gethostname() != "unreachable-host"
         database.close()
 
     def test_force_cannot_override_a_fresh_heartbeat(self, tmp_path):
@@ -2546,6 +2607,7 @@ class TestSingleEngineLock:
         second = first.__class__(repository, live=True, owner="host-b:2",
                                  stale_after_seconds=180)
         first.acquire(now=now)
+        self._prove_dead_local_owner(repository, database)
         decision = second.acquire(now=now + timedelta(minutes=5), force=True)
         assert decision.granted is True
         assert "stale" in decision.reason
@@ -2560,6 +2622,7 @@ class TestSingleEngineLock:
         second = first.__class__(repository, live=True, owner="host-b:2",
                                  stale_after_seconds=60)
         first.acquire(now=now)
+        self._prove_dead_local_owner(repository, database)
         assert second.acquire(now=now + timedelta(minutes=10)).granted is True
         assert first.heartbeat(now=now + timedelta(minutes=10)) is False
         assert first.held is False
@@ -2645,7 +2708,9 @@ class TestSingleEngineLock:
         status = lock.status(now=now + timedelta(seconds=90))
         assert status["held"] is True and status["stale"] is False
         assert status["heartbeat_age_seconds"] == pytest.approx(90, abs=1)
-        assert lock.status(now=now + timedelta(hours=2))["stale"] is True
+        aged_but_live = lock.status(now=now + timedelta(hours=2))
+        assert aged_but_live["stale"] is False
+        assert aged_but_live["owner_liveness"] == "alive"
         database.close()
 
     def test_live_lock_refuses_repository_without_atomic_lease_api(self):
@@ -2777,6 +2842,12 @@ class TestSingleEngineLock:
         rival = EngineLock(repository, live=True, owner="dead:1",
                            stale_after_seconds=60)
         rival.acquire(now=datetime.now(timezone.utc) - timedelta(minutes=30))
+        import socket
+        from app.live.lock import LOCK_KEY
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET pid=?, host=? WHERE name=?",
+                (2_147_483_647, socket.gethostname(), LOCK_KEY))
 
         reconcile_calls = {"n": 0}
         real_reconcile = engine.reconcile

@@ -85,9 +85,44 @@ class GatewayRoutedBroker:
         result = self.gateway.submit(intent)   # raises GatewayRefusal
         return str(result.get("order_id", ""))
 
+    def cancel(self, intent_id: str) -> dict:
+        """Route cancellation through the gateway; never delegate it directly.
+
+        Cancel is risk-reducing, but it still needs a live lease, valid broker
+        identity, emergency-stop semantics and a durable audit record.
+        """
+        state = getattr(self._inner, "orders", {}).get(str(intent_id))
+        if state is None:
+            raise ValueError("Unknown live order intent")
+        epoch = self.gateway.epochs.current() or {}
+        identity = str(getattr(state, "symbol", "") or self.market_id)
+        intent = ExecutionIntent(
+            purpose="CANCEL", market_id=self.market_id, identity=identity,
+            side=str(getattr(state, "side", "")),
+            quantity=float(getattr(state, "quantity", 0) or 0),
+            order_type="MARKET", price=float(getattr(state, "price", 0) or 0),
+            account_scope=self.account_scope or self.gateway.account_scope,
+            universe=self.universe, strategy_id=self.strategy_id,
+            strategy_lineage=self.strategy_id,
+            signal_id="cancel:" + str(intent_id), signal_ts=self.clock(),
+            configuration_hash=configuration_hash(self.gateway.settings),
+            authorization_epoch=(int(epoch.get("epoch"))
+                                 if epoch.get("epoch") is not None else None),
+            build_identity=build_identity_string(),
+            cancel_order_id=str(intent_id))
+        result = self.gateway.submit(intent)
+        return result.get("cancelled") or {"status": "UNKNOWN"}
+
+    def modify(self, *_args, **_kwargs):
+        """Fail closed until modifications have an explicit gateway intent."""
+        raise GatewayRefusal(
+            "BROKER IDENTITY",
+            "live order modification is unavailable without a gateway-authorized intent")
+
     # --------------------------------------- non-submission passthrough ----
     def __getattr__(self, name):
-        # Only reached for attributes NOT found on the facade itself.
+        # Only reached for attributes NOT found on the facade. Order submission
+        # and cancellation are explicit methods above; neither can pass through.
         inner = self.__dict__.get("_inner")
         if inner is None:
             raise AttributeError(name)

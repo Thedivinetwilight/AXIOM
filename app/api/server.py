@@ -21,6 +21,8 @@ from app.api.routes import wizard as wizard_routes
 from app.api.routes import app_api as app_api_routes
 from app.api.routes import workstation as workstation_routes
 
+logger = logging.getLogger("bot.api")
+
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     settings = settings or Settings.from_env()
@@ -51,9 +53,36 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 app.state.workstation.tasks.recover()
             except Exception as exc:
                 logger.warning("task recovery skipped at startup: %s", exc)
+            # A control-plane restart never inherits live entry authority. A
+            # surviving engine is told to drain, retaining its lease while any
+            # positions/open orders still require risk-reducing management.
+            try:
+                app.state.workstation.live_sessions.recover_after_restart()
+            except Exception as exc:
+                # If session recovery cannot read/write durable state, abort
+                # startup rather than expose a control plane that may disagree
+                # with the engine about whether entries are authorized.
+                logger.error("live-session startup recovery failed: %s",
+                             type(exc).__name__)
+                raise
             # Paper execution feeds the intelligence layer with OBSERVED bars.
             app.state.simulator.workstation = app.state.workstation
             yield
+            try:
+                app.state.workstation.live_sessions.stop(
+                    reason="workstation API shutdown")
+            except Exception as exc:
+                logger.error("live-session shutdown transition failed: %s",
+                             type(exc).__name__)
+            try:
+                close_result = app.state.workstation.live_supervisor.close(
+                    timeout=5.0)
+                if close_result.get("running"):
+                    logger.warning(
+                        "live engine retained for risk management during shutdown")
+            except Exception as exc:
+                logger.error("live supervisor shutdown request failed: %s",
+                             type(exc).__name__)
             await app.state.simulator.stop()
             broker.close()
         finally:

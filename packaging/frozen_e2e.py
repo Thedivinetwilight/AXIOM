@@ -175,6 +175,34 @@ class FrozenE2E:
         self.base = f"http://127.0.0.1:{self.port}"
         self.token: str | None = None
         self.output_log = self.workdir / "arena-process.log"
+        self.browser_capture = self.workdir / "browser-launches.txt"
+        self.browser_stub = self.workdir / "browser_capture.py"
+        self.browser_stub.write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "target = Path(os.environ['ARENA_BROWSER_CAPTURE_FILE'])\n"
+            "with target.open('a', encoding='utf-8') as f:\n"
+            "    f.write(sys.argv[-1] + chr(10))\n",
+            encoding="utf-8")
+        self.expected_commit = self._expected_build_commit()
+
+    def _expected_build_commit(self) -> str:
+        meta_path = ROOT / "app" / "BUILD_META.json"
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            if metadata.get("commit"):
+                return str(metadata["commit"])
+        except (OSError, ValueError):
+            pass
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ""
 
     # ------------------------------------------------------------- helpers
     def check(self, name: str, ok: bool, detail: str = "") -> bool:
@@ -187,18 +215,45 @@ class FrozenE2E:
         env = dict(os.environ)
         env["ARENA_HOME"] = str(self.home)
         env["ARENA_PORT"] = str(self.port)
+        env["ARENA_BROWSER_CAPTURE_FILE"] = str(self.browser_capture)
+        browser_python = Path(sys.executable).resolve().as_posix()
+        browser_script = self.browser_stub.resolve().as_posix()
+        env["BROWSER"] = f'"{browser_python}" "{browser_script}" %s'
         for key in ("DATABASE_URL", "DATA_DIR", "API_TOKEN"):
             env.pop(key, None)
         return env
 
-    def start(self, *, cwd: Path | None = None) -> subprocess.Popen:
+    def _browser_urls(self) -> list[str]:
+        try:
+            return self.browser_capture.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+    def _wait_browser_route(self, route: str, *, start_index: int = 0,
+                            timeout: float = 15.0) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for url in self._browser_urls()[start_index:]:
+                if url.rstrip("/").endswith(route):
+                    return url
+            time.sleep(0.1)
+        return ""
+
+    def start(self, *, cwd: Path | None = None,
+              open_browser: bool = True) -> subprocess.Popen:
         # Launched from a directory that is neither the repo nor the home:
-        # exactly the situation of a double-clicked executable.
+        # exactly the situation of a double-clicked executable. The standard
+        # launch path opens the real first-run/application URL; BROWSER points
+        # at a local capture stub so CI proves this without launching a real
+        # user's browser.
         launch_dir = Path(cwd or self.workdir / "launchdir")
         launch_dir.mkdir(parents=True, exist_ok=True)
         log = open(self.output_log, "ab")
+        argv = [str(self.artifact)]
+        if not open_browser:
+            argv.append("--no-browser")
         process = subprocess.Popen(
-            [str(self.artifact), "--no-browser"],
+            argv,
             cwd=str(launch_dir), env=self._env(),
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         return process
@@ -219,6 +274,7 @@ class FrozenE2E:
             self._phase_cli_reentry()
             self._phase_frontend_integrity()
             self._phase_wizard_flow()
+            self._phase_build_identity()
             self._phase_paper_engine()
             self._phase_stop_and_restart()
             self._phase_duplicate_launch()
@@ -242,6 +298,9 @@ class FrozenE2E:
         health = json.loads(body)
         from app import __version__
 
+        gui_url = self._wait_browser_route("/setup")
+        self.check("default startup opens the first-run GUI",
+                   bool(gui_url), gui_url or "no browser launch was captured")
         self.check("/health reports status ok and the current version",
                    status == 200 and health.get("status") == "ok"
                    and health.get("version") == __version__,
@@ -309,6 +368,29 @@ class FrozenE2E:
         status, app_html = _get(self.base, "/app")
         self.check("GET /app returns the application shell", status == 200)
         self.check("app shell references arena-app.js", "arena-app.js" in app_html)
+        app_srcs = re.findall(r'<script[^>]*\bsrc="([^"]+)"', app_html)
+        for src in app_srcs:
+            clean = src.split("?")[0]
+            try:
+                asset_status, js = _get(self.base, clean)
+                parses, detail = _js_parses(js, f"frozen app asset {clean}")
+                self.check(f"frozen app asset serves and parses: {clean}",
+                           asset_status == 200 and parses, detail)
+            except (urllib.error.URLError, OSError) as exc:
+                self.check(f"frozen app asset serves and parses: {clean}",
+                           False, str(exc))
+        css_refs = re.findall(r'<link[^>]*\bhref="([^"]+\.css(?:\?[^\"]*)?)"',
+                              app_html, re.I)
+        self.check("app shell references the bundled stylesheet", bool(css_refs))
+        for href in css_refs:
+            clean = href.split("?")[0]
+            try:
+                asset_status, css = _get(self.base, clean)
+                self.check(f"frozen stylesheet serves: {clean}",
+                           asset_status == 200 and bool(css.strip()),
+                           f"{len(css)} bytes")
+            except (urllib.error.URLError, OSError) as exc:
+                self.check(f"frozen stylesheet serves: {clean}", False, str(exc))
 
     def _phase_wizard_flow(self) -> None:
         # token endpoint first (independent of the browser driver)
@@ -345,6 +427,23 @@ class FrozenE2E:
             from app.config.envfile import read_values
 
             self.token = read_values(env_path).get("API_TOKEN")
+
+    def _phase_build_identity(self) -> None:
+        if not self.token:
+            self.check("frozen runtime reports exact build identity", False,
+                       "the setup flow did not produce an API token")
+            return
+        status, identity = _get_json(self.base, "/api/system/info", self.token)
+        commit = str(identity.get("commit") or "")
+        expected = self.expected_commit
+        build_id = str(identity.get("build_id") or "")
+        expected_id = (str(identity.get("version") or "") + "-" + expected[:10]
+                       if expected else "")
+        ok = (status == 200 and bool(expected) and commit == expected
+              and identity.get("frozen") is True and build_id == expected_id)
+        self.check("frozen runtime reports exact build identity", ok,
+                   f"expected={expected or 'unavailable'} actual={commit or 'unavailable'} "
+                   f"build_id={build_id or 'unavailable'} frozen={identity.get('frozen')}")
 
     def _phase_paper_engine(self) -> None:
         if not self.token:
@@ -391,9 +490,13 @@ class FrozenE2E:
         time.sleep(0.5)
 
         # restart in the SAME home: state must be recovered, not reset
+        browser_index = len(self._browser_urls())
         self.process = self.start()
         healthy = _wait_health(self.base, timeout=120)
         self.check("restart: executable starts again on the same home", healthy)
+        gui_url = self._wait_browser_route("/app", start_index=browser_index)
+        self.check("restart opens the main application GUI", bool(gui_url),
+                   gui_url or "no /app browser launch was captured")
         if not healthy:
             self._dump_log()
             return

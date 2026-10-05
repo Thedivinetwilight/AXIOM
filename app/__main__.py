@@ -744,15 +744,31 @@ def cmd_live_halt(args) -> int:
     try:
         already = bool((repository.get_engine_state("emergency_stop") or {})
                        .get("stopped"))
+        halt_reason = args.reason or "manual halt via CLI"
         repository.set_engine_state("emergency_stop", {
             "stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
-            "reason": args.reason or "manual halt via CLI"})
+            "reason": halt_reason})
         repository.record_system_event("EMERGENCY_STOP", {
-            "reason": args.reason or "manual halt via CLI", "source": "CLI"})
+            "reason": halt_reason, "source": "CLI"})
+        session_blocked = False
+        try:
+            from app.live.session import (ACTIVE, ARMED, PAUSED, RECONCILING,
+                                          LiveSessionManager)
+
+            manager = LiveSessionManager(repository)
+            if manager.current().state in (ACTIVE, ARMED, PAUSED, RECONCILING):
+                manager.block(reason=f"emergency stop: {halt_reason}")
+                session_blocked = True
+        except Exception as exc:
+            # The persisted kill flag is already set; the running engine and
+            # final gateway both independently fail closed on it.
+            payload["session_block_error_type"] = type(exc).__name__
         payload.update(ok=True, halted=True, was_already_halted=already,
-                       reason=args.reason or "manual halt via CLI",
-                       note="a running engine observes this and cancels working "
-                            "orders; broker-side positions are NOT auto-closed")
+                       live_session_blocked=session_blocked,
+                       reason=halt_reason,
+                       note="the running engine cancels working orders when it "
+                            "observes the stop and remains available for "
+                            "risk-reducing exits; positions are NOT auto-closed")
         if config_error:
             payload["reason"] = f"{args.reason or 'manual halt via CLI'} " \
                                 f"(while: {config_error})"
@@ -770,6 +786,8 @@ def cmd_live_resume(args) -> int:
     re-arm trading.
     """
     payload: dict = {"scope": "LIVE RESUME (clear persisted emergency stop)"}
+    from datetime import datetime, timezone
+
     try:
         settings = _load_settings()
     except ValueError as exc:
@@ -790,11 +808,36 @@ def cmd_live_resume(args) -> int:
     database, repository = _open_ops_repository(settings)
     try:
         was = bool((repository.get_engine_state("emergency_stop") or {}).get("stopped"))
-        repository.set_engine_state("emergency_stop", {"stopped": False})
-        repository.record_system_event("ENGINE_RESUME", {"source": "CLI"})
+        from app.live.session import (ACTIVE, ARMED, PAUSED, RECONCILING,
+                                      BLOCKED, LiveSessionManager)
+
+        manager = LiveSessionManager(repository)
+        current = manager.current()
+        was_live_session = current.state in {
+            ACTIVE, ARMED, PAUSED, RECONCILING, BLOCKED}
+        if current.state in (ACTIVE, ARMED, PAUSED, RECONCILING):
+            # Invalidate authorization BEFORE clearing the persisted flag.
+            manager.block(reason="emergency stop clear requires a fresh ARM")
+        repository.set_engine_state("emergency_stop", {
+            "stopped": False,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "reason": "cleared by operator; fresh ARM/ACTIVATE required"})
+        repository.record_system_event(
+            "ENGINE_RESUME", {"source": "CLI", "fresh_arm_required": True})
+        released = False
+        if (was_live_session and manager.current().state == BLOCKED
+                and "emergency stop" in manager.current().reason.lower()):
+            manager.release_block(
+                destination="STOPPED",
+                reason="emergency stop cleared; fresh ARM and ACTIVATE required")
+            released = True
         payload.update(ok=True, resumed=True, was_halted=was,
-                       note="new entries are allowed again; hard risk limits and "
-                            "L-ops guards still apply")
+                       live_session_stopped=(manager.current().state == "STOPPED"
+                                             if was_live_session else False),
+                       fresh_arm_required=was_live_session or released,
+                       note="the emergency flag is clear, but any prior live "
+                            "authorization remains invalid; a fresh ARM and "
+                            "ACTIVATE are required")
     finally:
         database.close()
     print(json.dumps(payload, indent=2))

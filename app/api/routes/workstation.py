@@ -570,6 +570,7 @@ async def live_session(request: Request) -> dict:
             "ts_entered": current.ts_entered,
             "derived_configuration_state": derived,
             "emergency_stop_active": workstation.emergency_stop_active(),
+            "supervisor": workstation.live_supervisor.status(),
             "states": ["OFF", "CONFIGURED", "READY", "ARMED", "ACTIVE",
                        "PAUSED", "RECONCILING", "STOPPED", "BLOCKED"],
             "note": "ARMED/ACTIVE require explicit operator authorization; no "
@@ -583,15 +584,41 @@ class ArmBody(BaseModel):
 @router.post("/api/live/session/arm", dependencies=[Depends(authenticate)])
 async def live_arm(body: ArmBody, request: Request) -> dict:
     workstation = ws(request)
-    from app.live.session import LiveTransitionError
+    from app.config.settings import LIVE_CONFIRM_PHRASE
+    from app.live.session import (OFF, CONFIGURED, READY, STOPPED,
+                                  LiveTransitionError)
+    from app.live.supervisor import LiveSupervisorError
+
+    if body.confirmation_phrase != LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            409, "Arming live trading requires the explicit confirmation phrase.")
+    current = workstation.live_sessions.current()
+    if current.state not in (OFF, CONFIGURED, READY, STOPPED):
+        raise HTTPException(
+            409, f"Cannot arm live trading from state {current.state}; "
+                 "resolve or explicitly release the current session first.")
+    if workstation.emergency_stop_active():
+        raise HTTPException(409, "Cannot arm while the emergency stop is active.")
 
     try:
+        # The child is spawned only by this explicit ARM action, never at
+        # application startup. Readiness is tied to its real PID/lease and
+        # completed broker reconciliation before the state machine can arm.
+        await asyncio.to_thread(workstation.live_supervisor.start)
         snapshot = workstation.live_sessions.arm(
             workstation.settings, confirmation_phrase=body.confirmation_phrase,
             repository=workstation.repository)
-    except LiveTransitionError as exc:
+    except (LiveTransitionError, LiveSupervisorError) as exc:
+        try:
+            await asyncio.to_thread(
+                workstation.live_supervisor.request_stop,
+                reason="ARM was refused; drain the supervised engine safely")
+        except Exception as stop_exc:
+            logger.error("ARM refusal stop request failed: %s",
+                         type(stop_exc).__name__)
         raise HTTPException(409, str(exc))
-    return {"state": snapshot.state, "reason": snapshot.reason}
+    return {"state": snapshot.state, "reason": snapshot.reason,
+            "supervisor": workstation.live_supervisor.status()}
 
 
 @router.post("/api/live/session/activate", dependencies=[Depends(authenticate)])
@@ -646,6 +673,94 @@ async def live_disarm(request: Request) -> dict:
     except LiveTransitionError as exc:
         raise HTTPException(409, str(exc))
     return {"state": snapshot.state, "reason": snapshot.reason}
+
+
+class EmergencyStopBody(BaseModel):
+    reason: str = "operator emergency stop"
+
+
+@router.post("/api/live/emergency-stop", dependencies=[Depends(authenticate)])
+async def live_emergency_stop(body: EmergencyStopBody, request: Request) -> dict:
+    """Persist the kill switch, invalidate live authority and request a safe drain.
+
+    This control plane never sends a broker order itself. The supervised child
+    cancels working orders when reachable and remains alive for risk-reducing
+    exits until the live book is flat.
+    """
+    workstation = ws(request)
+    from datetime import datetime, timezone
+
+    reason = (body.reason or "operator emergency stop").strip()[:240]
+    if not reason:
+        reason = "operator emergency stop"
+    try:
+        workstation.repository.set_engine_state("emergency_stop", {
+            "stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
+            "reason": reason})
+        workstation.repository.record_system_event(
+            "EMERGENCY_STOP", {"reason": reason, "source": "workstation GUI"})
+        snapshot = workstation.live_sessions.block(reason=f"emergency stop: {reason}")
+    except Exception as exc:
+        # A failed stop-flag read inside the engine/gateway is fail-closed.
+        # Report the persistence failure without pretending the write landed.
+        logger.error("GUI emergency stop persistence failed: %s",
+                     type(exc).__name__)
+        raise HTTPException(503, "Emergency stop state could not be confirmed; "
+                                 "the engine fails closed on an unreadable flag.")
+    return {"stopped": True, "state": snapshot.state,
+            "reason": snapshot.reason,
+            "note": "No position was auto-closed; risk-reducing exits remain enabled."}
+
+
+class EmergencyClearBody(BaseModel):
+    confirmation_phrase: str
+
+
+@router.post("/api/live/emergency-stop/clear",
+             dependencies=[Depends(authenticate)])
+async def live_emergency_stop_clear(body: EmergencyClearBody,
+                                    request: Request) -> dict:
+    workstation = ws(request)
+    from datetime import datetime, timezone
+    from app.config.settings import LIVE_CONFIRM_PHRASE
+    from app.live.session import (ACTIVE, ARMED, PAUSED, RECONCILING, BLOCKED,
+                                  LiveTransitionError)
+
+    if body.confirmation_phrase != LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            409, "Clearing the emergency stop requires the explicit confirmation phrase.")
+    manager = workstation.live_sessions
+    current = manager.current()
+    should_release = current.state in (ACTIVE, ARMED, PAUSED, RECONCILING) or (
+        current.state == BLOCKED and "emergency stop" in current.reason.lower())
+    try:
+        # Revoke entry authority BEFORE making the flag clear. Clearing a
+        # kill-switch can never resume an old ACTIVE epoch.
+        if current.state in (ACTIVE, ARMED, PAUSED, RECONCILING):
+            manager.block(reason="emergency stop cleared; fresh ARM required")
+        workstation.repository.set_engine_state("emergency_stop", {
+            "stopped": False, "ts": datetime.now(timezone.utc).isoformat(),
+            "reason": "cleared by operator; fresh ARM/ACTIVATE required"})
+        workstation.repository.record_system_event(
+            "EMERGENCY_STOP_CLEARED",
+            {"source": "workstation GUI",
+             "fresh_arm_required": True})
+        if should_release and manager.current().state == BLOCKED:
+            snapshot = manager.release_block(
+                destination="STOPPED",
+                reason="emergency stop cleared; fresh ARM and ACTIVATE required")
+        else:
+            snapshot = manager.current()
+    except LiveTransitionError as exc:
+        raise HTTPException(409, str(exc))
+    except Exception as exc:
+        logger.error("GUI emergency-stop clear failed: %s", type(exc).__name__)
+        raise HTTPException(503, "Emergency-stop clear could not be confirmed.")
+    return {"stopped": False, "state": snapshot.state,
+            "reason": snapshot.reason,
+            "note": (f"Emergency flag cleared; session remains {snapshot.state}. "
+                     "No prior authorization was restored; a new live cycle "
+                     "requires readiness, fresh ARM and explicit ACTIVATE.")}
 
 
 @router.get("/api/live/session/history", dependencies=[Depends(authenticate)])

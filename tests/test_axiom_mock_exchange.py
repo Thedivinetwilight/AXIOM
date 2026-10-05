@@ -11,6 +11,7 @@ duplicates, auth failure — plus the full gateway → broker pipeline.
 from __future__ import annotations
 
 import pytest
+from datetime import datetime, timezone
 
 from app.brokers.mock_exchange import MockUpstoxExchange
 from app.brokers.live import UpstoxLiveBroker
@@ -37,6 +38,34 @@ def live_broker(exchange, repo):
     return UpstoxLiveBroker(
         "mock-token", KEY, confirm=LIVE_CONFIRM_PHRASE,
         repository=repo, transport=exchange.transport())
+
+
+class _FixtureReadySupervisor:
+    """Mock child proof, backed by a current atomic lease and READY runtime."""
+
+    def __init__(self, repository):
+        self.repository = repository
+
+    def readiness_context(self):
+        from app.live.lock import EngineLock
+
+        lease = EngineLock(self.repository, live=True).status()
+        runtime = self.repository.get_engine_state("live_engine_runtime", {}) or {}
+        control = self.repository.get_engine_state("live_engine_control", {}) or {}
+        if (control.get("stop_requested") is True
+                or lease.get("held") is not True or lease.get("live") is not True
+                or lease.get("stale") is not False
+                or runtime.get("state") != "READY"
+                or runtime.get("owner") != lease.get("owner")
+                or runtime.get("pid") != lease.get("pid")
+                or runtime.get("host") != lease.get("host")):
+            raise RuntimeError("mock engine has no fresh reconciled lease")
+        return {"supervisor_verified": True,
+                "supervisor_lease_owner": lease["owner"],
+                "supervisor_pid": lease["pid"],
+                "supervisor_host": lease["host"],
+                "last_market_data_ts": self.repository.get_engine_state(
+                    "last_market_data_ts")}
 
 
 # =====================================================================
@@ -198,6 +227,7 @@ class TestLiveArchitectureAgainstMockExchange:
         from app.live.guard_chain import default_chain
         from app.live.ops import read_emergency_stop
         from app.live.session import LiveSessionManager
+        from app.live.lock import EngineLock
 
         settings = Settings(
             mode="LIVE", live_trading=True, broker="UPSTOX_LIVE",
@@ -206,7 +236,20 @@ class TestLiveArchitectureAgainstMockExchange:
             max_position_value=1_000_000.0, max_open_positions=5,
             max_daily_loss=50_000.0, max_trades_per_day=100,
             default_timeframe="1m", market_data_mode="realtime")
-        manager = LiveSessionManager(repo)
+        lock = EngineLock(repo, live=True)
+        assert lock.acquire().granted
+        now = datetime.now(timezone.utc).isoformat()
+        lease = lock.status()
+        repo.set_engine_state("last_market_data_ts", now)
+        repo.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+        repo.set_engine_state("live_token_verified", {"verified_at": now})
+        repo.set_engine_state("live_engine_control", {
+            "stop_requested": False, "generation": 1})
+        repo.set_engine_state("live_engine_runtime", {
+            "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
+            "host": lease["host"], "reconciled_at": now})
+        manager = LiveSessionManager(
+            repo, engine_supervisor=_FixtureReadySupervisor(repo))
         broker = live_broker(exchange, repo)
         gateway = LiveExecutionGateway(
             settings=settings, repository=repo, session_manager=manager,

@@ -478,10 +478,22 @@ def run_readiness_center_checks(settings, *, repository=None,
             status = EngineLock(repository).status()
             readable = bool(status.get("readable"))
             atomic = bool(status.get("atomic_supported"))
+            supervisor_owns_lease = (
+                context.get("supervisor_verified") is True
+                and status.get("owner") == context.get("supervisor_lease_owner")
+                and status.get("pid") == context.get("supervisor_pid")
+                and status.get("host") == context.get("supervisor_host")
+                and status.get("live") is True
+                and status.get("stale") is False
+                and status.get("owner_liveness") == "alive"
+                and isinstance(status.get("heartbeat_age_seconds"), (int, float))
+                and status["heartbeat_age_seconds"]
+                <= status.get("stale_after_seconds", 0))
             blocking = (not readable or not atomic
                         or (bool(status.get("held"))
                             and not status.get("stale")
-                            and bool(status.get("live"))))
+                            and bool(status.get("live"))
+                            and not supervisor_owns_lease))
             if not readable:
                 detail = ("live-engine lease state is UNKNOWN/unreadable; "
                           "activation is blocked")
@@ -491,6 +503,9 @@ def run_readiness_center_checks(settings, *, repository=None,
             elif blocking:
                 detail = (f"another live engine ({status.get('owner')}) "
                           "holds the lock")
+            elif supervisor_owns_lease:
+                detail = ("the supervised live engine owns a fresh atomic lease "
+                          "after startup reconciliation")
             else:
                 detail = "atomic lease store is readable; no other fresh live lease"
             checks.append(_check("single_instance_lock", not blocking,
@@ -526,6 +541,12 @@ def run_readiness_center_checks(settings, *, repository=None,
     # Data freshness (spec section 32): only verifiable when the caller
     # supplies the latest market-data timestamp.
     last_data_ts = context.get("last_market_data_ts")
+    data_read_failed = False
+    if not last_data_ts and repository is not None:
+        try:
+            last_data_ts = repository.get_engine_state("last_market_data_ts")
+        except Exception:
+            data_read_failed = True
     if last_data_ts:
         try:
             parsed = datetime.fromisoformat(str(last_data_ts).replace("Z", "+00:00"))
@@ -533,18 +554,32 @@ def run_readiness_center_checks(settings, *, repository=None,
                 parsed = parsed.replace(tzinfo=timezone.utc)
             age_s = (now - parsed).total_seconds()
             stale = age_s > float(context.get("data_stale_after_s", 300))
+            severity = ERROR if str(getattr(settings, "broker", "")).upper() \
+                == "UPSTOX_LIVE" else WARNING
             checks.append(_check(
-                "data_freshness", not stale, WARNING,
+                "data_freshness", not stale, severity,
                 f"last market data {age_s:.0f}s ago"))
         except ValueError:
-            checks.append(_check("data_freshness", False, WARNING,
-                                 f"last market data timestamp unreadable: {last_data_ts!r}"))
+            checks.append(_check("data_freshness", False, ERROR,
+                                 "last market-data timestamp is malformed"))
     else:
-        checks.append(_unavailable("data_freshness", "no market-data timestamp supplied"))
+        checks.append(_unavailable(
+            "data_freshness", "market-data timestamp is unreadable" if data_read_failed
+            else "no observed market-data timestamp supplied"))
 
-    # Token lifecycle (spec section 38): presence is checked by the base
-    # suite; freshness is only knowable with an issued-at timestamp.
+    # Token lifecycle (spec section 38): use the durable successful
+    # verification timestamp when no explicit issued-at timestamp is available.
     issued_at = context.get("token_issued_ts")
+    token_read_failed = False
+    if not issued_at and repository is not None:
+        try:
+            token_state = repository.get_engine_state("live_token_verified", {}) or {}
+            if isinstance(token_state, dict):
+                issued_at = token_state.get("verified_at")
+            else:
+                token_read_failed = True
+        except Exception:
+            token_read_failed = True
     if issued_at:
         try:
             parsed = datetime.fromisoformat(str(issued_at).replace("Z", "+00:00"))
@@ -561,6 +596,8 @@ def run_readiness_center_checks(settings, *, repository=None,
         except ValueError:
             checks.append(_unavailable("token_lifecycle", "token issued-at unreadable"))
     else:
-        checks.append(_unavailable("token_lifecycle", "no token issued-at timestamp supplied"))
+        checks.append(_unavailable(
+            "token_lifecycle", "token verification state is unreadable"
+            if token_read_failed else "no verified token timestamp supplied"))
 
     return checks

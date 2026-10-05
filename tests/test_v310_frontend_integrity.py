@@ -143,6 +143,33 @@ class TestServedAssetsParse:
         assert "immutable" in response.headers.get("cache-control", "")
 
 
+class TestChartWorkspaceInteractions:
+    source = (ROOT / "app" / "static" / "arena-app.js").read_text(encoding="utf-8")
+
+    def test_crosshair_syncs_recorded_bars_by_timestamp(self):
+        assert "pointermove" in self.source
+        assert "pointerleave" in self.source
+        assert "syncSharedCrosshair" in self.source
+        assert "nearestChartCandle" in self.source
+        assert "Date.parse" in self.source
+        assert "chart-crosshair-horizontal" in self.source
+
+    def test_panels_can_be_dragged_reordered_and_resized(self):
+        assert "draggable: \"true\"" in self.source
+        assert 'addEventListener("dragstart"' in self.source
+        assert 'addEventListener("drop"' in self.source
+        assert "reorderChartPanels" in self.source
+        assert 'type: "range"' in self.source
+        assert 'cfg.panels[index].height = height' in self.source
+        assert "saveChartConfig(cfg)" in self.source
+
+    def test_pin_buttons_use_the_instrument_pin_api(self):
+        assert '"/api/universe/pins?market_id="' in self.source
+        assert '"/api/universe/pin"' in self.source
+        assert '"/api/universe/unpin"' in self.source
+        assert "addInstrumentPinControl" in self.source
+
+
 class TestLegacyPagesStillParse:
     """The feature console and dashboard still use inline scripts; the
     incident's lesson applies to them too — their JavaScript must parse."""

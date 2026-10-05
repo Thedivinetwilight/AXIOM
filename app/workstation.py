@@ -22,6 +22,7 @@ from app.intel.regime_bridge import RegimeBridge
 from app.live.guard_chain import default_chain
 from app.live.rate_limit import RateLimiter
 from app.live.session import LiveSessionManager
+from app.live.supervisor import LiveEngineSupervisor
 from app.models.studio import KronosStudio
 from app.state.bus import EventBus
 from app.state.changes import ChangeEngine
@@ -46,6 +47,7 @@ class Workstation:
     governor: ResourceGovernor
     tasks: TaskCenter
     live_sessions: LiveSessionManager
+    live_supervisor: LiveEngineSupervisor
     rate_limiter: RateLimiter
     studio: KronosStudio
     backup: BackupManager
@@ -101,7 +103,9 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
     latency = LatencyTracker()
     governor = ResourceGovernor(disk_path=str(data_dir))
     tasks = TaskCenter(repository, governor=governor)
-    live_sessions = LiveSessionManager(repository, bus=bus)
+    live_supervisor = LiveEngineSupervisor(settings, repository)
+    live_sessions = LiveSessionManager(
+        repository, bus=bus, engine_supervisor=live_supervisor)
     profile = getattr(settings, "live_rate_limit_profile", "REGULAR_ALGO") or "REGULAR_ALGO"
     try:
         rate_limiter = RateLimiter(profile)
@@ -127,7 +131,8 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
         settings=settings, repository=repository, data_dir=data_dir, bus=bus,
         changes=changes, opportunities=opportunities, missed=missed,
         expired_recorder=expired, latency=latency, governor=governor, tasks=tasks,
-        live_sessions=live_sessions, rate_limiter=rate_limiter, studio=studio,
+        live_sessions=live_sessions, live_supervisor=live_supervisor,
+        rate_limiter=rate_limiter, studio=studio,
         backup=backup, analogues=AnalogueEngine(), regime_bridge=regime_bridge,
         updater=updater, agreement=_agreement_ledger(data_dir),
         research_scheduler=ResearchScheduler(
