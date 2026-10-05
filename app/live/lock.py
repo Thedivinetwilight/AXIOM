@@ -79,29 +79,62 @@ def owner_id(*, pid: int | None = None, host: str | None = None) -> str:
     return f"{host or socket.gethostname()}:{pid or os.getpid()}"
 
 
+def _pid_alive_windows(pid: int, *, kernel32=None,
+                       get_last_error=None) -> bool | None:
+    """Query a Windows PID without treating access denial as proof of death.
+
+    ``OpenProcess`` reports ERROR_INVALID_PARAMETER for a PID that does not
+    exist. Access-denied and other failures are unknown: they must never be
+    converted into permission to take over a LIVE lease.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        if kernel32 is None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        error_invalid_parameter = 87
+        error_not_found = 1168
+
+        # Explicit prototypes preserve pointer-sized HANDLEs on 64-bit Windows.
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information, False, int(pid))
+        if not handle:
+            if get_last_error is None:
+                get_last_error = ctypes.get_last_error
+            error = get_last_error()
+            if error in (error_invalid_parameter, error_not_found):
+                return False
+            return None
+        try:
+            code = wintypes.DWORD(still_active)
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
 def _pid_alive(pid: int) -> bool | None:
     """Best-effort local PID proof; None means it cannot be established."""
     if int(pid or 0) <= 0:
         return None
     if os.name == "nt":  # pragma: no cover - exercised on Windows CI
-        try:
-            import ctypes
-
-            process_query_limited_information = 0x1000
-            still_active = 259
-            handle = ctypes.windll.kernel32.OpenProcess(
-                process_query_limited_information, False, int(pid))
-            if not handle:
-                return None
-            try:
-                code = ctypes.c_ulong(still_active)
-                ok = ctypes.windll.kernel32.GetExitCodeProcess(
-                    handle, ctypes.byref(code))
-                return bool(ok) and code.value == still_active
-            finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
-        except Exception:
-            return None
+        return _pid_alive_windows(int(pid))
     try:
         os.kill(int(pid), 0)
         return True

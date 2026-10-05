@@ -2628,6 +2628,48 @@ class TestSingleEngineLock:
         assert first.held is False
         database.close()
 
+    def test_windows_pid_probe_proves_only_documented_absence(self):
+        from types import SimpleNamespace
+
+        from app.live.lock import _pid_alive_windows
+
+        class Function:
+            def __init__(self, callback):
+                self.callback = callback
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        def api(open_result, *, exit_code=259, exit_ok=True):
+            closed = []
+
+            def read_exit_code(_handle, output):
+                output._obj.value = exit_code
+                return exit_ok
+
+            kernel32 = SimpleNamespace(
+                OpenProcess=Function(lambda *_args: open_result),
+                GetExitCodeProcess=Function(read_exit_code),
+                CloseHandle=Function(lambda handle: closed.append(handle) or 1),
+            )
+            return kernel32, closed
+
+        missing, _ = api(None)
+        assert _pid_alive_windows(
+            2_147_483_647, kernel32=missing,
+            get_last_error=lambda: 87) is False
+        denied, _ = api(None)
+        assert _pid_alive_windows(
+            2_147_483_647, kernel32=denied,
+            get_last_error=lambda: 5) is None
+
+        running, closed = api(1234, exit_code=259)
+        assert _pid_alive_windows(1234, kernel32=running) is True
+        assert closed == [1234]
+        exited, closed = api(1234, exit_code=0)
+        assert _pid_alive_windows(1234, kernel32=exited) is False
+        assert closed == [1234]
+
     def test_two_racing_engines_yield_exactly_one_owner(self, tmp_path):
         # FINAL-11/10 §15 atomicity: independent spawn-started processes use
         # separate database connections and contend at the same barrier. The
