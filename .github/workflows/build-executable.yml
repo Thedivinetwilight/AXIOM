@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest -q --no-header -k "not slow" 2>&1 | tee pytest-output.txt
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
 
       - name: Report failures as annotations
         if: failure()
@@ -171,7 +171,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest -q --no-header -k "not slow" 2>&1 | tee pytest-output.txt
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
 
       - name: Report full-suite failures
         if: failure() && steps.fullsuite.outcome == 'failure'
@@ -183,15 +183,40 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import os
-          lines = Path("pytest-output.txt").read_text(encoding="utf-8", errors="replace").splitlines()
-          tail = lines[-35:]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("\n### Full-suite diagnostic tail\n\n```text\n")
-              summary.write("\n".join(tail))
-              summary.write("\n```\n")
+          import xml.etree.ElementTree as ET
+
+          lines = Path("pytest-output.txt").read_text(
+              encoding="utf-8", errors="replace").splitlines()
+          tail = lines[-20:]
           for line in tail:
               safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print(f"::error title=Full-suite output on ${{ matrix.os }}::{safe}")
+
+          report = Path("pytest-results.xml")
+          if report.exists():
+              try:
+                  root = ET.parse(report).getroot()
+              except ET.ParseError as exc:
+                  print(f"::error title=Pytest report parse failed::{exc}")
+              else:
+                  for case in root.iter("testcase"):
+                      failure = case.find("failure")
+                      if failure is None:
+                          failure = case.find("error")
+                      if failure is not None:
+                          message = " ".join((failure.get("message") or failure.text or "").split())
+                          name = case.get("classname", "") + "::" + case.get("name", "unknown")
+                          safe = message[:350].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                          print(f"::error title=Pytest failure::{name} — {safe}")
+          else:
+              print("::error title=Pytest report missing::pytest-results.xml was not written")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as summary:
+                  summary.write("\n### Full-suite diagnostic tail\n\n```text\n")
+                  summary.write("\n".join(tail))
+                  summary.write("\n```\n")
           PY
           exit 1
 
@@ -200,8 +225,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-pytest-output-${{ github.run_number }}
-          path: pytest-output.txt
-          if-no-files-found: error
+          path: |
+            pytest-output.txt
+            pytest-results.xml
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Build the executable and verify it end-to-end (hard gate)
