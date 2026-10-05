@@ -180,7 +180,29 @@ jobs:
           grep -E "^(FAILED|ERROR)" pytest-output.txt | head -25 | while IFS= read -r line; do
             echo "::error title=Suite failure on ${{ matrix.os }}::${line}"
           done
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          lines = Path("pytest-output.txt").read_text(encoding="utf-8", errors="replace").splitlines()
+          tail = lines[-35:]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n### Full-suite diagnostic tail\n\n```text\n")
+              summary.write("\n".join(tail))
+              summary.write("\n```\n")
+          for line in tail:
+              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Full-suite output on ${{ matrix.os }}::{safe}")
+          PY
           exit 1
+
+      - name: Upload failed Windows full-suite output
+        if: failure() && matrix.os == 'windows-latest' && steps.fullsuite.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pytest-output-${{ github.run_number }}
+          path: pytest-output.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Build the executable and verify it end-to-end (hard gate)
         # --test runs packaging/frozen_e2e.py against the ACTUAL artifact:
