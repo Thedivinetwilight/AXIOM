@@ -73,3 +73,7 @@ VERIFIED (implemented + tested) · PARTIAL · MISSING · BLOCKED EXTERNALLY.
 Also fixed during this audit: `_recorded_series` called a non-existent
 `CandleStore.load`, so drift/analogue/counterfactual routes silently saw
 zero candles — now reads via `read_range` (a "silent no-data" defect).
+
+## Current-session evidence correction (2026-10-05)
+
+The VERIFIED labels above include historical source/mocked evidence and are not blanket current-head production verification. On `arena/01a109db-axiom`, §35–38 director scheduling now derives a stable SHA-256 seed and has a cross-process regression (commit `6b179c8`, 1710 passed / 39 skipped local full suite). Other research scheduler reproducibility paths, live lease ownership at the final gateway boundary, genuine model weights, external Upstox/static-IP validation and current-head frozen E2E are **not established by this change**. Build run 37255156406 was in progress when recorded. These remain partial or externally blocked, not release VERIFIED.

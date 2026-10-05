@@ -16,3 +16,10 @@ Entries are appended in time order. Each entry records the revision tested and i
 - Live-data evidence is mock/local only: full-feed protobuf → observed quote store → engine gate is tested; stale/missing quotes refuse. No live credentials, production OAuth, real order, or external broker call was used.
 - GitHub Build executable run **37212868184** for `f6808ae` was `in_progress` at last query. Final CI result still pending.
 - Next: continue P0 lease audit. Stale takeover still needs PID/host proof and owner binding at the final live authorization boundary; test the actual supervisor/startup/reconcile path before moving down-priority.
+
+## 2026-10-05 — deterministic director seeds (branch `arena/01a109db-axiom`)
+
+- Recovered clean checkout at `418b9001bee608337b6a1edced90743d449b6123`. This Arena session is fixed to `arena/01a109db-axiom`, not the previous session branch named in the handoff. Latest completed GitHub run at inspection was successful run 37217864723 (same base revision; three platform jobs successful). The later failure notification was not the latest run in the API listing.
+- Found an actual unfinished requirement: `ResearchDirector.schedule` used Python's process-randomized `hash(question)` as its experiment seed. Replaced it with a SHA-256-derived integer; added a regression using two independent processes and different `PYTHONHASHSEED` values sharing one persisted repository.
+- Focused director tests: 3 passed. Full local source suite on Python 3.11: **1710 passed, 39 skipped, 1 warning** in 142.48 seconds. The skips are not passes. `git diff --check` passed. Commit `6b179c8` pushed to the session branch. Build executable run 37255156406 started for that revision and was in progress at this entry. Workflow dispatch was denied by GitHub integration (403), but the push trigger started the build automatically.
+- No real orders, production credentials, or external model weights were used. Current frozen artifacts and platform E2E for `6b179c8` must be checked from run 37255156406 before any release verdict.
