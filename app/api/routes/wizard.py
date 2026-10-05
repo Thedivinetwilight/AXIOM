@@ -151,6 +151,11 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
         md_symbols = (payload.market_data_symbols or "").strip()
         if not md_token or not md_symbols:
             raise HTTPException(422, "Live-market paper needs a market-data token and instrument keys.")
+        try:
+            validated_symbols = _validate_upstox_instrument_keys(md_symbols)
+        except ValueError as exc:
+            raise HTTPException(422, f"Instrument key invalid: {exc}") from exc
+        md_symbols = ",".join(validated_symbols)
         check = await _probe_market_data(md_token)
         if check.verdict != "feed_ok":
             raise HTTPException(
@@ -243,6 +248,36 @@ def _rebuild_engine_for(request: Request, settings) -> None:
         )
 
 
+def _validate_upstox_instrument_keys(raw_symbols: str) -> list[str]:
+    """Validate provider-form instrument keys without confusing them with Arena symbols.
+
+    Upstox keys deliberately contain the pipe separator, while the internal
+    Arena symbol charset deliberately does not. Validate the provider key
+    first, then validate only its normalized display form so the two namespaces
+    remain separate. This matches the contract enforced by the Upstox stream adapter.
+    """
+    from app.data.models import validate_symbol
+    from app.data.upstox_stream import INSTRUMENT_KEY, to_symbol
+
+    symbols = [item.strip() for item in raw_symbols.split(",") if item.strip()]
+    if not symbols:
+        raise ValueError("At least one Upstox instrument key is required.")
+    validated: list[str] = []
+    for key in symbols:
+        if not INSTRUMENT_KEY.fullmatch(key):
+            raise ValueError(
+                "use a valid Upstox instrument key such as NSE_EQ|INE002A01018"
+            )
+        try:
+            validate_symbol(to_symbol(key))
+        except ValueError as exc:
+            raise ValueError(
+                f"the Upstox key {key!r} cannot be used as an Arena symbol: {exc}"
+            ) from exc
+        validated.append(key)
+    return validated
+
+
 async def _probe_market_data(token: str):
     from app.config.settings import Settings
     from app.data.upstox_auth import verify_feed_credential
@@ -256,16 +291,10 @@ async def _probe_market_data(token: str):
              dependencies=[Depends(loopback_or_bearer)])
 async def validate_market_data(payload: ValidateMarketDataRequest, request: Request) -> dict:
     """Read-only credential probe. The token is never stored or echoed."""
-    from app.data.models import validate_symbol
-
-    symbols = [s.strip() for s in payload.symbols.split(",") if s.strip()]
-    if not symbols:
-        raise HTTPException(422, "At least one instrument key is required.")
     try:
-        for symbol in symbols:
-            validate_symbol(symbol)
+        symbols = _validate_upstox_instrument_keys(payload.symbols)
     except ValueError as exc:
-        raise HTTPException(422, f"Instrument key invalid: {exc}")
+        raise HTTPException(422, f"Instrument key invalid: {exc}") from exc
 
     check = await _probe_market_data(payload.token.strip())
     if check.verdict != "feed_ok":
