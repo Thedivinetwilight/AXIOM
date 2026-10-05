@@ -251,14 +251,37 @@ jobs:
           import hashlib, json, pathlib
           target = pathlib.Path("release") / "${{ matrix.release_asset }}"
           digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          size_bytes = target.stat().st_size
           pathlib.Path("${{ matrix.checksum }}").write_text(
               f"{digest}  {target.name}\n", encoding="utf-8")
           meta_path = pathlib.Path("app/BUILD_META.json")
-          meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-          print(f"{target}  {target.stat().st_size / 1048576:.1f} MB")
+          meta = json.loads(meta_path.read_text(encoding="utf-8"))
+          expected_commit = "${{ github.sha }}"
+          if meta.get("commit") != expected_commit:
+              raise SystemExit(
+                  f"Build identity mismatch: expected {expected_commit}, "
+                  f"found {meta.get('commit')!r}")
+          build_id = f"{meta.get('version', 'unknown')}-{meta['commit'][:10]}"
+          record = {
+              "artifact": target.name,
+              "version": meta.get("version", "unknown"),
+              "build_id": build_id,
+              "commit": meta["commit"],
+              "built_at": meta.get("built_at", "unknown"),
+              "platform": meta.get("platform", "unknown"),
+              "size_bytes": size_bytes,
+              "sha256": digest,
+          }
+          record_path = pathlib.Path("release") / f"{target.name}.build-info.json"
+          record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          print(f"::notice title={target.name} build identity::{build_id}; "
+                f"commit={record['commit']}; built_at={record['built_at']}; "
+                f"platform={record['platform']}")
+          print(f"::notice title={target.name} size (bytes)::{size_bytes}")
+          print(f"::notice title={target.name} SHA-256::{digest}")
+          print(f"{target}  {size_bytes} bytes")
           print(f"sha256 {digest}")
-          print(f"built from commit {meta.get('commit', 'unknown')} "
-                f"at {meta.get('built_at', 'unknown')}")
+          print(f"built from commit {record['commit']} at {record['built_at']}")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -267,6 +290,7 @@ jobs:
           path: |
             release/${{ matrix.release_asset }}
             ${{ matrix.checksum }}
+            release/${{ matrix.release_asset }}.build-info.json
           if-no-files-found: error
           retention-days: 30
 
@@ -309,6 +333,7 @@ jobs:
           files: |
             release/${{ matrix.release_asset }}
             ${{ matrix.checksum }}
+            release/${{ matrix.release_asset }}.build-info.json
           fail_on_unmatched_files: true
           allowUpdates: true
           prerelease: true
@@ -324,7 +349,10 @@ jobs:
             echo "- Packaging gates on this platform: **${{ steps.packaging.outcome }}**"
             echo "- Full suite on this platform: **${{ steps.fullsuite.outcome }}**"
             if [ -f "release/${{ matrix.release_asset }}" ]; then
-              echo "- Artifact: **built and verified end-to-end** — \`${{ matrix.release_asset }}\`, $(du -h "release/${{ matrix.release_asset }}" | cut -f1)"
+              echo "- Artifact: **built and verified end-to-end** — \`${{ matrix.release_asset }}\`, $(wc -c < "release/${{ matrix.release_asset }}" | tr -d ' ') bytes"
+              if [ -f "release/${{ matrix.release_asset }}.build-info.json" ]; then
+                echo "- Build record: \`$(cat "release/${{ matrix.release_asset }}.build-info.json" | tr -d '\n')\`"
+              fi
               if [ -f "${{ matrix.checksum }}" ]; then
                 echo "- Checksum: \`$(cat "${{ matrix.checksum }}")\`"
               fi
