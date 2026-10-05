@@ -2,6 +2,9 @@
 charts, period reports — over recorded rows only."""
 
 import json
+import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -138,6 +141,31 @@ class TestCommandCenter:
 
 
 class TestDirector:
+    def test_seed_survives_restart_and_hash_randomization(self, tmp_path):
+        db = tmp_path / "seeds.db"
+        script = """
+import json, sys
+from app.database.database import Database
+from app.database.repository import Repository
+from app.research.director import ResearchDirector
+store = Database('sqlite:///' + sys.argv[1])
+repo = Repository(store)
+questions = repo.list_research_questions(limit=500)
+qid = questions[0]['id'] if questions else repo.record_research_question(
+    'Is volatility stable? π', {'kind': 'test'})
+print(json.dumps(ResearchDirector(repo, experiment_engine=object()).schedule(
+    qid, candles=[1, 2, 3])['seed']))
+store.close()
+"""
+        seeds = []
+        for random_seed in ("11", "875"):
+            env = {**os.environ, "PYTHONHASHSEED": random_seed}
+            result = subprocess.run([sys.executable, "-c", script, str(db)],
+                                    capture_output=True, text=True, check=True,
+                                    env=env, timeout=30)
+            seeds.append(json.loads(result.stdout.strip()))
+        assert seeds[0] == seeds[1]
+
     def test_survey_creates_idempotent_questions(self, env):
         from app.research.director import ResearchDirector
 
