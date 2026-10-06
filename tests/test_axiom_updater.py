@@ -178,6 +178,32 @@ class TestDownloadVerifyPrepareInstall:
         assert target.read_bytes() == b"AXIOM-UPDATE-PAYLOAD"
         assert target.with_suffix(".previous").read_bytes() == b"OLD-BINARY"
 
+    def test_rollback_backup_fsync_uses_a_writable_descriptor(
+            self, manager, tmp_path, monkeypatch):
+        from app.system import updater as updater_module
+
+        target = tmp_path / "current-binary"
+        target.write_bytes(b"OLD-BINARY")
+        update, downloaded, digest = self._staged(manager)
+        update.target_path = target
+        assert update.verify(downloaded["path"], digest)["status"] == VERIFIED
+        assert update.prepare(downloaded["path"])["status"] == PREPARED
+        real_open = open
+        backup_modes = []
+
+        def tracking_open(path, mode="r", *args, **kwargs):
+            candidate = Path(path)
+            if (candidate.parent == target.parent
+                    and candidate.name.startswith(".current-binary.previous.")
+                    and candidate.name.endswith(".tmp")):
+                backup_modes.append(mode)
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(updater_module, "open", tracking_open, raising=False)
+        installed = update.install()
+        assert installed["status"] == INSTALLED_RESTART_REQUIRED
+        assert backup_modes == ["r+b"]
+
     def test_checksum_match_is_not_reported_as_publisher_authenticity(self, manager):
         update, downloaded, digest = self._staged(manager)
         assert downloaded["digest_role"] == "locally-computed-only"

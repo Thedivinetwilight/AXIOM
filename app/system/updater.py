@@ -393,7 +393,9 @@ class UpdateManager:
         temp_target = target.with_name(f".{target.name}.{uuid4().hex}.install")
         try:
             shutil.copy2(target, temp_backup)
-            with open(temp_backup, "rb") as handle:
+            # Windows refuses to fsync a read-only descriptor (EBADF); the
+            # rollback copy must be opened for update before the durable flush.
+            with open(temp_backup, "r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(temp_backup, backup)
             shutil.copy2(artifact, temp_target)
