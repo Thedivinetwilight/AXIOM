@@ -29,6 +29,44 @@ core research/replay paths must keep working with the standard library alone.
 
 from urllib.parse import urlparse
 
+
+def is_trusted_upstox_url(url: str, allowed_hosts, *, expected_path=None) -> bool:
+    """Whether a broker endpoint is HTTPS, host-pinned, and structurally safe.
+
+    Broker URLs carry a bearer token. Do not allow a custom base/history URL to
+    redirect credentials to an arbitrary host, cleartext HTTP, nonstandard
+    port, or URL with embedded user-info/query/fragment data.
+    """
+    try:
+        parsed = urlparse(str(url))
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if (parsed.scheme.lower() != "https"
+            or (parsed.hostname or "").lower() not in set(allowed_hosts)
+            or parsed.username is not None or parsed.password is not None
+            or port not in (None, 443) or parsed.query or parsed.fragment):
+        return False
+    path = parsed.path or ""
+    if expected_path is None:
+        return not path.strip("/")
+    return path.rstrip("/") == str(expected_path).rstrip("/")
+
+
+def is_trusted_upstox_request_url(url: str, allowed_hosts) -> bool:
+    """Host/scheme validation for an already-built API request URL."""
+    try:
+        parsed = urlparse(str(url))
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() in set(allowed_hosts)
+        and parsed.username is None and parsed.password is None
+        and port in (None, 443) and not parsed.fragment)
+
+
 #: Order-mutating hosts a SANDBOX broker may contact.
 SANDBOX_ORDER_HOSTS = frozenset({
     "api-sandbox.upstox.com",  # documented sandbox order host (SDK sandbox=True)

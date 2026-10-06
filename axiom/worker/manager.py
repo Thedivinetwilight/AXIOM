@@ -30,6 +30,7 @@ from axiom.kronos.backends import KronosInference, KronosRuntimeUnavailable
 from axiom.kronos.runtime import KronosRuntime
 from axiom.log import get_logger
 from axiom.market.provider import MarketDataBar
+from axiom.market.validation import validate_inference_inputs
 from axiom.models import KronosConfig, KronosState, KronosStatus, utcnow
 from axiom.worker.child import ChildRuntime
 from axiom.worker.protocol import (
@@ -325,6 +326,9 @@ class KronosManager:
         future_timestamps: Sequence[datetime],
         timeout: float | None = None,
     ) -> KronosInference:
+        # Validate before serialization as well as in the child/runtime/backend:
+        # malformed bars or timestamps must not cross the process boundary.
+        validate_inference_inputs(bars, future_timestamps, self.config)
         response = self._request(
             "forecast",
             {

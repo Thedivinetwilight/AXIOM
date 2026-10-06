@@ -1,5 +1,8 @@
 # V063_VERIFICATION.md — V0.6.3 Real Upstox → Paper Trading (credential-type verification)
 
+> **Historical version report:** this V0.6.3 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Scope:** V0.6.3 continues V0.6.2 with one focused goal — **never assume the
 credential type**. The official Analytics Token documentation (verified current
 2026-09-22) shows the 1-year read-only Analytics Token supports GET APIs across

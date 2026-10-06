@@ -1,6 +1,6 @@
-# ARENA BUILD AND VERIFICATION REPORT
+# ARENA BUILD AND VERIFICATION REPORT — HISTORICAL
 
-> Machine-readable build & verification record for release **3.1.0**.
+> **Historical snapshot only:** this machine-readable record describes release **3.1.0** and its earlier CI/artifact results. It is not evidence for current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
 > Regenerate the numbers in this file with:
 > `python build_exe.py --test` (frozen checks) and `pytest` (source suite).
 

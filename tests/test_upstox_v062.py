@@ -53,10 +53,15 @@ pytest.importorskip("websockets")
 REAL_KEY = KEY
 
 
+# Anchor once at module import so repeated calls cannot jump a minute boundary
+# during a long/parallel test run.
+_DEEP_BUCKET_BASE = int(time.time()) - 1200
+_DEEP_BUCKET_BASE -= _DEEP_BUCKET_BASE % 60
+
+
 def deep_bucket(index: int) -> int:
-    """Minute-aligned bucket ~20 minutes in the past (never crosses 'now')."""
-    base = int(time.time()) - 1200
-    return base - base % 60 + index * 60
+    """Minute-aligned bucket ~20 minutes in the past."""
+    return _DEEP_BUCKET_BASE + index * 60
 
 
 # ---------------------------------------------------------------- decoder

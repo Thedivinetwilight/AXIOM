@@ -1,5 +1,8 @@
 # Delivery verification — V0.6
 
+> **Historical version report:** this V0.6 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 Verified on **2026-09-20**, Linux, **CPython 3.13.14**. Commands were run in `trading_bot/`, not merely proposed.
 
 ## Results

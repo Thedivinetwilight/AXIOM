@@ -63,7 +63,9 @@ class GatewayRoutedBroker:
         # authorization can never trap a held position.
         purpose = "EXIT" if side == "SELL" else "ENTRY"
         epoch = self.gateway.epochs.current() or {}
-        intent = ExecutionIntent(
+        signal_id = str(intent_id or extra.get("signal_id") or "")
+        signal_ts = extra.get("signal_ts")
+        intent_fields = dict(
             purpose=purpose,
             market_id=self.market_id,
             identity=(instrument_key or symbol or self.market_id),
@@ -75,13 +77,16 @@ class GatewayRoutedBroker:
             universe=self.universe,
             strategy_id=self.strategy_id,
             strategy_lineage=self.strategy_id,
-            signal_id=str(intent_id or ""),
-            signal_ts=self.clock(),
+            signal_id=signal_id,
+            signal_ts=signal_ts,
             configuration_hash=configuration_hash(self.gateway.settings),
             authorization_epoch=(int(epoch.get("epoch"))
                                  if epoch.get("epoch") is not None else None),
             build_identity=build_identity_string(),
         )
+        if intent_id is not None:
+            intent_fields["intent_id"] = str(intent_id)
+        intent = ExecutionIntent(**intent_fields)
         result = self.gateway.submit(intent)   # raises GatewayRefusal
         return str(result.get("order_id", ""))
 

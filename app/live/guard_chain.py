@@ -17,6 +17,7 @@ guard refused and why. Two invariants:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -103,7 +104,9 @@ class GuardChain:
 def default_chain(*, settings=None, session_state: str = "OFF",
                   emergency_stop: bool = False,
                   recent_intent_ids: set | None = None,
-                  max_entry_age_s: float = 5.0) -> GuardChain:
+                  max_entry_age_s: float = 5.0,
+                  max_future_skew_s: float = 1.0,
+                  clock=time.time) -> GuardChain:
     """The production chain wired to live session state and settings.
 
     Every closure reads live inputs at evaluation time; nothing is cached at
@@ -161,9 +164,24 @@ def default_chain(*, settings=None, session_state: str = "OFF",
         signal_ts = context.get("signal_ts")
         if signal_ts is None:
             return False, "order has no signal timestamp; cannot verify freshness"
-        age = time.time() - float(signal_ts)
-        if age > max_entry_age_s:
-            return False, f"signal is {age:.1f}s old (max {max_entry_age_s}s)"
+        try:
+            timestamp = float(signal_ts)
+            now = float(clock())
+            max_age = float(max_entry_age_s)
+            future_skew = float(max_future_skew_s)
+        except (TypeError, ValueError, OverflowError):
+            return False, "signal timestamp or freshness bound is malformed"
+        if (not math.isfinite(timestamp) or timestamp <= 0
+                or not math.isfinite(now) or now <= 0
+                or not math.isfinite(max_age) or max_age <= 0
+                or not math.isfinite(future_skew) or future_skew < 0):
+            return False, "signal timestamp or freshness bound is non-finite/invalid"
+        age = now - timestamp
+        if age < -future_skew:
+            return False, (f"signal timestamp is {-age:.2f}s in the future "
+                           f"(max clock skew {future_skew:g}s)")
+        if age > max_age:
+            return False, f"signal is {age:.1f}s old (max {max_age:g}s)"
         return True, f"signal age {age:.2f}s within bound"
 
     def duplicate_check(order: dict, context: dict):

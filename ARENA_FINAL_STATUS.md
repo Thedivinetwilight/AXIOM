@@ -1,4 +1,6 @@
-# AXIOM Final Completion Status
+# AXIOM Final Completion Status — HISTORICAL SNAPSHOT
+
+> **Historical only:** this status records commit `f6808ae` and evidence from 2026-10-04. It is not the current status of the working tree or current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current evidence.
 
 **Updated:** 2026-10-04 (Asia/Calcutta)  
 **Branch:** `arena/01a102dd-axiom`  

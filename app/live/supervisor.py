@@ -88,11 +88,12 @@ class LiveEngineSupervisor:
     def _clear_stop_request(self) -> None:
         """Start a new control generation only after exclusive ownership is safe."""
         previous = self._control()
-        try:
-            generation = int(previous.get("generation", 0)) + 1
-        except (TypeError, ValueError) as exc:
+        prior_generation = previous.get("generation", 0)
+        if (type(prior_generation) is not int or prior_generation < 0
+                or prior_generation >= 2**63 - 1):
             raise LiveSupervisorError(
-                "live engine control generation is malformed") from exc
+                "live engine control generation is malformed")
+        generation = prior_generation + 1
         now = self.clock()
         control = {"stop_requested": False, "generation": generation,
                    "reason": "new explicit ARM request", "requested_at": now}
@@ -109,25 +110,46 @@ class LiveEngineSupervisor:
         lease = self._lease_status()
         runtime = self._runtime()
         host = self._host()
-        expected_owner = f"{host}:{int(pid)}"
+        try:
+            control = self._control()
+            from app.live.readiness import reconciliation_freshness
+
+            silence_minutes = float(getattr(
+                self.settings, "live_reconcile_silence_minutes", 10))
+            reconciliation = reconciliation_freshness(
+                self.repository, max_age_seconds=silence_minutes * 60.0,
+                now_epoch=self.clock())
+        except Exception:
+            control = {}
+            reconciliation = {"ok": False, "timestamp": None}
+        generation = control.get("generation")
         age = lease.get("heartbeat_age_seconds")
         ready = (
             lease.get("readable") is True
             and lease.get("atomic_supported") is True
             and lease.get("held") is True
             and lease.get("live") is True
-            and lease.get("owner") == expected_owner
+            and isinstance(lease.get("owner"), str)
+            and bool(lease.get("owner"))
             and lease.get("pid") == int(pid)
             and lease.get("host") == host
             and lease.get("stale") is False
             and lease.get("owner_liveness") == "alive"
             and isinstance(age, (int, float))
+            and age >= 0
             and age <= lease.get("stale_after_seconds", 0)
             and runtime.get("state") == "READY"
-            and runtime.get("owner") == expected_owner
+            and runtime.get("owner") == lease.get("owner")
             and runtime.get("pid") == int(pid)
             and runtime.get("host") == host
-            and bool(runtime.get("reconciled_at")))
+            and type(generation) is int
+            and generation > 0
+            and type(runtime.get("generation")) is int
+            and runtime.get("generation") == generation
+            and control.get("stop_requested") is False
+            and runtime.get("reconciliation_ok") is True
+            and runtime.get("reconciled_at") == reconciliation.get("timestamp")
+            and reconciliation.get("ok") is True)
         return ready, lease, runtime
 
     def start(self, *, timeout: float | None = None) -> dict:
@@ -288,6 +310,7 @@ class LiveEngineSupervisor:
                 "supervisor_lease_owner": status["owner"],
                 "supervisor_pid": status["pid"],
                 "supervisor_host": status["host"],
+                "supervisor_generation": status.get("control_generation"),
                 "last_market_data_ts": status.get("last_market_data_ts")}
 
     def status(self) -> dict:

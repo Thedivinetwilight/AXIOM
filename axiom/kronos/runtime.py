@@ -19,10 +19,12 @@ from axiom.kronos.backends import (
     KronosModelMismatch,
     KronosRuntimeUnavailable,
     build_backend,
+    is_immutable_revision,
 )
 from axiom.kronos.model_cache import ModelCache
 from axiom.log import get_logger
 from axiom.market.provider import MarketDataBar
+from axiom.market.validation import validate_inference_inputs
 from axiom.models import (
     KronosConfig,
     KronosState,
@@ -47,7 +49,8 @@ class KronosRuntime:
         on_state: Callable[[KronosState, str], None] | None = None,
     ) -> None:
         self.config = config.validate()
-        self.cache = cache
+        self.cache = (cache or ModelCache(self.config.cache_dir or None)
+                      if self.config.backend == "upstream" else cache)
         self.clock = clock
         self.on_state = on_state
         self.backend = backend or build_backend(self.config)
@@ -100,14 +103,42 @@ class KronosRuntime:
             return self._set(KronosState.DISABLED, "Kronos is disabled in configuration")
         self._set(KronosState.INITIALIZING, f"preparing {self.config.backend} backend")
         if self.cache is not None:
-            # Integrity is verified before ANY backend loads weights, so a
-            # corrupted or swapped file can never reach the model.
-            integrity = self.cache.verify(self.config.model_id, self.config.model_revision)
-            if integrity.problems:
+            # Both artifacts participate in upstream inference. A corrupt or
+            # path-escaping manifest is refused for every backend; an untracked
+            # cache is additionally refused for upstream weights, while the
+            # explicitly labelled dependency-free stub needs no model files.
+            artifacts = ((self.config.model_id, self.config.model_revision),
+                         (self.config.tokenizer_id, self.config.tokenizer_revision))
+            checked: set[tuple[str, str]] = set()
+            must_be_tracked = self.config.backend == "upstream"
+            failures = (["automatic model downloads are disabled for verified inference"]
+                        if must_be_tracked and self.config.allow_download else [])
+            if (must_be_tracked and
+                    (not is_immutable_revision(self.config.model_revision)
+                     or not is_immutable_revision(self.config.tokenizer_revision))):
+                failures.append(
+                    "model_revision and tokenizer_revision must be full immutable "
+                    "40- or 64-character hexadecimal commit ids")
+            for artifact_id, revision in artifacts:
+                identity = (artifact_id, revision)
+                if identity in checked:
+                    continue
+                checked.add(identity)
+                integrity = (self.cache.verify_artifact(artifact_id, revision)
+                             if must_be_tracked
+                             else self.cache.verify(artifact_id, revision))
+                if integrity.problems or (must_be_tracked and not integrity.ok):
+                    reasons = integrity.problems or integrity.notes or (
+                        "no verifiable cache manifest entry exists",
+                    )
+                    failures.extend(f"{artifact_id}: {reason}" for reason in reasons)
+            if failures:
+                detail = "; ".join(failures)
                 return self._set(
                     KronosState.ERROR,
-                    "model integrity check failed: " + "; ".join(integrity.problems),
-                    last_error="; ".join(integrity.problems),
+                    "model/tokenizer integrity was not verified; refusing to load "
+                    "weights: " + detail,
+                    last_error=detail,
                 )
         try:
             self._info = self.backend.load(
@@ -150,6 +181,7 @@ class KronosRuntime:
                 f"Kronos is not ready (state={self._status.state.value}: "
                 f"{self._status.message})"
             )
+        validate_inference_inputs(bars, future_timestamps, self.config)
         self._set(KronosState.INFERENCING, "running Kronos inference")
         try:
             result = self.backend.forecast(bars, future_timestamps, self.config)

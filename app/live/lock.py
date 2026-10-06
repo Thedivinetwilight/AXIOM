@@ -22,14 +22,17 @@ The lock is deliberately *soft* rather than a filesystem lock:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import socket
+from uuid import uuid4
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 LOCK_KEY = "engine_lock"
+_PROCESS_INSTANCE_ID = uuid4().hex
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,33 @@ class LockDecision:
                 "took_over_stale": self.took_over_stale}
 
 
+def _state_from_mapping(raw: dict) -> LockState:
+    if not isinstance(raw, dict):
+        raise ValueError("lease record is not an object")
+    owner = raw.get("owner")
+    host = raw.get("host")
+    pid = raw.get("pid")
+    started = raw.get("started_ts")
+    heartbeat = raw.get("heartbeat_ts")
+    live = raw.get("live", True)
+    if not isinstance(owner, str) or not owner.strip():
+        raise ValueError("lease owner is missing")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ValueError("lease PID is invalid")
+    if not isinstance(host, str) or not host.strip():
+        raise ValueError("lease host is invalid")
+    if not isinstance(started, str) or not isinstance(heartbeat, str):
+        raise ValueError("lease timestamps are malformed")
+    if type(live) is bool:
+        is_live = live
+    elif type(live) is int and live in (0, 1):
+        is_live = bool(live)
+    else:
+        raise ValueError("lease mode is malformed")
+    return LockState(owner=owner, pid=pid, host=host,
+                     started_ts=started, heartbeat_ts=heartbeat, live=is_live)
+
+
 def _parse(ts) -> datetime | None:
     if not ts:
         return None
@@ -75,8 +105,15 @@ def _parse(ts) -> datetime | None:
 
 
 def owner_id(*, pid: int | None = None, host: str | None = None) -> str:
-    """A stable identity for this process: host + pid."""
-    return f"{host or socket.gethostname()}:{pid or os.getpid()}"
+    """A process-instance identity: host + PID + random per-process nonce.
+
+    PID and host alone are not unique across restarts because operating systems
+    reuse PIDs. The nonce is stable for this Python process, shared by its
+    EngineLock and gateway, and changes after a restart.
+    """
+    process_id = os.getpid() if pid is None else int(pid)
+    hostname = socket.gethostname() if host is None else str(host)
+    return f"{hostname}:{process_id}:{_PROCESS_INSTANCE_ID}"
 
 
 def _pid_alive_windows(pid: int, *, kernel32=None,
@@ -174,15 +211,8 @@ class EngineLock:
                 f"lease state read failed ({type(exc).__name__})") from exc
         if raw is None:
             return None
-        if not isinstance(raw, dict) or not raw.get("owner"):
-            raise LockStateUnavailable("lease record has an invalid shape")
         try:
-            return LockState(owner=str(raw["owner"]),
-                             pid=int(raw.get("pid") or 0),
-                             host=str(raw.get("host") or "?"),
-                             started_ts=str(raw.get("started_ts") or ""),
-                             heartbeat_ts=str(raw.get("heartbeat_ts") or ""),
-                             live=bool(raw.get("live", True)))
+            return _state_from_mapping(raw)
         except (TypeError, ValueError, KeyError) as exc:
             raise LockStateUnavailable("lease record is malformed") from exc
 
@@ -208,6 +238,13 @@ class EngineLock:
                     "liveness": "unknown"}
         now = now or self._now()
         age = (now - heartbeat).total_seconds()
+        if not isinstance(age, (int, float)) or not math.isfinite(age):
+            return {"proven": False, "reason": "heartbeat age is invalid",
+                    "liveness": "unknown"}
+        if age < -1.0:
+            return {"proven": False,
+                    "reason": "heartbeat timestamp is in the future",
+                    "liveness": "unknown", "age_seconds": age}
         if age <= self.stale_after_seconds:
             return {"proven": False, "reason": "heartbeat is fresh",
                     "liveness": "alive", "age_seconds": max(0.0, age)}
@@ -220,6 +257,13 @@ class EngineLock:
             return {"proven": True, "reason": "stale heartbeat and local PID is absent",
                     "liveness": "dead", "age_seconds": age}
         if alive is True:
+            if (existing.pid == os.getpid()
+                    and existing.host == socket.gethostname()
+                    and existing.owner != self.owner):
+                return {"proven": False,
+                        "reason": "local PID is alive but its process-instance owner "
+                                 "does not match the lease; PID reuse is unknown",
+                        "liveness": "unknown", "age_seconds": age}
             return {"proven": False, "reason": "heartbeat is stale but local PID is alive",
                     "liveness": "alive", "age_seconds": age}
         return {"proven": False, "reason": "local PID liveness could not be verified",
@@ -268,20 +312,16 @@ class EngineLock:
                 return LockDecision(
                     False, "live-engine lease owner could not be verified; refusing start")
             if prior is not None:
-                if not isinstance(prior, dict) or not prior.get("owner"):
+                try:
+                    prior_state = _state_from_mapping(prior)
+                except (TypeError, ValueError, KeyError):
                     return LockDecision(
                         False, "live-engine lease record is malformed; refusing start")
                 same_process = (
-                    prior.get("owner") == self.owner
-                    and int(prior.get("pid") or 0) == os.getpid()
-                    and str(prior.get("host") or "") == socket.gethostname())
-                if not same_process and prior.get("live", True):
-                    prior_state = LockState(
-                        owner=str(prior["owner"]), pid=int(prior.get("pid") or 0),
-                        host=str(prior.get("host") or "?"),
-                        started_ts=str(prior.get("started_ts") or ""),
-                        heartbeat_ts=str(prior.get("heartbeat_ts") or ""),
-                        live=True)
+                    prior_state.owner == self.owner
+                    and prior_state.pid == os.getpid()
+                    and prior_state.host == socket.gethostname())
+                if not same_process and prior_state.live:
                     proof = self._stale_proof(prior_state, now=now)
                     if not proof["proven"]:
                         logger.warning("LIVE_LEASE_TAKEOVER_REFUSED",
@@ -352,17 +392,15 @@ class EngineLock:
                 return LockDecision(
                     False,
                     "live-engine lease changed during atomic acquisition; refusing start")
-            if not (self.live and existing_row.get("live", True)):
+            try:
+                existing = _state_from_mapping(existing_row)
+            except (TypeError, ValueError, KeyError):
+                return LockDecision(
+                    False, "live-engine lease result is malformed; refusing start")
+            if not (self.live and existing.live):
                 # Non-live sessions are not exclusive; record and continue.
                 self.held = True
                 return LockDecision(True, "lock acquired (non-live coexists)")
-            existing = LockState(
-                owner=str(existing_row["owner"]),
-                pid=int(existing_row.get("pid") or 0),
-                host=str(existing_row.get("host") or "?"),
-                started_ts=str(existing_row.get("started_ts") or ""),
-                heartbeat_ts=str(existing_row.get("heartbeat_ts") or ""),
-                live=bool(existing_row.get("live", True)))
             return LockDecision(
                 False,
                 f"another LIVE engine ({existing.owner}) is heartbeating "
@@ -468,14 +506,11 @@ class EngineLock:
             read_lease = getattr(self.repository, "read_lease", None)
             lease = read_lease(LOCK_KEY) if callable(read_lease) else None
             if lease is not None:
-                if not isinstance(lease, dict) or not lease.get("owner"):
-                    raise LockStateUnavailable("lease record has an invalid shape")
-                existing = LockState(
-                    owner=str(lease["owner"]), pid=int(lease.get("pid") or 0),
-                    host=str(lease.get("host") or "?"),
-                    started_ts=str(lease.get("started_ts") or ""),
-                    heartbeat_ts=str(lease.get("heartbeat_ts") or ""),
-                    live=bool(lease.get("live", True)))
+                try:
+                    existing = _state_from_mapping(lease)
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise LockStateUnavailable(
+                        "lease record has an invalid shape") from exc
             else:
                 existing = self._load()
         except Exception as exc:

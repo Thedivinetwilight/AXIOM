@@ -1,5 +1,8 @@
 # Arena Trading Bot — USER MANUAL
 
+> **Historical manual snapshot:** this manual identifies Arena 3.0.4 as current. That release identity is stale relative to the AXIOM 3.2.0 source line; use [`AXIOM_PRODUCT_MANUAL.md`](AXIOM_PRODUCT_MANUAL.md) for a qualified product overview and [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for evidence.
+
+
 **Release: Arena 3.0.4 (current build in this repository)**
 Audience: human operator / developer running Arena locally.
 

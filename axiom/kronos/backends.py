@@ -29,7 +29,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from math import isfinite
 from pathlib import Path
@@ -37,6 +37,7 @@ from random import Random
 
 from axiom.kronos.model_cache import ModelCache
 from axiom.market.provider import MarketDataBar, MarketDataError
+from axiom.market.validation import validate_inference_inputs
 from axiom.models import KronosConfig, KronosState, sha256_text, utcnow
 
 # Context lengths published in the Kronos README model zoo. Anything not listed
@@ -117,6 +118,62 @@ class KronosInference:
 
     def close_paths(self) -> list[list[float]]:
         return [[step["close"] for step in path] for path in self.paths]
+
+
+def is_immutable_revision(value: str) -> bool:
+    """Accept only full hexadecimal commit identifiers, never branch names."""
+    return (isinstance(value, str) and len(value) in {40, 64}
+            and all(char in "0123456789abcdefABCDEF" for char in value))
+
+
+def require_verified_model_cache(
+    config: KronosConfig, cache: ModelCache | None = None
+) -> ModelCache:
+    """Require complete manifest-checked model AND tokenizer trees before load.
+
+    Automatic Hub downloads are intentionally refused: downloading or resolving
+    a new branch head and then loading it before a trusted digest is supplied
+    cannot be called verified. The manifest/digest is local integrity evidence,
+    not a signed publisher identity.
+    """
+    if config.allow_download:
+        raise KronosRuntimeUnavailable(
+            "automatic model downloads are disabled for verified inference; "
+            "stage and verify both configured artifacts before loading"
+        )
+    if (not is_immutable_revision(config.model_revision)
+            or not is_immutable_revision(config.tokenizer_revision)):
+        raise KronosRuntimeUnavailable(
+            "model_revision and tokenizer_revision must be full immutable "
+            "40- or 64-character hexadecimal commit ids; mutable branch/tag "
+            "identities are not loadable"
+        )
+    verified_cache = cache or ModelCache(config.cache_dir or None)
+    artifacts = ((config.model_id, config.model_revision),
+                 (config.tokenizer_id, config.tokenizer_revision))
+    checked: set[tuple[str, str]] = set()
+    failures: list[str] = []
+    for artifact_id, revision in artifacts:
+        identity = (artifact_id, revision)
+        if identity in checked:
+            continue
+        checked.add(identity)
+        try:
+            report = verified_cache.verify_artifact(artifact_id, revision)
+        except Exception as exc:
+            failures.append(
+                f"{artifact_id}: integrity check failed ({type(exc).__name__})")
+            continue
+        if not report.ok:
+            reasons = report.problems or report.notes or (
+                "no verifiable cache manifest entry exists",)
+            failures.extend(f"{artifact_id}: {reason}" for reason in reasons)
+    if failures:
+        raise KronosRuntimeUnavailable(
+            "model/tokenizer integrity was not verified; refusing to load "
+            "weights: " + "; ".join(failures)
+        )
+    return verified_cache
 
 
 class KronosBackend(ABC):
@@ -210,16 +267,39 @@ def kronos_checkout_root(source: str) -> Path:
 def installed_kronos_available() -> bool:
     """True if ``kronos`` is importable *and* installed as a distribution.
 
-    Requiring distribution metadata is what keeps a stray directory named
-    ``kronos`` on ``sys.path`` from being treated as the model implementation.
+    This is only a preliminary discovery check. ``import_kronos_modules`` also
+    proves the resolved module file is listed by that distribution before it is
+    imported; metadata existence alone does not make a same-named local module
+    trustworthy.
     """
-    if importlib.util.find_spec("kronos") is None:
-        return False
     try:
+        if importlib.util.find_spec("kronos") is None:
+            return False
         importlib.metadata.distribution("kronos")
-    except importlib.metadata.PackageNotFoundError:
+    except (ImportError, ValueError, importlib.metadata.PackageNotFoundError):
         return False
     return True
+
+
+def _distribution_module_origins(distribution) -> set[Path]:
+    """Return the installed distribution's valid top-level ``kronos`` origins.
+
+    Only RECORD-listed source modules are eligible. A local shadow module that
+    happens to win ``sys.path`` resolution must not gain trust merely because a
+    separate distribution with the same name is installed.
+    """
+    origins: set[Path] = set()
+    for item in distribution.files or ():
+        parts = Path(str(item)).parts
+        is_entry = (parts == ("kronos.py",)
+                    or (len(parts) == 2 and parts == ("kronos", "__init__.py")))
+        if not is_entry:
+            continue
+        try:
+            origins.add(Path(distribution.locate_file(item)).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return origins
 
 
 def import_kronos_modules() -> tuple[object, object, object, str]:
@@ -251,9 +331,30 @@ def import_kronos_modules() -> tuple[object, object, object, str]:
 
     if installed_kronos_available():
         tried.append("installed 'kronos' distribution")
+        try:
+            distribution = importlib.metadata.distribution("kronos")
+            trusted_origins = _distribution_module_origins(distribution)
+            spec = importlib.util.find_spec("kronos")
+            spec_origin = Path(spec.origin).resolve() if spec and spec.origin else None
+        except (ImportError, OSError, RuntimeError, ValueError,
+                importlib.metadata.PackageNotFoundError) as exc:
+            raise KronosRuntimeUnavailable(
+                f"installed Kronos distribution could not be verified "
+                f"({type(exc).__name__})"
+            ) from exc
+        if not trusted_origins or spec_origin not in trusted_origins:
+            raise KronosRuntimeUnavailable(
+                "refusing to import 'kronos': the resolved module is not a "
+                "source file listed by the installed Kronos distribution"
+            )
         module = importlib.import_module("kronos")
-        location = Path(getattr(module, "__file__", "") or "")
-        return _extract_exports(module, under=location.parent.parent or None)
+        location = Path(getattr(module, "__file__", "") or "").resolve()
+        if location != spec_origin or location not in trusted_origins:
+            raise KronosRuntimeUnavailable(
+                "refusing to import 'kronos': imported module origin differs "
+                "from the verified installed distribution file"
+            )
+        return _extract_exports(module)
 
     raise KronosRuntimeUnavailable(
         "Kronos implementation not found. Clone https://github.com/shiyu-coder/Kronos "
@@ -282,7 +383,7 @@ def _import_trusted(module_name: str, root: Path):
     return module
 
 
-def _extract_exports(module, under: Path | None = None) -> tuple[object, object, object, str]:
+def _extract_exports(module) -> tuple[object, object, object, str]:
     missing = [name for name in KRONOS_MODULE_EXPORTS if not hasattr(module, name)]
     if missing:
         raise KronosRuntimeUnavailable(
@@ -309,22 +410,26 @@ class UpstreamKronosBackend(KronosBackend):
         self._torch = None
 
     # -- loading -------------------------------------------------------------
-    def _from_pretrained(self, cls, model_id: str, revision: str, cache: ModelCache | None,
-                         allow_download: bool, on_state: StateCallback | None):
-        kwargs: dict[str, object] = {}
-        if revision:
-            kwargs["revision"] = revision
-        if cache is not None:
-            kwargs["cache_dir"] = str(cache.root)
-        kwargs["local_files_only"] = not allow_download
-        if allow_download and on_state is not None:
-            on_state(KronosState.DOWNLOADING, f"downloading {model_id}")
+    def _from_pretrained(self, cls, model_id: str, revision: str,
+                         cache: ModelCache | None, allow_download: bool,
+                         on_state: StateCallback | None):
+        if allow_download:
+            raise KronosRuntimeUnavailable(
+                "automatic model downloads are disabled for verified inference"
+            )
+        if cache is None:
+            raise KronosRuntimeUnavailable("a complete local model cache is required")
         try:
-            return cls.from_pretrained(model_id, **kwargs)
-        except TypeError:
-            # Older/newer hub versions with a different keyword set.
-            kwargs.pop("local_files_only", None)
-            return cls.from_pretrained(model_id, **kwargs)
+            artifact_dir = cache.artifact_directory(model_id, revision)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise KronosRuntimeUnavailable(
+                f"{model_id} artifact bundle could not be verified: {exc}"
+            ) from exc
+        # Load the exact directory whose complete regular-file tree was checked.
+        # Passing a Hub model ID plus cache_dir could select unrelated or
+        # untracked cached files even when one recorded weight file matched.
+        # Do not drop local_files_only on compatibility errors: fail closed.
+        return cls.from_pretrained(str(artifact_dir), local_files_only=True)
 
     def load(
         self,
@@ -334,7 +439,11 @@ class UpstreamKronosBackend(KronosBackend):
         on_state: StateCallback | None = None,
     ) -> KronosRuntimeInfo:
         config.validate()
-        notes: list[str] = []
+        cache = require_verified_model_cache(config, cache)
+        notes: list[str] = [
+            "complete model/tokenizer directories matched mutable local SHA-256 "
+            "manifests; publisher authenticity is not established"
+        ]
 
         try:
             import torch  # noqa: F401  (Kronos runtime dependency)
@@ -415,16 +524,8 @@ class UpstreamKronosBackend(KronosBackend):
 
     @staticmethod
     def _resolve_revision(cache: ModelCache | None, model_id: str, requested: str) -> str:
-        """Pinned revision if configured, else the commit the cache resolved."""
-        if requested:
-            return requested
-        if cache is None:
-            return ""
-        ref = cache.root / ("models--" + model_id.replace("/", "--")) / "refs" / "main"
-        try:
-            return ref.read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
+        """Return only the caller's revision; never infer mutable ``refs/main``."""
+        return requested
 
     def _record_weights(self, cache: ModelCache, config: KronosConfig) -> None:
         """Track what is on disk so later loads can verify SHA-256."""
@@ -450,13 +551,7 @@ class UpstreamKronosBackend(KronosBackend):
     ) -> KronosInference:
         if self.predictor is None or self.info is None:
             raise KronosRuntimeUnavailable("Kronos is not loaded")
-        if not bars:
-            raise MarketDataError("no closed bars supplied for inference")
-        if len(future_timestamps) != config.pred_len:
-            raise MarketDataError(
-                f"future timestamps ({len(future_timestamps)}) != pred_len "
-                f"({config.pred_len})"
-            )
+        validate_inference_inputs(bars, future_timestamps, config)
         import pandas as pd
 
         frame = pd.DataFrame(
@@ -515,15 +610,21 @@ class UpstreamKronosBackend(KronosBackend):
                 f"{len(future_timestamps)} future timestamps"
             )
         index = list(getattr(predicted, "index", []))
+        if len(index) != len(future_timestamps):
+            raise KronosRuntimeUnavailable(
+                "Kronos output index length does not match the requested horizon")
         for position, expected in enumerate(future_timestamps):
-            if position < len(index):
-                actual = index[position]
-                stamp = getattr(actual, "to_pydatetime", lambda: actual)()
-                if stamp != expected:
-                    raise KronosRuntimeUnavailable(
-                        f"Kronos timestamp misalignment at step {position}: "
-                        f"{stamp} != {expected}"
-                    )
+            actual = index[position]
+            stamp = getattr(actual, "to_pydatetime", lambda: actual)()
+            if (not isinstance(stamp, datetime) or stamp.tzinfo is None
+                    or stamp.utcoffset() is None):
+                raise KronosRuntimeUnavailable(
+                    f"Kronos output timestamp {position} is not timezone-aware")
+            if stamp.astimezone(timezone.utc) != expected:
+                raise KronosRuntimeUnavailable(
+                    f"Kronos timestamp misalignment at step {position}: "
+                    f"{stamp} != {expected}"
+                )
         path = []
         for position in range(len(future_timestamps)):
             row = predicted.iloc[position]
@@ -588,12 +689,7 @@ class StubKronosBackend(KronosBackend):
     ) -> KronosInference:
         if self.info is None:
             raise KronosRuntimeUnavailable("stub backend is not loaded")
-        if not bars:
-            raise MarketDataError("no closed bars supplied for inference")
-        if len(future_timestamps) != config.pred_len:
-            raise MarketDataError(
-                f"future timestamps ({len(future_timestamps)}) != pred_len ({config.pred_len})"
-            )
+        validate_inference_inputs(bars, future_timestamps, config)
         started = time.perf_counter()
         closes = [bar.close for bar in bars]
         window_hash = sha256_text(

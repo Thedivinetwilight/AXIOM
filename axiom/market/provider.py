@@ -42,6 +42,10 @@ class MarketDataBar:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timestamp", require_aware_utc(self.timestamp))
+        if (not isinstance(self.instrument, str) or not self.instrument.strip()
+                or self.instrument.strip() != self.instrument):
+            raise ValueError(
+                "MarketDataBar.instrument must be a non-empty trimmed string")
         if self.origin != MARKET_ORIGIN:
             raise ValueError(
                 f"MarketDataBar.origin must be {MARKET_ORIGIN!r}, got {self.origin!r}"
@@ -64,26 +68,34 @@ class MarketDataBar:
         return payload
 
     @classmethod
-    def from_row(cls, row: dict[str, Any], instrument: str = "") -> "MarketDataBar":
+    def from_row(cls, row: dict[str, Any], instrument: str = "") -> MarketDataBar:
         """Parse one mapping; malformed rows raise instead of being repaired."""
         try:
             timestamp = row["timestamp"]
-            values = {
-                name: float(row[name])
-                for name in ("open", "high", "low", "close", "volume")
-            }
+            raw_values = {name: row[name]
+                          for name in ("open", "high", "low", "close", "volume")}
+            if any(isinstance(value, bool) for value in raw_values.values()):
+                raise ValueError("OHLCV values must be numeric, not boolean")
+            values = {name: float(value) for name, value in raw_values.items()}
             if isinstance(timestamp, datetime):
                 parsed = timestamp
             else:
-                parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(str(timestamp))
             if parsed.tzinfo is None or parsed.utcoffset() is None:
                 raise ValueError("timestamp must be timezone-aware")
         except (KeyError, TypeError, ValueError) as exc:
             raise MarketDataError(f"malformed OHLCV row: {row!r} ({exc})") from exc
-        symbol = str(row.get("symbol") or row.get("instrument") or instrument).strip()
-        if not symbol:
-            raise MarketDataError("row is missing an instrument/symbol")
-        return cls(parsed, **values, instrument=symbol)
+        if "symbol" in row:
+            raw_symbol = row["symbol"]
+        elif "instrument" in row:
+            raw_symbol = row["instrument"]
+        else:
+            raw_symbol = instrument
+        if (not isinstance(raw_symbol, str) or not raw_symbol.strip()
+                or raw_symbol.strip() != raw_symbol):
+            raise MarketDataError(
+                "row instrument identity must be a non-empty trimmed string")
+        return cls(parsed, **values, instrument=raw_symbol)
 
     @property
     def prices_finite(self) -> bool:
@@ -106,8 +118,29 @@ class MarketDataResult:
     notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.timeframe not in TIMEFRAME_SECONDS:
+        if (not isinstance(self.instrument, str) or not self.instrument.strip()
+                or self.instrument.strip() != self.instrument):
+            raise MarketDataError(
+                "provider result instrument must be a non-empty trimmed string")
+        if not isinstance(self.timeframe, str) or self.timeframe not in TIMEFRAME_SECONDS:
             raise MarketDataError(f"unsupported timeframe: {self.timeframe}")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise MarketDataError("provider result source must be a non-empty string")
+        if not isinstance(self.provider, str) or not self.provider.strip():
+            raise MarketDataError("provider result name must be a non-empty string")
+        if not isinstance(self.bars, (tuple, list)):
+            raise MarketDataError("provider result bars must be an ordered sequence")
+        bars = tuple(self.bars)
+        if any(not isinstance(bar, MarketDataBar) for bar in bars):
+            raise MarketDataError("provider result contains a non-MarketDataBar value")
+        if any(bar.instrument != self.instrument for bar in bars):
+            raise MarketDataError("provider result bars do not match its instrument")
+        object.__setattr__(self, "bars", bars)
+        try:
+            object.__setattr__(self, "retrieved_at",
+                               require_aware_utc(self.retrieved_at, "retrieved_at"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketDataError(f"provider result retrieved_at is invalid: {exc}") from exc
 
     @property
     def first_timestamp(self) -> datetime | None:
@@ -142,13 +175,29 @@ class MarketDataProvider(ABC):
         self.source = source
 
     def check_timeframe(self, timeframe: str) -> None:
-        if timeframe not in TIMEFRAME_SECONDS:
+        if not isinstance(timeframe, str) or timeframe not in TIMEFRAME_SECONDS:
             raise MarketDataError(f"unknown timeframe: {timeframe}")
         if timeframe not in self.supported_timeframes:
             raise MarketDataError(
                 f"{self.name} does not support timeframe {timeframe} "
                 f"(supported: {', '.join(sorted(self.supported_timeframes))})"
             )
+
+    def validate_fetch_args(self, instrument, timeframe, end, limit):
+        """Validate query identity/time bounds once for every provider."""
+        if (not isinstance(instrument, str) or not instrument.strip()
+                or instrument.strip() != instrument):
+            raise MarketDataError("instrument must be a non-empty trimmed string")
+        self.check_timeframe(timeframe)
+        if end is not None:
+            try:
+                end = require_aware_utc(end, "market-data end")
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise MarketDataError(f"market-data end timestamp is invalid: {exc}") from exc
+        if limit is not None and (
+                isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise MarketDataError("limit must be a positive integer")
+        return end, limit
 
     @abstractmethod
     def fetch(

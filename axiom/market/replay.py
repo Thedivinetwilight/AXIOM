@@ -124,7 +124,7 @@ class ReplayMarketDataProvider(MarketDataProvider):
         end: datetime | None = None,
         limit: int | None = None,
     ) -> MarketDataResult:
-        self.check_timeframe(timeframe)
+        end, limit = self.validate_fetch_args(instrument, timeframe, end, limit)
         key = (instrument, timeframe)
         if key not in self._series:
             available = ", ".join(

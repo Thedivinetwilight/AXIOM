@@ -3,9 +3,9 @@
 This is how the ENTIRE live architecture is exercised without an exchange:
 the real :class:`UpstoxLiveBroker` / :class:`UpstoxSandboxBroker` speaks its
 real wire protocol (place / cancel / order-history / tag lookup) to this
-exchange through an injected ``httpx`` transport. No socket is ever opened —
-a packet cannot leave the machine, so no automated run can place a real
-order by construction.
+exchange through a test-only HTTPX adapter. The live broker rejects injected
+caller-owned transports. No socket is opened in the test harness, so no
+automated run can place a real order by construction.
 
 The exchange is SCRIPTABLE and DETERMINISTIC. Every failure class the live
 system must survive has an explicit injection point:
@@ -136,6 +136,7 @@ class MockUpstoxExchange:
             "price": float(order.get("price", 0.0)),
             "order_type": order.get("order_type", "MARKET"),
             "instrument_token": order["instrument_token"],
+            "product": order["product"],
             "status": order["status"],
             "order_timestamp": self._tick(),
         }
@@ -166,6 +167,14 @@ class MockUpstoxExchange:
             return self._cancel(params)
         if "order/history" in path and request.method == "GET":
             return self._history(params)
+        if path.endswith("/v2/order/retrieve-all") and request.method == "GET":
+            return self._order_book()
+        if path.endswith("/v2/portfolio/short-term-positions") \
+                and request.method == "GET":
+            return self._positions()
+        if path.endswith("/v2/portfolio/long-term-holdings") \
+                and request.method == "GET":
+            return self._json(200, {"status": "success", "data": []})
         if path.endswith("/user/profile") and request.method == "GET":
             return self._json(200, {"status": "success", "data": {
                 "email": "mock@example.invalid", "name": "Mock Account"}})
@@ -211,6 +220,7 @@ class MockUpstoxExchange:
             "price": float(body.get("price") or 0.0),
             "order_type": str(body.get("order_type") or "MARKET"),
             "instrument_token": str(body.get("instrument_token") or ""),
+            "product": str(body.get("product") or "I"),
             "status": "open",
             "filled": 0.0,
             "avg_price": 0.0,
@@ -252,6 +262,37 @@ class MockUpstoxExchange:
         order["status"] = "cancelled"
         return self._json(200, {"status": "success",
                                 "data": {"order_id": order_id}})
+
+    def _order_book(self) -> httpx.Response:
+        rows = []
+        for order in self.orders.values():
+            row = self._row(order)
+            filled = self._current_fill(order)
+            terminal = str(order.get("status", "")).lower() in {
+                "complete", "completed", "rejected", "cancelled", "canceled"}
+            row["pending_quantity"] = (0.0 if terminal else max(
+                0.0, float(order["quantity"]) - float(filled)))
+            rows.append(row)
+        return self._json(200, {"status": "success", "data": rows})
+
+    def _positions(self) -> httpx.Response:
+        positions = {}
+        for order in self.orders.values():
+            filled = float(self._current_fill(order))
+            sign = 1.0 if order.get("transaction_type") == "BUY" else -1.0
+            key = (order.get("instrument_token"), order.get("product"))
+            current = positions.setdefault(key, {"quantity": 0.0, "price": 0.0})
+            current["quantity"] += sign * filled
+            current["price"] = float(
+                order.get("avg_price") or order.get("price") or 100.0)
+        rows = [{"instrument_token": instrument, "product": product,
+                 "quantity": values["quantity"],
+                 "average_price": values["price"],
+                 "last_price": values["price"],
+                 "value": values["quantity"] * values["price"]}
+                for (instrument, product), values in positions.items()
+                if abs(values["quantity"]) > 1e-9]
+        return self._json(200, {"status": "success", "data": rows})
 
     def _history(self, params: dict) -> httpx.Response:
         if self._history_failures:

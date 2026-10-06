@@ -1,4 +1,6 @@
-# AXIOM-MONEY-PRINTER 3.2.0 — Build & Verification Report
+# AXIOM-MONEY-PRINTER 3.2.0 — Build & Verification Report (HISTORICAL)
+
+> **Historical snapshot only:** this report describes commit `e2001b7` and its 2026-10-04 verification. It is not evidence for current HEAD or the current release artifact. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
 
 **Date:** 2026-10-04 · **Branch:** `arena/01a102dd-axiom` · **HEAD:** `e2001b7`
 **Spec executed:** `AXIOM-MONEY-PRINTER_MASTER_PROMPT_v1.0.md` (v1.0, 150 sections)

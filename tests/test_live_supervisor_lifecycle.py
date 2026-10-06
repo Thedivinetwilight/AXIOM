@@ -52,9 +52,13 @@ def _publish_ready_runtime(repository, lease):
     now = datetime.now(timezone.utc).isoformat()
     repository.set_engine_state("last_market_data_ts", now)
     repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+    repository.set_engine_state("live_reconcile_status", {
+        "ok": True, "ts": now, "fills": 0})
+    control = repository.get_engine_state("live_engine_control", {}) or {}
     repository.set_engine_state("live_engine_runtime", {
         "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
-        "host": lease["host"], "reconciled_at": now})
+        "host": lease["host"], "generation": control.get("generation"),
+        "reconciliation_ok": True, "reconciled_at": now})
 
 
 def test_supervisor_waits_for_matching_lease_and_reconciliation_then_drains(repo):

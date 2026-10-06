@@ -1,5 +1,8 @@
 # USER_MANUAL_VERIFICATION.md
 
+> **Historical snapshot only:** this verification applies to the named 3.0.2 manual and earlier code. It is not a current release-readiness report. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 Companion to `USER_MANUAL.md` (Arena **3.0.2**). Documents what was inspected,
 what was executed to verify the manual, and every discrepancy found and fixed.
 **Documentation-only task:** no trading, risk, broker, strategy, or execution

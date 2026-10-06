@@ -9,6 +9,7 @@ real exchange (no automated test may ever place a production order).
 
 from __future__ import annotations
 
+import hashlib
 import socket
 import time
 from datetime import datetime, timezone
@@ -18,14 +19,16 @@ import pytest
 from app.config.settings import LIVE_CONFIRM_PHRASE
 from app.database.database import Database
 from app.database.repository import Repository
-from app.live.gateway import (AuthorizationEpochs, ExecutionIntent,
-                              GatewayRefusal, LiveExecutionGateway,
-                              configuration_hash)
+from app.live.gateway import (
+    AuthorizationEpochs,
+    ExecutionIntent,
+    GatewayRefusal,
+    LiveExecutionGateway,
+    configuration_hash,
+)
 from app.live.guard_chain import default_chain
 from app.live.ops import read_emergency_stop
-from app.live.session import (ACTIVE, ARMED, LiveSessionManager,
-                              LiveTransitionError)
-
+from app.live.session import ACTIVE, ARMED, LiveSessionManager, LiveTransitionError
 
 # =====================================================================
 # fixtures & mock broker
@@ -80,6 +83,9 @@ class MockLiveBroker:
         self.calls: list[dict] = []
         self.fail = fail
         self.ledger = _MockLedger()
+        self._product = "I"
+        self.positions = []
+        self.working_orders = []
 
     def submit(self, side, quantity, price, *, order_type="MARKET",
                intent_id=None, symbol=None, instrument_key=None, **extra):
@@ -92,6 +98,15 @@ class MockLiveBroker:
 
     def open_orders(self):
         return []
+
+    def get_positions(self):
+        return list(self.positions)
+
+    def get_account_positions(self):
+        return list(self.positions)
+
+    def get_open_orders(self):
+        return list(self.working_orders)
 
     def reconcile(self):
         return []
@@ -134,12 +149,15 @@ class _FixtureReadySupervisor:
                 or runtime.get("state") != "READY"
                 or runtime.get("owner") != lease.get("owner")
                 or runtime.get("pid") != lease.get("pid")
-                or runtime.get("host") != lease.get("host")):
+                or runtime.get("host") != lease.get("host")
+                or runtime.get("generation") != control.get("generation")
+                or runtime.get("reconciliation_ok") is not True):
             raise RuntimeError("fixture engine has no reconciled live lease")
         return {"supervisor_verified": True,
                 "supervisor_lease_owner": lease["owner"],
                 "supervisor_pid": lease["pid"],
                 "supervisor_host": lease["host"],
+                "supervisor_generation": control.get("generation"),
                 "last_market_data_ts": self.repository.get_engine_state(
                     "last_market_data_ts")}
 
@@ -150,7 +168,7 @@ class _FixtureReadySupervisor:
         return {"running": True, "stop_requested": True}
 
 
-def _install_fixture_live_engine(repository):
+def _install_fixture_live_engine(repository, credential="live-token-under-test"):
     from app.live.lock import EngineLock
 
     now = datetime.now(timezone.utc).isoformat()
@@ -159,12 +177,18 @@ def _install_fixture_live_engine(repository):
     lease = lock.status()
     repository.set_engine_state("last_market_data_ts", now)
     repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
-    repository.set_engine_state("live_token_verified", {"verified_at": now})
+    repository.set_engine_state("live_reconcile_status", {
+        "ok": True, "ts": now, "fills": 0})
+    repository.set_engine_state("live_token_verified", {
+        "verified_at": now,
+        "credential_sha256": hashlib.sha256(
+            credential.encode("utf-8")).hexdigest()})
     repository.set_engine_state("live_engine_control", {
         "stop_requested": False, "generation": 1})
     repository.set_engine_state("live_engine_runtime", {
         "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
-        "host": lease["host"], "reconciled_at": now})
+        "host": lease["host"], "generation": 1,
+        "reconciliation_ok": True, "reconciled_at": now})
     return lock, _FixtureReadySupervisor(repository)
 
 
@@ -174,17 +198,23 @@ def _restart_fixture_live_engine(repository):
 
     now = datetime.now(timezone.utc).isoformat()
     control = repository.get_engine_state("live_engine_control", {}) or {}
+    generation = int(control.get("generation", 0)) + 1
     repository.set_engine_state("live_engine_control", {
-        "stop_requested": False,
-        "generation": int(control.get("generation", 0)) + 1})
+        "stop_requested": False, "generation": generation})
     lease = EngineLock(repository, live=True).status()
     assert lease.get("held") is True and lease.get("live") is True
     repository.set_engine_state("last_market_data_ts", now)
     repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
-    repository.set_engine_state("live_token_verified", {"verified_at": now})
+    repository.set_engine_state("live_reconcile_status", {
+        "ok": True, "ts": now, "fills": 0})
+    repository.set_engine_state("live_token_verified", {
+        "verified_at": now,
+        "credential_sha256": hashlib.sha256(
+            b"live-token-under-test").hexdigest()})
     repository.set_engine_state("live_engine_runtime", {
         "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
-        "host": lease["host"], "reconciled_at": now})
+        "host": lease["host"], "generation": generation,
+        "reconciliation_ok": True, "reconciled_at": now})
 
 
 @pytest.fixture()
@@ -201,13 +231,22 @@ def armed(repo):
 
 def make_gateway(repo, manager, settings, broker=None, *, chain=None,
                  context=None):
+    from app.live.guard_chain import default_chain
+
+    risk_context = {"current_exposure": 0.0,
+                    "daily_loss_breached": False,
+                    "drawdown_breached": False,
+                    "canary_exhausted": False}
+    risk_context.update(context or {})
     return LiveExecutionGateway(
         settings=settings, repository=repo, session_manager=manager,
         broker=broker or MockLiveBroker(),
-        guard_chain=chain, epochs=manager.epochs,
+        guard_chain=chain or default_chain(
+            settings=settings, session_state="ACTIVE", max_entry_age_s=3600.0),
+        epochs=manager.epochs,
         emergency_stop_reader=read_emergency_stop,
         account_scope="upstox-test-account",
-        context_provider=(lambda: context) if context is not None else None)
+        context_provider=lambda: dict(risk_context))
 
 
 def entry_intent(epoch, **overrides):
@@ -217,7 +256,8 @@ def entry_intent(epoch, **overrides):
                   strategy_id="strat-v1", strategy_lineage="root/strat-v1",
                   signal_id="sig-1", signal_ts=time.time(),
                   evidence_snapshot_id="ev-1", risk_snapshot_id="risk-1",
-                  configuration_hash="cfg-1", model_revision="m-1",
+                  configuration_hash=configuration_hash(live_settings()),
+                  model_revision="m-1",
                   authorization_epoch=epoch, build_identity="test-build")
     values.update(overrides)
     return ExecutionIntent(**values)
@@ -260,6 +300,8 @@ class TestGatewayHappyPath:
         assert broker.calls == []
 
     def test_authorized_entry_reaches_the_broker_exactly_once(self, repo, armed):
+        from app.engine.state import ACKNOWLEDGED, SubmissionJournal
+
         settings, manager = armed
         epoch = manager.epochs.current()["epoch"]
         gateway = make_gateway(repo, manager, settings)
@@ -267,16 +309,231 @@ class TestGatewayHappyPath:
         assert result["authorized"] and result["submitted"]
         assert gateway.broker_calls == 1
         assert gateway.broker.calls[0]["intent_id"] == result["intent_id"]
+        assert SubmissionJournal(repo).get(result["intent_id"])["state"] == ACKNOWLEDGED
+
+    def test_final_boundary_refuses_a_stale_reconciliation(self, repo, armed):
+        from datetime import timedelta
+
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        repo.set_engine_state("last_reconcile_at", {"ts": old, "fills": 0})
+        repo.set_engine_state("live_reconcile_status", {"ok": True, "ts": old})
+        runtime = repo.get_engine_state("live_engine_runtime")
+        runtime["reconciled_at"] = old
+        repo.set_engine_state("live_engine_runtime", runtime)
+        gateway = make_gateway(repo, manager, settings)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "SUPERVISOR READINESS"
+        assert gateway.broker.calls == []
+
+    def test_final_boundary_refuses_a_malformed_control_record(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        repo.set_engine_state("live_engine_control", {
+            "stop_requested": "false", "generation": 1})
+        gateway = make_gateway(repo, manager, settings)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "LIVE ENGINE CONTROL"
+        assert gateway.broker.calls == []
+
+    def test_final_boundary_rechecks_token_freshness(self, repo, armed):
+        from datetime import timedelta
+
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        old = datetime.now(timezone.utc) - timedelta(days=1)
+        repo.set_engine_state("live_token_verified", {"verified_at": old.isoformat()})
+        gateway = make_gateway(repo, manager, settings)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "TOKEN FRESHNESS"
+        assert gateway.broker.calls == []
+
+    def test_live_token_must_match_the_credential_that_passed_preflight(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        repo.set_engine_state("live_token_verified", {
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "credential_sha256": hashlib.sha256(b"a-different-token").hexdigest()})
+        gateway = make_gateway(repo, manager, settings)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "TOKEN FRESHNESS"
+        assert "CHANGED_OR_UNBOUND" in exc.value.reason
+        assert gateway.broker.calls == []
+
+    def test_guard_chain_is_mandatory_for_live_entries(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        gateway = make_gateway(repo, manager, settings)
+        gateway.guard_chain = None
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "GUARD CHAIN"
+        assert gateway.broker.calls == []
+
+    def test_emergency_stop_flipped_inside_final_guard_blocks_the_order(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        gateway = make_gateway(repo, manager, settings)
+        calls = 0
+
+        def flip_stop_during_final_context():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                repo.set_engine_state("emergency_stop", {
+                    "stopped": True, "reason": "concurrent final-boundary regression"})
+            return {"current_exposure": 0.0,
+                    "daily_loss_breached": False,
+                    "drawdown_breached": False,
+                    "canary_exhausted": False}
+
+        gateway.context_provider = flip_stop_during_final_context
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "EMERGENCY STOP"
+        assert gateway.broker.calls == []
+
+    def test_emergency_stop_after_durable_authorization_audit_blocks_broker(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        record_event = repo.record_system_event
+
+        def flip_stop_after_authorization(kind, payload):
+            record_event(kind, payload)
+            if kind == "LIVE_INTENT_AUTHORIZED":
+                repo.set_engine_state("emergency_stop", {
+                    "stopped": True, "reason": "audit-boundary regression"})
+
+        repo.record_system_event = flip_stop_after_authorization
+        gateway = make_gateway(repo, manager, settings)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "EMERGENCY STOP"
+        assert gateway.broker.calls == []
+
+    def test_settings_change_during_final_guard_invalidates_authorization(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        gateway = make_gateway(repo, manager, settings)
+        calls = 0
+
+        def change_configuration_during_final_context():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                object.__setattr__(settings, "max_daily_loss", 1.0)
+            return {"current_exposure": 0.0,
+                    "daily_loss_breached": False,
+                    "drawdown_breached": False,
+                    "canary_exhausted": False}
+
+        gateway.context_provider = change_configuration_during_final_context
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "CONFIGURATION"
+        assert gateway.broker.calls == []
+
+    def test_final_entry_cap_uses_authoritative_account_holdings(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker()
+        broker.positions = [{
+            "instrument_token": "NSE|RELIANCE", "product": "D",
+            "quantity": 400, "last_price": 2500.0}]
+        gateway = make_gateway(repo, manager, settings, broker=broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "ACCOUNT RISK"
+        assert "MAX_POSITION_VALUE" in exc.value.reason
+        assert broker.calls == []
+
+    def test_final_entry_blocks_when_account_positions_are_unreadable(
+            self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker()
+        broker.get_account_positions = lambda: (_ for _ in ()).throw(
+            RuntimeError("positions unavailable"))
+        gateway = make_gateway(repo, manager, settings, broker=broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch))
+        assert exc.value.layer == "ACCOUNT RISK"
+        assert broker.calls == []
+
+    def test_final_boundary_rejects_oversized_canary_intent(self, repo):
+        settings = live_settings(live_canary_max_notional=100.0,
+                                 live_canary_orders=2)
+        _lock, supervisor = _install_fixture_live_engine(repo)
+        manager = LiveSessionManager(repo, engine_supervisor=supervisor)
+        manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE,
+                    repository=repo)
+        manager.activate(settings=settings, actor="canary-test")
+        epoch = manager.epochs.current()["epoch"]
+        gateway = make_gateway(repo, manager, settings)
+        intent = entry_intent(
+            epoch, quantity=1, price=500.0,
+            configuration_hash=configuration_hash(settings),
+            intent_id="oversized-canary-intent")
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(intent)
+        assert exc.value.layer == "CANARY GUARD"
+        assert gateway.broker.calls == []
+        assert gateway.live_ops.canary.submitted() == 0
+
+    def test_canary_attempt_is_reserved_before_uncertain_broker_result(
+            self, repo, armed):
+        from app.engine.state import UNKNOWN, SubmissionJournal
+
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker(fail=RuntimeError("mock transport failure"))
+        gateway = make_gateway(repo, manager, settings, broker=broker)
+        intent = entry_intent(epoch, intent_id="uncertain-canary-intent")
+        with pytest.raises(RuntimeError):
+            gateway.submit(intent)
+        assert gateway.live_ops.canary.submitted() == 1
+        assert SubmissionJournal(repo).get(intent.intent_id)["state"] == UNKNOWN
+        second = make_gateway(repo, manager, settings, broker=broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            second.submit(intent)
+        assert exc.value.layer == "DUPLICATE CHECK"
+        assert len(broker.calls) == 1
 
     def test_risk_reduce_exit_allowed_while_paused(self, repo, armed):
         settings, manager = armed
         manager.pause()
-        gateway = make_gateway(repo, manager, settings)
+        broker = MockLiveBroker()
+        broker._product = "I"
+        broker.get_positions = lambda: [{
+            "instrument_token": "NSE|RELIANCE", "product": "I", "quantity": 10}]
+        broker.get_open_orders = lambda: []
+        gateway = make_gateway(repo, manager, settings, broker=broker)
         intent = ExecutionIntent(purpose="RISK_REDUCE", market_id="india",
                                  identity="NSE|RELIANCE", side="SELL",
                                  quantity=10, account_scope="upstox-test-account")
         assert gateway.submit(intent)["submitted"]
         assert gateway.broker_calls == 1
+
+    def test_long_only_risk_reduction_rejects_buy_direction(self, repo, armed):
+        settings, manager = armed
+        manager.pause()
+        gateway = make_gateway(repo, manager, settings)
+        intent = ExecutionIntent(purpose="RISK_REDUCE", market_id="india",
+                                 identity="NSE|RELIANCE", side="BUY",
+                                 quantity=1, account_scope="upstox-test-account")
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(intent)
+        assert exc.value.layer == "INTENT"
+        assert gateway.broker_calls == 0
 
 
 # =====================================================================
@@ -284,13 +541,32 @@ class TestGatewayHappyPath:
 # =====================================================================
 
 class TestAuthorizationEpochs:
+    def test_concurrent_activations_mint_unique_monotonic_epochs(self, repo):
+        from concurrent.futures import ThreadPoolExecutor
+
+        epochs = AuthorizationEpochs(repo)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            states = list(pool.map(
+                lambda index: epochs.activate(
+                    actor=f"test-{index}", configuration_hash="config-hash"),
+                range(16)))
+        assert sorted(state["epoch"] for state in states) == list(range(1, 17))
+
+    def test_malformed_epoch_is_not_repaired_into_live_permission(self, repo):
+        repo.set_engine_state("live_authorization_epoch", "not-an-epoch")
+        epochs = AuthorizationEpochs(repo)
+        with pytest.raises(ValueError, match="malformed"):
+            epochs.activate(configuration_hash="config-hash")
+        assert repo.get_engine_state("live_authorization_epoch") == "not-an-epoch"
+        assert epochs.validate(1)[0] is False
+
     def test_stop_invalidates_the_epoch(self, repo, armed):
         settings, manager = armed
         old_epoch = manager.epochs.current()["epoch"]
         manager.stop(reason="operator done")
         gateway = make_gateway(repo, manager, settings)
         with pytest.raises(GatewayRefusal) as exc:
-            gateway.submit(entry_intent(old_epoch, side="SELL"))
+            gateway.submit(entry_intent(old_epoch))
         assert exc.value.layer == "AUTHORIZATION EPOCH"
         assert gateway.broker_calls == 0
 
@@ -345,7 +621,8 @@ class TestSessionStateGate:
         manager = LiveSessionManager(repo, engine_supervisor=supervisor)
         manager.arm(settings, confirmation_phrase=LIVE_CONFIRM_PHRASE,
                     repository=repo)
-        manager.epochs.activate(actor="test")          # epoch exists...
+        manager.epochs.activate(
+            actor="test", configuration_hash=configuration_hash(settings))
         gateway = make_gateway(repo, manager, settings)
         with pytest.raises(GatewayRefusal) as exc:
             gateway.submit(entry_intent(1))            # ...but state is ARMED
@@ -385,14 +662,17 @@ class TestEmergencyStopSemantics:
 
         stopped, reason = read_emergency_stop(MalformedRepository())
         assert stopped is True
-        assert "TypeError" in reason
+        assert "malformed" in reason.lower()
 
     def test_entry_blocked_exit_available_under_emergency_stop(self, repo, armed):
         settings, manager = armed
         epoch = manager.epochs.current()["epoch"]
         repo.set_engine_state("emergency_stop",
                               {"stopped": True, "reason": "drill"})
-        gateway = make_gateway(repo, manager, settings)
+        broker = MockLiveBroker()
+        broker.positions = [{"instrument_token": "NSE|RELIANCE",
+                             "product": "I", "quantity": 10}]
+        gateway = make_gateway(repo, manager, settings, broker=broker)
         with pytest.raises(GatewayRefusal) as exc:
             gateway.submit(entry_intent(epoch))
         assert exc.value.layer == "EMERGENCY STOP"
@@ -419,6 +699,28 @@ class TestEmergencyStopSemantics:
         assert exc.value.layer == "EMERGENCY STOP"
         assert gateway.broker_calls == 0
 
+    def test_missing_emergency_record_fails_closed(self, repo):
+        with repo.db.transaction() as connection:
+            connection.execute(
+                "DELETE FROM engine_state WHERE key='emergency_stop'")
+
+        stopped, reason = read_emergency_stop(repo)
+        assert stopped is True
+        assert "missing" in reason.lower()
+
+    def test_fresh_database_has_an_explicit_clear_emergency_record(self, repo):
+        flag = repo.get_engine_state("emergency_stop", None)
+        assert isinstance(flag, dict)
+        assert flag.get("stopped") is False
+
+    @pytest.mark.parametrize("stopped_value", [0, 1, "false", None])
+    def test_non_boolean_emergency_value_is_unknown_and_fails_closed(
+            self, repo, stopped_value):
+        repo.set_engine_state("emergency_stop", {"stopped": stopped_value})
+        stopped, reason = read_emergency_stop(repo)
+        assert stopped is True
+        assert "malformed" in reason.lower()
+
     def test_reconcile_purpose_never_becomes_an_order_submission(self,
                                                                repo, armed):
         settings, manager = armed
@@ -427,7 +729,8 @@ class TestEmergencyStopSemantics:
         broker.reconcile = lambda: (reconciliations.append("read") or [])
         gateway = make_gateway(repo, manager, settings, broker)
         intent = ExecutionIntent(purpose="RECONCILE", market_id="india",
-                                 identity="NSE|RELIANCE", side="BUY", quantity=1)
+                                 identity="NSE|RELIANCE", side="BUY", quantity=1,
+                                 account_scope="upstox-test-account")
 
         result = gateway.submit(intent)
 
@@ -538,6 +841,17 @@ class TestGuardChainIntegration:
         assert "FRESHNESS" in exc.value.reason.upper()
         assert gateway.broker_calls == 0
 
+    def test_future_signal_refused_by_chain(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        gateway = make_gateway(repo, manager, settings, chain=self._chain(settings))
+        future = entry_intent(epoch, signal_ts=time.time() + 60.0)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(future)
+        assert exc.value.layer == "GUARD CHAIN"
+        assert "FRESHNESS" in exc.value.reason.upper()
+        assert gateway.broker_calls == 0
+
     def test_daily_loss_breach_refused_by_chain(self, repo, armed):
         settings, manager = armed
         epoch = manager.epochs.current()["epoch"]
@@ -563,6 +877,27 @@ class TestGuardChainIntegration:
             gateway.submit(entry_intent(epoch))
         assert gateway.broker_calls == 0
 
+    def test_non_finite_order_values_are_refused(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker()
+        gateway = make_gateway(repo, manager, settings, broker=broker)
+        for quantity in (float("nan"), float("inf")):
+            with pytest.raises(GatewayRefusal) as exc:
+                gateway.submit(entry_intent(epoch, quantity=quantity))
+            assert exc.value.layer == "INTENT"
+        assert broker.calls == []
+
+    def test_non_finite_signal_timestamp_is_refused(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker()
+        gateway = make_gateway(repo, manager, settings, broker=broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            gateway.submit(entry_intent(epoch, signal_ts=float("nan")))
+        assert exc.value.layer == "INTENT"
+        assert broker.calls == []
+
 
 # =====================================================================
 # duplicates & structural integrity (§5, §22)
@@ -579,6 +914,19 @@ class TestDuplicatesAndStructure:
             gateway.submit(intent)
         assert exc.value.layer == "DUPLICATE CHECK"
         assert gateway.broker_calls == 1
+
+    def test_duplicate_intent_stays_blocked_after_gateway_restart(self, repo, armed):
+        settings, manager = armed
+        epoch = manager.epochs.current()["epoch"]
+        broker = MockLiveBroker()
+        first = make_gateway(repo, manager, settings, broker=broker)
+        second = make_gateway(repo, manager, settings, broker=broker)
+        intent = entry_intent(epoch, intent_id="durable-signal-1")
+        assert first.submit(intent)["submitted"]
+        with pytest.raises(GatewayRefusal) as exc:
+            second.submit(intent)
+        assert exc.value.layer == "DUPLICATE CHECK"
+        assert len(broker.calls) == 1
 
     @pytest.mark.parametrize("overrides,fragment", [
         ({"strategy_id": ""}, "strategy_id"),
@@ -630,6 +978,19 @@ class TestDuplicatesAndStructure:
         assert "LIVE_INTENT_FAILED" in kinds
         assert "LIVE_INTENT_SUBMITTED" not in kinds
 
+    def test_unreadable_live_open_orders_blocks_readiness(self, repo, monkeypatch):
+        from app.live.preflight import ERROR, run_readiness_center_checks
+
+        def broken_open_orders():
+            raise RuntimeError("order table unavailable")
+
+        monkeypatch.setattr(repo, "open_live_orders", broken_open_orders)
+        checks = run_readiness_center_checks(live_settings(), repository=repo)
+        check = next(c for c in checks if c.name == "no_open_orders_left")
+        assert check.ok is False
+        assert check.severity == ERROR
+        assert "could not be read" in check.detail.lower()
+
 
 def test_configuration_hash_is_deterministic():
     settings = live_settings()
@@ -668,10 +1029,55 @@ class TestGatewayRoutedBroker:
         broker = MockLiveBroker()
         facade = self._facade(repo, manager, settings, broker)
         order_id = facade.submit("BUY", 10, 2900.0, intent_id="sig-1",
-                                 instrument_key="NSE_EQ|INE002A01018")
+                                 instrument_key="NSE_EQ|INE002A01018",
+                                 signal_ts=time.time())
         assert order_id == "mock-order-1"
         assert len(broker.calls) == 1
         assert broker.calls[0]["side"] == "BUY"
+
+    def test_stale_strategy_timestamp_is_not_replaced_with_submission_time(
+            self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("BUY", 10, 2900.0, intent_id="stale-signal",
+                          instrument_key="NSE_EQ|INE002A01018",
+                          signal_ts=time.time() - 60.0)
+        assert exc.value.layer == "GUARD CHAIN"
+        assert "FRESHNESS" in exc.value.reason.upper()
+        assert broker.calls == []
+
+    def test_exit_without_confirmed_long_position_is_refused(self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        repo.set_engine_state("emergency_stop", {
+            "stopped": True, "reason": "exit must remain possible only against a holding"})
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("SELL", 10, 100.0, intent_id="no-position-exit",
+                          instrument_key="NSE_EQ|INE002A01018")
+        assert exc.value.layer == "POSITION REDUCTION"
+        assert broker.calls == []
+
+    def test_exit_cannot_exceed_position_after_pending_sells(self, repo, armed):
+        settings, manager = armed
+        broker = MockLiveBroker()
+        broker._product = "I"
+        broker.get_positions = lambda: [{
+            "instrument_token": "NSE_EQ|INE002A01018", "product": "I",
+            "quantity": 10}]
+        broker.get_open_orders = lambda: [{
+            "instrument_token": "NSE_EQ|INE002A01018", "product": "I",
+            "transaction_type": "SELL", "status": "open",
+            "pending_quantity": 4}]
+        facade = self._facade(repo, manager, settings, broker)
+        with pytest.raises(GatewayRefusal) as exc:
+            facade.submit("SELL", 7, 100.0, intent_id="overdraw-exit",
+                          instrument_key="NSE_EQ|INE002A01018")
+        assert exc.value.layer == "POSITION REDUCTION"
+        assert "available" in exc.value.reason.lower()
+        assert broker.calls == []
 
     def test_no_epoch_means_no_entry(self, repo, armed):
         settings, manager = armed
@@ -680,7 +1086,8 @@ class TestGatewayRoutedBroker:
         facade = self._facade(repo, manager, settings, broker)
         with pytest.raises(GatewayRefusal) as exc:
             facade.submit("BUY", 10, 2900.0, intent_id="sig-2",
-                          instrument_key="NSE_EQ|INE002A01018")
+                          instrument_key="NSE_EQ|INE002A01018",
+                          signal_ts=time.time())
         assert exc.value.layer == "AUTHORIZATION EPOCH"
         assert broker.calls == []
 
@@ -691,18 +1098,20 @@ class TestGatewayRoutedBroker:
         facade = self._facade(repo, manager, settings, broker)
         with pytest.raises(GatewayRefusal):
             facade.submit("BUY", 1, 100.0, intent_id="sig-3",
-                          instrument_key="NSE_EQ|X")
+                          instrument_key="NSE_EQ|X", signal_ts=time.time())
         assert broker.calls == []
 
     def test_emergency_stop_blocks_entries_but_not_exits(self, repo, armed):
         settings, manager = armed
         broker = MockLiveBroker()
+        broker.positions = [{"instrument_token": "NSE_EQ|X",
+                             "product": "I", "quantity": 10}]
         facade = self._facade(repo, manager, settings, broker)
         repo.set_engine_state("emergency_stop",
                               {"stopped": True, "reason": "drill"})
         with pytest.raises(GatewayRefusal) as exc:
             facade.submit("BUY", 10, 100.0, intent_id="sig-4",
-                          instrument_key="NSE_EQ|X")
+                          instrument_key="NSE_EQ|X", signal_ts=time.time())
         assert exc.value.layer == "EMERGENCY STOP"
         assert broker.calls == []                    # entry never left
         order_id = facade.submit("SELL", 10, 100.0, intent_id="sig-5",
@@ -717,7 +1126,7 @@ class TestGatewayRoutedBroker:
         facade.gateway.context_provider = lambda: ctx
         with pytest.raises(GatewayRefusal) as exc:
             facade.submit("BUY", 10, 100.0, intent_id="sig-6",
-                          instrument_key="NSE_EQ|X")
+                          instrument_key="NSE_EQ|X", signal_ts=time.time())
         assert exc.value.layer == "GUARD CHAIN"
         assert broker.calls == []
 
@@ -752,6 +1161,7 @@ class TestGatewayRoutedBroker:
 
     def test_cancel_refuses_without_the_owned_live_lease(self, repo, armed):
         from types import SimpleNamespace
+
         from app.live.lock import EngineLock
 
         settings, manager = armed
@@ -810,6 +1220,22 @@ class TestGatewayRoutedBroker:
         assert broker.calls == []
         assert engine.submitted == 0
 
+    def test_engine_forwards_completed_candle_time_into_gateway(self, repo, armed):
+        from datetime import timedelta
+
+        from app.data.models import Candle
+
+        settings, manager = armed
+        broker = MockLiveBroker()
+        facade = self._facade(repo, manager, settings, broker)
+        engine, _candle = self._engine_with_facade(repo, facade)
+        stale = Candle(timestamp=datetime.now(timezone.utc) - timedelta(minutes=5),
+                       open=100, high=101, low=99, close=100, volume=1000,
+                       symbol="RELIANCE")
+        engine._submit("BUY", 1.0, 100.0, stale)
+        assert broker.calls == []
+        assert engine.submitted == 0
+
     def test_live_risk_only_candle_never_evaluates_strategy_entries(self,
                                                                    repo, armed):
         settings, manager = armed
@@ -833,6 +1259,8 @@ class TestGatewayRoutedBroker:
         # a risk-reducing exit still flows through the gateway to the broker.
         settings, manager = armed
         broker = MockLiveBroker()
+        broker.positions = [{"instrument_token": "NSE_EQ|INE002A01018",
+                             "product": "I", "quantity": 10}]
         facade = self._facade(repo, manager, settings, broker)
         engine, candle = self._engine_with_facade(repo, facade)
         repo.set_engine_state("emergency_stop", {"stopped": True,

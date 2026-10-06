@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,14 +24,14 @@ from app.database.repository import Repository
 from app.intel.analogues import AnalogueEngine
 from app.intel.evidence import EvidenceStack
 from app.intel.missed import MissedOpportunityRecorder
-from app.intel.opportunity import (DETECTED, EXPIRED, HIGH_CONVICTION,
-                                   INVALIDATED, OpportunityCenter)
+from app.intel.opportunity import DETECTED, EXPIRED, HIGH_CONVICTION, INVALIDATED, OpportunityCenter
 from app.state.bus import EventBus
 from app.state.changes import ChangeEngine
 from app.system.backup import BackupManager
 from app.system.latency import LatencyTracker, track
 from app.system.resources import ResourceGovernor
-from app.system.tasks import STATES as TASK_STATES, TaskCenter
+from app.system.tasks import STATES as TASK_STATES
+from app.system.tasks import TaskCenter
 
 
 @pytest.fixture()
@@ -174,7 +175,8 @@ class TestEvidenceStack:
                   provenance="feed")
         now[0] += 5
         view = stack.to_dict()
-        layer = next(l for l in view["layers"] if l["layer"] == "market_state")
+        layer = next(layer for layer in view["layers"]
+                     if layer["layer"] == "market_state")
         assert layer["age_seconds"] == 5.0
         assert layer["kind"] == "OBSERVED"
 
@@ -183,7 +185,8 @@ class TestEvidenceStack:
         stack.set("kronos_forecast", kind="MODEL", value=None, provenance="kronos",
                   unavailable_reason="weights not verified")
         view = stack.to_dict()
-        layer = next(l for l in view["layers"] if l["layer"] == "kronos_forecast")
+        layer = next(layer for layer in view["layers"]
+                     if layer["layer"] == "kronos_forecast")
         assert layer["status"] == "UNAVAILABLE"
         assert layer["value"]["unavailable_reason"] == "weights not verified"
 
@@ -191,7 +194,7 @@ class TestEvidenceStack:
         now = [1000.0]
         stack = EvidenceStack(identity="NSE|A", market_id="india", clock=lambda: now[0])
         stack.set("market_state", kind="OBSERVED", value={"last": 1.0}, provenance="feed")
-        rec = stack.recommend("WATCH", rationale="developing", validity_s=60)
+        stack.recommend("WATCH", rationale="developing", validity_s=60)
         assert stack.recommendation()["state"] == "WATCH"
         now[0] += 61
         assert stack.recommendation() is None          # expired, not kept alive
@@ -234,7 +237,8 @@ class TestAnalogues:
             # analogue window + forward horizon must end before current window
             assert result.analogue_start_index + 20 + 5 <= n - 20
         assert search.methodology
-        assert any("not a guarantee" in l for l in search.limitations)
+        assert any("not a guarantee" in limitation
+                   for limitation in search.limitations)
 
     def test_summary_requires_sample_size(self):
         engine = AnalogueEngine(lookback=20, horizon=5)
@@ -407,6 +411,101 @@ class TestBackupRestore:
         assert repository.list_universes()[0]["name"] == "Pre"
         database.close()
 
+    def test_backup_uses_consistent_sqlite_online_snapshot(self, tmp_path):
+        import sqlite3
+        import tarfile
+
+        db_path = self._seeded_db(tmp_path)
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE wal_snapshot_probe(value TEXT)")
+            connection.execute("INSERT INTO wal_snapshot_probe VALUES ('committed-in-wal')")
+            connection.commit()
+            wal_path = Path(str(db_path) + "-wal")
+            assert wal_path.exists() and wal_path.stat().st_size > 0
+
+            manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
+            created = manager.create()
+            with tarfile.open(created["path"], "r:gz") as archive:
+                database_bytes = archive.extractfile("trading_bot.db").read()
+            snapshot = tmp_path / "snapshot.db"
+            snapshot.write_bytes(database_bytes)
+            check = sqlite3.connect(snapshot)
+            try:
+                row = check.execute("SELECT value FROM wal_snapshot_probe").fetchone()
+            finally:
+                check.close()
+            assert row == ("committed-in-wal",)
+        finally:
+            connection.close()
+
+    def test_backup_names_do_not_collide_within_one_second(self, tmp_path):
+        db_path = self._seeded_db(tmp_path)
+        manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
+        first = manager.create()
+        second = manager.create()
+        assert first["path"] != second["path"]
+        assert Path(first["path"]).is_file() and Path(second["path"]).is_file()
+
+    def test_manifest_must_hash_database_member_and_have_valid_structure(self, tmp_path):
+        import io
+        import tarfile
+
+        db_path = self._seeded_db(tmp_path)
+        manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
+        created = manager.create()
+        with tarfile.open(created["path"], "r:gz") as archive:
+            database_bytes = archive.extractfile("trading_bot.db").read()
+            manifest = json.loads(archive.extractfile("manifest.json").read())
+
+        manifest["members"].pop("trading_bot.db")
+        malformed = tmp_path / "missing-db-hash.tar.gz"
+        manifest_bytes = json.dumps(manifest).encode()
+        with tarfile.open(malformed, "w:gz") as archive:
+            db_info = tarfile.TarInfo("trading_bot.db")
+            db_info.size = len(database_bytes)
+            archive.addfile(db_info, io.BytesIO(database_bytes))
+            manifest_info = tarfile.TarInfo("manifest.json")
+            manifest_info.size = len(manifest_bytes)
+            archive.addfile(manifest_info, io.BytesIO(manifest_bytes))
+
+        result = manager.verify(malformed)
+        assert result["ok"] is False
+        assert any("does not hash required database" in problem
+                   for problem in result["problems"])
+        before = db_path.read_bytes()
+        refused = manager.restore(malformed)
+        assert refused["restored"] is False
+        assert db_path.exists() and db_path.read_bytes() == before
+
+    def test_active_restore_stages_and_applies_on_next_database_open(self, tmp_path):
+
+        db_path = self._seeded_db(tmp_path)
+        manager = BackupManager(db_path, backup_dir=tmp_path / "backups",
+                                active_database=True)
+        created = manager.create()
+
+        live_database = Database(f"sqlite:///{db_path}")
+        live_repository = Repository(live_database)
+        live_repository.save_universe(market_id="india", name="Current",
+                                      symbols=["NSE|Y"])
+        live_database.close()
+        current_bytes = db_path.read_bytes()
+
+        staged = manager.restore(created["path"])
+        assert staged["restored"] is False
+        assert staged["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
+        assert db_path.exists() and db_path.read_bytes() == current_bytes
+        pending = Path(staged["pending_database"])
+        assert pending.exists()
+
+        restored_database = Database(f"sqlite:///{db_path}")
+        restored_repository = Repository(restored_database)
+        assert [row["name"] for row in restored_repository.list_universes()] == ["Pre"]
+        restored_database.close()
+        assert not pending.exists()
+
     def test_corrupt_archive_refused(self, tmp_path):
         db_path = self._seeded_db(tmp_path)
         manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
@@ -419,30 +518,32 @@ class TestBackupRestore:
         assert result["restored"] is False
         assert not verification["ok"] or "refused" in result["note"]
 
-    def test_locked_target_yields_honest_restart_required(self, tmp_path, monkeypatch):
-        """Windows keeps open SQLite files locked against rename. The swap
-        failure path must stage the verified database, never fake success."""
-        from pathlib import Path as _Path
+    def test_failed_atomic_replace_keeps_active_database_and_stages_restore(
+            self, tmp_path, monkeypatch):
+        """A target rename failure must not move the active database away."""
+        import os
+        import sqlite3
+        from pathlib import Path
 
         db_path = self._seeded_db(tmp_path)
         manager = BackupManager(db_path, backup_dir=tmp_path / "backups")
         created = manager.create()
-        real_replace = _Path.replace
+        original = db_path.read_bytes()
+        real_replace = os.replace
 
-        def refusing_replace(self, target):
-            if self.name.endswith(".restore-staging") and \
-                    str(target).endswith("trading_bot.db"):
+        def refusing_replace(source, target):
+            source_path, target_path = Path(source), Path(target)
+            if ".restore-staging-" in source_path.name and target_path == db_path:
                 raise PermissionError(32, "The process cannot access the file")
-            return real_replace(self, target)
+            return real_replace(source, target)
 
-        monkeypatch.setattr(_Path, "replace", refusing_replace)
+        monkeypatch.setattr(os, "replace", refusing_replace)
         result = manager.restore(created["path"])
         assert result["restored"] is False
         assert result["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
-        pending = _Path(result["pending_database"])
+        assert db_path.exists() and db_path.read_bytes() == original
+        pending = Path(result["pending_database"])
         assert pending.exists() and pending.name.endswith(".restore-pending")
-        # The staged file is itself a valid SQLite database.
-        import sqlite3
         connection = sqlite3.connect(pending)
         try:
             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -456,8 +557,8 @@ class TestBackupRestore:
 
 class TestKronosStudio:
     def test_cards_are_truthful_without_weights(self, tmp_path, repo):
-        from axiom.kronos.model_cache import ModelCache
         from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
 
         studio = KronosStudio(ModelCache(tmp_path / "cache"), repository=repo)
         cards = studio.catalog()
@@ -467,31 +568,91 @@ class TestKronosStudio:
             assert card["integrity"]["ok"] is False
 
     def test_download_without_source_is_honest(self, tmp_path, repo):
-        from axiom.kronos.model_cache import ModelCache
         from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
 
         studio = KronosStudio(ModelCache(tmp_path / "cache"), repository=repo)
         result = studio.download("NeoQuasar/Kronos-mini")
         assert result["ok"] is False
         assert result["status"] == "DOWNLOAD_NOT_CONFIGURED"
 
-    def test_install_and_activate_refuse_unverified(self, tmp_path, repo):
-        from axiom.kronos.model_cache import ModelCache
+    def test_download_records_empty_revision_without_inventing_provenance(self, tmp_path, repo):
         from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
+
+        cache = ModelCache(tmp_path / "cache")
+        model_path = cache.root / "downloaded.safetensors"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model_path.write_bytes(b"downloaded model bytes")
+        studio = KronosStudio(cache, downloader=lambda model_id: model_path,
+                              repository=repo)
+        result = studio.download("NeoQuasar/Kronos-mini")
+        assert result["status"] == "DOWNLOADED"
+        assert result["revision"] == ""
+        assert result["integrity_scope"] == "single_file_local_manifest_sha256_only"
+        assert result["verified"] is False
+        assert result["authenticity"] == "not established"
+        entry = cache.entry_for("NeoQuasar/Kronos-mini", "")
+        assert entry is not None and entry.revision == ""
+        assert cache.entry_for("NeoQuasar/Kronos-mini", "downloaded") is None
+
+    def test_download_of_complete_directory_checks_every_file(self, tmp_path, repo):
+        from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
+
+        cache = ModelCache(tmp_path / "cache")
+        artifact_dir = cache.root / "staged" / "mini"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "config.json").write_text("{}", encoding="utf-8")
+        (artifact_dir / "model.safetensors").write_bytes(b"model shard")
+        studio = KronosStudio(cache, downloader=lambda _model_id: artifact_dir,
+                              repository=repo)
+        result = studio.download("NeoQuasar/Kronos-mini")
+        assert result["ok"] is True
+        assert result["verified"] is True
+        assert result["integrity_scope"] == \
+            "complete_directory_local_manifest_sha256_only"
+        (artifact_dir / "model.safetensors").write_bytes(b"tampered shard")
+        assert studio.verify("NeoQuasar/Kronos-mini")["ok"] is False
+        assert studio.install("NeoQuasar/Kronos-mini")["ok"] is False
+
+    def test_download_outside_cache_is_not_reported_as_verified(self, tmp_path, repo):
+        from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
+
+        external = tmp_path / "outside.safetensors"
+        external.write_bytes(b"external model bytes")
+        studio = KronosStudio(ModelCache(tmp_path / "cache"),
+                              downloader=lambda model_id: external,
+                              repository=repo)
+        result = studio.download("NeoQuasar/Kronos-mini")
+        assert result["ok"] is False
+        assert result["status"] == "NOT_VERIFIED"
+        assert "outside the model cache" in result["detail"]
+
+    def test_install_and_activate_refuse_unverified(self, tmp_path, repo):
+        from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
 
         studio = KronosStudio(ModelCache(tmp_path / "cache"), repository=repo)
         assert studio.install("NeoQuasar/Kronos-mini")["ok"] is False
         assert studio.activate("NeoQuasar/Kronos-mini")["ok"] is False
 
     def test_verified_weights_install_and_activate(self, tmp_path, repo):
-        from axiom.kronos.model_cache import ModelCache
         from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
 
         cache = ModelCache(tmp_path / "cache")
-        weights = tmp_path / "cache" / "kronos.bin"
-        weights.parent.mkdir(parents=True, exist_ok=True)
+        model_dir = cache.root / "staged" / "kronos-mini"
+        model_dir.mkdir(parents=True)
+        weights = model_dir / "kronos.bin"
         weights.write_bytes(b"\x00" * 64)
-        cache.record("NeoQuasar/Kronos-mini", "", weights)
+        cache.record_artifact("NeoQuasar/Kronos-mini", "", model_dir)
+        tokenizer_dir = cache.root / "staged" / "tokenizer-2k"
+        tokenizer_dir.mkdir(parents=True)
+        tokenizer_weights = tokenizer_dir / "tokenizer.safetensors"
+        tokenizer_weights.write_bytes(b"\x01" * 64)
+        cache.record_artifact("NeoQuasar/Kronos-Tokenizer-2k", "", tokenizer_dir)
         studio = KronosStudio(cache, repository=repo)
         assert studio.verify("NeoQuasar/Kronos-mini")["ok"] is True
         assert studio.install("NeoQuasar/Kronos-mini")["ok"] is True
@@ -499,9 +660,25 @@ class TestKronosStudio:
         assert activated["ok"] is True
         assert repo.get_engine_state("kronos_active_model") == "NeoQuasar/Kronos-mini"
 
-    def test_benchmark_never_fabricated(self, tmp_path, repo):
-        from axiom.kronos.model_cache import ModelCache
+    def test_model_weights_alone_do_not_verify_untracked_tokenizer(self, tmp_path, repo):
         from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
+
+        cache = ModelCache(tmp_path / "cache")
+        weights = cache.root / "model.safetensors"
+        weights.parent.mkdir(parents=True, exist_ok=True)
+        weights.write_bytes(b"model weights")
+        cache.record("NeoQuasar/Kronos-mini", "", weights)
+        studio = KronosStudio(cache, repository=repo)
+        report = studio.verify("NeoQuasar/Kronos-mini")
+        assert report["ok"] is False
+        assert any("NeoQuasar/Kronos-Tokenizer-2k" in note
+                   for note in report["notes"])
+        assert studio.activate("NeoQuasar/Kronos-mini")["ok"] is False
+
+    def test_benchmark_never_fabricated(self, tmp_path, repo):
+        from app.models.studio import KronosStudio
+        from axiom.kronos.model_cache import ModelCache
 
         studio = KronosStudio(ModelCache(tmp_path / "cache"), repository=repo)
         result = studio.benchmark("NeoQuasar/Kronos-mini")
@@ -518,6 +695,9 @@ def client(tmp_path, monkeypatch):
     for key in ("API_TOKEN", "DATABASE_URL", "DATA_DIR", "ARENA_HOME",
                 "ARENA_ENV_FILE"):
         monkeypatch.delenv(key, raising=False)
+    for key in tuple(os.environ):
+        if key.startswith("AXIOM_"):
+            monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("API_TOKEN", "workstation-token")
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'arena.db'}")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
@@ -588,9 +768,134 @@ class TestWorkstationApi:
     def test_kronos_studio_over_http(self, client):
         overview = client.get("/api/kronos/studio").json()
         assert len(overview["cards"]) == 3
+        service = overview["forecast_service"]
+        assert service["available"] is False
+        assert service["status"]["state"] == "DISABLED"
+        refresh = client.post("/api/kronos/forecast/refresh",
+                              json={"instrument": "DEMO", "timeframe": "1h"}).json()
+        assert refresh["accepted"] is False
+        assert refresh["status"] == "DISABLED"
+        assert client.get("/api/kronos/service").json()["available"] is False
         download = client.post("/api/kronos/studio/download",
                                json={"model_id": "NeoQuasar/Kronos-mini"}).json()
         assert download["ok"] is False  # honest: no source configured here
+
+    def test_configured_forecast_service_is_started_and_reachable_over_http(
+            self, tmp_path, monkeypatch):
+        from axiom.bootstrap import KronosEnvironment
+        from axiom.models import KronosConfig, KronosState, KronosStatus
+
+        class FakeForecastService:
+            def __init__(self):
+                self.started = False
+                self.stopped = False
+                self.requested = []
+                self.scheduled = []
+                self.status_value = KronosStatus(
+                    state=KronosState.READY, message="mock runtime ready")
+
+            @property
+            def running(self):
+                return self.started and not self.stopped
+
+            @property
+            def queued(self):
+                return len(self.requested)
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.stopped = True
+
+            def refresh_if_due(self, series):
+                self.scheduled.extend(series)
+                return list(series)
+
+            def request_refresh(self, instrument, timeframe, *, force=False):
+                self.requested.append((instrument, timeframe, force))
+                return True
+
+            def status(self):
+                return self.status_value
+
+        service = FakeForecastService()
+        environment = KronosEnvironment(
+            config=KronosConfig(enabled=True, backend="stub"),
+            service=service,
+            status=KronosStatus(state=KronosState.INITIALIZING,
+                                message="mock service configured"),
+            series=(("DEMO", "1h"),),
+            notes=("test-only composition",),
+        )
+        monkeypatch.setattr("axiom.bootstrap.build_forecast_service",
+                            lambda: environment)
+        monkeypatch.setenv("API_TOKEN", "workstation-token")
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wired.db'}")
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "wired-data"))
+        app = create_app(Settings.from_env())
+        with TestClient(app) as test_client:
+            test_client.headers.update({"Authorization": "Bearer workstation-token"})
+            status = test_client.get("/api/kronos/service").json()
+            assert status["available"] is True and status["running"] is True
+            assert status["status"]["state"] == "READY"
+            assert service.scheduled == [("DEMO", "1h")]
+            queued = test_client.post("/api/kronos/forecast/refresh", json={
+                "instrument": "DEMO", "timeframe": "1h", "force": True}).json()
+            assert queued["accepted"] is True
+            assert service.requested == [("DEMO", "1h", True)]
+        assert service.stopped is True
+
+    def test_configured_but_failed_forecast_runtime_is_unavailable(self):
+        from types import SimpleNamespace
+
+        from app.api.routes.workstation import _forecast_service_payload
+        from axiom.bootstrap import KronosEnvironment
+        from axiom.models import KronosConfig, KronosState, KronosStatus
+
+        class FailedService:
+            running = True
+            queued = 0
+
+            @staticmethod
+            def status():
+                return KronosStatus(state=KronosState.ERROR,
+                                    message="local model bundle was not verified")
+
+        environment = KronosEnvironment(
+            config=KronosConfig(enabled=True), service=FailedService(),
+            status=KronosStatus(state=KronosState.ERROR,
+                                message="local model bundle was not verified"),
+            notes=("publisher authenticity is not established",))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            kronos_environment=environment, forecast_service=environment.service,
+            kronos_service_error="")))
+        payload = _forecast_service_payload(request)
+        assert payload["configured"] is True
+        assert payload["available"] is False
+        assert payload["running"] is True
+        assert payload["status"]["state"] == "ERROR"
+
+    def test_enabled_but_uncomposed_forecast_service_is_not_reported_configured(self):
+        from types import SimpleNamespace
+
+        from app.api.routes.workstation import _forecast_service_payload
+        from axiom.bootstrap import KronosEnvironment
+        from axiom.models import KronosConfig, KronosState, KronosStatus
+
+        environment = KronosEnvironment(
+            config=KronosConfig(enabled=True), service=None,
+            status=KronosStatus(state=KronosState.DATA_ERROR,
+                                message="market data source unavailable"),
+            notes=("AXIOM_MARKET_DATA_URL must be set",))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            kronos_environment=environment, forecast_service=None,
+            kronos_service_error="")))
+        payload = _forecast_service_payload(request)
+        assert payload["configured"] is False
+        assert payload["available"] is False
+        assert payload["running"] is False
+        assert payload["status"]["state"] == "DATA_ERROR"
 
     def test_tasks_backup_latency_over_http(self, client):
         task = client.post("/api/tasks", json={"name": "scan", "type": "research"}).json()
@@ -633,8 +938,18 @@ class TestWorkstationApi:
         assert (changes[0]["previous"], changes[0]["current"]) == ("1", "2")
 
     def test_backup_path_confinement(self, client, tmp_path):
+
         evil = client.post("/api/backup/restore", json={"path": "/etc/passwd"})
         assert evil.status_code in (404, 422)
+
+        backup_dir = client.app.state.workstation.backup.backup_dir.resolve()
+        sibling = backup_dir.parent / f"{backup_dir.name}-evil"
+        sibling.mkdir(exist_ok=True)
+        archive = sibling / "axiom-backup-evil.tar.gz"
+        archive.write_bytes(b"not a backup")
+        prefix_traversal = client.post("/api/backup/restore",
+                                       json={"path": str(archive)})
+        assert prefix_traversal.status_code == 422
 
     def test_secrets_not_in_boot_surfaces(self, client):
         boot = client.get("/api/boot").json()
@@ -680,8 +995,9 @@ class TestDriftDetector:
         assert report.statistics == {}
 
     def test_bad_input_refused_not_repaired(self):
-        from app.intel.drift import DriftDetector
         import pytest as _pt
+
+        from app.intel.drift import DriftDetector
         with _pt.raises(ValueError):
             DriftDetector().evaluate("NSE|X", [100.0, float("nan"), 101.0])
         with _pt.raises(ValueError):

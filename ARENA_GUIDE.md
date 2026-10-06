@@ -1,5 +1,8 @@
 # Arena — Complete Operator Guide
 
+> **Historical product guide:** this guide is labeled version 3.0.5 and predates current source changes. Confirm commands and readiness against the current code/report; see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Version 3.0.5** · Install → first run → paper → sandbox → live, with every
 feature explained and every command documented.
 

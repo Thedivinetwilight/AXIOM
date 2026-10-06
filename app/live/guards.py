@@ -21,6 +21,10 @@ reset a freshness clock.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -62,10 +66,22 @@ class TokenGuard:
 
     # -- write side ----------------------------------------------------------
 
-    def record_verified(self, *, when: datetime | None = None, source: str = "") -> dict:
-        """Mark the credential as verified-NOW (call after a successful probe)."""
+    def record_verified(self, *, when: datetime | None = None, source: str = "",
+                         credential: str | None = None) -> dict:
+        """Record a successful probe and bind it to that exact credential.
+
+        Only a SHA-256 fingerprint is persisted; the bearer token never enters
+        engine_state, events, logs, or report output. Callers that do not have
+        a real credential (for example, offline drills) may omit it, but such
+        a record cannot authorize a live entry.
+        """
         now = when or self._now()
         state = {"verified_at": now.isoformat(), "source": source}
+        if credential is not None:
+            if not isinstance(credential, str) or not credential.strip():
+                raise ValueError("verified credential must be a non-empty string")
+            state["credential_sha256"] = hashlib.sha256(
+                credential.encode("utf-8")).hexdigest()
         if self.repository is not None:
             self.repository.set_engine_state(TOKEN_KEY, state)
         return state
@@ -85,8 +101,15 @@ class TokenGuard:
         now = now or self._now()
         return (now - verified).total_seconds() / 3600.0
 
-    def check(self, *, now: datetime | None = None) -> GuardDecision:
-        """Entries allowed only when the credential is verified and fresh."""
+    def check(self, *, now: datetime | None = None,
+              credential: str | None = None) -> GuardDecision:
+        """Allow only a fresh, successfully probed credential.
+
+        Supplying ``credential`` enables exact credential binding for the live
+        gateway. Historical timestamp-only records remain useful for advisory
+        status, but are not proof that the currently configured token passed
+        the probe.
+        """
         if self.max_age_hours <= 0:
             return GuardDecision(True, "TOKEN_AGE_CHECK_DISABLED")
         now = now or self._now()
@@ -97,7 +120,32 @@ class TokenGuard:
             return GuardDecision(
                 False, "TOKEN_UNVERIFIED: run 'python -m app live-preflight' "
                        "to verify the live credential before trading")
-        deadline = verified + timedelta(hours=self.max_age_hours)
+        if credential is not None:
+            if not isinstance(credential, str) or not credential.strip():
+                return GuardDecision(False, "TOKEN_CREDENTIAL_UNBOUND: no credential supplied")
+            try:
+                state = self.repository.get_engine_state(TOKEN_KEY, {}) or {}
+                stored_hash = (state.get("credential_sha256")
+                               if isinstance(state, dict) else None)
+            except Exception:
+                return GuardDecision(False, "TOKEN_CREDENTIAL_PROVENANCE_UNKNOWN")
+            expected_hash = hashlib.sha256(credential.encode("utf-8")).hexdigest()
+            if (not isinstance(stored_hash, str) or len(stored_hash) != 64
+                    or not hmac.compare_digest(stored_hash, expected_hash)):
+                return GuardDecision(
+                    False, "TOKEN_CREDENTIAL_CHANGED_OR_UNBOUND: rerun live-preflight")
+        try:
+            age_seconds = (now - verified).total_seconds()
+            max_age = float(self.max_age_hours)
+        except (TypeError, ValueError, OverflowError):
+            return GuardDecision(False, "TOKEN_FRESHNESS_UNKNOWN: invalid clock or bound")
+        if (not math.isfinite(age_seconds) or not math.isfinite(max_age)
+                or max_age < 0):
+            return GuardDecision(False, "TOKEN_FRESHNESS_UNKNOWN: invalid clock or bound")
+        if age_seconds < -60.0:
+            return GuardDecision(
+                False, "TOKEN_VERIFICATION_FUTURE_DATED: clock/provenance is unknown")
+        deadline = verified + timedelta(hours=max_age)
         if now >= deadline:
             return GuardDecision(
                 False, f"TOKEN_STALE: last verified {self.age_hours(now=now):.1f}h ago "
@@ -154,13 +202,18 @@ class CanaryGuard:
     def _load(self) -> dict:
         if self.repository is None:
             return {}
-        return self.repository.get_engine_state(CANARY_KEY, {}) or {}
+        state = self.repository.get_engine_state(CANARY_KEY, {})
+        if state is None:
+            return {}
+        if not isinstance(state, dict):
+            raise ValueError("live canary state is malformed")
+        return state
 
     def submitted(self) -> int:
-        try:
-            return int(self._load().get("submitted", 0))
-        except (TypeError, ValueError):
-            return 0
+        value = self._load().get("submitted", 0)
+        if type(value) is not int or value < 0:
+            raise ValueError("live canary submitted count is malformed")
+        return value
 
     def _persist(self, submitted: int) -> None:
         if self.repository is None:
@@ -179,6 +232,90 @@ class CanaryGuard:
         self._persist(count)
         return count
 
+    def reserve_submission(self, *, intent_id: str, quantity: float,
+                           price: float) -> GuardDecision:
+        """Durably reserve the final canary count before a broker call.
+
+        The reservation is monotonic: even a lost broker response consumes one
+        canary attempt, rather than allowing a retry or concurrent submission
+        to exceed the configured ramp. The execution journal separately
+        prevents resubmission of the same intent.
+        """
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            return GuardDecision(False, "CANARY_INTENT_ID_MISSING")
+        try:
+            qty = float(quantity)
+            px = 0.0 if price is None else float(price)
+            maximum = float(self.max_notional)
+        except (TypeError, ValueError, OverflowError):
+            return GuardDecision(False, "CANARY_INVALID_INPUT")
+        if (not math.isfinite(qty) or qty <= 0 or not math.isfinite(px)
+                or px < 0 or not math.isfinite(maximum) or maximum < 0
+                or type(self.first_orders) is not int or self.first_orders < 0):
+            return GuardDecision(False, "CANARY_INVALID_INPUT")
+        if self.repository is None or getattr(self.repository, "db", None) is None:
+            return GuardDecision(False, "CANARY_STATE_UNAVAILABLE")
+        try:
+            with self.repository.db.transaction() as db:
+                # Serialize count/check/write across threads and processes.
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT payload FROM engine_state WHERE key=?", (CANARY_KEY,)
+                ).fetchone()
+                if row is None:
+                    state = {}
+                else:
+                    state = json.loads(row[0])
+                    if not isinstance(state, dict):
+                        raise ValueError("canary state is not an object")
+                count = state.get("submitted", 0)
+                if type(count) is not int or count < 0:
+                    raise ValueError("canary submitted count is malformed")
+                recorded_max = state.get("max_notional")
+                if recorded_max is not None:
+                    if (isinstance(recorded_max, bool)
+                            or not isinstance(recorded_max, (int, float))
+                            or not math.isfinite(float(recorded_max))
+                            or not math.isclose(float(recorded_max), maximum,
+                                                rel_tol=0.0, abs_tol=1e-9)):
+                        raise ValueError("canary configuration changed mid-session")
+                recorded_orders = state.get("first_orders")
+                if recorded_orders is not None and (
+                        type(recorded_orders) is not int
+                        or recorded_orders != self.first_orders):
+                    raise ValueError("canary configuration changed mid-session")
+                reservations = state.get("reserved_intents", [])
+                if (not isinstance(reservations, list)
+                        or any(not isinstance(value, str) for value in reservations)):
+                    raise ValueError("canary intent reservations are malformed")
+                if intent_id in reservations:
+                    return GuardDecision(False, "CANARY_DUPLICATE_RESERVATION")
+                if self.enabled and count < self.first_orders:
+                    notional = qty * px
+                    if px <= 0 or not math.isfinite(notional):
+                        return GuardDecision(
+                            False, "CANARY_INVALID_INPUT: finite positive price required")
+                    if notional > maximum:
+                        return GuardDecision(
+                            False, "CANARY_LIMIT: final intent exceeds remaining ramp cap")
+                reservations = (reservations + [intent_id])[-10000:]
+                state.update({
+                    "submitted": count + 1,
+                    "max_notional": maximum,
+                    "first_orders": self.first_orders,
+                    "updated_at": self._now().isoformat(),
+                    "reserved_intents": reservations,
+                })
+                payload = json.dumps(state, allow_nan=False, separators=(",", ":"))
+                db.execute(
+                    "INSERT INTO engine_state(key,payload) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                    (CANARY_KEY, payload))
+            return GuardDecision(True, "CANARY_SUBMISSION_RESERVED")
+        except Exception as exc:
+            return GuardDecision(
+                False, f"CANARY_STATE_UNKNOWN ({type(exc).__name__})")
+
     def record_fill(self) -> int:
         """Optional: record a completed canary fill (informational)."""
         state = self._load()
@@ -192,29 +329,39 @@ class CanaryGuard:
 
     def check(self, *, quantity: float, price: float) -> GuardDecision:
         """Allow, shrink or refuse ONE entry against the canary ceiling."""
+        try:
+            qty = float(quantity)
+            px = float(price)
+            maximum = float(self.max_notional)
+        except (TypeError, ValueError, OverflowError):
+            return GuardDecision(
+                False, "CANARY_INVALID_INPUT: entry needs numeric price and quantity")
+        if (not math.isfinite(qty) or qty <= 0 or not math.isfinite(px)
+                or px <= 0 or not math.isfinite(maximum) or maximum < 0):
+            return GuardDecision(
+                False, "CANARY_INVALID_INPUT: entry price/quantity/limit is invalid")
         if not self.enabled:
             return GuardDecision(True, "CANARY_DISABLED")
         count = self.submitted()
         if count >= self.first_orders:
             return GuardDecision(True, "CANARY_COMPLETE")
-        if price is None or price <= 0 or quantity is None or quantity <= 0:
-            return GuardDecision(
-                False, "CANARY_INVALID_INPUT: entry needs a positive price and quantity")
-        notional = float(quantity) * float(price)
-        if notional <= self.max_notional:
+        notional = qty * px
+        if not math.isfinite(notional):
+            return GuardDecision(False, "CANARY_INVALID_INPUT: notional overflow")
+        if notional <= maximum:
             return GuardDecision(
                 True, f"CANARY_OK ({count + 1}/{self.first_orders}, "
-                      f"notional {notional:,.2f} ≤ {self.max_notional:,.2f})")
-        allowed_qty = int(self.max_notional // float(price))
+                      f"notional {notional:,.2f} ≤ {maximum:,.2f})")
+        allowed_qty = int(maximum // px)
         if allowed_qty <= 0:
             return GuardDecision(
-                False, f"CANARY_BLOCKED: one unit costs {price:,.2f} but the "
-                       f"canary ceiling is {self.max_notional:,.2f}")
+                False, f"CANARY_BLOCKED: one unit costs {px:,.2f} but the "
+                       f"canary ceiling is {maximum:,.2f}")
         return GuardDecision(
             True,
             f"CANARY_REDUCED ({count + 1}/{self.first_orders}): quantity "
             f"{quantity} → {allowed_qty} to respect the "
-            f"{self.max_notional:,.2f} canary ceiling",
+            f"{maximum:,.2f} canary ceiling",
             adjusted_quantity=float(allowed_qty))
 
     def status(self) -> dict:

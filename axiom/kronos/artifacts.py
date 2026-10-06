@@ -15,29 +15,31 @@ is equally true of a 33k-parameter toy.
 Two independent gates are therefore required before
 ``REAL_INFERENCE_VERIFIED`` can ever be reported:
 
-1. **Checksum** — the artifact on disk matches a recorded SHA-256. This is the
-   only real defence against a full-size randomly-initialised model, because
-   such a model has the *correct* parameter count and cannot be told apart by
-   inspection.
+1. **Expected checksum** — when an independently trusted expected SHA-256 is
+   supplied, the inspected weight-file set matches it. The value is caller-
+   supplied; this module does not fetch a signed checksum or establish
+   publisher/release authenticity. A mutable local manifest alone is not this
+   evidence.
 2. **Parameter count** — catches the toy/random-weight case, where the model
    is orders of magnitude smaller than the published one.
 
-Neither gate alone is sufficient; ``classify`` requires both.
+Neither gate alone is sufficient; ``classify`` requires both. This is still
+not a cryptographic release-signature verification.
 
 Offline artifacts
 -----------------
-The artifact directory is the *same* directory the backend loads from, so the
-report cannot describe a location the loader ignores. ``bootstrap.py`` maps
-``AXIOM_MODEL_CACHE`` onto ``KronosConfig.cache_dir``, and
-``UpstreamKronosBackend._from_pretrained`` passes that to
-``from_pretrained(cache_dir=..., local_files_only=True)``. This module
-therefore defaults to :func:`axiom.kronos.model_cache.default_cache_root` and
-reuses :class:`ModelCache` for layout, digests and manifest handling rather
-than inventing a parallel scheme.
+The upstream loader requires complete, immutable-revision model and tokenizer
+directories staged inside the configured cache and recorded with
+:meth:`ModelCache.record_artifact`. It verifies the exact directory trees and
+loads those local paths with `local_files_only=True`; it does not resolve a Hub
+model id or read a mutable `refs/main` pointer. The local file hashes provide
+consistency against the mutable AXIOM manifest only; without an independently
+trusted expected digest or signature they do not establish publisher
+authenticity. This module defaults to
+:func:`axiom.kronos.model_cache.default_cache_root` for diagnostics.
 
-Copy genuine weights obtained on another machine into that directory (Hugging
-Face cache layout) and AXIOM loads them with no network access. Nothing is
-downloaded here and no weight file is ever committed to Git.
+No weight downloader is configured in this build and no weight file is
+committed to Git.
 """
 
 from __future__ import annotations
@@ -268,9 +270,9 @@ class ArtifactReport:
 def locate_artifacts(cache: ModelCache, model_id: str) -> list[Path]:
     """Weight files present for ``model_id`` in the cache the loader uses.
 
-    Delegates to :meth:`ModelCache.locate_weights` so the Hugging Face layout
-    (``models--<owner>--<name>/…``) and the flat fallback are interpreted
-    exactly as ``from_pretrained`` will interpret them.
+    This is a diagnostic search of known weight-file layouts only. A found file
+    is not enough to load the model: the upstream backend requires a complete
+    staged bundle verified by :meth:`ModelCache.verify_artifact`.
     """
     return cache.locate_weights(model_id)
 

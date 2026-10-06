@@ -114,6 +114,7 @@ class SandboxEngine:
         self._peak_equity = 0.0
         self._trades_today = 0
         self._last_realized = 0.0
+        self._unaccounted_fills: dict[str, dict] = {}
         self.evaluation: dict | None = None
         self.regime_engine = regime_engine
         self.shadow_engine = shadow_engine
@@ -196,6 +197,14 @@ class SandboxEngine:
             if self._recovery_report.get("orders_replayed"):
                 logger.warning("LEDGER_RECOVERED",
                                extra={"orders": self._recovery_report["orders_replayed"]})
+            if self.daily is not None:
+                for fill in self._recovery_report.get("replayed_fills", []):
+                    self.daily.record_realized_fill(
+                        fill.get("fill_id"), fill.get("realized_pnl", 0.0),
+                        observed_at=fill.get("observed_at"))
+        # The non-persisted fallback is a baseline, never zero: recovery may
+        # have replayed historical realized P&L into the ledger above.
+        self._last_realized = float(self.broker.ledger.realized_pnl)
         self.restore_from_repository()
         self._surface_unresolved_intents()
         self._snapshot_dates: set[str] = set()
@@ -369,7 +378,8 @@ class SandboxEngine:
         self.state = "STOPPED"
         return {"stopped": False}
 
-    def _publish_live_runtime(self, state: str, *, error_type: str | None = None) -> None:
+    def _publish_live_runtime(self, state: str, *, error_type: str | None = None,
+                              audit_event: bool = True) -> None:
         """Publish the supervised process state used by readiness checks.
 
         READY is written only after this process owns the atomic lease and a
@@ -382,39 +392,52 @@ class SandboxEngine:
         import os
         import socket
 
+        control = self._live_control()
+        generation = control.get("generation") if isinstance(control, dict) else None
+        if state == "READY" and (type(generation) is not int or generation <= 0):
+            raise RuntimeError("live runtime READY requires a valid supervisor generation")
         payload = {"state": str(state), "owner": getattr(lock, "owner", ""),
                    "pid": os.getpid(), "host": socket.gethostname(),
+                   "generation": generation,
                    "updated_at": datetime.now(timezone.utc).isoformat(),
                    "error_type": error_type}
         reconcile = self.repository.get_engine_state("last_reconcile_at", {}) or {}
+        reconcile_status = self.repository.get_engine_state(
+            "live_reconcile_status", {}) or {}
         if isinstance(reconcile, dict):
             payload["reconciled_at"] = reconcile.get("ts")
-        if state == "READY" and not payload.get("reconciled_at"):
-            raise RuntimeError("live runtime READY requires a reconciliation stamp")
-        self.repository.record_system_event(
-            f"LIVE_ENGINE_RUNTIME_{str(state).upper()}", payload)
+        if isinstance(reconcile_status, dict):
+            payload["reconciliation_ok"] = reconcile_status.get("ok")
+        if state == "READY" and (
+                not payload.get("reconciled_at")
+                or reconcile_status.get("ok") is not True
+                or reconcile_status.get("ts") != payload.get("reconciled_at")):
+            raise RuntimeError(
+                "live runtime READY requires a proven successful reconciliation")
+        if audit_event:
+            self.repository.record_system_event(
+                f"LIVE_ENGINE_RUNTIME_{str(state).upper()}", payload)
         self.repository.set_engine_state("live_engine_runtime", payload)
 
     def _check_emergency(self) -> bool:
-        try:
-            flag = self.repository.get_engine_state("emergency_stop", {}) or {}
-            if not isinstance(flag, dict):
-                raise TypeError("emergency-stop record has an invalid shape")
-            return bool(flag.get("stopped"))
-        except Exception as exc:
-            # FINAL-11/10 §63: an unreadable or malformed emergency flag must
-            # behave as STOPPED, never as clear (fail closed). Do not log
-            # exception text; a driver may include sensitive connection data.
-            logger.error("EMERGENCY_FLAG_UNREADABLE: treating as stopped",
-                         extra={"error_type": type(exc).__name__})
-            return True
+        from app.live.ops import read_emergency_stop
+
+        active, _reason = read_emergency_stop(self.repository)
+        return active
 
     def _live_control(self) -> dict:
         """Read child stop state; database uncertainty means stop requested."""
         try:
-            control = self.repository.get_engine_state("live_engine_control", {}) or {}
+            control = self.repository.get_engine_state("live_engine_control", {})
             if not isinstance(control, dict):
                 raise TypeError("live-engine control has an invalid shape")
+            stop_requested = control.get("stop_requested")
+            if type(stop_requested) is not bool:
+                raise ValueError("live-engine stop state is not an explicit boolean")
+            generation = control.get("generation")
+            if (type(generation) is not int or generation < 0
+                    or (not stop_requested and generation <= 0)):
+                raise ValueError("live-engine control generation is invalid")
             return control
         except Exception as exc:
             logger.error("LIVE_CONTROL_UNREADABLE: draining fail-closed",
@@ -641,6 +664,7 @@ class SandboxEngine:
             async def watch_live_control():
                 """Observe stop/lease state without relying on another candle."""
                 last_ops_tick = 0.0
+                last_reconcile = 0.0
                 last_flatness_check = 0.0
                 last_cancel_retry = 0.0
                 while live_owned:
@@ -656,6 +680,13 @@ class SandboxEngine:
                             logger.error("LIVE_PROVIDER_CLOSE_FAILED",
                                          extra={"error_type": type(exc).__name__})
                         return
+                    if now - last_reconcile >= 30.0:
+                        try:
+                            self.reconcile()
+                        except Exception as exc:
+                            logger.error("LIVE_PERIODIC_RECONCILIATION_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                        last_reconcile = now
 
                     emergency = self._check_emergency()
                     control = self._live_control()
@@ -1659,9 +1690,21 @@ class SandboxEngine:
             } if self.last_router_decision else None,
             "intent_id": intent_key,
         })
+        submit_kwargs = {"intent_id": intent_key, "symbol": candle.symbol,
+                         "instrument_key": instrument_key}
+        if bool(getattr(self.broker, "LIVE", False)):
+            # Strategy data carries an OPEN timestamp. A signal from the
+            # completed candle becomes available at its close; preserve that
+            # event time through the facade instead of fabricating submission
+            # time at the last authorization boundary.
+            try:
+                submit_kwargs["signal_ts"] = candle.available_at(
+                    self.timeframe).timestamp()
+            except Exception as exc:
+                self._reject_entry_gate_failure("SIGNAL_TIMESTAMP", candle, exc)
+                return
         try:
-            self.broker.submit(side, quantity, price, intent_id=intent_key,
-                               symbol=candle.symbol, instrument_key=instrument_key)
+            self.broker.submit(side, quantity, price, **submit_kwargs)
         except Exception as exc:
             self.repository.record_system_event(
                 "SANDBOX_SUBMIT_FAILURE", {"error": type(exc).__name__,
@@ -1675,7 +1718,10 @@ class SandboxEngine:
         self.repository.set_engine_state("processed_signals", sorted(processed)[-2000:])
         self.submitted += 1
         if side == "BUY":
-            if self.live_ops is not None:
+            is_gateway_routed_live = (
+                bool(getattr(self.broker, "LIVE", False))
+                and getattr(self.broker, "gateway", None) is not None)
+            if self.live_ops is not None and not is_gateway_routed_live:
                 self.live_ops.record_submitted_entry(quantity=quantity, price=price)
             if self.daily is not None:
                 self.daily.register_trade()
@@ -1683,31 +1729,87 @@ class SandboxEngine:
                 self._trades_today += 1
 
     def reconcile(self) -> list[dict]:
-        fills = self.broker.reconcile() if hasattr(self.broker, "reconcile") else []
-        # L-ops liveness stamp: silence here is a silent 24/7 failure mode
-        self.repository.set_engine_state(
-            "last_reconcile_at", {"ts": datetime.now(timezone.utc).isoformat(),
-                                  "fills": len(fills)})
-        for fill in fills:
-            if fill["side"] == "SELL":
-                realized_delta = self.broker.ledger.realized_pnl - self._last_realized
+        try:
+            if not hasattr(self.broker, "reconcile"):
+                raise RuntimeError("live broker does not expose reconciliation")
+            fills = self.broker.reconcile()
+            if not isinstance(fills, (list, tuple)):
+                raise RuntimeError("broker reconciliation returned a malformed result")
+            for fill in fills:
+                if not isinstance(fill, dict):
+                    raise RuntimeError("broker reconciliation contains a malformed fill")
+                if fill.get("side") == "SELL":
+                    fill_id = fill.get("fill_id")
+                    if not fill_id:
+                        from app.engine.state import reconciled_fill_id
+                        order_id = fill.get("order_id")
+                        child_id = fill.get("upstox_order_id")
+                        cumulative = fill.get("cumulative_filled")
+                        if order_id and cumulative is not None:
+                            fill_id = reconciled_fill_id(
+                                str(order_id), child_id, float(cumulative))
+                    if not isinstance(fill_id, str) or not fill_id:
+                        raise RuntimeError("reconciled SELL fill has no stable identity")
+                    if "realized_pnl" not in fill:
+                        raise RuntimeError("reconciled SELL fill has no realized P&L")
+                    try:
+                        realized_delta = float(fill["realized_pnl"])
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError("reconciled SELL P&L is malformed") from exc
+                    queued = dict(fill)
+                    queued["fill_id"] = fill_id
+                    queued["realized_pnl"] = realized_delta
+                    previous = self._unaccounted_fills.get(fill_id)
+                    if previous is not None and previous != queued:
+                        raise RuntimeError("reconciled fill identity changed its contents")
+                    self._unaccounted_fills[fill_id] = queued
+            for fill_id, fill in list(self._unaccounted_fills.items()):
+                realized_delta = float(fill["realized_pnl"])
+                if self.daily is not None:
+                    self.daily.record_realized_fill(
+                        fill_id, realized_delta,
+                        observed_at=fill.get("observed_at"))
+                else:
+                    self._last_realized += realized_delta
                 _order = self.broker.orders.get(fill.get("intent_id"))
                 self.journal.record_outcome(
                     strategy=self.strategy.name,
                     symbol=(fill.get("symbol")
                             or (_order.symbol if _order is not None else None)
-                            or "UNKNOWN"),  # honest: never substitute an instrument
-                    entry=fill["price"], exit=fill["price"], quantity=fill["quantity"],
-                    pnl=realized_delta,
+                            or "UNKNOWN"),
+                    entry=fill["price"], exit=fill["price"],
+                    quantity=fill["quantity"], pnl=realized_delta,
                     fees=self.broker.ledger.fees, slippage=0.0,
-                    duration_bars=self.processed, outcome="closed", regime=self.regime or "unknown",
-                )
-                self._last_realized = self.broker.ledger.realized_pnl
-                if self.daily is not None:
-                    self.daily.add_realized(realized_delta)
-        if fills:
-            self._persist_equity()
-        return fills
+                    duration_bars=self.processed, outcome="closed",
+                    regime=self.regime or "unknown")
+                del self._unaccounted_fills[fill_id]
+            if fills:
+                self._persist_equity()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            self.repository.set_engine_states({
+                "last_reconcile_at": {"ts": timestamp, "fills": len(fills)},
+                "live_reconcile_status": {"ok": True, "ts": timestamp,
+                                           "fills": len(fills)},
+            })
+            lock = getattr(self, "live_lock", None)
+            if (lock is not None and bool(getattr(lock, "live", False))
+                    and bool(getattr(lock, "held", False))):
+                runtime = self.repository.get_engine_state(
+                    "live_engine_runtime", {}) or {}
+                control = self._live_control()
+                if (isinstance(runtime, dict) and runtime.get("state") == "READY"
+                        and control.get("stop_requested") is False):
+                    self._publish_live_runtime("READY", audit_event=False)
+            return list(fills)
+        except Exception as exc:
+            try:
+                self.repository.set_engine_state("live_reconcile_status", {
+                    "ok": False, "ts": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__})
+            except Exception as status_exc:
+                logger.error("LIVE_RECONCILIATION_FAILURE_STATE_UNAVAILABLE",
+                             extra={"error_type": type(status_exc).__name__})
+            raise
 
     def _daily_snapshot(self, candle) -> None:
         from app.history.store import parse_local

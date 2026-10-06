@@ -1,5 +1,8 @@
 # Enabling Live Trading — Repository Analysis & Runbook
 
+> **Historical runbook snapshot:** its repository branch, audit commit and test counts predate the current branch state. It is not current proof of live readiness; see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Repository:** `Thedivinetwilight/AXIOM` (branch `arena/01a0fcfb-axiom`)
 **Audit commit:** `7dc3e1a` · **Audit test suite:** 949 passed / 37 skipped
 **Last updated:** 2026-10-02 — **Route B is now implemented** (983 passed / 37 skipped)

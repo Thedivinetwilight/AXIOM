@@ -6,7 +6,7 @@ timeframe, insufficient history, timezone correctness — and the rule that
 nothing is ever silently repaired or fabricated.
 """
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -23,7 +23,6 @@ from axiom.market import (
 )
 from axiom.models import DataQualityState
 
-UTC = timezone.utc
 SAMPLE_CSV = "data/sample_1h.csv"
 DAILY_CSV = "data/sample.csv"
 
@@ -72,13 +71,27 @@ class TestMarketDataContract:
 
     def test_bar_rejects_naive_timestamp(self):
         with pytest.raises(ValueError, match="timezone-aware"):
-            MarketDataBar(datetime(2024, 1, 1), 1, 2, 0.5, 1.5, 10, "DEMO")
+            MarketDataBar(datetime(2024, 1, 1), 1, 2, 0.5, 1.5, 10, "DEMO")  # noqa: DTZ001
 
     def test_bar_from_row_rejects_naive_timestamp(self):
         with pytest.raises(MarketDataError, match="malformed OHLCV row"):
             MarketDataBar.from_row({
                 "timestamp": "2024-01-01T00:00:00", "open": 1, "high": 2,
                 "low": 0.5, "close": 1.5, "volume": 10, "symbol": "DEMO"})
+
+    def test_bar_from_row_rejects_boolean_ohlcv_values(self):
+        with pytest.raises(MarketDataError, match="numeric, not boolean"):
+            MarketDataBar.from_row({
+                "timestamp": "2024-01-01T00:00:00Z", "open": True, "high": 2,
+                "low": 0.5, "close": 1.5, "volume": 10, "symbol": "DEMO"})
+
+    def test_instrument_identity_whitespace_is_rejected_not_normalized(self):
+        with pytest.raises(ValueError, match="trimmed"):
+            bar(0, instrument=" DEMO ")
+        row = {"timestamp": "2024-01-01T00:00:00Z", "open": 1, "high": 2,
+               "low": 0.5, "close": 1.5, "volume": 10, "symbol": " DEMO "}
+        with pytest.raises(MarketDataError, match="trimmed"):
+            MarketDataBar.from_row(row, instrument="DEMO")
 
     def test_bar_from_row_parses_zulu_timestamps(self):
         parsed = MarketDataBar.from_row({
@@ -107,6 +120,24 @@ class TestMarketDataValidation:
                                  10.0, "DEMO")
         quality = validate_market_data([bars[0], bars[1], infinite], "1h", min_history=2)
         assert any("non-finite" in error for error in quality.errors)
+
+    def test_non_numeric_and_boolean_bar_values_return_data_errors(self):
+        for invalid in ("100.0", True):
+            bars = window(3)
+            object.__setattr__(bars[1], "open", invalid)
+            quality = validate_market_data(bars, "1h", min_history=2)
+            assert quality.state is DataQualityState.DATA_ERROR
+            assert any("OHLCV" in error and
+                       ("non-numeric" in error or "boolean" in error)
+                       for error in quality.errors)
+
+    def test_non_utc_mutated_bar_is_rejected(self):
+        bars = window(3)
+        object.__setattr__(bars[1], "timestamp", bars[1].timestamp.astimezone(
+            timezone(timedelta(hours=5, minutes=30))))
+        quality = validate_market_data(bars, "1h", min_history=2)
+        assert quality.state is DataQualityState.DATA_ERROR
+        assert any("not normalized to UTC" in error for error in quality.errors)
 
     def test_duplicate_timestamps_are_rejected(self):
         bars = window(4)
@@ -269,6 +300,14 @@ class TestReplayProvider:
         assert len(limited) == 100
         assert all(b.timestamp < cut for b in limited)
 
+    def test_fetch_bounds_require_aware_end_and_positive_integer_limit(self):
+        provider = ReplayMarketDataProvider.from_csv(SAMPLE_CSV, "1h")
+        with pytest.raises(MarketDataError, match="end timestamp is invalid"):
+            provider.fetch("DEMO", "1h", end=datetime(2024, 1, 1))  # noqa: DTZ001
+        for limit in (True, 1.5, 0, -1):
+            with pytest.raises(MarketDataError, match="positive integer"):
+                provider.fetch("DEMO", "1h", limit=limit)
+
     def test_limit_returns_the_most_recent_bars(self):
         provider = ReplayMarketDataProvider.from_csv(SAMPLE_CSV, "1h")
         limited = provider.fetch("DEMO", "1h", limit=50).bars
@@ -342,6 +381,24 @@ class TestHttpProvider:
             transport=lambda url, headers, timeout: b"not json")
         with pytest.raises(MarketDataError, match="not valid JSON"):
             provider.fetch("DEMO", "1h")
+
+    def test_explicit_empty_instrument_is_not_replaced_with_requested_identity(self):
+        def transport(url, headers, timeout):
+            return (b'[{"timestamp":"2024-01-01T00:00:00Z","open":1,'
+                    b'"high":2,"low":0.5,"close":1.5,"volume":10,'
+                    b'"symbol":""}]')
+
+        provider = HttpJsonMarketDataProvider(
+            "https://example.invalid/{instrument}", transport=transport)
+        with pytest.raises(MarketDataError, match="instrument identity"):
+            provider.fetch("DEMO", "1h")
+
+    def test_provider_query_identity_must_already_be_trimmed(self):
+        provider = HttpJsonMarketDataProvider(
+            "https://example.invalid/{instrument}",
+            transport=lambda url, headers, timeout: b"[]")
+        with pytest.raises(MarketDataError, match="trimmed"):
+            provider.fetch(" DEMO ", "1h")
 
     def test_epoch_millisecond_timestamps_are_utc(self):
         def transport(url, headers, timeout):
@@ -556,7 +613,7 @@ class TestCalendarTimezones:
         """A naive stamp would mean different things on different machines."""
         calendar = calendar_factory()
         timeframe = "1h" if isinstance(calendar, ContinuousCalendar) else "1D"
-        naive = datetime(2024, 1, 1, 1, 0)
+        naive = datetime(2024, 1, 1, 1, 0)  # noqa: DTZ001
         with pytest.raises(MarketDataError, match="no timezone"):
             calendar.is_valid_bar_time(naive, timeframe)
         with pytest.raises(MarketDataError, match="no timezone"):

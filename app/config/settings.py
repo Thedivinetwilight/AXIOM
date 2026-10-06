@@ -28,8 +28,10 @@ from app.config.hosts import (
     FORBIDDEN_IN_LIVE,
     FORBIDDEN_IN_SANDBOX,
     LIVE_ORDER_HOSTS,
+    READ_AND_AUTH_HOSTS,
     SANDBOX_ORDER_HOSTS,
     host_of,
+    is_trusted_upstox_url,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -393,6 +395,17 @@ class Settings:
                 f"(sandbox hosts: {', '.join(sorted(SANDBOX_ORDER_HOSTS))}); "
                 "refusing to configure a sandbox broker against a live/order host"
             )
+        if not is_trusted_upstox_url(
+                self.upstox_sandbox_base_url, SANDBOX_ORDER_HOSTS):
+            raise ValueError(
+                "UPSTOX_SANDBOX_BASE_URL must be an HTTPS root URL on a "
+                "documented sandbox host")
+        if not is_trusted_upstox_url(
+                self.upstox_sandbox_order_history_url, READ_AND_AUTH_HOSTS,
+                expected_path="/v2/order/history"):
+            raise ValueError(
+                "UPSTOX_SANDBOX_ORDER_HISTORY_URL must be the documented "
+                "HTTPS Upstox order-history endpoint")
 
     def _validate_live_mode(self) -> None:
         """All four locks + non-zero risk limits, or refuse to start.
@@ -434,6 +447,17 @@ class Settings:
                 f"UPSTOX_LIVE_BASE_URL host {host!r} is a sandbox/auth host and "
                 "cannot route real orders"
             )
+        if not is_trusted_upstox_url(
+                self.upstox_live_base_url, LIVE_ORDER_HOSTS):
+            raise ValueError(
+                "UPSTOX_LIVE_BASE_URL must be an HTTPS root URL on the "
+                "documented live order host")
+        if not is_trusted_upstox_url(
+                self.upstox_live_order_history_url, READ_AND_AUTH_HOSTS,
+                expected_path="/v2/order/history"):
+            raise ValueError(
+                "UPSTOX_LIVE_ORDER_HISTORY_URL must be the documented "
+                "HTTPS Upstox order-history endpoint")
 
     def market_data_symbol_list(self) -> list[str]:
         """Comma-separated MARKET_DATA_SYMBOLS → instrument key list."""

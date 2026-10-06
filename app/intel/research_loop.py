@@ -19,10 +19,12 @@ This module never runs that cycle by itself — it is the *governor* for it:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -66,45 +68,95 @@ class ResearchScheduler:
     repository: object | None = None
     _started: dict = field(default_factory=dict)   # day -> count
     _refusals: list = field(default_factory=list)
+    _quota_lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.daily_experiment_quota < 0:
             raise ValueError("daily_experiment_quota cannot be negative")
 
     # -------------------------------------------- durable quota state (§37) --
+    @staticmethod
+    def _validate_usage(stored) -> dict | None:
+        """Return a validated day->count map, or None for corrupt state."""
+        if stored is None:
+            return {}
+        if not isinstance(stored, dict):
+            return None
+        usage: dict[str, int] = {}
+        for key, value in stored.items():
+            if not isinstance(key, str):
+                return None
+            try:
+                parsed_day = date.fromisoformat(key)
+            except ValueError:
+                return None
+            if parsed_day.isoformat() != key or type(value) is not int or value < 0:
+                return None
+            usage[key] = value
+        return usage
+
     def _durable_usage(self) -> dict | None:
-        """Read the persisted day->count map. None when there is no
-        repository; an UNREADABLE record returns {} and is treated as
-        exhausted below (fail closed: a restart can never buy quota)."""
+        """Read and validate persisted usage; corruption fails closed."""
         if self.repository is None:
             return None
         try:
             stored = self.repository.get_engine_state(QUOTA_STATE_KEY, None)
+            usage = self._validate_usage(stored)
         except Exception:
-            logger.warning("research quota state unreadable; treating the "
-                           "quota as exhausted (fail closed)")
+            usage = None
+        if usage is None:
+            logger.warning("research quota state unreadable or malformed; "
+                           "treating the quota as exhausted (fail closed)")
             return {"__unreadable__": 1}
-        if not isinstance(stored, dict):
-            return {}
-        usage: dict = {}
-        for key, value in stored.items():
-            try:
-                usage[str(key)] = int(value)
-            except (TypeError, ValueError):
-                continue
         return usage
 
-    def _persist_usage(self, usage: dict) -> None:
-        if self.repository is None:
-            return
-        trimmed = dict(sorted(usage.items())[-_QUOTA_HISTORY_DAYS:])
+    def _reserve_durable_usage(self, day: str) -> tuple[int, str | None]:
+        """Atomically consume one quota slot across threads and processes.
+
+        Returns ``(usage_after, error)``. The row read, cap check and update
+        share one ``BEGIN IMMEDIATE`` transaction, so concurrent workers cannot
+        both spend the same final slot or lose an increment.
+        """
+        database = getattr(self.repository, "db", None)
+        if database is None:
+            return self.daily_experiment_quota, "durable quota storage is unavailable"
         try:
-            self.repository.set_engine_state(QUOTA_STATE_KEY, trimmed)
-        except Exception:
-            # Losing the write would silently re-open the quota; fail closed
-            # by remembering it in-process only and surfacing the problem.
-            logger.error("research quota state could not be persisted; the "
-                         "in-process count remains authoritative for this run")
+            with database.transaction() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT payload FROM engine_state WHERE key=?",
+                    (QUOTA_STATE_KEY,),
+                ).fetchone()
+                if row is None:
+                    usage = {}
+                else:
+                    try:
+                        stored = json.loads(row["payload"])
+                    except (TypeError, ValueError):
+                        return self.daily_experiment_quota, \
+                            "durable quota state is unreadable"
+                    usage = self._validate_usage(stored)
+                    if usage is None:
+                        return self.daily_experiment_quota, \
+                            "durable quota state is malformed"
+                used = usage.get(day, 0)
+                if used >= self.daily_experiment_quota:
+                    return used, "daily experiment quota exhausted"
+                usage[day] = used + 1
+                trimmed = dict(sorted(usage.items())[-_QUOTA_HISTORY_DAYS:])
+                payload = json.dumps(trimmed, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False)
+                db.execute(
+                    "INSERT INTO engine_state(key,payload) VALUES (?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                    (QUOTA_STATE_KEY, payload),
+                )
+                return used + 1, None
+        except Exception as exc:
+            logger.error("research quota reservation failed; refusing admission",
+                         extra={"error_type": type(exc).__name__})
+            return self.daily_experiment_quota, \
+                f"durable quota could not be persisted ({type(exc).__name__})"
 
     def _usage_for(self, day: str) -> tuple[int, bool]:
         """(used, bounded) for ``day``. bounded=True when the durable record
@@ -141,9 +193,10 @@ class ResearchScheduler:
         used, unreadable = self._usage_for(day)
         critical = self.trading_critical_window(now)
 
-        def refuse(verdict: str, reason: str) -> dict:
+        def refuse(verdict: str, reason: str, *, quota_used: int | None = None) -> dict:
             decision = {"admitted": False, "verdict": verdict, "kind": kind,
-                        "day": day, "quota_used": used,
+                        "day": day,
+                        "quota_used": used if quota_used is None else quota_used,
                         "quota_limit": self.daily_experiment_quota,
                         "trading_critical_window": critical, "reason": reason,
                         "loop_steps": list(LOOP_STEPS)}
@@ -164,7 +217,7 @@ class ResearchScheduler:
                           "admission pauses until the host recovers")
         if unreadable:
             return refuse(VERDICT_QUOTA,
-                          "the durable quota record is unreadable; refusing "
+                          "the durable quota record is unreadable or malformed; refusing "
                           "rather than assuming fresh quota (a restart can "
                           "never buy quota)")
         if used >= self.daily_experiment_quota:
@@ -172,13 +225,31 @@ class ResearchScheduler:
                           f"daily experiment quota exhausted "
                           f"({used}/{self.daily_experiment_quota}); the loop "
                           f"is bounded by design")
-        self._started = {day: used + 1}
-        durable = self._durable_usage()
-        if durable is not None:
-            durable[day] = used + 1
-            self._persist_usage(durable)
+        if self.repository is not None:
+            used_after, reservation_error = self._reserve_durable_usage(day)
+            if reservation_error is not None:
+                reason = (
+                    reservation_error if reservation_error !=
+                    "daily experiment quota exhausted" else
+                    f"daily experiment quota exhausted "
+                    f"({used_after}/{self.daily_experiment_quota}); the loop is bounded by design")
+                return refuse(VERDICT_QUOTA, reason, quota_used=used_after)
+        else:
+            with self._quota_lock:
+                current_used = int(self._started.get(day, 0))
+                if current_used >= self.daily_experiment_quota:
+                    return refuse(
+                        VERDICT_QUOTA,
+                        f"daily experiment quota exhausted "
+                        f"({current_used}/{self.daily_experiment_quota}); the loop "
+                        f"is bounded by design",
+                        quota_used=current_used)
+                used_after = current_used + 1
+                self._started[day] = used_after
+        with self._quota_lock:
+            self._started[day] = max(int(self._started.get(day, 0)), used_after)
         return {"admitted": True, "verdict": VERDICT_ADMITTED, "kind": kind,
-                "day": day, "quota_used": used + 1,
+                "day": day, "quota_used": used_after,
                 "quota_limit": self.daily_experiment_quota,
                 "trading_critical_window": critical,
                 "loop_steps": list(LOOP_STEPS)}

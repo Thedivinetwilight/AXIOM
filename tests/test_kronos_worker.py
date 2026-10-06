@@ -91,7 +91,15 @@ class TestProtocol:
         with pytest.raises(ProtocolError):
             KronosRequest.decode('{"kind": "ping"}')
         with pytest.raises(ProtocolError):
+            KronosRequest.decode('{"kind":"ping","id":"1","payload":null}')
+        with pytest.raises(ProtocolError, match="payload must be an object"):
+            KronosRequest.decode('{"kind":"ping","id":"1","payload":[]}')
+        with pytest.raises(ProtocolError):
             KronosResponse.decode("[1, 2, 3]")
+        with pytest.raises(ProtocolError, match="ok.*boolean"):
+            KronosResponse.decode('{"id":"1","ok":"false","result":{}}')
+        with pytest.raises(ProtocolError, match="string 'id'"):
+            KronosResponse.decode('{"id":7,"ok":true,"result":{}}')
 
     def test_bars_and_timestamps_round_trip(self):
         bars = window(3)
@@ -105,6 +113,10 @@ class TestProtocol:
             decode_bars("nope")
         with pytest.raises(ProtocolError, match="bar needs"):
             decode_bars([[1, 2]])
+        with pytest.raises(ProtocolError, match="exactly"):
+            decode_bars([["2024-01-01T00:00:00Z", 1, 2, 0.5, 1.5, 10, "DEMO", "extra"]])
+        with pytest.raises(ProtocolError, match="instrument must be"):
+            decode_bars([["2024-01-01T00:00:00Z", 1, 2, 0.5, 1.5, 10, None]])
 
 
 class TestProtocolBoundaryStrictness:
@@ -123,6 +135,10 @@ class TestProtocolBoundaryStrictness:
     def test_a_naive_future_timestamp_is_refused(self):
         with pytest.raises(ProtocolError, match="has no timezone offset"):
             decode_timestamps(["2024-01-01T00:00:00"])
+
+    def test_future_offset_timestamps_are_normalized_to_utc(self):
+        assert decode_timestamps(["2024-01-01T05:30:00+05:30"]) == [
+            datetime(2024, 1, 1, tzinfo=UTC)]
 
     def test_future_timestamps_must_be_a_non_empty_list(self):
         """An empty horizon is a protocol error, not a zero-length forecast.
@@ -182,6 +198,18 @@ class TestChildRuntime:
         shutdown = child.handle(KronosRequest("shutdown", "4"))
         assert shutdown.ok and shutdown.state == "OFFLINE"
 
+    def test_loaded_runtime_rejects_a_mismatched_request_configuration(self):
+        child = ChildRuntime(config())
+        assert child.handle(KronosRequest("load", "load")).ok
+        mismatched = child.handle(KronosRequest("forecast", "forecast", {
+            "config": config(temperature=0.5).to_dict(),
+            "bars": encode_bars(window(64)),
+            "future_timestamps": encode_timestamps(stamps(8)),
+        }))
+        assert mismatched.ok is False
+        assert "differs from the loaded runtime" in mismatched.error
+        assert child.runtime.status.state is KronosState.READY
+
     def test_forecast_before_load_is_refused_without_killing_the_child(self):
         child = ChildRuntime(config())
         refused = child.handle(KronosRequest("forecast", "1", {
@@ -217,6 +245,11 @@ class TestChildRuntime:
         load = child.handle(KronosRequest("load", "l1", {}))
         assert load.ok is False
         assert load.error == "no Kronos configuration supplied with 'load'"
+
+        malformed_config = child.handle(KronosRequest(
+            "load", "bad-config", {"config": []}))
+        assert malformed_config.ok is False
+        assert "config must be an object" in malformed_config.error
 
         # Both refusals left the child alive; a real config still works.
         recovered = child.handle(
@@ -360,6 +393,17 @@ class TestManagerInProcess:
         manager.shutdown()
         assert manager.alive is False
         assert manager.status().state is KronosState.OFFLINE
+
+    def test_malformed_forecast_inputs_are_rejected_before_ipc(self):
+        from axiom.market.provider import MarketDataError
+
+        child = ChildRuntime(config())
+        manager = KronosManager(config(), mode="in-process", child=child)
+        malformed = window(64)
+        object.__setattr__(malformed[-1], "open", "not-a-price")
+        with pytest.raises(MarketDataError, match="non-numeric"):
+            manager.forecast(malformed, stamps(8))
+        assert child.runtime is None, "invalid input must not reach the child dispatcher"
 
     def test_requests_after_shutdown_report_offline(self):
         manager = in_process_manager(config())
@@ -667,7 +711,8 @@ class TestBootstrap:
             "AXIOM_FORECAST_SERIES": "DEMO:1h",
         })
         try:
-            assert environment.available
+            assert environment.configured
+            assert not environment.available
             assert tuple(environment.series) == (("DEMO", "1h"),)
             service = environment.service
             service.start()
@@ -678,9 +723,35 @@ class TestBootstrap:
                 outcomes = service.poll()
                 time.sleep(0.05)
             assert outcomes and outcomes[0].state is KronosState.READY
+            assert environment.available
             assert service.latest("DEMO", "1h") is not None
         finally:
             environment.service.stop(timeout=10)
+
+    def test_child_uses_the_configured_isolated_cache_root(self, tmp_path):
+        cache_root = tmp_path / "isolated-model-cache"
+        configured = config(cache_dir=str(cache_root))
+        child = ChildRuntime(configured)
+        runtime = child._ensure_runtime({}, kind="load")
+        assert runtime.cache.root == cache_root.resolve()
+
+    def test_supplied_manager_with_different_configuration_is_unavailable(self):
+        from axiom.bootstrap import build_forecast_service
+
+        environment = build_forecast_service({
+            "AXIOM_KRONOS_ENABLED": "true",
+            "AXIOM_KRONOS_BACKEND": "stub",
+            "AXIOM_KRONOS_LOOKBACK": "120",
+            "AXIOM_KRONOS_PRED_LEN": "8",
+            "AXIOM_KRONOS_MIN_HISTORY": "32",
+            "AXIOM_MARKET_DATA_SOURCE": "replay",
+            "AXIOM_MARKET_DATA_CSV": SAMPLE_CSV,
+            "AXIOM_MARKET_DATA_TIMEFRAME": "1h",
+            "AXIOM_FORECAST_SERIES": "DEMO:1h",
+        }, manager=KronosManager(config(temperature=0.5), mode="in-process"))
+        assert environment.service is None
+        assert environment.status.state is KronosState.ERROR
+        assert "configuration differs" in environment.status.message
 
     def test_bad_configuration_is_reported_not_raised(self):
         from axiom.bootstrap import build_forecast_service
@@ -792,7 +863,8 @@ class TestConfigurationIsNeverSilentlyDowngraded:
             "AXIOM_FORECAST_SERIES": "DEMO:1h",
         })
         try:
-            assert environment.available
+            assert environment.configured
+            assert not environment.available
             assert any("AXIOM_KRONOS_MODE invalid" in note for note in environment.notes), \
                 environment.notes
         finally:

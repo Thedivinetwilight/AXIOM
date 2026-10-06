@@ -200,6 +200,15 @@ class TestTokenGuard:
         assert decision.reason.startswith("TOKEN_STALE")
         database.close()
 
+    def test_future_credential_verification_is_not_fresh_evidence(self, tmp_path):
+        repository, database = repo(tmp_path)
+        guard = TokenGuard(repository, max_age_hours=20, now_fn=lambda: NOW)
+        guard.record_verified(when=NOW + timedelta(minutes=2))
+        decision = guard.check()
+        assert decision.allowed is False
+        assert decision.reason.startswith("TOKEN_VERIFICATION_FUTURE_DATED")
+        database.close()
+
     def test_warning_window_precedes_the_block(self, tmp_path):
         repository, database = repo(tmp_path)
         guard = TokenGuard(repository, max_age_hours=20, warn_minutes=120,
@@ -288,6 +297,60 @@ class TestCanaryGuard:
         restarted = CanaryGuard(repository, max_notional=10_000, first_orders=5,
                                 now_fn=lambda: NOW)
         assert restarted.submitted() == 1
+        database.close()
+
+    def test_final_reservation_rechecks_the_cap_and_is_idempotent(self, tmp_path):
+        repository, database = repo(tmp_path)
+        guard = CanaryGuard(repository, max_notional=100, first_orders=2,
+                            now_fn=lambda: NOW)
+        oversized = guard.reserve_submission(
+            intent_id="too-large", quantity=3, price=50)
+        assert oversized.allowed is False
+        assert guard.submitted() == 0
+        accepted = guard.reserve_submission(
+            intent_id="intent-a", quantity=1, price=50)
+        assert accepted.allowed is True
+        duplicate = guard.reserve_submission(
+            intent_id="intent-a", quantity=1, price=50)
+        assert duplicate.allowed is False
+        assert "DUPLICATE" in duplicate.reason
+        assert guard.submitted() == 1
+        database.close()
+
+    def test_final_canary_reservation_serializes_concurrent_entries(self, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+
+        url = f"sqlite:///{tmp_path}/canary-concurrency.db"
+        first_db, second_db = Database(url), Database(url)
+        first_repo, second_repo = Repository(first_db), Repository(second_db)
+        guards = [CanaryGuard(first_repo, max_notional=100, first_orders=2,
+                              now_fn=lambda: NOW),
+                  CanaryGuard(second_repo, max_notional=100, first_orders=2,
+                              now_fn=lambda: NOW)]
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(
+                    lambda pair: pair[0].reserve_submission(
+                        intent_id=pair[1], quantity=1, price=50),
+                    zip(guards, ("intent-a", "intent-b"))))
+            assert all(result.allowed for result in results)
+            assert guards[0].submitted() == 2
+        finally:
+            first_db.close()
+            second_db.close()
+
+    def test_canary_configuration_change_fails_closed(self, tmp_path):
+        repository, database = repo(tmp_path)
+        original = CanaryGuard(repository, max_notional=100, first_orders=2,
+                               now_fn=lambda: NOW)
+        assert original.reserve_submission(
+            intent_id="intent-a", quantity=1, price=50).allowed
+        changed = CanaryGuard(repository, max_notional=1_000, first_orders=2,
+                              now_fn=lambda: NOW)
+        decision = changed.reserve_submission(
+            intent_id="intent-b", quantity=1, price=50)
+        assert decision.allowed is False
+        assert "UNKNOWN" in decision.reason
         database.close()
 
     def test_invalid_input_is_refused_during_the_ramp(self, tmp_path):
@@ -1777,6 +1840,8 @@ class TestReadinessRecordedState:
         journal = SubmissionJournal(repository)
         journal.record("intent-1", instrument_key="NSE_EQ|INE1", symbol="S",
                        side="BUY", quantity=1, price=1.0, strategy="t")
+        from app.engine.state import SUBMISSION_ATTEMPTED
+        journal.mark("intent-1", SUBMISSION_ATTEMPTED)
         journal.mark("intent-1", UNKNOWN)
         checks = run_checks(self._settings(tmp_path), repository=repository)
         check = self._named(checks, "no_unresolved_intents")
@@ -2553,6 +2618,36 @@ class TestSingleEngineLock:
         decision = second.acquire(now=now)
         assert decision.granted is False
         assert "two live engines" in decision.reason
+        database.close()
+
+    def test_reused_pid_with_old_owner_nonce_cannot_renew_stale_lease(
+            self, tmp_path, monkeypatch):
+        import os
+        import socket
+        from app.live import lock as lock_module
+        from app.live.lock import EngineLock, LOCK_KEY, owner_id
+
+        now = datetime.now(timezone.utc)
+        old = EngineLock(repository=None, live=True,
+                         owner=f"{socket.gethostname()}:{os.getpid()}")
+        first, repository, database = self._lock(
+            tmp_path, name="pid-reuse.db", owner=old.owner)
+        assert first.acquire(now=now - timedelta(hours=2)).granted
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE engine_lease SET heartbeat_ts=? WHERE name=?",
+                ((now - timedelta(hours=2)).isoformat(), LOCK_KEY))
+        monkeypatch.setattr(lock_module, "_pid_alive", lambda pid: True)
+
+        # The OS now reports the same numeric PID as alive, but this process
+        # must not mistake the old host:PID label for proof it owns that lease.
+        new_owner = owner_id()
+        second = EngineLock(repository, live=True)
+        decision = second.acquire(now=now)
+        assert new_owner != old.owner
+        assert decision.granted is False
+        assert "cannot be proven stopped" in decision.reason
+        assert repository.read_lease(LOCK_KEY)["owner"] == old.owner
         database.close()
 
     def test_stale_heartbeat_with_live_local_pid_is_not_takeover_proof(

@@ -4,7 +4,7 @@ A forecast is cached by everything that can change its output, so a cached
 result is only reused when the *entire* input is identical:
 
     instrument · timeframe · last closed candle timestamp · input window hash
-    · model revision · configuration hash
+    · resolved model id/revision · configuration hash
 
 ``input_hash`` covers the exact OHLCV values and timestamps of the window, so a
 revised candle (late correction, different provider) invalidates the cache even
@@ -47,6 +47,7 @@ def forecast_cache_key(
     input_hash_value: str,
     model_revision: str,
     config_hash: str,
+    model_id: str = "",
 ) -> str:
     payload = canonical_json(
         {
@@ -56,6 +57,7 @@ def forecast_cache_key(
                 last_closed_timestamp.isoformat() if last_closed_timestamp else None
             ),
             "input_hash": input_hash_value,
+            "model_id": model_id,
             "model_revision": model_revision,
             "config_hash": config_hash,
         }

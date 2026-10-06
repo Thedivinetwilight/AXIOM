@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from axiom.kronos import artifacts as kronos_artifacts
 from axiom.kronos import backends as kronos_backends
-from axiom.kronos.model_cache import ModelCache
+from axiom.kronos.model_cache import IntegrityReport, ModelCache
 
 DOWNLOAD_NOT_CONFIGURED = "DOWNLOAD_NOT_CONFIGURED"
 DOWNLOADED = "DOWNLOADED"
@@ -80,10 +81,10 @@ class KronosStudio:
         if model_id not in kronos_artifacts.KNOWN_MODEL_PAIRINGS:
             raise KeyError(f"unknown Kronos model '{model_id}'; known: "
                            + ", ".join(sorted(kronos_artifacts.KNOWN_MODEL_PAIRINGS)))
-        report = self.cache.verify(model_id)
+        report = self._integrity_report(model_id)
         weights = self.cache.locate_weights(model_id)
         notes = list(report.problems) + list(report.notes)
-        lifecycle = self._lifecycle(model_id, report.ok, bool(weights))
+        lifecycle = self._lifecycle(model_id, report.ok, bool(weights or report.entries))
         benchmark = self._benchmarks.get(model_id)
         context = kronos_backends.KNOWN_MODEL_CONTEXT.get(model_id)
         return ModelCard(
@@ -95,6 +96,23 @@ class KronosStudio:
             integrity=report.to_dict(),
             benchmark=benchmark,
             notes=tuple(notes),
+        )
+
+    def _integrity_report(self, model_id: str) -> IntegrityReport:
+        tokenizer_id = kronos_artifacts.KNOWN_MODEL_PAIRINGS[model_id]
+        checks = [(model_id, self.cache.verify_artifact(model_id))]
+        if tokenizer_id != model_id:
+            checks.append((tokenizer_id, self.cache.verify_artifact(tokenizer_id)))
+        entries = tuple(entry for _, report in checks for entry in report.entries)
+        problems = tuple(f"{artifact_id}: {problem}"
+                         for artifact_id, report in checks for problem in report.problems)
+        notes = tuple(f"{artifact_id}: {note}"
+                      for artifact_id, report in checks for note in report.notes)
+        return IntegrityReport(
+            ok=all(report.ok for _, report in checks),
+            entries=entries,
+            problems=problems,
+            notes=notes,
         )
 
     def _lifecycle(self, model_id: str, integrity_ok: bool, weights_present: bool) -> str:
@@ -147,24 +165,59 @@ class KronosStudio:
             return {"model_id": model_id, "ok": False, "status": DOWNLOADED,
                     "detail": f"download failed: {type(exc).__name__}; nothing "
                               f"was recorded as verified"}
-        entry = self.cache.record(model_id, "downloaded", path)
+        # No pinned upstream revision is available from this downloader; retain
+        # the empty revision rather than inventing a commit identity. A single
+        # downloaded file is useful evidence of a download, but it cannot verify
+        # the complete model/tokenizer directory that from_pretrained consumes.
+        try:
+            path = Path(path)
+            if path.is_dir():
+                self.cache.record_artifact(model_id, "", path)
+                report = self.cache.verify_artifact(model_id, "")
+                scope = "complete_directory_local_manifest_sha256_only"
+            else:
+                entry = self.cache.record(model_id, "", path)
+                report = self.cache.verify(model_id, "")
+                scope = "single_file_local_manifest_sha256_only"
+        except Exception as exc:
+            return {"model_id": model_id, "ok": False, "status": NOT_VERIFIED,
+                    "detail": f"downloaded artifact could not be recorded safely "
+                              f"({type(exc).__name__}); nothing is activatable"}
+        if not report.ok:
+            return {"model_id": model_id, "ok": False, "status": NOT_VERIFIED,
+                    "integrity_scope": scope,
+                    "detail": "; ".join(report.problems or report.notes)
+                              or "complete artifact could not be verified inside the cache"}
         return {"model_id": model_id, "ok": True, "status": DOWNLOADED,
-                "detail": f"recorded in cache (sha256 {entry.sha256[:16]}…); "
-                          f"verification is still required before install"}
+                "revision": "",
+                "verified": scope.startswith("complete_directory_"),
+                "integrity_scope": scope,
+                "authenticity": "not established",
+                "detail": ("complete local directory matches its manifest; "
+                           "publisher authenticity is not established")
+                          if scope.startswith("complete_directory_") else
+                          f"recorded file (sha256 {entry.sha256[:16]}…); a complete "
+                          "directory is still required before install; publisher "
+                          "authenticity is not established"}
 
     def verify(self, model_id: str) -> dict:
-        report = self.cache.verify(model_id)
+        if model_id not in kronos_artifacts.KNOWN_MODEL_PAIRINGS:
+            raise KeyError(f"unknown Kronos model '{model_id}'")
+        report = self._integrity_report(model_id)
         return {"model_id": model_id, "ok": report.ok,
                 "problems": list(report.problems), "notes": list(report.notes),
                 "status": VERIFIED if report.ok else NOT_VERIFIED}
 
     def install(self, model_id: str) -> dict:
         """INSTALL = verified + registered for loading. Refuses unverified."""
-        report = self.cache.verify(model_id)
+        if model_id not in kronos_artifacts.KNOWN_MODEL_PAIRINGS:
+            raise KeyError(f"unknown Kronos model '{model_id}'")
+        report = self._integrity_report(model_id)
         if not report.ok:
             return {"model_id": model_id, "ok": False, "status": INSTALL_REFUSED,
                     "detail": "integrity verification must pass before install: "
-                              + ("; ".join(report.problems) or "weights missing")}
+                              + ("; ".join(report.problems or report.notes)
+                                 or "weights missing")}
         return {"model_id": model_id, "ok": True, "status": INSTALLED}
 
     def benchmark(self, model_id: str, *, runner=None) -> dict:
@@ -191,11 +244,13 @@ class KronosStudio:
 
     def activate(self, model_id: str) -> dict:
         """ACTIVATE requires VERIFIED integrity first (never load unverified)."""
-        report = self.cache.verify(model_id)
+        if model_id not in kronos_artifacts.KNOWN_MODEL_PAIRINGS:
+            raise KeyError(f"unknown Kronos model '{model_id}'")
+        report = self._integrity_report(model_id)
         if not report.ok:
             return {"model_id": model_id, "ok": False, "status": ACTIVATE_REFUSED,
                     "detail": "activation refused: integrity verification failed "
-                              f"({'; '.join(report.problems) or 'weights missing'})"}
+                              f"({'; '.join(report.problems or report.notes) or 'weights missing'})"}
         if self.repository is not None:
             self.repository.set_engine_state(_ACTIVE_MODEL_KEY, model_id)
         return {"model_id": model_id, "ok": True, "status": ACTIVE,

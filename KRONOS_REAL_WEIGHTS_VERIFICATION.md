@@ -1,5 +1,8 @@
 # Kronos Real-Weights Verification
 
+> **Historical model-artifact report:** this record describes its named baseline commit. Its important limitation remains: a local checksum/manifest is not publisher authenticity, and real pretrained inference must not be claimed without independent evidence. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current state.
+
+
 **Date:** 2026-10-01
 **Branch:** `arena/01a0ecfa-axiom`
 **Base commit:** `21b81e2`

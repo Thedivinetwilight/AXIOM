@@ -1,25 +1,36 @@
-from contextlib import asynccontextmanager
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
+
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
-from app.api.auth import authenticate
+
 from app import __version__
+from app.api.auth import authenticate
+from app.api.routes import app_api as app_api_routes
+from app.api.routes import (
+    backtests,
+    dashboard,
+    health,
+    market,
+    market_events,
+    paper,
+    strategies,
+    v2,
+)
+from app.api.routes import console as console_routes
+from app.api.routes import frontend as frontend_routes
+from app.api.routes import setup as setup_routes
+from app.api.routes import wizard as wizard_routes
+from app.api.routes import workstation as workstation_routes
+from app.backtesting.costs import ExecutionConfig
 from app.config.settings import ROOT, Settings
 from app.database.database import Database
 from app.database.repository import Repository
-from app.backtesting.costs import ExecutionConfig
 from app.paper_trading.broker import PaperBroker
 from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
-from app.api.routes import dashboard, health, market, strategies, backtests, paper, v2, market_events
-from app.api.routes import console as console_routes
-from app.api.routes import setup as setup_routes
-from app.api.routes import frontend as frontend_routes
-from app.api.routes import wizard as wizard_routes
-from app.api.routes import app_api as app_api_routes
-from app.api.routes import workstation as workstation_routes
 
 logger = logging.getLogger("bot.api")
 
@@ -31,6 +42,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     async def lifespan(app):
         database = Database(settings.database_url)
         repository = Repository(database)
+        forecast_service = None
         try:
             broker = PaperBroker(
                 ExecutionConfig(**settings.execution_kwargs()),
@@ -67,6 +79,28 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 raise
             # Paper execution feeds the intelligence layer with OBSERVED bars.
             app.state.simulator.workstation = app.state.workstation
+
+            # Optional Kronos composition is explicit and disabled by default.
+            # When configured, the isolated ForecastService is the only app-side
+            # owner of the worker; the execution engine never receives its data.
+            try:
+                from axiom.bootstrap import build_forecast_service
+
+                environment = build_forecast_service()
+                app.state.kronos_environment = environment
+                forecast_service = environment.service
+                app.state.forecast_service = forecast_service
+                if forecast_service is not None:
+                    forecast_service.start()
+                    if environment.series:
+                        forecast_service.refresh_if_due(environment.series)
+            except Exception as exc:
+                logger.error("Kronos service composition failed (%s)",
+                             type(exc).__name__)
+                app.state.kronos_environment = None
+                app.state.forecast_service = None
+                app.state.kronos_service_error = type(exc).__name__
+
             yield
             try:
                 app.state.workstation.live_sessions.stop(
@@ -86,6 +120,12 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             await app.state.simulator.stop()
             broker.close()
         finally:
+            if forecast_service is not None:
+                try:
+                    forecast_service.stop()
+                except Exception as exc:
+                    logger.warning("Kronos shutdown reported an error (%s)",
+                                   type(exc).__name__)
             repository.release_writer()
             database.close()
 
@@ -100,6 +140,9 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     )
 
     app.state.api_latencies = []  # rolling last-100 request latencies (ms)
+    app.state.forecast_service = None
+    app.state.kronos_environment = None
+    app.state.kronos_service_error = ""
 
     @app.middleware("http")
     async def record_latency(request, call_next):

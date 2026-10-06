@@ -1,5 +1,8 @@
 # Files changed since the original AXIOM-main
 
+> **Historical snapshot only:** the diff and file list below are pinned to their named base/revision and do not describe current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current scope and verification.
+
+
 Base commit `0314db2` ("Add Arena 3.0.5 source") is the imported AXIOM-main
 tree. Everything below is work added on branch `arena/01a0ecfa-axiom`.
 

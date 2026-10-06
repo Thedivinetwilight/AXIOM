@@ -1,14 +1,12 @@
-# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0)
+# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0 code line)
 
-> **Current release: 3.2.0 (AXIOM).** The product is now the
-> AXIOM-MONEY-PRINTER workstation (display name **AXIOM**): market-scoped
-> universes, multi-market session clocks, an evidence stack, an opportunity
-> center, research intelligence, Kronos model studio, paper trading and a
-> first-class fail-closed LIVE mode — all through a GUI, no terminal.
-> Read **`AXIOM_PRODUCT_MANUAL.md`** (authoritative) and the engineering
-> spec **`AXIOM-MONEY-PRINTER_MASTER_PROMPT_v1.0.md`**. Documents listed in
-> the manual's "Superseded documents" section describe earlier releases.
-> Everything below this banner is retained 3.1.0-and-earlier release history.
+> **Current source line:** 3.2.0. `AXIOM_PRODUCT_MANUAL.md` is a qualified
+> product overview, not a release-readiness certificate. Use
+> [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the
+> commit-specific test, CI, package, artifact, and external-verification state.
+> The master prompt is a requirements document, not evidence that a requirement
+> is implemented or verified. Everything below this banner is retained 3.1.0-
+> and-earlier release history; its release claims and test counts are historical.
 
 ---
 

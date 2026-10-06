@@ -57,8 +57,11 @@ from app.config.hosts import (
     DEFAULT_ORDER_HISTORY_URL,
     DEFAULT_SANDBOX_BASE_URL,
     FORBIDDEN_IN_SANDBOX,
+    READ_AND_AUTH_HOSTS,
     SANDBOX_ORDER_HOSTS,
     host_of,
+    is_trusted_upstox_request_url,
+    is_trusted_upstox_url,
 )
 
 logger = logging.getLogger("bot.sandbox")
@@ -267,6 +270,13 @@ class UpstoxSandboxBroker:
                 f"Permitted hosts: {', '.join(sorted(self.ALLOWED_HOSTS))}. "
                 f"Set the base URL to one of them."
             )
+        if not is_trusted_upstox_url(base_url, self.ALLOWED_HOSTS):
+            raise ValueError("Broker base URL must be a secure HTTPS root on its order host")
+        if not is_trusted_upstox_url(
+                history_url, READ_AND_AUTH_HOSTS,
+                expected_path="/v2/order/history"):
+            raise ValueError(
+                "Order-history URL must be the documented HTTPS Upstox endpoint")
         self._token = access_token
         self.instrument_key = instrument_key
         # 3.0.1: authoritative symbol → instrument_key resolution. The broker
@@ -326,10 +336,26 @@ class UpstoxSandboxBroker:
             headers["X-Algo-Name"] = self._algo_name  # optional per current docs
         return headers
 
+    def _authorize_request(self, method: str, url: str, **kwargs) -> None:
+        """Pin bearer-token requests to the configured order/history hosts."""
+        method = str(method).upper()
+        base_host = host_of(self._base_url)
+        allowed_hosts = {base_host}
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            allowed_hosts.add(host_of(self._history_url))
+        if not is_trusted_upstox_request_url(url, allowed_hosts):
+            raise SandboxRequestError(
+                "Broker request refused: endpoint must use HTTPS on a configured "
+                "Upstox host")
+
     def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """HTTP core. 401/403 fail closed. Reads (GET) retry 429/5xx with
         bounded backoff; writes (POST/PUT/DELETE) NEVER auto-retry — the
         remote outcome could already exist (duplicate-order safety)."""
+        # Dispatch the authorization hook here rather than only in a subclass
+        # override: even an explicit call to this base method must pass the
+        # live broker's final transport gate.
+        self._authorize_request(method, url, **kwargs)
         if not self.available:
             raise SandboxAuthError("Sandbox broker disabled after an auth failure")
         import time as _time
@@ -430,16 +456,29 @@ class UpstoxSandboxBroker:
 
             self._journal = getattr(self, "_journal", None) or SubmissionJournal(
                 self.repository)
-            if self._journal.resubmission_forbidden(intent_id):
-                # durable journal says this intent may already exist remotely
+            gateway_authorization_id = str(
+                extra.pop("_gateway_authorization_id", "") or "")
+            existing_entry = self._journal.get(intent_id)
+            detail = (existing_entry.get("detail")
+                      if isinstance(existing_entry, dict) else None)
+            gateway_authorized_attempt = bool(
+                gateway_authorization_id
+                and isinstance(existing_entry, dict)
+                and existing_entry.get("state") == SUBMISSION_ATTEMPTED
+                and isinstance(detail, dict)
+                and detail.get("gateway_authorization_id") == gateway_authorization_id)
+            if (self._journal.resubmission_forbidden(intent_id)
+                    and not gateway_authorized_attempt):
+                # Durable journal says this intent may already exist remotely.
                 logger.warning("DUPLICATE_INTENT_BLOCKED",
                                extra={"intent": intent_id[:8]})
                 return intent_id
-            self._journal.record(
-                intent_id, instrument_key=resolved_key, symbol=symbol or "",
-                side=side, quantity=float(quantity), price=float(price),
-                strategy="", params_version="", tag=intent_tag)
-            self._journal.mark(intent_id, SUBMISSION_ATTEMPTED)
+            if not gateway_authorized_attempt:
+                self._journal.record(
+                    intent_id, instrument_key=resolved_key, symbol=symbol or "",
+                    side=side, quantity=float(quantity), price=float(price),
+                    strategy="", params_version="", tag=intent_tag)
+                self._journal.mark(intent_id, SUBMISSION_ATTEMPTED)
         our_id = f"{'live' if self.LIVE else 'sbox'}-{intent_id[:12]}"
         state = SandboxOrderState(
             our_id=our_id, symbol=symbol or resolved_key.split("|")[-1],
@@ -727,6 +766,8 @@ class UpstoxSandboxBroker:
         recorded once (idempotent transitions keyed by child id), so restarts
         never double count and no child is ever lost or applied twice.
         """
+        from app.engine.state import reconciled_fill_id
+
         new_fills: list[dict] = []
         if self.repository is not None:
             from app.engine.state import (SubmissionJournal, UNKNOWN,
@@ -764,10 +805,12 @@ class UpstoxSandboxBroker:
                 average = float(final.get("average_price") or 0)
                 ts = str(final.get("order_timestamp") or "")
                 mapped = self._map_status(status, filled)
+                observed_at = datetime.now(timezone.utc).isoformat()
+                transition_raw = {**final, "_axiom_observed_at": observed_at}
                 if self.repository:
                     fresh = self._record_transition(
-                        state.our_id, upstox_order_id, mapped, filled, average, ts, final
-                    )
+                        state.our_id, upstox_order_id, mapped, filled, average, ts,
+                        transition_raw)
                 else:
                     fresh = True  # without a repository, apply conservatively
                 if not fresh:
@@ -789,7 +832,9 @@ class UpstoxSandboxBroker:
                             incremental = average
                     elif average <= 0 and prev_avg > 0:
                         incremental = prev_avg
+                    realized_before = self.ledger.realized_pnl
                     self.ledger.apply_fill(state.side, delta, incremental)
+                    realized_delta = self.ledger.realized_pnl - realized_before
                     state.child_filled[upstox_order_id] = filled
                     state.child_avg_price[upstox_order_id] = \
                         average if average > 0 else prev_avg
@@ -798,7 +843,12 @@ class UpstoxSandboxBroker:
                         {"intent_id": intent_id, "order_id": state.our_id,
                          "upstox_order_id": upstox_order_id,
                          "side": state.side, "quantity": delta,
-                         "price": incremental}
+                         "cumulative_filled": filled,
+                         "fill_id": reconciled_fill_id(
+                             state.our_id, upstox_order_id, filled),
+                         "price": incremental,
+                         "realized_pnl": realized_delta,
+                         "observed_at": observed_at}
                     )
                     logger.info(
                         "SANDBOX_FILL_RECONCILED",

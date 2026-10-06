@@ -1,5 +1,8 @@
 # Arena — Install the `.exe` and Start Trading
 
+> **Historical installation guide:** binary availability and commands may have changed since this guide was written. Verify the current build/artifact state in [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) before following release-specific instructions.
+
+
 A step-by-step guide from downloading the file to a running session. No Python,
 no command line, no prior knowledge assumed.
 

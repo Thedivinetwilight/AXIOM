@@ -1,5 +1,8 @@
 # ARENA FINAL VERIFICATION — 3.0.5
 
+> **Historical snapshot only:** this 3.0.5 verification predates the current 3.2.0 source audit. Its test counts, release identity and artifact claims do not describe current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current evidence.
+
+
 > **PATCH 3.0.5 (2026-09-26) + PATCH 3.0.3 (2026-09-26) + FINAL HARDENING PASS (2026-09-25).** 3.0.5 adds the additive Market Event Listener (internet intelligence, transmission-path impact, Router context, dashboard panel, observational memory, 20 deterministic tests) atop the 3.0.3 sliced-order correctness; 3.0.3 fixes sliced-order accounting, per-child recovery, incremental fill pricing and adaptive cadence on top of the 3.0.2 hardening; 3.0.2 eliminated the remaining execution-path defects found in the full-code audit of 3.0.1. It is an additive release: no feature or working V1/V2.1/3.0/3.0.1/3.0.3 behavior removed, no risk control weakened. Historical version references (V0.6.x, V1, V2.1, FINAL 3.0.0/3.0.1/3.0.3 notes) are preserved as history; all *current-release* identity surfaces read **3.0.5**.
 
 Date: 2026-09-25 · Vocabulary: **VERIFIED / NOT VERIFIED / NOT ATTEMPTED / FAILED** only.

@@ -27,6 +27,7 @@ from axiom.market.provider import (
     MarketDataBar,
     MarketDataError,
     MarketDataProvider,
+    MarketDataResult,
 )
 from axiom.market.validation import validate_market_data
 from axiom.models import (
@@ -36,6 +37,8 @@ from axiom.models import (
     KronosConfig,
     KronosState,
     MarketDataQuality,
+    TIMEFRAME_SECONDS,
+    require_aware_utc,
     utcnow,
 )
 
@@ -101,6 +104,9 @@ class ForecastPipeline:
             raise ValueError("ForecastPipeline needs a Kronos runtime or an infer callable")
         self.provider = provider
         self.config = config.validate()
+        if runtime is not None and runtime.config != self.config:
+            raise ValueError(
+                "ForecastPipeline configuration differs from its Kronos runtime")
         self.calendar = calendar or ContinuousCalendar()
         self.store = store if store is not None else ForecastStore()
         self.runtime = runtime
@@ -122,10 +128,12 @@ class ForecastPipeline:
         if self.model_identity is not None:
             try:
                 reported = self.model_identity()
+                if (not isinstance(reported, Sequence) or
+                        isinstance(reported, (str, bytes)) or len(reported) != 2):
+                    raise ValueError("model identity must be a two-item sequence")
+                identity = (str(reported[0] or ""), str(reported[1] or ""))
             except Exception as exc:  # accessor must never break forecasting
                 logger.warning("model identity accessor failed: %s", exc)
-            else:
-                identity = (str(reported[0] or ""), str(reported[1] or ""))
         return (
             info.model_id if info else (identity[0] or self.config.model_id),
             info.model_revision
@@ -174,11 +182,40 @@ class ForecastPipeline:
         now: datetime | None = None,
         force: bool = False,
     ) -> ForecastOutcome:
-        moment = now or self.clock()
+        moment = self.clock() if now is None else now
+        if not isinstance(instrument, str) or not instrument.strip():
+            return self._reject(
+                KronosState.DATA_ERROR, "instrument must be a non-empty string",
+                MarketDataQuality.unavailable("invalid instrument"),
+            )
+        if not isinstance(timeframe, str) or timeframe not in TIMEFRAME_SECONDS:
+            return self._reject(
+                KronosState.DATA_ERROR, f"unsupported timeframe: {timeframe}",
+                MarketDataQuality.unavailable("unsupported timeframe"),
+            )
+        try:
+            moment = require_aware_utc(moment, "forecast time")
+        except (TypeError, ValueError, OverflowError) as exc:
+            return self._reject(
+                KronosState.DATA_ERROR, f"invalid forecast time: {exc}",
+                MarketDataQuality.unavailable(f"invalid forecast time: {exc}"),
+            )
 
         # 1) real market data (or an honest failure) -------------------------
         try:
             result = self.provider.fetch(instrument, timeframe)
+            if not isinstance(result, MarketDataResult):
+                raise MarketDataError("provider returned an invalid market-data result")
+            if result.instrument != instrument:
+                raise MarketDataError(
+                    f"provider result instrument {result.instrument!r} != requested "
+                    f"{instrument!r}"
+                )
+            if result.timeframe != timeframe:
+                raise MarketDataError(
+                    f"provider result timeframe {result.timeframe!r} != requested "
+                    f"{timeframe!r}"
+                )
         except MarketDataError as exc:
             return self._reject(
                 KronosState.DATA_ERROR,
@@ -193,8 +230,15 @@ class ForecastPipeline:
             )
 
         # 2) closed-candle gate ---------------------------------------------
-        gate = ClosedCandleGate(timeframe, self.calendar)
-        window = gate.apply(list(result.bars), moment)
+        try:
+            gate = ClosedCandleGate(timeframe, self.calendar)
+            window = gate.apply(list(result.bars), moment)
+        except Exception as exc:
+            return self._reject(
+                KronosState.DATA_ERROR,
+                f"market data timestamps could not be gated: {type(exc).__name__}: {exc}",
+                MarketDataQuality.unavailable("invalid market-data timestamps"),
+            )
         if not window.closed:
             return self._reject(
                 KronosState.INSUFFICIENT_HISTORY,
@@ -204,13 +248,20 @@ class ForecastPipeline:
 
         # 3) validate the window (never repair) ------------------------------
         bars = list(window.closed[-self.config.lookback:])
-        quality = validate_market_data(
-            bars,
-            timeframe,
-            min_history=self.config.min_history,
-            calendar=self.calendar,
-            expected_instrument=instrument,
-        )
+        try:
+            quality = validate_market_data(
+                bars,
+                timeframe,
+                min_history=self.config.min_history,
+                calendar=self.calendar,
+                expected_instrument=instrument,
+            )
+        except Exception as exc:
+            return self._reject(
+                KronosState.DATA_ERROR,
+                f"market data could not be validated: {type(exc).__name__}: {exc}",
+                MarketDataQuality.unavailable("market data validation failed"),
+            )
         if quality.state is DataQualityState.INSUFFICIENT_HISTORY:
             return self._reject(
                 KronosState.INSUFFICIENT_HISTORY,
@@ -242,6 +293,7 @@ class ForecastPipeline:
             input_hash_value=digest,
             model_revision=model_revision,
             config_hash=self.config.config_hash(),
+            model_id=model_id,
         )
 
         # 4) cache: only a new closed candle (or changed input) re-runs ------
@@ -275,10 +327,10 @@ class ForecastPipeline:
             future_timestamps = self.calendar.project_future_timestamps(
                 last_closed, timeframe, self.config.pred_len  # type: ignore[arg-type]
             )
-        except MarketDataError as exc:
+        except Exception as exc:
             return self._reject(
                 KronosState.DATA_ERROR,
-                f"cannot project future timestamps: {exc}",
+                f"cannot project future timestamps: {type(exc).__name__}: {exc}",
                 quality,
                 last_closed,
             )
@@ -298,13 +350,46 @@ class ForecastPipeline:
             )
 
         # 6) validate the forecast ------------------------------------------
-        check = validate_forecast(inference, future_timestamps, self.config)
+        try:
+            check = validate_forecast(inference, future_timestamps, self.config)
+        except Exception as exc:
+            return self._reject(
+                KronosState.ERROR,
+                f"forecast validation failed: {type(exc).__name__}: {exc}",
+                quality,
+                last_closed,
+            )
         if not check.ok:
             return self._reject(
                 KronosState.ERROR,
                 "forecast rejected: " + "; ".join(check.errors[:5]),
                 quality,
                 last_closed,
+            )
+
+        # The inference result is the final model identity evidence for a
+        # process-backed runtime. If its loaded identity differs from the
+        # pre-inference status used for lookup, store only under the identity
+        # that actually came back with the trajectories.
+        actual_model_id = inference.model_id or model_id
+        actual_model_revision = inference.model_revision or model_revision
+        identity_changed = (actual_model_id != model_id
+                            or actual_model_revision != model_revision)
+        if identity_changed:
+            logger.warning(
+                "model identity used for inference (%s@%s) differs from the "
+                "pre-inference cache identity (%s@%s) for %s %s",
+                actual_model_id or "<unset>", actual_model_revision or "<unset>",
+                model_id or "<unset>", model_revision or "<unset>",
+                instrument, timeframe)
+            cache_key = forecast_cache_key(
+                instrument=instrument,
+                timeframe=timeframe,
+                last_closed_timestamp=last_closed,
+                input_hash_value=digest,
+                model_id=actual_model_id,
+                model_revision=actual_model_revision,
+                config_hash=self.config.config_hash(),
             )
 
         # 7) assemble and store the snapshot ---------------------------------
@@ -316,19 +401,10 @@ class ForecastPipeline:
             candles = build_forecast_candles(inference.paths, future_timestamps)
             uncertainty = summarize_paths(inference.close_paths())
             notes = list(quality.warnings) + list(check.warnings) + list(inference.notes)
-            if inference.model_revision and inference.model_revision != model_revision:
-                # The child loaded something other than the identity we keyed on.
-                # Record what actually ran rather than silently trusting the key.
-                logger.warning(
-                    "model revision used for inference (%s) differs from the cached "
-                    "identity (%s) for %s %s",
-                    inference.model_revision,
-                    model_revision or "<unset>",
-                    instrument,
-                    timeframe,
-                )
+            if identity_changed:
                 notes.append(
-                    f"model revision resolved to {inference.model_revision} at inference"
+                    f"model identity resolved to {actual_model_id}@"
+                    f"{actual_model_revision} at inference; cache identity updated"
                 )
             if uncertainty is None and self.config.sample_paths > 1:
                 notes.append(
@@ -343,8 +419,8 @@ class ForecastPipeline:
                 config=self.config,
                 provenance=self._provenance(result, bars, digest),
                 data_quality=quality,
-                model_id=inference.model_id or model_id,
-                model_revision=inference.model_revision or model_revision,
+                model_id=actual_model_id,
+                model_revision=actual_model_revision,
                 tokenizer_id=tokenizer_id,
                 tokenizer_revision=tokenizer_revision,
                 device=device,

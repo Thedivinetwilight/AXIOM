@@ -1,6 +1,8 @@
-# KRONOS INTEGRATION — AXIOM forecasting subsystem
+# KRONOS INTEGRATION — HISTORICAL TECHNICAL NOTES
 
-Status: implemented and tested at the integration level, **off by default**
+> **Historical snapshot only:** this guide and its §0 test counts describe an earlier integration snapshot (`0314db2`), before later AXIOM app integration and forecast-contract/cache hardening. The implementation and claims below are not a current HEAD runbook or verification report. The old source maps, test counts, and statements such as “Arena 3.0.5 is untouched” are preserved as historical context, not promoted as current facts. For current code paths and evidence, see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+Historical status at that snapshot: implemented and tested at the integration level, **off by default**
 (`AXIOM_KRONOS_ENABLED=false`). **Not production-ready**, and **never verified
 against real pretrained Kronos weights** — see [§0 Verification status](#0-verification-status).
 

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import Settings
 from app.api.server import create_app
 from app.intel.research_loop import (CRITICAL_SAFE_KINDS, LOOP_STEPS,
-                                     ResearchScheduler)
+                                     QUOTA_STATE_KEY, ResearchScheduler)
 
 
 class FakeGovernor:
@@ -144,6 +144,50 @@ class TestDurableResearchQuota:
         decision = revived.admit(now=now)
         assert decision["admitted"] and decision["quota_used"] == 2
         assert revived.status(now=now)["quota_used"] == 2
+        database.close()
+
+    def test_concurrent_processes_cannot_spend_the_same_quota_slot(self, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.database.database import Database
+        from app.database.repository import Repository
+
+        path = tmp_path / "shared-quota.db"
+        first_db = Database(f"sqlite:///{path}")
+        second_db = Database(f"sqlite:///{path}")
+        schedulers = [
+            ResearchScheduler(daily_experiment_quota=1,
+                              repository=Repository(first_db)),
+            ResearchScheduler(daily_experiment_quota=1,
+                              repository=Repository(second_db)),
+        ]
+        now = time.time()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            decisions = list(pool.map(
+                lambda scheduler: scheduler.admit(now=now), schedulers))
+        assert sum(decision["admitted"] for decision in decisions) == 1
+        assert max(decision["quota_used"] for decision in decisions) == 1
+        first_db.close()
+        second_db.close()
+
+    def test_malformed_quota_state_and_write_failure_fail_closed(self, tmp_path):
+        repository, database = self._repo(tmp_path)
+        repository.set_engine_state(QUOTA_STATE_KEY, {"not-a-day": 1})
+        malformed = ResearchScheduler(daily_experiment_quota=5,
+                                      repository=repository)
+        decision = malformed.admit()
+        assert decision["admitted"] is False
+        assert "unreadable or malformed" in decision["reason"]
+
+        class ReadOnlyRepo:
+            def get_engine_state(self, key, default=None):
+                return {}
+
+        failed_write = ResearchScheduler(daily_experiment_quota=5,
+                                         repository=ReadOnlyRepo())
+        decision = failed_write.admit()
+        assert decision["admitted"] is False
+        assert "storage is unavailable" in decision["reason"]
         database.close()
 
     def test_durable_quota_resets_next_day(self, tmp_path):

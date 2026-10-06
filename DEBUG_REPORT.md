@@ -1,5 +1,8 @@
 # Arena — Full-Codebase Debug Report
 
+> **Historical snapshot only:** this audit describes branch `arena/01a0fcfb-axiom` at its stated baseline and is not evidence for current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current verification.
+
+
 **Date:** 2026-10-03
 **Repository:** `Thedivinetwilight/AXIOM` · branch `arena/01a0fcfb-axiom`
 **Baseline commit:** `733c2a8` (HEAD == remote at start of pass)

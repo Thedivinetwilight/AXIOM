@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
+from pathlib import PurePosixPath, PureWindowsPath
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -105,17 +107,37 @@ class ModelManifestEntry:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "ModelManifestEntry":
-        stamp = payload["downloaded_at"]
+        if not isinstance(payload, dict):
+            raise TypeError("manifest entry must be an object")
+        model_id = payload.get("model_id")
+        revision = payload.get("revision", "")
+        file_name = payload.get("file_name")
+        relative_path = payload.get("relative_path")
+        size_bytes = payload.get("size_bytes")
+        digest = payload.get("sha256")
+        stamp = payload.get("downloaded_at")
+        if (not isinstance(model_id, str) or not model_id.strip()
+                or not isinstance(revision, str)
+                or not isinstance(file_name, str) or not file_name
+                or not isinstance(relative_path, str) or not relative_path
+                or type(size_bytes) is not int or size_bytes < 0
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest.lower())):
+            raise ValueError("manifest entry fields are malformed")
+        if not isinstance(stamp, str):
+            raise ValueError("manifest timestamp is malformed")
+        downloaded_at = datetime.fromisoformat(stamp)
+        if downloaded_at.tzinfo is None or downloaded_at.utcoffset() is None:
+            raise ValueError("manifest timestamp must be timezone-aware")
         return cls(
-            model_id=payload["model_id"],
-            revision=payload.get("revision", ""),
-            file_name=payload["file_name"],
-            relative_path=payload["relative_path"],
-            size_bytes=int(payload["size_bytes"]),
-            sha256=payload["sha256"],
-            downloaded_at=(
-                stamp if isinstance(stamp, datetime) else datetime.fromisoformat(stamp)
-            ),
+            model_id=model_id,
+            revision=revision,
+            file_name=file_name,
+            relative_path=relative_path,
+            size_bytes=size_bytes,
+            sha256=digest.lower(),
+            downloaded_at=downloaded_at,
         )
 
 
@@ -143,31 +165,61 @@ class ModelCache:
         self.manifest_path = self.root / MANIFEST_NAME
 
     # -- manifest ------------------------------------------------------------
-    def load_manifest(self) -> dict[str, ModelManifestEntry]:
-        if not self.manifest_path.exists():
+    def _load_document(self) -> dict:
+        if not self.manifest_path.exists() or self.manifest_path.is_symlink():
             return {}
         try:
             raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return {}
-        entries = {}
-        for key, payload in (raw.get("entries") or {}).items():
+        if (not isinstance(raw, dict) or type(raw.get("schema")) is not int
+                or raw.get("schema") != 1 or not isinstance(raw.get("entries"), dict)):
+            return {}
+        return raw
+
+    def load_manifest(self) -> dict[str, ModelManifestEntry]:
+        raw_entries = self._load_document().get("entries", {})
+        entries: dict[str, ModelManifestEntry] = {}
+        for key, payload in raw_entries.items():
+            if not isinstance(key, str):
+                continue
             try:
-                entries[key] = ModelManifestEntry.from_dict(payload)
-            except (KeyError, TypeError, ValueError):
+                entry = ModelManifestEntry.from_dict(payload)
+                if entry.key == key:
+                    entries[key] = entry
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
         return entries
 
-    def save_manifest(self, entries: dict[str, ModelManifestEntry]) -> None:
+    def save_manifest(self, entries: dict[str, ModelManifestEntry], *,
+                      artifacts: dict | None = None) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.manifest_path.is_symlink():
+            raise ValueError("model cache manifest must not be a symlink")
+        if artifacts is None:
+            existing = self._load_document().get("artifacts", {})
+            artifacts = existing if isinstance(existing, dict) else {}
         payload = {
             "schema": 1,
             "updated_at": utcnow().isoformat(),
             "entries": {key: entry.to_dict() for key, entry in sorted(entries.items())},
+            "artifacts": artifacts,
         }
-        self.manifest_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=self.root,
+                    prefix=".manifest-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(json.dumps(payload, indent=2, sort_keys=True))
+                handle.flush()
+                os.fsync(handle.fileno())
+            # os.replace replaces a link itself rather than following it, and
+            # makes the manifest update atomic for readers after a crash.
+            os.replace(temporary, self.manifest_path)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
 
     # -- recording -----------------------------------------------------------
     def record(
@@ -179,8 +231,11 @@ class ModelCache:
         downloaded_at: datetime | None = None,
     ) -> ModelManifestEntry:
         file_path = Path(path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"weight file not found: {file_path}")
+        if not file_path.is_file():
+            raise FileNotFoundError(f"weight file not found as a regular file: {file_path}")
+        stamp = downloaded_at or utcnow()
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError("downloaded_at must be timezone-aware")
         try:
             relative = file_path.resolve().relative_to(self.root.resolve())
             relative_path = str(relative)
@@ -193,7 +248,7 @@ class ModelCache:
             relative_path=relative_path,
             size_bytes=file_path.stat().st_size,
             sha256=sha256_file(file_path),
-            downloaded_at=downloaded_at or utcnow(),
+            downloaded_at=stamp,
         )
         entries = self.load_manifest()
         entries[entry.key] = entry
@@ -202,6 +257,215 @@ class ModelCache:
 
     def entry_for(self, model_id: str, revision: str = "") -> ModelManifestEntry | None:
         return self.load_manifest().get(f"{model_id}@{revision or 'default'}")
+
+    @staticmethod
+    def _artifact_key(model_id: str, revision: str) -> str:
+        return f"{model_id}@{revision or 'default'}"
+
+    def record_artifact(
+        self, model_id: str, revision: str, directory: str | Path
+    ) -> Path:
+        """Record every regular file in one staged local artifact directory.
+
+        The directory must already live inside the cache. Symlinks and special
+        files are refused so the verified file set is exactly what the loader
+        will see. This creates mutable local integrity metadata only; it does
+        not establish publisher identity or signed release provenance.
+        """
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("model_id must be a non-empty string")
+        if not isinstance(revision, str):
+            raise ValueError("revision must be a string")
+        source = Path(directory)
+        if source.is_symlink() or not source.is_dir():
+            raise ValueError("artifact must be a regular directory, not a symlink")
+        root = source.resolve()
+        try:
+            relative_root = root.relative_to(self.root.resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError("artifact directory must be inside the model cache") from exc
+        if root == self.root.resolve():
+            raise ValueError("artifact directory must not be the cache root itself")
+
+        files: list[dict[str, object]] = []
+        for current, directories, names in os.walk(root, followlinks=False):
+            parent = Path(current)
+            kept_directories = []
+            for name in directories:
+                item = parent / name
+                if item.is_symlink():
+                    raise ValueError(f"artifact contains a symlink directory: {item}")
+                kept_directories.append(name)
+            directories[:] = kept_directories
+            for name in names:
+                item = parent / name
+                if item.is_symlink() or not item.is_file():
+                    raise ValueError(f"artifact contains a non-regular file: {item}")
+                files.append({
+                    "relative_path": item.relative_to(root).as_posix(),
+                    "file_name": item.name,
+                    "size_bytes": item.stat().st_size,
+                    "sha256": sha256_file(item),
+                })
+        files.sort(key=lambda item: str(item["relative_path"]))
+        if not files:
+            raise ValueError("artifact directory contains no regular files")
+        document = self._load_document()
+        artifacts = document.get("artifacts", {})
+        artifacts = dict(artifacts) if isinstance(artifacts, dict) else {}
+        key = self._artifact_key(model_id, revision)
+        artifact_payload = {
+            "model_id": model_id,
+            "revision": revision,
+            "relative_path": relative_root,
+            "files": files,
+            "recorded_at": utcnow().isoformat(),
+        }
+        existing = artifacts.get(key)
+        if isinstance(existing, dict):
+            stable_fields = ("model_id", "revision", "relative_path", "files")
+            if any(existing.get(name) != artifact_payload[name] for name in stable_fields):
+                raise ValueError(
+                    "an immutable model revision is already bound to different "
+                    "artifact bytes or a different directory")
+        artifacts[key] = artifact_payload
+        self.save_manifest(self.load_manifest(), artifacts=artifacts)
+        return root
+
+    def verify_artifact(
+        self, model_id: str, revision: str = ""
+    ) -> IntegrityReport:
+        """Verify a complete staged tree, including absence of untracked files.
+
+        The bundle manifest is mutable. A passing report means only that all
+        regular files in this exact directory match local recorded byte counts
+        and SHA-256 digests; it is not a signed publisher authenticity check.
+        """
+        document = self._load_document()
+        artifacts = document.get("artifacts", {})
+        key = self._artifact_key(model_id, revision)
+        artifact = artifacts.get(key) if isinstance(artifacts, dict) else None
+        if not isinstance(artifact, dict):
+            single = self.entry_for(model_id, revision)
+            detail = ("single-file integrity metadata is not a complete artifact bundle"
+                      if single is not None else "artifact bundle is not tracked")
+            return IntegrityReport(False, (), (), (detail,))
+        if artifact.get("model_id") != model_id or artifact.get("revision") != revision:
+            return IntegrityReport(
+                False, (), ("artifact manifest identity does not match the request",))
+        relative_root = artifact.get("relative_path")
+        raw_files = artifact.get("files")
+        if not isinstance(relative_root, str) or not relative_root:
+            return IntegrityReport(False, (), ("artifact directory path is malformed",))
+        try:
+            artifact_root = self.resolve_within_root(relative_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return IntegrityReport(False, (), (str(exc),))
+        if not artifact_root.is_dir() or (self.root / relative_root).is_symlink():
+            return IntegrityReport(
+                False, (), ("recorded artifact directory is missing or not a regular directory",))
+        if not isinstance(raw_files, list) or not raw_files:
+            return IntegrityReport(False, (), ("artifact file list is malformed or empty",))
+
+        expected: dict[str, dict] = {}
+        problems: list[str] = []
+        for item in raw_files:
+            if not isinstance(item, dict):
+                problems.append("artifact file entry is malformed")
+                continue
+            relative = item.get("relative_path")
+            name = item.get("file_name")
+            size = item.get("size_bytes")
+            digest = item.get("sha256")
+            if (not isinstance(relative, str) or not relative or "\\" in relative
+                    or PurePosixPath(relative).is_absolute()
+                    or PureWindowsPath(relative).is_absolute()
+                    or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
+                    or not isinstance(name, str) or not name
+                    or PurePosixPath(relative).name != name
+                    or type(size) is not int or size < 0
+                    or not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest.lower())):
+                problems.append("artifact file entry fields are malformed")
+                continue
+            if relative in expected:
+                problems.append(f"duplicate artifact path: {relative}")
+                continue
+            expected[relative] = item
+
+        actual: dict[str, Path] = {}
+        try:
+            for current, directories, names in os.walk(artifact_root, followlinks=False):
+                parent = Path(current)
+                kept_directories = []
+                for name in directories:
+                    path = parent / name
+                    if path.is_symlink():
+                        problems.append(f"artifact contains a symlink directory: {name}")
+                    else:
+                        kept_directories.append(name)
+                directories[:] = kept_directories
+                for name in names:
+                    path = parent / name
+                    relative = path.relative_to(artifact_root).as_posix()
+                    if path.is_symlink() or not path.is_file():
+                        problems.append(f"artifact contains a non-regular file: {relative}")
+                    else:
+                        actual[relative] = path
+        except (OSError, RuntimeError, ValueError) as exc:
+            problems.append(f"artifact tree could not be enumerated ({type(exc).__name__})")
+
+        for relative in sorted(set(expected) - set(actual)):
+            problems.append(f"recorded artifact file is missing: {relative}")
+        for relative in sorted(set(actual) - set(expected)):
+            problems.append(f"untracked file exists in artifact directory: {relative}")
+
+        entries: list[ModelManifestEntry] = []
+        recorded_at = artifact.get("recorded_at", "")
+        try:
+            stamp = datetime.fromisoformat(recorded_at)
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                raise ValueError("recorded_at must be timezone-aware")
+        except (TypeError, ValueError, OverflowError):
+            stamp = utcnow()
+            problems.append("artifact manifest timestamp is malformed")
+        for relative in sorted(set(expected) & set(actual)):
+            item = expected[relative]
+            path = actual[relative]
+            try:
+                size = path.stat().st_size
+                digest = sha256_file(path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                problems.append(f"artifact file could not be read ({type(exc).__name__}): {relative}")
+                continue
+            expected_size = item["size_bytes"]
+            expected_digest = str(item["sha256"]).lower()
+            if size != expected_size:
+                problems.append(
+                    f"size mismatch for {relative}: recorded {expected_size}, found {size}")
+            if digest != expected_digest:
+                problems.append(f"SHA-256 mismatch for artifact file {relative}")
+            entries.append(ModelManifestEntry(
+                model_id=model_id, revision=revision, file_name=path.name,
+                relative_path=path.relative_to(self.root.resolve()).as_posix(),
+                size_bytes=int(expected_size), sha256=expected_digest,
+                downloaded_at=stamp,
+            ))
+        return IntegrityReport(
+            ok=not problems,
+            entries=tuple(entries),
+            problems=tuple(problems),
+            notes=("complete directory matches the mutable local manifest; "
+                   "publisher authenticity is not established",),
+        )
+
+    def artifact_directory(self, model_id: str, revision: str = "") -> Path:
+        report = self.verify_artifact(model_id, revision)
+        if not report.ok:
+            raise ValueError("artifact bundle was not verified: " +
+                             "; ".join(report.problems or report.notes))
+        artifact = self._load_document()["artifacts"][self._artifact_key(model_id, revision)]
+        return self.resolve_within_root(artifact["relative_path"])
 
     def resolve_within_root(self, relative_path: str) -> Path:
         """Resolve a manifest path, refusing anything outside the cache root.
@@ -212,10 +476,26 @@ class ModelCache:
         would pass, because it compares the digest of the very file it was
         pointed at. The manifest is not a trusted input.
         """
+        if not isinstance(relative_path, str) or not relative_path:
+            raise ValueError("manifest path must be a non-empty string")
         candidate = Path(relative_path).expanduser()
         root = self.root.resolve()
-        resolved = (root / candidate).resolve() if not candidate.is_absolute() else \
-            candidate.resolve()
+        if not candidate.is_absolute():
+            windows = PureWindowsPath(relative_path)
+            if windows.is_absolute() or any(
+                    part in {"", ".", ".."} for part in candidate.parts):
+                raise ValueError(
+                    f"manifest path {relative_path!r} is outside the model cache {root}")
+            cursor = root
+            for part in candidate.parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    raise ValueError(
+                        f"manifest path {relative_path!r} traverses a symlink "
+                        "inside the model cache")
+            resolved = cursor.resolve()
+        else:
+            resolved = candidate.resolve()
         if resolved == root or root not in resolved.parents:
             raise ValueError(
                 f"manifest path {relative_path!r} resolves to {resolved}, outside "
@@ -240,38 +520,58 @@ class ModelCache:
     def verify(
         self, model_id: str, revision: str = "", *, expected_sha256: str | None = None
     ) -> IntegrityReport:
-        """Check the recorded digest of the cached weights before loading."""
-        entry = self.entry_for(model_id, revision)
+        """Check the recorded digest of the cached weights before loading.
+
+        The local manifest is mutable and is not publisher provenance. This
+        proves only that the tracked file still matches its recorded byte count
+        and SHA-256; callers must not label it as a signed/authentic upstream
+        artifact.
+        """
+        identity = f"{model_id}@{revision or 'default'}"
+        try:
+            entry = self.entry_for(model_id, revision)
+        except Exception as exc:
+            return IntegrityReport(
+                False, (), (f"manifest could not be read ({type(exc).__name__})",))
         problems: list[str] = []
         notes: list[str] = []
         if entry is None:
             if expected_sha256:
                 problems.append(
-                    f"no cached weights for {model_id}@{revision or 'default'} "
-                    "to verify against the configured digest"
+                    f"no cached weights for {identity} to verify against the "
+                    "configured digest"
                 )
             else:
                 notes.append(
-                    f"{model_id}@{revision or 'default'} is not tracked in the "
-                    "AXIOM manifest; integrity will be recorded after download"
+                    f"{identity} is not tracked in the AXIOM manifest; integrity "
+                    "is unverified"
                 )
             return IntegrityReport(False, (), tuple(problems), tuple(notes))
 
+        if entry.model_id != model_id or entry.revision != revision:
+            problems.append("manifest identity does not match the requested artifact")
         try:
             path = self.resolve_within_root(entry.relative_path)
-        except ValueError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             problems.append(str(exc))
             return IntegrityReport(False, (entry,), tuple(problems))
-        if not path.exists():
-            problems.append(f"recorded weight file is missing: {path}")
+        try:
+            if not path.is_file():
+                problems.append(f"recorded weight file is missing or not regular: {path}")
+                return IntegrityReport(False, (entry,), tuple(problems))
+            if path.name != entry.file_name:
+                problems.append("manifest file name does not match its resolved path")
+                return IntegrityReport(False, (entry,), tuple(problems))
+            actual_size = path.stat().st_size
+            if actual_size != entry.size_bytes:
+                problems.append(
+                    f"size mismatch for {entry.file_name}: recorded "
+                    f"{entry.size_bytes} bytes, found {actual_size}"
+                )
+            actual_sha = sha256_file(path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            problems.append(f"recorded weight file could not be read ({type(exc).__name__})")
             return IntegrityReport(False, (entry,), tuple(problems))
-        actual_size = path.stat().st_size
-        if actual_size != entry.size_bytes:
-            problems.append(
-                f"size mismatch for {entry.file_name}: recorded "
-                f"{entry.size_bytes} bytes, found {actual_size}"
-            )
-        actual_sha = sha256_file(path)
         if actual_sha != entry.sha256:
             problems.append(
                 f"SHA-256 mismatch for {entry.file_name}: recorded "

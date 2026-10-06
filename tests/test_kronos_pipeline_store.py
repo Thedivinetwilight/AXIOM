@@ -15,7 +15,7 @@ from axiom.forecast.store import ForecastStore
 from axiom.kronos.backends import KronosInference, KronosRuntimeUnavailable
 from axiom.kronos.runtime import KronosRuntime
 from axiom.market.calendar import ContinuousCalendar, DailyCalendar
-from axiom.market.provider import MarketDataBar, MarketDataError
+from axiom.market.provider import MarketDataBar, MarketDataError, MarketDataResult
 from axiom.market.replay import ReplayMarketDataProvider
 from axiom.models import (
     FORECAST_ORIGIN,
@@ -98,6 +98,13 @@ def now_for(csv: str = SAMPLE_CSV, timeframe: str = "1h",
 
 
 class TestPipelineHappyPath:
+    def test_pipeline_rejects_a_runtime_with_different_configuration(self):
+        cfg = config()
+        mismatched_runtime = KronosRuntime(config(temperature=0.5))
+        provider = ReplayMarketDataProvider.from_csv(SAMPLE_CSV, "1h")
+        with pytest.raises(ValueError, match="differs from its Kronos runtime"):
+            ForecastPipeline(provider, cfg, runtime=mismatched_runtime)
+
     def test_generates_a_labelled_forecast_from_closed_bars(self):
         moment = now_for()
         pipeline, runtime = make_pipeline(moment)
@@ -365,7 +372,15 @@ class TestModelIdentityInCacheKey:
             clock=lambda: moment)
         snapshot = pipeline.run("DEMO", "1h").snapshot
         assert snapshot.model_revision == "901c26c"
-        assert "resolved to 901c26c at inference" in snapshot.note
+        assert "cache identity updated" in snapshot.note
+        from axiom.forecast.cache import forecast_cache_key
+
+        assert snapshot.cache_key == forecast_cache_key(
+            instrument="DEMO", timeframe="1h",
+            last_closed_timestamp=snapshot.last_closed_timestamp,
+            input_hash_value=snapshot.input_hash,
+            model_id="NeoQuasar/Kronos-small", model_revision="901c26c",
+            config_hash=cfg.config_hash())
 
 
 class TestCacheHitStaleness:
@@ -445,6 +460,52 @@ class TestPipelineFailures:
         outcome = pipeline.run("DEMO", "1h")
         assert outcome.state is KronosState.DATA_ERROR
         assert "503" in outcome.message
+
+    def test_provider_result_must_match_requested_instrument_and_timeframe(self):
+        from axiom.market.provider import MarketDataProvider
+
+        class MismatchedProvider(MarketDataProvider):
+            name = "mismatch"
+
+            def __init__(self, result_instrument, result_timeframe):
+                super().__init__(source="fixture")
+                self.result_instrument = result_instrument
+                self.result_timeframe = result_timeframe
+
+            def fetch(self, instrument, timeframe, *, end=None, limit=None):
+                source_bars = ReplayMarketDataProvider.from_csv(
+                    SAMPLE_CSV, "1h").fetch("DEMO", "1h").bars
+                bars = tuple(MarketDataBar(
+                    bar.timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume,
+                    self.result_instrument) for bar in source_bars)
+                return MarketDataResult(
+                    instrument=self.result_instrument, timeframe=self.result_timeframe,
+                    bars=bars, source="fixture", provider="mismatch")
+
+        for result_instrument, result_timeframe, expected in (
+                ("OTHER", "1h", "result instrument"), ("DEMO", "30m", "result timeframe")):
+            pipeline, runtime = make_pipeline(
+                now_for(), provider=MismatchedProvider(result_instrument, result_timeframe))
+            outcome = pipeline.run("DEMO", "1h")
+            assert outcome.state is KronosState.DATA_ERROR
+            assert expected in outcome.message
+            assert runtime.calls == 0
+
+    def test_naive_now_is_rejected_without_raising(self):
+        pipeline, runtime = make_pipeline(datetime(2024, 1, 1))
+        outcome = pipeline.run("DEMO", "1h")
+        assert outcome.state is KronosState.DATA_ERROR
+        assert "invalid forecast time" in outcome.message
+        assert runtime.calls == 0
+
+    def test_non_numeric_provider_bar_is_rejected_before_inference(self):
+        provider, _all_bars, bars = fixture()
+        object.__setattr__(bars[-5], "open", "not-a-price")
+        pipeline, runtime = make_pipeline(now_for(), provider=provider)
+        outcome = pipeline.run("DEMO", "1h")
+        assert outcome.state is KronosState.DATA_ERROR
+        assert "non-finite or non-numeric OHLCV" in outcome.message
+        assert runtime.calls == 0
 
     def test_no_closed_candles_yet(self):
         _provider, _all_bars, visible = fixture(upto=5)

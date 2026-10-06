@@ -1,6 +1,6 @@
-# AXIOM Final Run Log (append-only)
+# AXIOM Final Run Log — HISTORICAL ENTRIES (append-only)
 
-Entries are appended in time order. Each entry records the revision tested and its actual result; older outcomes are not promoted to current proof.
+Entries are retained in time order. The existing entry records the 2026-10-04 snapshot at `f6808ae`; it is not current proof. A current-HEAD entry, if present, must explicitly name its tested commit and evidence. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the authoritative current state.
 
 ## 2026-10-04 — workspace recovery and fail-closed safety phase
 

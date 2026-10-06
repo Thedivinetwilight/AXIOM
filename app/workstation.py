@@ -117,8 +117,9 @@ def build(settings: Settings, repository, data_dir: str | Path) -> Workstation:
         studio = KronosStudio(ModelCache(), repository=repository)
     except Exception:
         studio = KronosStudio(repository=repository)
-    backup = BackupManager(settings.database_path() if hasattr(settings, "database_path")
-                           else _db_path(settings), backup_dir=data_dir / "backups")
+    backup = BackupManager(
+        settings.database_path() if hasattr(settings, "database_path") else _db_path(settings),
+        backup_dir=data_dir / "backups", active_database=True)
     market_id = str(getattr(settings, "market", "india") or "india")
     regime_bridge = RegimeBridge(changes, opportunities, market_id=market_id)
     import sys as _sys

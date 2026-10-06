@@ -201,14 +201,32 @@ class KronosEnvironment:
     notes: tuple[str, ...] = ()
 
     @property
-    def available(self) -> bool:
+    def configured(self) -> bool:
+        """Whether the isolated orchestration service was composed."""
         return self.service is not None
 
+    @property
+    def available(self) -> bool:
+        """Whether a running service currently reports a ready model runtime."""
+        if self.service is None:
+            return False
+        try:
+            return bool(self.service.running and self.service.status().is_ready)
+        except Exception:
+            return False
+
     def describe(self) -> dict:
+        status = self.status
+        if self.service is not None:
+            try:
+                status = self.service.status()
+            except Exception:
+                pass
         return {
+            "configured": self.configured,
             "available": self.available,
             "config": self.config.to_dict(),
-            "status": self.status.to_dict(),
+            "status": status.to_dict(),
             "series": [{"instrument": i, "timeframe": t} for i, t in self.series],
             "notes": list(self.notes),
         }
@@ -266,6 +284,18 @@ def build_forecast_service(
         mode = "process"
         notes.append("AXIOM_KRONOS_MODE invalid; using 'process'")
     cache = ModelCache(config.cache_dir or None)
+    if manager is not None and manager.config != config:
+        reason = "provided Kronos manager configuration differs from environment configuration"
+        return KronosEnvironment(
+            config,
+            None,
+            KronosStatus.error(reason, base=KronosStatus(
+                state=KronosState.INITIALIZING, backend=config.backend,
+                model_id=config.model_id, tokenizer_id=config.tokenizer_id,
+                cache_dir=str(cache.root), updated_at=clock())),
+            tuple(series),
+            notes=tuple(notes + [reason]),
+        )
     worker = manager or KronosManager(config, mode=mode, clock=clock)
 
     def infer(bars, future_timestamps):

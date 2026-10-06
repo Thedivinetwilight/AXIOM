@@ -122,7 +122,7 @@ class KronosConfig:
     enabled: bool = False
     backend: str = "upstream"  # "upstream" (real Kronos) or "stub" (dev/test)
     model_id: str = "NeoQuasar/Kronos-small"
-    model_revision: str = ""  # "" = default branch head; pinned revision preferred
+    model_revision: str = ""  # upstream loading requires a full immutable commit id
     tokenizer_id: str = "NeoQuasar/Kronos-Tokenizer-base"
     tokenizer_revision: str = ""
     lookback: int = 400
@@ -142,6 +142,29 @@ class KronosConfig:
     def validate(self) -> "KronosConfig":
         """Fail loudly on an unusable configuration; never silently clamp."""
         problems: list[str] = []
+        for name in ("lookback", "pred_len", "max_context", "top_k",
+                     "sample_paths", "min_history"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"{name} must be an integer")
+        for name in ("temperature", "top_p", "stale_after_seconds"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not isfinite(value)):
+                problems.append(f"{name} must be a finite number")
+        for name in ("enabled", "update_on_closed_bar", "allow_download"):
+            if type(getattr(self, name)) is not bool:
+                problems.append(f"{name} must be a boolean")
+        for name in ("backend", "model_id", "model_revision", "tokenizer_id",
+                     "tokenizer_revision", "device", "cache_dir"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                problems.append(f"{name} must be a string")
+            elif name in {"backend", "model_id", "tokenizer_id", "device"} \
+                    and not value.strip():
+                problems.append(f"{name} must not be empty")
+        if problems:
+            raise ValueError("Invalid KronosConfig: " + "; ".join(problems))
         if self.backend not in {"upstream", "stub"}:
             problems.append("backend must be 'upstream' or 'stub'")
         if self.lookback < 2:
@@ -168,12 +191,15 @@ class KronosConfig:
             problems.append("sample_paths must be >= 1")
         if self.stale_after_seconds <= 0:
             problems.append("stale_after_seconds must be > 0")
-        device = str(self.device)
-        if device not in {"auto", "cpu", "mps"} and not device.startswith("cuda"):
+        device = self.device
+        valid_cuda = (device == "cuda" or
+                      (device.startswith("cuda:") and device[5:].isdigit()))
+        if device not in {"auto", "cpu", "mps"} and not valid_cuda:
             problems.append("device must be 'auto', 'cpu', 'mps' or 'cuda[:n]'")
         for name in ("model_id", "tokenizer_id"):
-            if not str(getattr(self, name)).strip():
-                problems.append(f"{name} must not be empty")
+            value = getattr(self, name)
+            if isinstance(value, str) and value.strip() != value:
+                problems.append(f"{name} must not contain surrounding whitespace")
         if problems:
             raise ValueError("Invalid KronosConfig: " + "; ".join(problems))
         return self
@@ -218,8 +244,14 @@ class KronosConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "KronosConfig":
-        known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in payload.items() if k in known}).validate()
+        if not isinstance(payload, dict):
+            raise ValueError("Kronos configuration must be an object")
+        known = set(cls.__dataclass_fields__)
+        unknown = sorted(str(key) for key in payload if key not in known)
+        if unknown:
+            raise ValueError("unknown Kronos configuration field(s): "
+                             + ", ".join(unknown))
+        return cls(**payload).validate()
 
 
 @dataclass(frozen=True)

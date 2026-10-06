@@ -9,22 +9,20 @@ hints only.
 
 from __future__ import annotations
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 import asyncio
 import json
+import logging
 import time
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.auth import authenticate
-from app.markets import get_market, list_markets, market_session_state, \
-    parse_instrument_identity
+from app.markets import get_market, list_markets, market_session_state, parse_instrument_identity
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -347,7 +345,7 @@ async def evidence_view(market_id: str, identity: str, request: Request) -> dict
     if snapshot is not None:
         stack.set("kronos_forecast", kind="MODEL",
                   value={"note": "MODEL FORECAST — not observed market data",
-                         "snapshot": getattr(snapshot, "to_dict", lambda: {})()},
+                         "snapshot": getattr(snapshot, "to_dict", dict)()},
                   provenance="isolated Kronos forecast service")
     else:
         stack.set("kronos_forecast", kind="MODEL", value=None,
@@ -494,7 +492,6 @@ async def next_best_experiment(request: Request) -> dict:
     and opportunity density. Never fabricates expected information gain.
     """
     workstation = ws(request)
-    missed = workstation.missed.list(limit=100)
     stats = workstation.missed.stats()
     experiments = workstation.repository.list_experiments(limit=20) \
         if hasattr(workstation.repository, "list_experiments") else []
@@ -585,8 +582,7 @@ class ArmBody(BaseModel):
 async def live_arm(body: ArmBody, request: Request) -> dict:
     workstation = ws(request)
     from app.config.settings import LIVE_CONFIRM_PHRASE
-    from app.live.session import (OFF, CONFIGURED, READY, STOPPED,
-                                  LiveTransitionError)
+    from app.live.session import CONFIGURED, OFF, READY, STOPPED, LiveTransitionError
     from app.live.supervisor import LiveSupervisorError
 
     if body.confirmation_phrase != LIVE_CONFIRM_PHRASE:
@@ -688,14 +684,14 @@ async def live_emergency_stop(body: EmergencyStopBody, request: Request) -> dict
     exits until the live book is flat.
     """
     workstation = ws(request)
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     reason = (body.reason or "operator emergency stop").strip()[:240]
     if not reason:
         reason = "operator emergency stop"
     try:
         workstation.repository.set_engine_state("emergency_stop", {
-            "stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
+            "stopped": True, "ts": datetime.now(UTC).isoformat(),
             "reason": reason})
         workstation.repository.record_system_event(
             "EMERGENCY_STOP", {"reason": reason, "source": "workstation GUI"})
@@ -721,10 +717,10 @@ class EmergencyClearBody(BaseModel):
 async def live_emergency_stop_clear(body: EmergencyClearBody,
                                     request: Request) -> dict:
     workstation = ws(request)
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from app.config.settings import LIVE_CONFIRM_PHRASE
-    from app.live.session import (ACTIVE, ARMED, PAUSED, RECONCILING, BLOCKED,
-                                  LiveTransitionError)
+    from app.live.session import ACTIVE, ARMED, BLOCKED, PAUSED, RECONCILING, LiveTransitionError
 
     if body.confirmation_phrase != LIVE_CONFIRM_PHRASE:
         raise HTTPException(
@@ -739,7 +735,7 @@ async def live_emergency_stop_clear(body: EmergencyClearBody,
         if current.state in (ACTIVE, ARMED, PAUSED, RECONCILING):
             manager.block(reason="emergency stop cleared; fresh ARM required")
         workstation.repository.set_engine_state("emergency_stop", {
-            "stopped": False, "ts": datetime.now(timezone.utc).isoformat(),
+            "stopped": False, "ts": datetime.now(UTC).isoformat(),
             "reason": "cleared by operator; fresh ARM/ACTIVATE required"})
         workstation.repository.record_system_event(
             "EMERGENCY_STOP_CLEARED",
@@ -847,9 +843,86 @@ async def live_rate_limit(request: Request) -> dict:
 # KRONOS STUDIO (spec section 18)
 # =====================================================================
 
+def _forecast_service_payload(request: Request) -> dict:
+    environment = getattr(request.app.state, "kronos_environment", None)
+    service = getattr(request.app.state, "forecast_service", None)
+    setup_error = getattr(request.app.state, "kronos_service_error", "")
+    if service is not None:
+        running = False
+        try:
+            running = bool(service.running)
+            status = service.status()
+            status_payload = status.to_dict()
+            available = bool(running and status.is_ready)
+        except Exception as exc:
+            available = False
+            status_payload = {"state": "ERROR",
+                              "message": f"forecast status unavailable ({type(exc).__name__})"}
+        return {
+            "configured": True,
+            "available": available,
+            "running": running,
+            "queued": int(service.queued),
+            "status": status_payload,
+            "series": ([{"instrument": instrument, "timeframe": timeframe}
+                        for instrument, timeframe in environment.series]
+                       if environment is not None else []),
+            "notes": list(environment.notes) if environment is not None else [],
+        }
+    if environment is not None:
+        return {"configured": environment.configured,
+                "available": False, "running": False, "queued": 0,
+                "status": environment.status.to_dict(),
+                "series": [{"instrument": instrument, "timeframe": timeframe}
+                           for instrument, timeframe in environment.series],
+                "notes": list(environment.notes)}
+    return {"configured": False, "available": False, "running": False,
+            "queued": 0,
+            "status": {"state": "ERROR" if setup_error else "DISABLED",
+                       "message": (f"forecast service composition failed ({setup_error})"
+                                   if setup_error else "Kronos service is not configured")},
+            "series": [], "notes": []}
+
+
 @router.get("/api/kronos/studio", dependencies=[Depends(authenticate)])
 async def kronos_studio(request: Request) -> dict:
-    return ws(request).studio.overview()
+    overview = ws(request).studio.overview()
+    overview["forecast_service"] = _forecast_service_payload(request)
+    return overview
+
+
+@router.get("/api/kronos/service", dependencies=[Depends(authenticate)])
+async def kronos_service_status(request: Request) -> dict:
+    return _forecast_service_payload(request)
+
+
+class ForecastRefreshBody(BaseModel):
+    instrument: str = Field(min_length=1, max_length=200)
+    timeframe: str = Field(min_length=2, max_length=4)
+    force: bool = False
+
+
+@router.post("/api/kronos/forecast/refresh", dependencies=[Depends(authenticate)])
+async def kronos_forecast_refresh(body: ForecastRefreshBody, request: Request) -> dict:
+    from axiom.models import TIMEFRAME_SECONDS
+
+    instrument = body.instrument.strip()
+    service = getattr(request.app.state, "forecast_service", None)
+    if not instrument:
+        raise HTTPException(422, "instrument must not be blank")
+    if body.timeframe not in TIMEFRAME_SECONDS:
+        raise HTTPException(422, "unsupported timeframe")
+    if service is None:
+        current = _forecast_service_payload(request)
+        return {"ok": False, "accepted": False,
+                "status": current["status"].get("state", "DISABLED"),
+                "detail": current["status"].get("message", "forecast service unavailable")}
+    accepted = service.request_refresh(instrument, body.timeframe, force=body.force)
+    return {"ok": accepted, "accepted": accepted,
+            "status": service.status().state.value,
+            "queued": service.queued,
+            "detail": ("forecast request queued" if accepted
+                       else "forecast queue is full; request was not accepted")}
 
 
 class ModelAction(BaseModel):
@@ -1013,8 +1086,6 @@ class BackupTarget(BaseModel):
 
 @router.post("/api/backup/verify", dependencies=[Depends(authenticate)])
 async def backup_verify(body: BackupTarget, request: Request) -> dict:
-    from pathlib import Path
-
     path = _confine_backup_path(ws(request), body.path)
     return ws(request).backup.verify(path)
 
@@ -1031,8 +1102,10 @@ def _confine_backup_path(workstation, raw: str):
     candidate = Path(raw)
     backup_dir = workstation.backup.backup_dir.resolve()
     resolved = candidate.resolve()
-    if not str(resolved).startswith(str(backup_dir)):
-        raise HTTPException(422, "backup path must stay inside the backup directory")
+    try:
+        resolved.relative_to(backup_dir)
+    except ValueError:
+        raise HTTPException(422, "backup path must stay inside the backup directory") from None
     if not resolved.exists():
         raise HTTPException(404, "backup archive not found")
     return resolved

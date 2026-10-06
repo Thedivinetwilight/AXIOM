@@ -14,9 +14,9 @@ separately in ``ForecastUncertainty``.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import isfinite
 
 from axiom.kronos.backends import KronosInference
@@ -50,24 +50,52 @@ def validate_forecast(
 ) -> ForecastValidation:
     errors: list[str] = []
     warnings: list[str] = []
-    paths = inference.paths
+    try:
+        config.validate()
+    except (AttributeError, TypeError, ValueError) as exc:
+        return ForecastValidation(False, errors=(f"invalid Kronos configuration: {exc}",))
+    paths = getattr(inference, "paths", None)
 
+    if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes)):
+        return ForecastValidation(False, errors=("model trajectories must be an ordered sequence",))
     if not paths:
         return ForecastValidation(False, errors=("model returned no trajectory",))
     if len(paths) != config.sample_paths:
         errors.append(
             f"expected {config.sample_paths} sampled path(s), got {len(paths)}"
         )
+    if not isinstance(future_timestamps, Sequence) or isinstance(
+            future_timestamps, (str, bytes)):
+        return ForecastValidation(False, errors=("future timestamps must be an ordered sequence",),
+                                  paths=len(paths))
     if len(future_timestamps) != config.pred_len:
         errors.append(
             f"expected {config.pred_len} future timestamps, got {len(future_timestamps)}"
         )
-    if any(b <= a for a, b in zip(future_timestamps, future_timestamps[1:])):
+    stamps_valid = True
+    for index, stamp in enumerate(future_timestamps):
+        if not isinstance(stamp, datetime):
+            errors.append(f"future timestamp {index} is not a datetime")
+            stamps_valid = False
+            continue
+        try:
+            offset = stamp.utcoffset()
+        except (TypeError, ValueError, OverflowError):
+            offset = None
+        if stamp.tzinfo is None or offset is None or offset != timedelta(0):
+            errors.append(f"future timestamp {index} must be timezone-aware UTC")
+            stamps_valid = False
+    if stamps_valid and any(
+        b <= a for a, b in zip(future_timestamps, future_timestamps[1:])
+    ):
         errors.append("future timestamps must be strictly increasing")
 
     ohlc_violations = 0
     negative_volume = 0
     for path_index, path in enumerate(paths):
+        if not isinstance(path, Sequence) or isinstance(path, (str, bytes)):
+            errors.append(f"path {path_index} must be an ordered sequence of steps")
+            continue
         if len(path) != len(future_timestamps):
             errors.append(
                 f"path {path_index} has {len(path)} steps, expected "
@@ -75,6 +103,11 @@ def validate_forecast(
             )
             continue
         for step_index, step in enumerate(path):
+            if not isinstance(step, Mapping):
+                errors.append(
+                    f"path {path_index} step {step_index} must be an OHLCV mapping"
+                )
+                continue
             missing = [f for f in FORECAST_FIELDS if f not in step]
             if missing:
                 errors.append(
@@ -83,10 +116,17 @@ def validate_forecast(
                 )
                 continue
             values = {name: step[name] for name in FORECAST_FIELDS}
-            if not all(isfinite(value) for value in values.values()):
+            try:
+                finite = all(
+                    not isinstance(value, bool) and isfinite(value)
+                    for value in values.values()
+                )
+            except (TypeError, ValueError, OverflowError):
+                finite = False
+            if not finite:
                 errors.append(
-                    f"path {path_index} step {step_index} has non-finite values: "
-                    f"{values!r}"
+                    f"path {path_index} step {step_index} has non-numeric or "
+                    f"non-finite values: {values!r}"
                 )
                 continue
             if values["high"] < max(values["open"], values["close"]) or values["low"] > min(

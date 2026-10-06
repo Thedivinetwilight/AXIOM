@@ -78,21 +78,30 @@ class ChildRuntime:
         return self.runtime.status.state.value if self.runtime else KronosState.DISABLED.value
 
     def _ensure_runtime(self, payload: dict[str, Any], *, kind: str = "load") -> KronosRuntime:
-        if self.runtime is None:
-            config_payload = payload.get("config") or {}
-            if not config_payload and self.default_config is None:
-                if kind == "load":
-                    raise ValueError("no Kronos configuration supplied with 'load'")
-                raise ValueError(
-                    f"'{kind}' before 'load': the Kronos runtime is not configured. "
-                    "Send 'load' first, or include a 'config' with this request."
-                )
-            config = (
-                self.default_config
-                if not config_payload
-                else KronosConfig.from_dict(config_payload)
+        config_payload = payload.get("config", {})
+        if not isinstance(config_payload, dict):
+            raise ValueError("Kronos request config must be an object")
+        if self.runtime is not None:
+            if config_payload:
+                requested = KronosConfig.from_dict(config_payload)
+                if requested != self.runtime.config:
+                    raise ValueError(
+                        "Kronos request configuration differs from the loaded runtime")
+            return self.runtime
+        if not config_payload and self.default_config is None:
+            if kind == "load":
+                raise ValueError("no Kronos configuration supplied with 'load'")
+            raise ValueError(
+                f"'{kind}' before 'load': the Kronos runtime is not configured. "
+                "Send 'load' first, or include a 'config' with this request."
             )
-            self.runtime = KronosRuntime(config, cache=self.cache or ModelCache())
+        config = (
+            self.default_config
+            if not config_payload
+            else KronosConfig.from_dict(config_payload)
+        )
+        self.runtime = KronosRuntime(
+            config, cache=self.cache or ModelCache(config.cache_dir or None))
         return self.runtime
 
     def _load(self, request: KronosRequest) -> KronosResponse:
@@ -171,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             except (ValueError, json.JSONDecodeError) as exc:
                 print(f"invalid --config JSON: {exc}", file=sys.stderr)
                 return 2
-    child = ChildRuntime(config, cache=ModelCache())
+    child = ChildRuntime(
+        config, cache=ModelCache(config.cache_dir or None) if config is not None else None)
     return child.serve(sys.stdin, sys.stdout)
 
 

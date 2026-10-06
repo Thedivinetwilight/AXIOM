@@ -611,12 +611,15 @@ def cmd_engine(args) -> int:
                                               30.0) or 30.0)),
             epochs=session_manager.epochs,
             emergency_stop_reader=read_emergency_stop,
-            context_provider=_live_risk_context)
+            context_provider=_live_risk_context,
+            account_scope=getattr(broker, "account_scope", ""),
+            live_ops=live_ops)
         first_key = (getattr(provider, "_keys", None) or [""])[0]
         execution_broker = GatewayRoutedBroker(
             broker, gateway,
             market_id=str(first_key).split("|")[0] or "UNKNOWN",
             strategy_id="engine",
+            account_scope=getattr(broker, "account_scope", ""),
             universe=str(getattr(settings, "market_universe", "") or ""))
         print(json.dumps({
             "ok": True,
@@ -1116,8 +1119,12 @@ def cmd_live_preflight(args) -> int:
                 repository,
                 max_age_hours=settings.live_token_max_age_hours,
                 warn_minutes=settings.live_token_warn_minutes,
-            ).record_verified(source="live-preflight")
-            payload["verification_recorded"] = state
+            ).record_verified(source="live-preflight", credential=token)
+            payload["verification_recorded"] = {
+                "verified_at": state.get("verified_at"),
+                "source": state.get("source"),
+                "credential_bound": bool(state.get("credential_sha256")),
+            }
     except SandboxAuthError:
         payload.update(credential_checked=True, credential_accepted=False,
                        probe="credential rejected (401/403)")

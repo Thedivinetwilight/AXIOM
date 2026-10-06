@@ -116,20 +116,40 @@ class LiveSessionManager:
             raise LiveTransitionError(
                 "supervised runtime state is unreadable; activation is refused") from exc
         age = lease.get("heartbeat_age_seconds")
+        try:
+            control = self.repository.get_engine_state("live_engine_control", {})
+        except Exception as exc:
+            raise LiveTransitionError(
+                "live engine control state is unreadable; activation is refused") from exc
+        generation = control.get("generation") if isinstance(control, dict) else None
+        from app.live.readiness import reconciliation_freshness
+
+        silence_minutes = float(getattr(
+            getattr(self.engine_supervisor, "settings", None),
+            "live_reconcile_silence_minutes", 10))
+        reconciliation = reconciliation_freshness(
+            self.repository, max_age_seconds=silence_minutes * 60.0)
         verified = (
             lease.get("readable") is True
             and lease.get("atomic_supported") is True
             and lease.get("held") is True and lease.get("live") is True
             and lease.get("stale") is False
             and lease.get("owner_liveness") == "alive"
-            and isinstance(age, (int, float))
+            and isinstance(age, (int, float)) and age >= 0
             and age <= lease.get("stale_after_seconds", 0)
             and _pid_alive(int(lease.get("pid") or 0)) is True
             and isinstance(runtime, dict) and runtime.get("state") == "READY"
             and runtime.get("owner") == lease.get("owner")
             and runtime.get("pid") == lease.get("pid")
             and runtime.get("host") == lease.get("host")
-            and bool(runtime.get("reconciled_at")))
+            and type(generation) is int and generation > 0
+            and type(runtime.get("generation")) is int
+            and runtime.get("generation") == generation
+            and isinstance(control, dict)
+            and control.get("stop_requested") is False
+            and runtime.get("reconciliation_ok") is True
+            and runtime.get("reconciled_at") == reconciliation.get("timestamp")
+            and reconciliation.get("ok") is True)
         if not verified:
             raise LiveTransitionError(
                 "a live engine with a fresh lease and completed reconciliation "
@@ -138,6 +158,7 @@ class LiveSessionManager:
                 "supervisor_lease_owner": lease["owner"],
                 "supervisor_pid": lease["pid"],
                 "supervisor_host": lease["host"],
+                "supervisor_generation": generation,
                 "last_market_data_ts": self.repository.get_engine_state(
                     "last_market_data_ts")}
 
@@ -327,11 +348,21 @@ class LiveSessionManager:
                 "Activation refused by the current readiness contract: "
                 + "; ".join(offenders or ["unknown blocker"]))
         self._last_settings = settings
-        snapshot = self._transition(ACTIVE, f"operator start by {actor}",
-                                    payload={"readiness": readiness["verdict"]})
+        try:
+            from app.live.gateway import configuration_hash
+
+            config_hash = configuration_hash(settings)
+        except Exception as exc:
+            raise LiveTransitionError(
+                f"current live configuration is invalid ({type(exc).__name__})") from exc
         if self.epochs is not None:
-            self.epochs.activate(actor=actor)
-        return snapshot
+            # Persist the configuration-bound epoch before making ACTIVE
+            # visible. A failed epoch write can never leave an ACTIVE session.
+            self.epochs.activate(actor=actor,
+                                 configuration_hash=config_hash)
+        return self._transition(ACTIVE, f"operator start by {actor}",
+                                payload={"readiness": readiness["verdict"],
+                                         "configuration_hash": config_hash})
 
     def pause(self, *, reason: str = "operator pause") -> LiveSnapshot:
         current = self.current()
@@ -356,12 +387,20 @@ class LiveSessionManager:
                 "Resume refused by the current readiness contract: "
                 + "; ".join(offenders or ["unknown blocker"]))
         self._last_settings = settings
-        snapshot = self._transition(ACTIVE, "operator resume",
-                                    payload={"readiness": readiness["verdict"]})
+        try:
+            from app.live.gateway import configuration_hash
+
+            config_hash = configuration_hash(settings)
+        except Exception as exc:
+            raise LiveTransitionError(
+                f"current live configuration is invalid ({type(exc).__name__})") from exc
         if self.epochs is not None:
             # Resuming IS an activation: fresh epoch, stale intents refused.
-            self.epochs.activate(actor="resume")
-        return snapshot
+            self.epochs.activate(actor="resume",
+                                 configuration_hash=config_hash)
+        return self._transition(ACTIVE, "operator resume",
+                                payload={"readiness": readiness["verdict"],
+                                         "configuration_hash": config_hash})
 
     def begin_reconciliation(self, *, reason: str = "reconciliation watchdog") -> LiveSnapshot:
         current = self.current()

@@ -1,5 +1,8 @@
 # CONFIGURATION FIX REPORT — Arena 3.0.2
 
+> **Historical snapshot only:** this report describes the 3.0.2 configuration fix, not current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current verification.
+
+
 **Scope:** complete audit and fix of the configuration system (task: "STOP
 PATCHING ONE FIELD AT A TIME"). Documentation/report file only — trading,
 risk, broker, strategy and execution behavior untouched.

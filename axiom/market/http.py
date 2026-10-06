@@ -192,8 +192,17 @@ class HttpJsonMarketDataProvider(MarketDataProvider):
                 timestamp = parse_timestamp_field(row[self.mapping["timestamp"]])
             except (KeyError, TypeError, ValueError) as exc:
                 raise MarketDataError(f"malformed candle row: {row!r} ({exc})") from exc
-            symbol = str(row.get(self.mapping.get("instrument", "symbol"), instrument))
-            return MarketDataBar(timestamp, **values, instrument=symbol or instrument)
+            symbol_field = self.mapping.get("instrument", "symbol")
+            if symbol_field in row:
+                symbol = row[symbol_field]
+                if (not isinstance(symbol, str) or not symbol.strip()
+                        or symbol.strip() != symbol):
+                    raise MarketDataError(
+                        "instrument identity in candle row must be a non-empty "
+                        "trimmed string")
+            else:
+                symbol = instrument
+            return MarketDataBar(timestamp, **values, instrument=symbol)
         if isinstance(row, (list, tuple)):
             if len(row) < 6:
                 raise MarketDataError(
@@ -221,7 +230,7 @@ class HttpJsonMarketDataProvider(MarketDataProvider):
         end: datetime | None = None,
         limit: int | None = None,
     ) -> MarketDataResult:
-        self.check_timeframe(timeframe)
+        end, limit = self.validate_fetch_args(instrument, timeframe, end, limit)
         url = self.build_url(instrument, timeframe, limit)
         raw = self.transport(url, self.headers, self.timeout)
         try:

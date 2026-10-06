@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from math import isfinite
 from typing import Any
 
@@ -51,7 +51,7 @@ class KronosRequest:
         request_id = raw.get("id")
         if not isinstance(kind, str) or not isinstance(request_id, str):
             raise ProtocolError("request needs string 'kind' and 'id'")
-        payload = raw.get("payload") or {}
+        payload = raw.get("payload", {})
         if not isinstance(payload, dict):
             raise ProtocolError("request payload must be an object")
         return cls(kind=kind, request_id=request_id, payload=payload)
@@ -85,17 +85,24 @@ class KronosResponse:
             raw = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ProtocolError(f"response is not valid JSON: {exc}") from exc
-        if not isinstance(raw, dict) or "id" not in raw:
-            raise ProtocolError("response must be a JSON object with an 'id'")
-        result = raw.get("result") or {}
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str):
+            raise ProtocolError("response must be a JSON object with a string 'id'")
+        result = raw.get("result", {})
         if not isinstance(result, dict):
             raise ProtocolError("response result must be an object")
+        ok = raw.get("ok", False)
+        if type(ok) is not bool:
+            raise ProtocolError("response 'ok' must be a boolean")
+        error = raw.get("error", "")
+        state = raw.get("state", "")
+        if not isinstance(error, str) or not isinstance(state, str):
+            raise ProtocolError("response 'error' and 'state' must be strings")
         return cls(
-            request_id=str(raw["id"]),
-            ok=bool(raw.get("ok")),
+            request_id=raw["id"],
+            ok=ok,
             result=result,
-            error=str(raw.get("error", "")),
-            state=str(raw.get("state", "")),
+            error=error,
+            state=state,
         )
 
     @classmethod
@@ -135,7 +142,7 @@ def decode_timestamp(value: Any, *, field: str = "timestamp") -> datetime:
         raise ProtocolError(
             f"{field} has no timezone offset: {value!r} (the wire format requires one)"
         )
-    return parsed
+    return parsed.astimezone(timezone.utc)
 
 
 def decode_number(value: Any, *, field: str) -> float:
@@ -158,8 +165,12 @@ def decode_bars(rows: Any):
         raise ProtocolError("bars must be a list")
     bars = []
     for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) < 7:
-            raise ProtocolError(f"bar needs [ts, o, h, l, c, v, instrument]: {row!r}")
+        if not isinstance(row, (list, tuple)) or len(row) != 7:
+            raise ProtocolError(f"bar needs exactly [ts, o, h, l, c, v, instrument]: {row!r}")
+        if (not isinstance(row[6], str) or not row[6].strip()
+                or row[6].strip() != row[6]):
+            raise ProtocolError(
+                f"bar instrument must be a non-empty trimmed string: {row[6]!r}")
         bars.append(
             MarketDataBar(
                 timestamp=decode_timestamp(row[0], field="bar timestamp"),

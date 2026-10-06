@@ -1,5 +1,8 @@
 # V061_VERIFICATION.md — V0.6.1 Real Market-Data Integration
 
+> **Historical version report:** this V0.6.1 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Scope of V0.6.1:** connect the existing, unchanged paper-trading pipeline to a
 **real external market-DATA provider** (Upstox Market Stream Feed V3). Only
 market *data* is real. Execution remains 100% simulated in the existing

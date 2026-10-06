@@ -5,7 +5,7 @@ name: Build executable
 # PyInstaller cannot cross-compile — a Windows .exe must be built on Windows —
 # so this workflow exists to do that for you.
 #
-# 3.1.0 HARD GATES (an artifact that merely "builds" is NOT a release):
+# 3.2.0 HARD GATES (an artifact that merely "builds" is NOT a release):
 #
 #   1. tests          the FULL source suite on ubuntu must pass;
 #   2. packaging      the packaging regression suite (frontend JS integrity,
@@ -298,7 +298,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: "Arena 3.1.0 — executable build"
+          name: "Arena 3.2.0 — executable build"
           body: |
             Single-file Arena executables, built and **verified end-to-end** by
             this workflow on each platform. Before an artifact was kept, the

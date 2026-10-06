@@ -314,33 +314,34 @@ def run_checks(settings, *, repository=None) -> list[Check]:
          f"{len(integrity.get('missing_fills', []))}, quantity mismatches "
          f"{len(integrity.get('quantity_mismatch', []))}) — reconcile before trading")))
 
-    # 14. the persisted emergency stop must be clear
+    # 14. the persisted emergency stop must be clear. Missing or malformed
+    # state is UNKNOWN/active, never an implicit operator clear.
     if repository is None:
         checks.append(_unavailable("emergency_stop_clear", "no database"))
     else:
-        try:
-            stopped = bool((repository.get_engine_state("emergency_stop") or {})
-                           .get("stopped"))
-        except Exception as exc:
-            stopped, problem = False, type(exc).__name__
-        else:
-            problem = ""
+        from app.live.ops import read_emergency_stop
+
+        stopped, stop_reason = read_emergency_stop(repository)
         checks.append(_check(
-            "emergency_stop_clear", not stopped and not problem, ERROR,
-            "no persisted EMERGENCY STOP" if not stopped and not problem
-            else (f"a persisted EMERGENCY STOP is set: the engine will refuse to "
-                  "trade until 'python -m app live-resume' clears it" if stopped
-                  else f"the emergency-stop state could not be read ({problem})")))
+            "emergency_stop_clear", not stopped, ERROR,
+            "persisted emergency-stop record is explicitly clear" if not stopped
+            else (f"emergency stop is active or unknown ({stop_reason}); the engine "
+                  "will refuse entries until 'python -m app live-resume' clears it")))
 
     # 15. working orders and unresolved intents left over from the last run
-    open_orders = 0
+    open_orders: int | None = 0
+    open_orders_error = ""
     unresolved = 0
     if repository is not None:
         try:
-            open_orders = len(repository.open_live_orders() if live_table
-                              else repository.open_sandbox_orders())
-        except Exception:
-            open_orders = 0
+            rows = (repository.open_live_orders() if live_table
+                    else repository.open_sandbox_orders())
+            if not isinstance(rows, list):
+                raise TypeError("working-order query returned a non-list")
+            open_orders = len(rows)
+        except Exception as exc:
+            open_orders = None
+            open_orders_error = type(exc).__name__
         try:
             from app.engine.state import SubmissionJournal
 
@@ -351,12 +352,19 @@ def run_checks(settings, *, repository=None) -> list[Check]:
         checks.append(_unavailable("no_open_orders_left", "no database"))
         checks.append(_unavailable("no_unresolved_intents", "no database"))
     else:
+        order_check_ok = open_orders == 0
+        order_severity = ERROR if live_table and open_orders is None else WARNING
+        if open_orders is None:
+            order_detail = (f"working-order state could not be read ({open_orders_error}); "
+                            "refusing live activation")
+        elif open_orders == 0:
+            order_detail = "no working orders recorded"
+        else:
+            order_detail = (f"{open_orders} working order(s) recorded: the engine will "
+                            "reconcile them at startup — never run two engines against "
+                            "one account")
         checks.append(_check(
-            "no_open_orders_left", open_orders == 0, WARNING,
-            "no working orders recorded" if open_orders == 0
-            else f"{open_orders} working order(s) recorded: the engine will "
-                 "reconcile them at startup — never run two engines against one "
-                 "account"))
+            "no_open_orders_left", order_check_ok, order_severity, order_detail))
         checks.append(_check(
             "no_unresolved_intents", unresolved == 0, ERROR,
             "no unresolved submission intents" if unresolved == 0
@@ -476,6 +484,15 @@ def run_readiness_center_checks(settings, *, repository=None,
 
         if repository is not None:
             status = EngineLock(repository).status()
+            runtime = repository.get_engine_state("live_engine_runtime", {}) or {}
+            control = repository.get_engine_state("live_engine_control", {}) or {}
+            from app.live.readiness import reconciliation_freshness
+
+            reconcile_minutes = float(getattr(
+                settings, "live_reconcile_silence_minutes", 10))
+            reconciliation = reconciliation_freshness(
+                repository, max_age_seconds=reconcile_minutes * 60.0)
+            generation = control.get("generation") if isinstance(control, dict) else None
             readable = bool(status.get("readable"))
             atomic = bool(status.get("atomic_supported"))
             supervisor_owns_lease = (
@@ -487,8 +504,14 @@ def run_readiness_center_checks(settings, *, repository=None,
                 and status.get("stale") is False
                 and status.get("owner_liveness") == "alive"
                 and isinstance(status.get("heartbeat_age_seconds"), (int, float))
-                and status["heartbeat_age_seconds"]
-                <= status.get("stale_after_seconds", 0))
+                and 0 <= status["heartbeat_age_seconds"]
+                <= status.get("stale_after_seconds", 0)
+                and isinstance(runtime, dict) and runtime.get("state") == "READY"
+                and type(generation) is int and generation > 0
+                and runtime.get("generation") == generation
+                and runtime.get("reconciliation_ok") is True
+                and runtime.get("reconciled_at") == reconciliation.get("timestamp")
+                and reconciliation.get("ok") is True)
             blocking = (not readable or not atomic
                         or (bool(status.get("held"))
                             and not status.get("stale")

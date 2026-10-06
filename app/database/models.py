@@ -344,6 +344,28 @@ CREATE TABLE IF NOT EXISTS engine_lease (
  heartbeat_ts TEXT NOT NULL,
  live INTEGER NOT NULL
 );
+
+-- V3.2: permanent per-intent submission journal. The legacy engine_state
+-- snapshot remains migratable, while rows are never evicted from this table.
+INSERT OR IGNORE INTO schema_version VALUES (11);
+CREATE TABLE IF NOT EXISTS submission_intents (
+ intent_id TEXT PRIMARY KEY,
+ payload TEXT NOT NULL
+);
+
+-- V3.2.1: idempotent daily-risk fill accounting. A unique fill key and the
+-- daily aggregate are updated in one SQLite transaction, so a restart between
+-- broker reconciliation and risk accounting cannot lose or double-count P&L.
+INSERT OR IGNORE INTO schema_version VALUES (12);
+CREATE TABLE IF NOT EXISTS daily_risk_fills (
+ fill_id TEXT PRIMARY KEY,
+ observed_ts TEXT,
+ trading_date TEXT NOT NULL,
+ realized_pnl REAL NOT NULL,
+ credited INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_daily_risk_fills_date
+ ON daily_risk_fills (trading_date);
 """
 
 # ---------------------------------------------------------------------------

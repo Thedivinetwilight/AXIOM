@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -267,15 +268,13 @@ class TestSystemPage:
         assert verified["ok"] is True
         restored = client.post("/api/backup/restore",
                                json={"path": created["path"]}).json()
-        # POSIX swaps the live database in place; Windows refuses to rename
-        # a file an open connection holds — the honest outcome there is a
-        # verified, staged restore applied with AXIOM stopped. Both are
-        # intended behaviours; a silent failure is not.
-        if restored["restored"]:
-            assert "previous_database" in restored
-        else:
-            assert restored["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
-            assert restored["pending_database"].endswith(".restore-pending")
+        # The API always keeps its open SQLite database in place. It stages a
+        # verified restore for startup, regardless of POSIX/Windows rename
+        # semantics; startup applies it only after the active engine is safe.
+        assert restored["restored"] is False
+        assert restored["status"] == "RESTORE_PREPARED_RESTART_REQUIRED"
+        assert restored["pending_database"].endswith(".restore-pending")
+        assert Path(restored["pending_database"]).exists()
         traversal = client.post("/api/backup/restore",
                                 json={"path": "/etc/passwd"})
         assert traversal.status_code == 422

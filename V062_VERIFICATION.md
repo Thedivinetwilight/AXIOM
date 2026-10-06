@@ -1,5 +1,8 @@
 # V062_VERIFICATION.md — V0.6.2 Real Upstox Market Data V3 Integration
 
+> **Historical version report:** this V0.6.2 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Scope:** production-hardened, real **market-DATA-only** Upstox V3 integration
 inside the existing paper-trading platform. Architecture unchanged, extended
 only. **Real-money order routing remains absent and disabled.** Docs verified

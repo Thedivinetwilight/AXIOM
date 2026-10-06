@@ -244,26 +244,35 @@ class LiveOperations:
 
 
 def read_emergency_stop(repository) -> tuple[bool, str]:
-    """Independent read of the persisted emergency-stop flag (master spec §37).
+    """Read the persisted emergency-stop state; uncertainty means STOPPED.
 
-    Emergency controls must not depend on the main engine object being alive,
-    so this reads the durable flag directly. Returns ``(active, reason)``.
-
-    FINAL-11/10 §63: an UNREADABLE flag behaves as STOPPED, never as clear —
-    failing open on the emergency stop would be the worst possible direction.
-    The reason string carries the word "unreadable" so callers can still
-    distinguish "clear" from "fail-closed default" in diagnostics.
+    A missing record is not evidence that an operator cleared a prior stop.
+    New databases seed an explicit ``{"stopped": false}`` record; legacy,
+    deleted, malformed, and unreadable records remain fail-closed until an
+    operator explicitly clears them.
     """
+    if repository is None:
+        return True, "emergency-stop repository unavailable; fail closed"
+
+    missing = object()
     try:
-        flag = repository.get_engine_state("emergency_stop", {}) or {}
-        if not isinstance(flag, dict):
-            raise TypeError("emergency-stop record has an invalid shape")
+        flag = repository.get_engine_state("emergency_stop", missing)
     except Exception as exc:
         error_type = type(exc).__name__
         logger.error("EMERGENCY_FLAG_UNREADABLE: fail closed (stopped)",
                      extra={"error_type": error_type})
         return True, ("emergency-stop flag unreadable "
                       f"({error_type}); fail closed")
-    if bool(flag.get("stopped")):
-        return True, str(flag.get("reason") or "no reason recorded")
+
+    if flag is missing:
+        return True, "emergency-stop record missing; fail closed until explicitly cleared"
+    if not isinstance(flag, dict):
+        return True, "emergency-stop record malformed; fail closed until explicitly cleared"
+    stopped = flag.get("stopped")
+    if type(stopped) is not bool:
+        return True, "emergency-stop state malformed; fail closed until explicitly cleared"
+    if stopped:
+        reason = flag.get("reason")
+        return True, reason.strip() if isinstance(reason, str) and reason.strip() \
+            else "no reason recorded"
     return False, "clear"

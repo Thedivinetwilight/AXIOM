@@ -73,12 +73,15 @@ class _FixtureReadySupervisor:
                 or runtime.get("state") != "READY"
                 or runtime.get("owner") != lease.get("owner")
                 or runtime.get("pid") != lease.get("pid")
-                or runtime.get("host") != lease.get("host")):
+                or runtime.get("host") != lease.get("host")
+                or runtime.get("generation") != control.get("generation")
+                or runtime.get("reconciliation_ok") is not True):
             raise RuntimeError("fixture engine is not supervised and reconciled")
         return {"supervisor_verified": True,
                 "supervisor_lease_owner": lease["owner"],
                 "supervisor_pid": lease["pid"],
                 "supervisor_host": lease["host"],
+                "supervisor_generation": control.get("generation"),
                 "last_market_data_ts": self.repository.get_engine_state(
                     "last_market_data_ts")}
 
@@ -97,11 +100,14 @@ def _ready_live_manager(repository):
     assert lock.acquire().granted
     lease = lock.status()
     repository.set_engine_state("last_reconcile_at", {"ts": now, "fills": 0})
+    repository.set_engine_state("live_reconcile_status", {
+        "ok": True, "ts": now, "fills": 0})
     repository.set_engine_state("live_engine_control", {
         "stop_requested": False, "generation": 1})
     repository.set_engine_state("live_engine_runtime", {
         "state": "READY", "owner": lease["owner"], "pid": lease["pid"],
-        "host": lease["host"], "reconciled_at": now})
+        "host": lease["host"], "generation": 1,
+        "reconciliation_ok": True, "reconciled_at": now})
     manager = LiveSessionManager(
         repository, engine_supervisor=_FixtureReadySupervisor(repository))
     return manager, lock

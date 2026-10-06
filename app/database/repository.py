@@ -378,10 +378,70 @@ class _V1RepositoryBase:
         with self.db.transaction() as db:
             db.execute("INSERT OR REPLACE INTO engine_state VALUES (?,?)", (key, encode(value)))
 
+    def set_engine_states(self, values: dict) -> None:
+        """Atomically persist related engine state records."""
+        if not isinstance(values, dict) or not values:
+            raise ValueError("engine-state batch must be a non-empty mapping")
+        encoded = [(str(key), encode(value)) for key, value in values.items()]
+        if any(not key for key, _ in encoded):
+            raise ValueError("engine-state keys must be non-empty")
+        with self.db.transaction() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO engine_state(key,payload) VALUES (?,?)",
+                encoded)
+
     def get_engine_state(self, key: str, default=None):
         with self.db.transaction() as db:
             row = db.execute("SELECT payload FROM engine_state WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
+
+    # -------------------------------------------- execution intents (§22) --
+    def insert_submission_intent(self, intent_id: str, payload: dict) -> bool:
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            raise ValueError("submission intent id must be non-empty")
+        encoded = encode(payload)
+        with self.db.transaction() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO submission_intents(intent_id,payload) "
+                "VALUES (?,?)", (intent_id, encoded))
+        return cursor.rowcount == 1
+
+    def update_submission_intent(self, intent_id: str, payload: dict, *,
+                                 expected_state: str | None = None) -> bool:
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            raise ValueError("submission intent id must be non-empty")
+        encoded = encode(payload)
+        with self.db.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT payload FROM submission_intents WHERE intent_id=?",
+                (intent_id,)).fetchone()
+            if row is None:
+                return False
+            current = json.loads(row[0])
+            if not isinstance(current, dict):
+                raise ValueError("durable submission intent is malformed")
+            if (expected_state is not None
+                    and current.get("state") != expected_state):
+                return False
+            cursor = db.execute(
+                "UPDATE submission_intents SET payload=? WHERE intent_id=?",
+                (encoded, intent_id))
+        return cursor.rowcount == 1
+
+    def get_submission_intent(self, intent_id: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT payload FROM submission_intents WHERE intent_id=?",
+                (intent_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_submission_intents(self) -> dict:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT intent_id,payload FROM submission_intents ORDER BY rowid"
+            ).fetchall()
+        return {row[0]: json.loads(row[1]) for row in rows}
 
     # ------------------------------------------------- engine leases (§15) --
     # Atomic, conditional ownership. ONE statement decides the owner, so two
@@ -413,7 +473,7 @@ class _V1RepositoryBase:
             if row:
                 existing = {"owner": row[0], "pid": row[1], "host": row[2],
                             "started_ts": row[3], "heartbeat_ts": row[4],
-                            "live": bool(row[5])}
+                            "live": row[5]}
             cur = db.execute(
                 "INSERT INTO engine_lease (name, owner, pid, host, started_ts, "
                 "heartbeat_ts, live) VALUES (?,?,?,?,?,?,?) "
@@ -471,7 +531,7 @@ class _V1RepositoryBase:
             return None
         return {"owner": row[0], "pid": row[1], "host": row[2],
                 "started_ts": row[3], "heartbeat_ts": row[4],
-                "live": bool(row[5])}
+                "live": row[5]}
 
 
 # ------------------------------------------------------------------ V2.1 ----

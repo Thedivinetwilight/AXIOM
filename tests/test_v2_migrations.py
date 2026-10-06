@@ -13,7 +13,7 @@ class TestMigrations:
             versions = [row[0] for row in db.execute(
                 "SELECT version FROM schema_version ORDER BY version").fetchall()]
         database.close()
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], \
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], \
             "migrations only ever add versions"
 
     def test_final_tables_additive(self, tmp_path):
@@ -24,7 +24,8 @@ class TestMigrations:
         database.close()
         assert {"strategy_lineage", "strategy_lifecycle", "regime_history",
                 "opportunity_scans", "research_questions", "system_status",
-                "reality_gap", "confidence_calibration"} <= tables
+                "reality_gap", "confidence_calibration", "submission_intents",
+                "daily_risk_fills"} <= tables
 
     def test_v1_tables_and_v2_tables_coexist(self, tmp_path):
         database = Database(f"sqlite:///{tmp_path}/m.db")

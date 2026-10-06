@@ -40,6 +40,8 @@ from axiom.market.provider import MarketDataBar
 from axiom.models import FORECAST_ORIGIN, KronosConfig, KronosState, KronosStatus
 
 UTC = timezone.utc
+TEST_MODEL_REVISION = "1" * 40
+TEST_TOKENIZER_REVISION = "2" * 40
 
 
 def bars(count: int = 40, *, instrument: str = "DEMO") -> list[MarketDataBar]:
@@ -97,6 +99,27 @@ class TestKronosConfig:
             KronosConfig(min_history=900, lookback=400).validate()
         with pytest.raises(ValueError, match="backend"):
             KronosConfig(backend="magic").validate()
+        with pytest.raises(ValueError, match="pred_len must be an integer"):
+            KronosConfig(pred_len=2.5).validate()
+        with pytest.raises(ValueError, match="sample_paths must be an integer"):
+            KronosConfig(sample_paths=True).validate()
+        with pytest.raises(ValueError, match="stale_after_seconds must be a finite number"):
+            KronosConfig(stale_after_seconds=float("nan")).validate()
+        with pytest.raises(ValueError, match="model_id must be a string"):
+            KronosConfig(model_id=123).validate()
+        with pytest.raises(ValueError, match="backend must be a string"):
+            KronosConfig(backend=[]).validate()
+        with pytest.raises(ValueError, match="device must be"):
+            KronosConfig(device="cuda-not-a-device").validate()
+
+    def test_from_dict_rejects_non_object_configuration(self):
+        for value in (None, [], "", 3):
+            with pytest.raises(ValueError, match="configuration must be an object"):
+                KronosConfig.from_dict(value)
+
+    def test_from_dict_rejects_unknown_configuration_fields(self):
+        with pytest.raises(ValueError, match="unknown Kronos configuration field"):
+            KronosConfig.from_dict({"enabled": True, "lookbak": 128})
 
     def test_config_hash_is_stable_and_sensitive(self):
         first = KronosConfig().config_hash()
@@ -260,7 +283,7 @@ class TestPairingAndContext:
                                           max_context=1024, lookback=400))
 
     def test_unknown_model_context_is_flagged_not_assumed(self):
-        notes = validate_context(KronosConfig(model_id="NeoQuasar/Kronos-custom",
+        notes = validate_context(KronosConfig(model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
                                              max_context=256, lookback=200))
         assert any("no published context length" in note for note in notes)
 
@@ -268,18 +291,58 @@ class TestPairingAndContext:
         assert build_backend(KronosConfig(backend="stub")).kind == "stub"
         assert build_backend(KronosConfig(backend="upstream")).kind == "upstream"
 
-    def test_missing_kronos_source_is_reported(self, monkeypatch):
-        """A bogus AXIOM_KRONOS_SOURCE must be reported, whichever check fires.
+    def test_missing_kronos_source_is_reported(self, tmp_path, monkeypatch):
+        """A bogus source is reported after both cached artifacts verify."""
+        from axiom.kronos.model_cache import ModelCache
 
-        ``load()`` imports torch before it resolves the Kronos source, so on a
-        host without PyTorch the dependency error surfaces first. Both outcomes
-        are honest refusals; neither may load a model.
-        """
         monkeypatch.setenv("AXIOM_KRONOS_SOURCE", "/definitely/not/a/kronos/checkout")
+        cache = ModelCache(tmp_path / "cache")
+        config = KronosConfig(enabled=True, model_revision=TEST_MODEL_REVISION,
+                              tokenizer_revision=TEST_TOKENIZER_REVISION)
+        for index, (model_id, revision) in enumerate((
+                (config.model_id, config.model_revision),
+                (config.tokenizer_id, config.tokenizer_revision))):
+            artifact = cache.root / f"artifact-{index}"
+            artifact.mkdir(parents=True, exist_ok=True)
+            (artifact / "config.json").write_text("{}", encoding="utf-8")
+            (artifact / "weights.safetensors").write_bytes(model_id.encode())
+            cache.record_artifact(model_id, revision, artifact)
         with pytest.raises(KronosRuntimeUnavailable) as excinfo:
-            UpstreamKronosBackend().load(KronosConfig(enabled=True))
+            UpstreamKronosBackend().load(config, cache=cache)
         assert ("does not look like" in str(excinfo.value)
                 or "PyTorch is not installed" in str(excinfo.value)), str(excinfo.value)
+
+    def test_upstream_loader_refuses_mutable_or_missing_revision_identity(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        with pytest.raises(KronosRuntimeUnavailable, match="full immutable"):
+            UpstreamKronosBackend().load(KronosConfig(enabled=True), cache=cache)
+        with pytest.raises(KronosRuntimeUnavailable, match="full immutable"):
+            UpstreamKronosBackend().load(KronosConfig(
+                enabled=True, model_revision="main",
+                tokenizer_revision=TEST_TOKENIZER_REVISION), cache=cache)
+
+    def test_direct_upstream_load_requires_tracked_model_and_tokenizer(self, tmp_path):
+        from axiom.kronos.model_cache import ModelCache
+
+        cache = ModelCache(tmp_path / "cache")
+        config = KronosConfig(enabled=True, model_revision=TEST_MODEL_REVISION,
+                              tokenizer_revision=TEST_TOKENIZER_REVISION)
+        with pytest.raises(KronosRuntimeUnavailable, match="integrity was not verified"):
+            UpstreamKronosBackend().load(config, cache=cache)
+
+    def test_verified_upstream_load_refuses_automatic_downloads(self, tmp_path):
+        from axiom.kronos.model_cache import ModelCache
+
+        cache = ModelCache(tmp_path / "cache")
+        for model_id, name in (("NeoQuasar/Kronos-small", "model.safetensors"),
+                               ("NeoQuasar/Kronos-Tokenizer-base", "tokenizer.safetensors")):
+            path = cache.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(model_id.encode())
+            cache.record(model_id, "", path)
+        with pytest.raises(KronosRuntimeUnavailable, match="automatic model downloads are disabled"):
+            UpstreamKronosBackend().load(
+                KronosConfig(enabled=True, allow_download=True), cache=cache)
 
     def test_a_bogus_source_is_rejected_without_needing_torch(self, monkeypatch):
         """The source contract itself, independent of the Kronos dependencies."""
@@ -318,6 +381,37 @@ class TestKronosModuleDiscovery:
         with pytest.raises(KronosRuntimeUnavailable, match="not found"):
             backends.import_kronos_modules()
         assert "model" not in sys.modules, "the decoy must not be executed at all"
+
+    def test_installed_distribution_does_not_trust_a_shadow_module(self, tmp_path, monkeypatch):
+        import axiom.kronos.backends as backends
+
+        installed = tmp_path / "site-packages"
+        listed_file = installed / "kronos" / "__init__.py"
+        listed_file.parent.mkdir(parents=True)
+        listed_file.write_text(self.DECOY)
+        attacker = tmp_path / "attacker"
+        shadow = attacker / "kronos" / "__init__.py"
+        shadow.parent.mkdir(parents=True)
+        marker = tmp_path / "executed.txt"
+        shadow.write_text(f"from pathlib import Path\\nPath({str(marker)!r}).write_text('ran')\\n"
+                          + self.DECOY)
+
+        class Distribution:
+            files = [Path("kronos/__init__.py")]
+
+            def locate_file(self, item):
+                return installed / item
+
+        monkeypatch.setenv("AXIOM_KRONOS_SOURCE", "")
+        monkeypatch.setattr(backends, "installed_kronos_available", lambda: True)
+        monkeypatch.setattr(backends.importlib.metadata, "distribution",
+                            lambda name: Distribution())
+        monkeypatch.setattr(sys, "path", [str(attacker), *sys.path])
+        monkeypatch.delitem(sys.modules, "kronos", raising=False)
+
+        with pytest.raises(KronosRuntimeUnavailable, match="not a source file listed"):
+            backends.import_kronos_modules()
+        assert not marker.exists(), "the shadow package must be refused before execution"
 
     def test_a_cached_foreign_model_module_is_refused(self, tmp_path, monkeypatch):
         """A different 'model' already in sys.modules must not be trusted."""
@@ -455,6 +549,60 @@ class TestModelCache:
         report = cache.verify("NeoQuasar/Kronos-small", "rev-1")
         assert report.ok, report.problems
 
+    def test_complete_artifact_tree_is_verified_without_claiming_authenticity(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        directory = cache.root / "staged" / "model"
+        (directory / "config").mkdir(parents=True)
+        (directory / "config" / "config.json").write_text("{}", encoding="utf-8")
+        (directory / "model.safetensors").write_bytes(b"all model bytes")
+        cache.record_artifact("model", "commit-1", directory)
+        report = cache.verify_artifact("model", "commit-1")
+        assert report.ok, report.problems
+        assert len(report.entries) == 2
+        assert any("publisher authenticity is not established" in note
+                   for note in report.notes)
+        assert cache.artifact_directory("model", "commit-1") == directory.resolve()
+
+    def test_artifact_tree_rejects_changed_missing_and_untracked_files(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        directory = cache.root / "model-tree"
+        directory.mkdir(parents=True)
+        weights = directory / "weights.bin"
+        weights.write_bytes(b"weights")
+        cache.record_artifact("model", "rev", directory)
+        weights.write_bytes(b"changed")
+        (directory / "unexpected.txt").write_text("untracked", encoding="utf-8")
+        report = cache.verify_artifact("model", "rev")
+        assert not report.ok
+        assert any("SHA-256 mismatch" in problem for problem in report.problems)
+        assert any("untracked file" in problem for problem in report.problems)
+        with pytest.raises(ValueError, match="bundle was not verified"):
+            cache.artifact_directory("model", "rev")
+
+    def test_same_revision_cannot_be_rebound_to_changed_artifact_bytes(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        directory = cache.root / "staged" / "model"
+        directory.mkdir(parents=True)
+        weights = directory / "weights.bin"
+        weights.write_bytes(b"revision-bound weights")
+        cache.record_artifact("model", TEST_MODEL_REVISION, directory)
+        weights.write_bytes(b"different bytes under the same revision")
+        with pytest.raises(ValueError, match="already bound to different"):
+            cache.record_artifact("model", TEST_MODEL_REVISION, directory)
+        report = cache.verify_artifact("model", TEST_MODEL_REVISION)
+        assert not report.ok
+        assert any("SHA-256 mismatch" in problem for problem in report.problems)
+
+    def test_single_file_cache_entry_is_not_a_complete_model_bundle(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        weights = cache.root / "model.safetensors"
+        weights.parent.mkdir(parents=True)
+        weights.write_bytes(b"one file only")
+        cache.record("model", "", weights)
+        report = cache.verify_artifact("model", "")
+        assert not report.ok
+        assert any("not a complete artifact bundle" in note for note in report.notes)
+
     def test_tampered_weights_are_detected(self, tmp_path):
         cache = ModelCache(tmp_path)
         weights = tmp_path / "model.safetensors"
@@ -536,10 +684,35 @@ class TestModelCache:
         cache.record("NeoQuasar/Kronos-small", "", weights)
         weights.write_bytes(b"corrupted")
         runtime = KronosRuntime(
-            KronosConfig(enabled=True, backend="stub"), cache=cache)
+            KronosConfig(enabled=True, backend="upstream"), cache=cache)
         status = runtime.load()
         assert status.state is KronosState.ERROR
         assert "integrity" in status.message
+
+    def test_load_refuses_untracked_weights_even_when_report_has_only_notes(self, tmp_path):
+        class MustNotLoad(StubKronosBackend):
+            def __init__(self):
+                super().__init__()
+                self.called = False
+
+            def load(self, config, *, cache=None, on_state=None):
+                self.called = True
+                return super().load(config, cache=cache, on_state=on_state)
+
+        cache = ModelCache(tmp_path)
+        untracked = tmp_path / "model.safetensors"
+        untracked.write_bytes(b"present-but-untracked")
+        report = cache.verify("NeoQuasar/Kronos-small")
+        assert report.ok is False and report.problems == () and report.notes
+
+        backend = MustNotLoad()
+        runtime = KronosRuntime(
+            KronosConfig(enabled=True, backend="upstream"),
+            cache=cache, backend=backend)
+        status = runtime.load()
+        assert status.state is KronosState.ERROR
+        assert "integrity was not verified" in status.message
+        assert backend.called is False
 
 
 class TestModelCachePathConfinement:
@@ -633,6 +806,37 @@ class TestModelCachePathConfinement:
         assert status.state is KronosState.ERROR
         assert "integrity" in status.message
 
+    def test_resolve_within_root_refuses_intermediate_symlink(self, tmp_path):
+        cache = ModelCache(tmp_path / "cache")
+        cache.root.mkdir()
+        target = cache.root / "real"
+        target.mkdir()
+        (target / "weights.bin").write_bytes(b"weights")
+        link = cache.root / "linked"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(ValueError, match="traverses a symlink"):
+            cache.resolve_within_root("linked/weights.bin")
+
+    def test_save_manifest_never_follows_a_symlink(self, tmp_path):
+        root = tmp_path / "cache"
+        root.mkdir()
+        target = tmp_path / "outside.json"
+        original = "do not overwrite"
+        target.write_text(original, encoding="utf-8")
+        manifest = root / "manifest.json"
+        try:
+            manifest.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        weights = root / "weights.bin"
+        weights.write_bytes(b"weights")
+        with pytest.raises(ValueError, match="must not be a symlink"):
+            ModelCache(root).record("model", "rev", weights)
+        assert target.read_text(encoding="utf-8") == original
+
     def test_resolve_within_root_accepts_a_genuine_cached_file(self, tmp_path):
         cache = ModelCache(tmp_path)
         nested = tmp_path / "models--NeoQuasar--Kronos-small" / "blobs"
@@ -698,11 +902,30 @@ def make_path(steps: int, *, offset: float = 0.0, bad: str | None = None):
 
 class TestForecastShapeAndValidation:
 
+    def test_upstream_frame_requires_an_aligned_timezone_aware_index(self):
+        class Frame:
+            columns = ("open", "high", "low", "close", "volume")
+
+            def __init__(self, index):
+                self.index = index
+
+            def __len__(self):
+                return 1
+
+        expected = [datetime(2024, 1, 1, tzinfo=UTC)]
+        with pytest.raises(KronosRuntimeUnavailable, match="index length"):
+            UpstreamKronosBackend._path_from_frame(Frame([]), expected)
+        with pytest.raises(KronosRuntimeUnavailable, match="timezone-aware"):
+            UpstreamKronosBackend._path_from_frame(Frame([datetime(2024, 1, 1)]), expected)
+        with pytest.raises(KronosRuntimeUnavailable, match="misalignment"):
+            UpstreamKronosBackend._path_from_frame(
+                Frame([datetime(2024, 1, 2, tzinfo=UTC)]), expected)
+
     def test_valid_shape_passes(self):
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=2, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=2, lookback=40, min_history=8)
         stamps = future(6)
         inference = KronosInference((make_path(6), make_path(6, offset=1.0)), 12.0, "stub")
         check = validate_forecast(inference, stamps, config)
@@ -713,7 +936,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=3, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=3, lookback=40, min_history=8)
         inference = KronosInference((make_path(6),), 1.0, "stub")
         check = validate_forecast(inference, future(6), config)
         assert not check.ok
@@ -723,17 +946,47 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         inference = KronosInference((make_path(5),), 1.0, "stub")
         check = validate_forecast(inference, future(6), config)
         assert not check.ok
         assert any("has 5 steps" in error for error in check.errors)
 
+    @pytest.mark.parametrize("bad", ["12.5", True, None, float("inf")])
+    def test_non_numeric_boolean_and_non_finite_outputs_are_rejected(self, bad):
+        from axiom.forecast.validation import validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=1, sample_paths=1, lookback=40, min_history=8)
+        step = make_path(1)[0]
+        step["close"] = bad
+        check = validate_forecast(
+            KronosInference(((step,),), 1.0, "worker"), future(1), config)
+        assert not check.ok
+        assert any("non-numeric or non-finite" in error for error in check.errors)
+
+    def test_malformed_worker_path_and_naive_forecast_timestamp_are_rejected(self):
+        from axiom.forecast.validation import validate_forecast
+        from axiom.kronos.backends import KronosInference
+
+        config = KronosConfig(pred_len=1, sample_paths=1, lookback=40, min_history=8)
+        malformed = validate_forecast(
+            KronosInference((("not-a-mapping",),), 1.0, "worker"),
+            future(1), config)
+        assert not malformed.ok
+        assert any("OHLCV mapping" in error for error in malformed.errors)
+
+        naive = validate_forecast(
+            KronosInference((make_path(1),), 1.0, "worker"),
+            [datetime(2024, 1, 1)], config)
+        assert not naive.ok
+        assert any("timezone-aware UTC" in error for error in naive.errors)
+
     def test_non_finite_output_is_rejected(self):
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         inference = KronosInference((make_path(6, bad="nan"),), 1.0, "stub")
         check = validate_forecast(inference, future(6), config)
         assert not check.ok
@@ -750,7 +1003,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         check = validate_forecast(KronosInference((), 1.0, "stub"), future(6), config)
         assert not check.ok
         assert check.errors == ("model returned no trajectory",)
@@ -765,7 +1018,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         # Five timestamps and a five-step path: internally consistent, but the
         # config asked for six. Only this check catches it.
         check = validate_forecast(
@@ -783,7 +1036,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=3, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=3, sample_paths=1, lookback=40, min_history=8)
         origin = datetime(2024, 3, 1, tzinfo=UTC)
         for bad_stamps in (
             [origin, origin, origin + timedelta(hours=1)],              # repeated
@@ -804,7 +1057,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import FORECAST_FIELDS, validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         path = list(make_path(6))
         del path[2]["high"]
         check = validate_forecast(
@@ -818,7 +1071,7 @@ class TestForecastShapeAndValidation:
         from axiom.forecast.validation import validate_forecast
         from axiom.kronos.backends import KronosInference
 
-        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40)
+        config = KronosConfig(pred_len=6, sample_paths=1, lookback=40, min_history=8)
         check = validate_forecast(
             KronosInference((make_path(6, bad="ohlc"),), 1.0, "stub"), future(6), config)
         assert check.ok
@@ -987,15 +1240,58 @@ def stubbed_download(kronos_module, monkeypatch):
     return kronos_module
 
 
+def _verified_test_cache(config: KronosConfig, root: Path) -> ModelCache:
+    """Seed isolated dummy artifacts for upstream-loader contract tests.
+
+    These files exercise only the mutable local manifest gate; they are not
+    real model weights and are never evidence of publisher authenticity.
+    """
+    cache = ModelCache(root / "verified-kronos-cache")
+    for index, (model_id, revision) in enumerate((
+            (config.model_id, config.model_revision),
+            (config.tokenizer_id, config.tokenizer_revision))):
+        artifact = cache.root / f"artifact-{index}"
+        artifact.mkdir(parents=True, exist_ok=True)
+        (artifact / "config.json").write_text("{}", encoding="utf-8")
+        (artifact / "weights.safetensors").write_bytes(
+            f"test-only dummy artifact {index}".encode())
+        cache.record_artifact(model_id, revision, artifact)
+    return cache
+
+
+class TestPretrainedCacheOnly:
+    def test_unsupported_local_files_only_fails_without_retrying_online(self, tmp_path):
+        calls = []
+
+        class LegacyModelLoader:
+            @classmethod
+            def from_pretrained(cls, model_id, **kwargs):
+                calls.append((model_id, dict(kwargs)))
+                raise TypeError("unexpected keyword argument 'local_files_only'")
+
+        backend = UpstreamKronosBackend()
+        config = KronosConfig()
+        cache = _verified_test_cache(config, tmp_path)
+        with pytest.raises(TypeError, match="local_files_only"):
+            backend._from_pretrained(
+                LegacyModelLoader, config.model_id, config.model_revision,
+                cache, False, None)
+        assert len(calls) == 1
+        assert calls[0][1]["local_files_only"] is True
+        assert Path(calls[0][0]).is_dir()
+        # It receives an exact local directory, never a Hub ID or revision.
+        assert calls[0][0] != config.model_id
+
+
 class TestCpuInference:
     def test_real_kronos_predictor_runs_on_cpu(self, stubbed_download, tmp_path):
         config = KronosConfig(
             enabled=True, backend="upstream", lookback=32, pred_len=4,
             max_context=64, sample_paths=2, device="cpu", min_history=8,
-            model_id="NeoQuasar/Kronos-custom",
+            model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
         )
         backend = UpstreamKronosBackend()
-        info = backend.load(config, cache=ModelCache(tmp_path))
+        info = backend.load(config, cache=_verified_test_cache(config, tmp_path))
         assert info.device == "cpu"
         assert info.torch_version
         assert info.max_context == 64
@@ -1038,10 +1334,10 @@ class TestCpuInference:
         config = KronosConfig(
             enabled=True, backend="upstream", lookback=32, pred_len=4,
             max_context=64, sample_paths=1, device="cpu", min_history=8,
-            model_id="NeoQuasar/Kronos-custom",
+            model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
         )
         backend = UpstreamKronosBackend()
-        backend.load(config, cache=ModelCache(tmp_path))
+        backend.load(config, cache=_verified_test_cache(config, tmp_path))
         window = bars(32)
         stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
         frame = pd.DataFrame({
@@ -1074,10 +1370,10 @@ class TestCpuInference:
         config = KronosConfig(
             enabled=True, backend="upstream", lookback=32, pred_len=4,
             max_context=64, sample_paths=1, device="cpu", min_history=8,
-            model_id="NeoQuasar/Kronos-custom",
+            model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
         )
         backend = UpstreamKronosBackend()
-        backend.load(config, cache=ModelCache(tmp_path))
+        backend.load(config, cache=_verified_test_cache(config, tmp_path))
         window = bars(32)
         stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
 
@@ -1100,10 +1396,10 @@ class TestCpuInference:
         config = KronosConfig(
             enabled=True, backend="upstream", lookback=32, pred_len=4,
             max_context=64, sample_paths=3, device="cpu", min_history=8,
-            model_id="NeoQuasar/Kronos-custom",
+            model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
         )
         backend = UpstreamKronosBackend()
-        info = backend.load(config, cache=ModelCache(tmp_path))
+        info = backend.load(config, cache=_verified_test_cache(config, tmp_path))
         window = bars(32)
         stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
         inference = backend.forecast(window, stamps, config)
@@ -1147,10 +1443,10 @@ class TestGpuInference:
         config = KronosConfig(
             enabled=True, backend="upstream", lookback=32, pred_len=4,
             max_context=64, sample_paths=1, device="cuda:0", min_history=8,
-            model_id="NeoQuasar/Kronos-custom",
+            model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
         )
         backend = UpstreamKronosBackend()
-        info = backend.load(config, cache=ModelCache(tmp_path))
+        info = backend.load(config, cache=_verified_test_cache(config, tmp_path))
         assert info.device.startswith("cuda")
         window = bars(32)
         stamps = future(4, start=window[-1].timestamp + timedelta(hours=1))
@@ -1201,13 +1497,13 @@ class TestValidatedChainIntoRealKronos:
     CONFIG = dict(
         enabled=True, backend="upstream", lookback=32, pred_len=4,
         max_context=64, sample_paths=3, device="cpu", min_history=8,
-        model_id="NeoQuasar/Kronos-custom",
+        model_id="NeoQuasar/Kronos-custom", model_revision=TEST_MODEL_REVISION, tokenizer_revision=TEST_TOKENIZER_REVISION,
     )
 
     def _loaded(self, stubbed_download, tmp_path):
         config = KronosConfig(**self.CONFIG)
         backend = UpstreamKronosBackend()
-        info = backend.load(config, cache=ModelCache(tmp_path))
+        info = backend.load(config, cache=_verified_test_cache(config, tmp_path))
         return config, backend, info
 
     def test_a_validated_window_produces_a_real_upstream_forecast(

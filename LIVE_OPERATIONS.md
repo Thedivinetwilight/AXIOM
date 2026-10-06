@@ -1,5 +1,8 @@
 # Live Operations (V2.1 "L-ops") — Running Real Money Safely
 
+> **Historical operations guide:** this document is the V2.1-era live-operations description. It is not a current authorization or readiness verdict; see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) before relying on it.
+
+
 Companion to [LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). That document is
 about *turning live trading on*; this one is about *staying alive once it is on*.
 
