@@ -440,6 +440,26 @@ class TestBackupRestore:
         finally:
             connection.close()
 
+    def test_archive_fsync_uses_a_writable_descriptor(self, tmp_path, monkeypatch):
+        from app.system import backup as backup_module
+
+        db_path = self._seeded_db(tmp_path)
+        backup_dir = tmp_path / "backups"
+        manager = BackupManager(db_path, backup_dir=backup_dir)
+        real_open = open
+        archive_modes = []
+
+        def tracking_open(path, mode="r", *args, **kwargs):
+            candidate = Path(path)
+            if candidate.parent == backup_dir and candidate.name.endswith(".tmp"):
+                archive_modes.append(mode)
+            return real_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(backup_module, "open", tracking_open, raising=False)
+        created = manager.create()
+        assert Path(created["path"]).is_file()
+        assert archive_modes == ["r+b"]
+
     def test_backup_names_do_not_collide_within_one_second(self, tmp_path):
         db_path = self._seeded_db(tmp_path)
         manager = BackupManager(db_path, backup_dir=tmp_path / "backups")

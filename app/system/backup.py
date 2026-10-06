@@ -211,7 +211,9 @@ class BackupManager:
                     info.size = len(manifest_bytes)
                     info.mode = 0o600
                     archive.addfile(info, _BytesReader(manifest_bytes))
-                with open(temp_archive, "rb") as handle:
+                # Windows refuses to fsync a read-only descriptor (EBADF);
+                # open for update so the archive is durably flushed on every OS.
+                with open(temp_archive, "r+b") as handle:
                     os.fsync(handle.fileno())
                 os.chmod(temp_archive, 0o600)
                 os.replace(temp_archive, archive_path)
