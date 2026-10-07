@@ -467,7 +467,8 @@ def _plan_router(first, second):
 
 
 def test_production_wss_uses_verified_default_tls(monkeypatch):
-    """ssl must never be None for wss://; the library default context verifies TLS."""
+    """ssl must never be None for wss://; an SSLContext with CA verification is used."""
+    import ssl as _ssl
     import websockets.asyncio.client
 
     def authorize_ok(request):
@@ -511,7 +512,8 @@ def test_production_wss_uses_verified_default_tls(monkeypatch):
 
     asyncio.run(scenario())
     assert captured["uri"].startswith("wss://")
-    assert captured["ssl"] is True, "wss must use the verified default TLS context"
+    assert isinstance(captured["ssl"], _ssl.SSLContext), "wss must use a verified SSLContext"
+    assert captured["ssl"].check_hostname is True
 
 
 # ------------------------------------------------------- trading/restart safety

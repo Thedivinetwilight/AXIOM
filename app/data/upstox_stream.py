@@ -35,9 +35,11 @@ import logging
 import math
 from random import random
 import re
+import ssl
 import time
 from uuid import uuid4
 
+import certifi
 import httpx
 from google.protobuf.message import DecodeError
 
@@ -46,6 +48,11 @@ from app.data.market_events import MarketEvent
 from app.data.models import Candle
 from app.data.provider import WebSocketProvider
 from app.data.upstox_proto import MarketDataFeed_pb2 as pb2
+
+# Same CA trust store used by app.data.upstox_auth so outbound TLS to Upstox
+# works inside a PyInstaller-frozen executable where certifi's cacert.pem
+# would otherwise not be on disk.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 logger = logging.getLogger("bot.upstox")
 feed_logger = logging.getLogger("bot.market")
@@ -337,7 +344,10 @@ class UpstoxStream(WebSocketProvider):
 
     async def _authorize(self) -> str:
         """Exchange the access token for a single-use wss URL (never logged)."""
-        async with httpx.AsyncClient(timeout=self._http_timeout, transport=self._transport) as client:
+        client_kwargs: dict = {"timeout": self._http_timeout}
+        if self._transport is None:
+            client_kwargs["verify"] = _SSL_CONTEXT
+        async with httpx.AsyncClient(transport=self._transport, **client_kwargs) as client:
             response = await client.get(
                 self._authorize_url,
                 headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"},
@@ -541,13 +551,17 @@ class UpstoxStream(WebSocketProvider):
                     uri = await self._authorize()
                     self.authenticated = True
                     # TLS policy: an explicit context wins (e.g. pinned trust);
-                    # wss:// always uses the library's VERIFIED default context;
+                    # wss:// always uses a VERIFIED default context pointing at
+                    # the certifi CA bundle (so the PyInstaller-frozen Windows
+                    # executable can validate Upstox's certificate — without an
+                    # explicit cafile the frozen bundle has no trust store);
                     # only plain ws:// loopback runs without TLS (ssl=None).
-                    tls = (
-                        self._ssl_context
-                        if self._ssl_context is not None
-                        else (True if uri.startswith("wss://") else None)
-                    )
+                    if self._ssl_context is not None:
+                        tls = self._ssl_context
+                    elif uri.startswith("wss://"):
+                        tls = _SSL_CONTEXT
+                    else:
+                        tls = None
                     async with connect(
                         uri,
                         ssl=tls,

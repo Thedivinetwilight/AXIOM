@@ -16,7 +16,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 ROOT = Path(SPECPATH).resolve().parent
 
@@ -73,6 +73,12 @@ hiddenimports = [
 ]
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
+hiddenimports += collect_submodules("certifi")
+
+# Bundle certifi's CA certificate store. Without it, HTTPS calls to api.upstox.com
+# fail inside the frozen Windows .exe with "unable to get local issuer certificate"
+# which surfaces to the UI only as the generic "Failed to fetch" banner.
+datas += collect_data_files("certifi")
 
 # Files the app reads from its own tree. Bundled data lands inside the
 # temporary extraction directory, which is exactly where ROOT points when
