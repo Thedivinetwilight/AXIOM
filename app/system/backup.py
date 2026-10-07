@@ -15,6 +15,7 @@ and does not establish the authenticity of the backup's source.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -29,6 +30,80 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+
+
+# Windows-specific transient error winerrors (share locks held by AV/indexer).
+# On POSIX we only retry EBUSY — plain EACCES is a real permission failure.
+_WIN_TRANSIENT_SHARE_ERRORS = (5, 32, 33)
+_POSIX_TRANSIENT_ERRORS = (errno.EBUSY,)
+_DURABLE_RETRY_ATTEMPTS = 20
+_DURABLE_RETRY_INITIAL_DELAY = 0.001
+_DURABLE_RETRY_MAX_DELAY = 0.02
+
+
+def _is_transient_share_error(exc: OSError) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WIN_TRANSIENT_SHARE_ERRORS
+    return exc.errno in _POSIX_TRANSIENT_ERRORS
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Atomically replace ``destination`` with ``source``.
+
+    On Windows, the kernel may briefly keep a share reservation on a just
+    closed file (antivirus real-time scan, Search Indexer), and ``os.replace``
+    transiently returns PermissionError (EACCES / winerror 5, 32, 33). A
+    short, bounded retry only for those specific errors waits the scan out
+    without masking permanent failures (e.g. the active database being held
+    open by another process).
+    """
+    delay = _DURABLE_RETRY_INITIAL_DELAY
+    last_exc: OSError | None = None
+    for _ in range(_DURABLE_RETRY_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        except OSError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        time.sleep(delay)
+        delay = min(delay * 1.5, _DURABLE_RETRY_MAX_DELAY)
+    if last_exc is not None:
+        raise last_exc
+
+
+def _fsync_writable(path: Path) -> None:
+    """Durably flush ``path`` through a read/write descriptor.
+
+    Windows raises EBADF when ``os.fsync`` is given a read-only descriptor,
+    and a freshly-written temp file can be share-locked by an AV scan for a
+    few milliseconds.
+    """
+    delay = _DURABLE_RETRY_INITIAL_DELAY
+    last_exc: OSError | None = None
+    for _ in range(_DURABLE_RETRY_ATTEMPTS):
+        try:
+            with open(path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            return
+        except PermissionError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        except OSError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        time.sleep(delay)
+        delay = min(delay * 1.5, _DURABLE_RETRY_MAX_DELAY)
+    if last_exc is not None:
+        raise last_exc
 
 MEMBER_DB = "trading_bot.db"
 MEMBER_MANIFEST = "manifest.json"
@@ -212,11 +287,11 @@ class BackupManager:
                     info.mode = 0o600
                     archive.addfile(info, _BytesReader(manifest_bytes))
                 # Windows refuses to fsync a read-only descriptor (EBADF);
-                # open for update so the archive is durably flushed on every OS.
-                with open(temp_archive, "r+b") as handle:
-                    os.fsync(handle.fileno())
+                # open for update so the archive is durably flushed on every OS,
+                # and tolerate a brief AV share-lock before atomic replace.
+                _fsync_writable(temp_archive)
                 os.chmod(temp_archive, 0o600)
-                os.replace(temp_archive, archive_path)
+                _durable_replace(temp_archive, archive_path)
             finally:
                 temp_archive.unlink(missing_ok=True)
 

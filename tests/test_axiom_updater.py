@@ -8,8 +8,10 @@ through urllib in production (``default_transport``).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -180,6 +182,12 @@ class TestDownloadVerifyPrepareInstall:
 
     def test_rollback_backup_fsync_uses_a_writable_descriptor(
             self, manager, tmp_path, monkeypatch):
+        """Both install temps must be fsync'd through a writable descriptor.
+
+        This guards against a regression where one of the ``os.fsync`` calls
+        is handed a read-only descriptor — on Linux that silently succeeds
+        but on Windows it raises EBADF.
+        """
         from app.system import updater as updater_module
 
         target = tmp_path / "current-binary"
@@ -189,20 +197,92 @@ class TestDownloadVerifyPrepareInstall:
         assert update.verify(downloaded["path"], digest)["status"] == VERIFIED
         assert update.prepare(downloaded["path"])["status"] == PREPARED
         real_open = open
-        backup_modes = []
+        fsync_modes: dict[str, list[str]] = {"backup": [], "target": []}
 
         def tracking_open(path, mode="r", *args, **kwargs):
             candidate = Path(path)
             if (candidate.parent == target.parent
                     and candidate.name.startswith(".current-binary.previous.")
                     and candidate.name.endswith(".tmp")):
-                backup_modes.append(mode)
+                fsync_modes["backup"].append(mode)
+            elif (candidate.parent == target.parent
+                    and candidate.name.startswith(".current-binary.")
+                    and candidate.name.endswith(".install")):
+                fsync_modes["target"].append(mode)
             return real_open(path, mode, *args, **kwargs)
 
         monkeypatch.setattr(updater_module, "open", tracking_open, raising=False)
         installed = update.install()
         assert installed["status"] == INSTALLED_RESTART_REQUIRED
-        assert backup_modes == ["r+b"]
+        # The durable fsync must use a writable descriptor (Windows EBADF
+        # regression). The later SHA-256 read (\"rb\") is unrelated.
+        assert fsync_modes["backup"][0] == "r+b"
+        assert fsync_modes["target"][0] == "r+b"
+
+    def test_install_survives_transient_windows_share_lock(self, manager, tmp_path,
+                                                           monkeypatch):
+        """Windows Defender / Search Indexer briefly share-locks new files.
+
+        ``os.replace`` used to fail with PermissionError (winerror 32 or 5)
+        the moment after a ``shutil.copy2`` closes the destination handle.
+        The updater must retry the rename briefly instead of returning
+        INSTALL_REFUSED for a transient, non-safety failure.
+        """
+        import errno
+        from app.system import updater as updater_module
+
+        target = tmp_path / "current-binary"
+        target.write_bytes(b"OLD-BINARY")
+        update, downloaded, digest = self._staged(manager)
+        update.target_path = target
+        assert update.verify(downloaded["path"], digest)["status"] == VERIFIED
+        assert update.prepare(downloaded["path"])["status"] == PREPARED
+
+        real_replace = os.replace
+        flake_budget = {"n": 3}
+
+        class _WindowsShareLock(PermissionError):
+            def __init__(self):
+                super().__init__(errno.EACCES, "The process cannot access the file")
+                self.winerror = 32
+
+        def flaky_replace(source, dest):
+            if flake_budget["n"] > 0:
+                flake_budget["n"] -= 1
+                raise _WindowsShareLock()
+            return real_replace(source, dest)
+
+        monkeypatch.setattr(updater_module.os, "replace", flaky_replace)
+        installed = update.install()
+        assert installed["status"] == INSTALLED_RESTART_REQUIRED
+        assert target.read_bytes() == b"AXIOM-UPDATE-PAYLOAD"
+        assert target.with_suffix(".previous").read_bytes() == b"OLD-BINARY"
+        # All three retries were consumed so we know the retry fired.
+        assert flake_budget["n"] == 0
+
+    def test_permanent_permission_failure_still_refuses(self, manager, tmp_path,
+                                                        monkeypatch):
+        """A permanent permission error must NOT be retried into success."""
+        from app.system import updater as updater_module
+
+        target = tmp_path / "current-binary"
+        target.write_bytes(b"OLD-BINARY")
+        update, downloaded, digest = self._staged(manager)
+        update.target_path = target
+        assert update.verify(downloaded["path"], digest)["status"] == VERIFIED
+        assert update.prepare(downloaded["path"])["status"] == PREPARED
+
+        def refusing_replace(source, dest):
+            # A permanent failure (winerror 87 = invalid parameter, or simply
+            # no winerror and errno=EROFS) must NOT be retried.
+            exc = OSError(errno.EROFS, "read-only file system")
+            raise exc
+
+        monkeypatch.setattr(updater_module.os, "replace", refusing_replace)
+        installed = update.install()
+        assert installed["status"] == INSTALL_REFUSED
+        # Target was NOT replaced.
+        assert target.read_bytes() == b"OLD-BINARY"
 
     def test_checksum_match_is_not_reported_as_publisher_authenticity(self, manager):
         update, downloaded, digest = self._staged(manager)

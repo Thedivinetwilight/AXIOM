@@ -13,6 +13,7 @@ executes downloaded code.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import ipaddress
 import json
@@ -28,6 +29,88 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+
+# Windows-specific transient error winerrors that indicate a share lock or
+# momentarily held handle (antivirus real-time scan, Search Indexer) rather
+# than a real permission problem. On POSIX, plain EACCES is a real
+# permission failure and must NOT be retried; only EBUSY (rare on FUSE mounts)
+# is transient enough to wait out.
+_WIN_TRANSIENT_SHARE_ERRORS = (5, 32, 33)
+_POSIX_TRANSIENT_ERRORS = (errno.EBUSY,)
+_DURABLE_RETRY_ATTEMPTS = 20
+_DURABLE_RETRY_INITIAL_DELAY = 0.001
+_DURABLE_RETRY_MAX_DELAY = 0.02
+
+
+def _is_transient_share_error(exc: OSError) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WIN_TRANSIENT_SHARE_ERRORS
+    return exc.errno in _POSIX_TRANSIENT_ERRORS
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Atomically replace ``destination`` with ``source``.
+
+    On Windows, a brief sharing-violation window can occur after we close the
+    last handle to ``source`` (antivirus real-time scans, the Search Indexer,
+    or a parent handle from ``shutil.copy2`` not yet being released by the
+    kernel). ``os.replace`` fails with ``PermissionError`` (EACCES / winerror
+    5, 32, or 33) in that case even though both paths are writable and the
+    destination is not locked by us. The file contents are already on disk
+    (callers fsync the source before calling here); only the rename needs to
+    happen. A short, bounded retry around only the permission/sharing failure
+    waits the transient scan out without weakening safety on permanent
+    errors such as an active running binary or an unwriteable target.
+    """
+    delay = _DURABLE_RETRY_INITIAL_DELAY
+    last_exc: OSError | None = None
+    for _ in range(_DURABLE_RETRY_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        except OSError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        time.sleep(delay)
+        delay = min(delay * 1.5, _DURABLE_RETRY_MAX_DELAY)
+    if last_exc is not None:
+        raise last_exc
+
+
+def _fsync_path(path: Path) -> None:
+    """Durably flush the bytes of ``path`` to disk using a writable handle.
+
+    Windows raises EBADF when ``os.fsync`` is called on a read-only file
+    descriptor, so the file is always opened read/write. The reopen gives
+    the kernel a moment to release any share reservation left by the
+    preceding ``shutil.copy2`` before we flush metadata and rename.
+    """
+    delay = _DURABLE_RETRY_INITIAL_DELAY
+    last_exc: OSError | None = None
+    for _ in range(_DURABLE_RETRY_ATTEMPTS):
+        try:
+            with open(path, "r+b") as handle:
+                os.fsync(handle.fileno())
+            return
+        except PermissionError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        except OSError as exc:
+            if not _is_transient_share_error(exc):
+                raise
+            last_exc = exc
+        time.sleep(delay)
+        delay = min(delay * 1.5, _DURABLE_RETRY_MAX_DELAY)
+    if last_exc is not None:
+        raise last_exc
 
 RELEASES_API = "https://api.github.com/repos/Thedivinetwilight/AXIOM/releases/latest"
 CHECKED = "CHECKED"
@@ -215,7 +298,7 @@ class UpdateManager:
                 json.dump(manifest, handle, indent=2, sort_keys=True, allow_nan=False)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, path)
+            _durable_replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -268,7 +351,7 @@ class UpdateManager:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, dest)
+            _durable_replace(temp, dest)
         except Exception as exc:
             temp.unlink(missing_ok=True)
             return {"ok": False, "status": DOWNLOAD_FAILED,
@@ -336,9 +419,10 @@ class UpdateManager:
             temp = self.updates_dir / f".{resolved.name}.{uuid4().hex}.tmp"
             try:
                 shutil.copy2(resolved, temp)
+                _fsync_path(temp)
                 if _sha256(temp) != verified_digest:
                     raise OSError("staged artifact changed while it was copied")
-                os.replace(temp, final_path)
+                _durable_replace(temp, final_path)
             except OSError as exc:
                 temp.unlink(missing_ok=True)
                 return {"ok": False, "status": PREPARE_REFUSED,
@@ -393,19 +477,19 @@ class UpdateManager:
         temp_target = target.with_name(f".{target.name}.{uuid4().hex}.install")
         try:
             shutil.copy2(target, temp_backup)
-            # Windows refuses to fsync a read-only descriptor (EBADF); the
-            # rollback copy must be opened for update before the durable flush.
-            with open(temp_backup, "r+b") as handle:
-                os.fsync(handle.fileno())
-            os.replace(temp_backup, backup)
+            # Windows refuses to fsync a read-only descriptor (EBADF), and a
+            # just-closed copy may still be share-locked by the AV scanner.
+            _fsync_path(temp_backup)
+            _durable_replace(temp_backup, backup)
             shutil.copy2(artifact, temp_target)
+            _fsync_path(temp_target)
             if _sha256(temp_target) != manifest["sha256"]:
                 raise OSError("verified artifact changed during install staging")
             try:
                 temp_target.chmod(temp_target.stat().st_mode | 0o111)
             except OSError as exc:
                 logger.debug("could not set executable bits on %s: %s", temp_target, exc)
-            os.replace(temp_target, target)
+            _durable_replace(temp_target, target)
         except OSError as exc:
             temp_backup.unlink(missing_ok=True)
             temp_target.unlink(missing_ok=True)
