@@ -75,11 +75,6 @@ hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("websockets")
 hiddenimports += collect_submodules("certifi")
 
-# Bundle certifi's CA certificate store. Without it, HTTPS calls to api.upstox.com
-# fail inside the frozen Windows .exe with "unable to get local issuer certificate"
-# which surfaces to the UI only as the generic "Failed to fetch" banner.
-datas += collect_data_files("certifi")
-
 # Files the app reads from its own tree. Bundled data lands inside the
 # temporary extraction directory, which is exactly where ROOT points when
 # frozen, so `ROOT / "data/sample.csv"` keeps working.
@@ -114,6 +109,13 @@ for pattern in (
     source = ROOT / pattern[0]
     if source.exists():
         datas.append((str(source), pattern[1]))
+
+# Bundle certifi's CA certificate store. Without it, HTTPS calls to
+# api.upstox.com fail inside the frozen Windows .exe with
+# "unable to get local issuer certificate" which surfaces to the UI only
+# as the generic "Failed to fetch" banner. Must come after `datas = []`
+# above so the name is defined.
+datas += collect_data_files("certifi")
 
 block_cipher = None
 

@@ -44,6 +44,35 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+
+def _pin_ca_bundle() -> None:
+    """Point every SSL-using library at certifi's CA bundle when frozen.
+
+    PyInstaller 6.22 ships no hook that installs a trust store, and on
+    Windows the frozen bundle has no default CA path. Setting
+    ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` before any network call
+    means httpx/requests/urllib3/websockets/ssl.create_default_context()
+    all pick up the bundled CA file — we don't have to thread ``verify=``
+    through every outbound call site.
+    """
+    if not getattr(sys, "frozen", False):
+        return  # source runs use the OS trust store
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE"):
+        return  # operator override wins
+    try:
+        import certifi
+        cafile = certifi.where()
+    except Exception:
+        return
+    if not Path(cafile).exists():
+        return
+    os.environ["SSL_CERT_FILE"] = cafile
+    os.environ["REQUESTS_CA_BUNDLE"] = cafile
+    os.environ["CURL_CA_BUNDLE"] = cafile
+
+
+_pin_ca_bundle()
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8042
 

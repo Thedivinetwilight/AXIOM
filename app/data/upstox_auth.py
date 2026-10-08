@@ -228,6 +228,20 @@ def exchange_code_for_token(
                 response = client.post(TOKEN_URL, data=data, headers=headers)
         else:
             response = httpx.post(TOKEN_URL, data=data, headers=headers, **client_kwargs)
+    except httpx.TimeoutException:
+        raise UpstoxOAuthError(
+            "Upstox token endpoint timed out; check network connectivity and retry."
+        )
+    except httpx.ConnectError:
+        raise UpstoxOAuthError(
+            "Could not reach Upstox (DNS/TCP connection failed); verify internet "
+            "connectivity and firewall settings."
+        )
+    except (httpx.RemoteProtocolError, ssl.SSLError):
+        raise UpstoxOAuthError(
+            "TLS handshake with Upstox failed; check that local TLS/proxy/antivirus "
+            "interception is not rewriting the Upstox certificate."
+        )
     except httpx.HTTPError:
         raise UpstoxOAuthError("Upstox token endpoint unreachable (network error)")
     if response.status_code != 200:

@@ -368,6 +368,14 @@ class UpstoxSandboxBroker:
                     with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                         response = client.request(method, url, headers=self._headers(), **kwargs)
                 else:
+                    # Use a plain httpx.request call (preserving the public
+                    # signature used by the live-broker test harness and
+                    # protocol-authorization checks) and rely on httpx's
+                    # default SSL context; a bundled certifi CA is wired up
+                    # at the frozen-exe entrypoint via SSL_CERT_FILE (see
+                    # arena.py / build_exe.py) rather than per-call, so we
+                    # don't need to pass verify= here and break the tests
+                    # that mock httpx.request.
                     response = httpx.request(
                         method, url, headers=self._headers(), timeout=self._timeout, **kwargs
                     )

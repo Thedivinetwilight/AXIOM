@@ -324,10 +324,20 @@ def test_token_exchange_success_failure_and_no_secret_leak():
     def unreachable(request):
         raise httpx.ConnectError("down")
 
-    with pytest.raises(UpstoxOAuthError, match="unreachable"):
+    # 3.2.2: granular network errors for the token exchange too.
+    with pytest.raises(UpstoxOAuthError, match="Could not reach Upstox"):
         exchange_code_for_token(
             "auth-code", "api-key", "super-secret", "https://example.com/cb",
             transport=httpx.MockTransport(unreachable),
+        )
+
+    def tls_down(request):
+        raise httpx.RemoteProtocolError("tls broken")
+
+    with pytest.raises(UpstoxOAuthError, match="TLS"):
+        exchange_code_for_token(
+            "auth-code", "api-key", "super-secret", "https://example.com/cb",
+            transport=httpx.MockTransport(tls_down),
         )
     with pytest.raises(UpstoxOAuthError):
         exchange_code_for_token("", "api-key", "super-secret", "https://example.com/cb")

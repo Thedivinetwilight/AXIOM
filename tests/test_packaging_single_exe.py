@@ -357,6 +357,75 @@ class TestBuildSpec:
     def test_spec_exists_and_is_valid_python(self):
         ast.parse(self._spec_source())
 
+    def test_spec_executes_without_name_errors(self):
+        """ast.parse only checks syntax — a NameError (like `datas += ...`
+        appearing before `datas = []`) would crash PyInstaller at build time
+        on every platform. Exec the spec with the PyInstaller Analysis/EXE
+        helpers stubbed out so we can catch any order-of-definition bugs."""
+        import types
+        import sys
+
+        class _FakeHooks:
+            @staticmethod
+            def collect_submodules(name):
+                return [f"{name}.stub"]
+            @staticmethod
+            def collect_data_files(name):
+                return [(f"/stub/{name}.dat", name)]
+
+        class _FakePyInstaller:
+            class utils:
+                class hooks:
+                    collect_submodules = staticmethod(lambda name: [f"{name}.stub"])
+                    collect_data_files = staticmethod(
+                        lambda name: [(f"/stub/{name}.dat", name)])
+
+        # Inject a minimal "PyInstaller" package into sys.modules so the
+        # `from PyInstaller.utils.hooks import ...` line resolves without
+        # requiring PyInstaller to be installed in every lightweight venv.
+        fake = types.ModuleType("PyInstaller")
+        fake.utils = types.ModuleType("PyInstaller.utils")
+        fake.utils.hooks = types.ModuleType("PyInstaller.utils.hooks")
+        fake.utils.hooks.collect_submodules = _FakeHooks.collect_submodules
+        fake.utils.hooks.collect_data_files = _FakeHooks.collect_data_files
+        prev = sys.modules.get("PyInstaller")
+        prev_u = sys.modules.get("PyInstaller.utils")
+        prev_h = sys.modules.get("PyInstaller.utils.hooks")
+        sys.modules["PyInstaller"] = fake
+        sys.modules["PyInstaller.utils"] = fake.utils
+        sys.modules["PyInstaller.utils.hooks"] = fake.utils.hooks
+        try:
+            spec_globals = {
+                "__file__": str(SPEC),
+                "SPECPATH": str(SPEC.parent),
+                # Analysis / PYZ / EXE — record calls, never actually build
+                "Analysis": lambda *a, **kw: types.SimpleNamespace(
+                    pure=[], zipped_data=[], scripts=[], binaries=[], zipfiles=[], datas=[]),
+                "PYZ": lambda *a, **kw: "PYZ",
+                "EXE": lambda *a, **kw: "EXE",
+                "block_cipher": None,
+            }
+            # IMPORTANT: `datas` and `hiddenimports` must NOT be pre-set —
+            # the spec is expected to define them before mutating them. This
+            # is exactly what catches the certifi `datas += ...` ordering
+            # regression that broke the v3.2.2 executable build on all three
+            # platforms.
+            exec(compile(self._spec_source(), str(SPEC), "exec"), spec_globals)
+        finally:
+            if prev is None:
+                sys.modules.pop("PyInstaller", None)
+                sys.modules.pop("PyInstaller.utils", None)
+                sys.modules.pop("PyInstaller.utils.hooks", None)
+            else:
+                sys.modules["PyInstaller"] = prev
+                sys.modules["PyInstaller.utils"] = prev_u
+                sys.modules["PyInstaller.utils.hooks"] = prev_h
+        assert "datas" in spec_globals, "spec did not define `datas`"
+        assert "hiddenimports" in spec_globals, "spec did not define `hiddenimports`"
+        certifi_entries = [e for e in spec_globals["datas"]
+                           if isinstance(e, tuple) and "certifi" in str(e[1])]
+        assert certifi_entries, "certifi CA bundle must be collected into datas"
+
     def test_entry_point_is_the_launcher(self):
         assert 'ROOT / "arena.py"' in self._spec_source()
 
@@ -744,3 +813,56 @@ class TestCredentialPathsFollowTheHome:
 
         source = inspect.getsource(run_login_flow)
         assert 'env_path or Path.cwd() / ".env"' in source
+
+
+class TestFrozenCaBundle:
+    """A frozen build must be able to validate TLS certificates without
+    relying on an OS trust store. Arena pins certifi's cacert.pem via
+    environment variables at startup and bundles it in the spec."""
+
+    def test_arena_pins_certifi_when_frozen(self, monkeypatch, tmp_path):
+        import importlib.util
+
+        # Stub "frozen" and a clean SSL_CERT_FILE so we can assert the pin.
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+
+        spec = importlib.util.spec_from_file_location("arena_pin_test", ROOT / "arena.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        import certifi
+        assert os.environ.get("SSL_CERT_FILE") == certifi.where()
+        assert os.environ.get("REQUESTS_CA_BUNDLE") == certifi.where()
+        assert Path(certifi.where()).exists()
+
+    def test_source_run_does_not_override_trust_store(self, monkeypatch):
+        import importlib.util
+
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        if hasattr(sys, "frozen"):
+            monkeypatch.delattr(sys, "frozen", raising=False)
+
+        spec = importlib.util.spec_from_file_location("arena_source_test", ROOT / "arena.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # A source run must leave the OS trust store in place; an override
+        # would silently change TLS behaviour for user-launched children.
+        assert os.environ.get("SSL_CERT_FILE") is None
+
+    def test_operator_override_wins(self, monkeypatch, tmp_path):
+        import importlib.util
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        override = tmp_path / "custom-ca.pem"
+        override.write_bytes(b"")
+        monkeypatch.setenv("SSL_CERT_FILE", str(override))
+
+        spec = importlib.util.spec_from_file_location(
+            "arena_override_test", ROOT / "arena.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert os.environ["SSL_CERT_FILE"] == str(override), (
+            "an operator-set SSL_CERT_FILE must never be overwritten")
