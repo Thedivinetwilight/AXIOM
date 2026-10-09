@@ -117,6 +117,8 @@ def test_core_frozen_gates_individually(e2e_result):
     gate("app shell references the bundled stylesheet")
     gate("frozen stylesheet serves")
     gate("token endpoint returns a secure token")
+    gate("frozen Upstox key validation reaches upstream HTTPS")
+    gate("dummy Upstox credential is absent from frozen process logs")
     gate("frozen runtime reports exact build identity")
     gate("paper engine processed replay bars")
     gate("paper engine recorded simulated orders/fills/trades")

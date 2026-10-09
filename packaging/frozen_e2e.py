@@ -274,6 +274,7 @@ class FrozenE2E:
             self._phase_cli_reentry()
             self._phase_frontend_integrity()
             self._phase_wizard_flow()
+            self._phase_upstox_instrument_validation()
             self._phase_build_identity()
             self._phase_paper_engine()
             self._phase_stop_and_restart()
@@ -427,6 +428,50 @@ class FrozenE2E:
             from app.config.envfile import read_values
 
             self.token = read_values(env_path).get("API_TOKEN")
+
+    def _phase_upstox_instrument_validation(self) -> None:
+        """Exercise the provider-key validator inside the real frozen process.
+
+        This deliberately sends a known-invalid token with a known-valid
+        Upstox instrument key. The expected result is an upstream HTTP auth
+        rejection, proving that the bundled wizard accepted the pipe-form
+        key, the CA bundle verified TLS, and the request reached Upstox. A
+        local "Invalid symbol" error or transport/TLS failure must fail the
+        release gate. No real credential and no order endpoint are used.
+        """
+        if not self.token:
+            self.check(
+                "frozen Upstox key validation reaches upstream HTTPS", False,
+                "no local API token available for the probe")
+            return
+        dummy_token = "arena-frozen-e2e-invalid-token"
+        status, body = _post(
+            self.base,
+            "/api/wizard/validate-market-data",
+            {"token": dummy_token, "symbols": "NSE_EQ|INE002A01018"},
+            self.token,
+            timeout=30.0,
+        )
+        detail = str(body.get("detail", ""))
+        upstream_rejected = any(
+            verdict in detail
+            for verdict in ("(rejected)", "(forbidden)", "(http_429)", "(http_5")
+        )
+        ok = status == 422 and upstream_rejected and "Invalid symbol" not in detail
+        self.check(
+            "frozen Upstox key validation reaches upstream HTTPS",
+            ok,
+            f"HTTP {status}; {detail[:260] or body}",
+        )
+        try:
+            logs = self.output_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            logs = ""
+        self.check(
+            "dummy Upstox credential is absent from frozen process logs",
+            dummy_token not in logs,
+        )
+
 
     def _phase_build_identity(self) -> None:
         if not self.token:
