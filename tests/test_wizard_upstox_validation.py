@@ -157,3 +157,78 @@ class TestValidateMarketDataEndpoint:
         assert "LIVE_TRADING" in wizard.LIVE_ENABLEMENT
         assert "UPSTOX_LIVE" in wizard.LIVE_BROKERS
         assert "LOCAL_PAPER" not in wizard.LIVE_BROKERS
+
+
+class TestPreparePaperValidatesInstrumentKeys:
+    """The /api/wizard/prepare-paper save path must reject malformed Upstox
+    instrument keys BEFORE probing the network or writing the .env. Otherwise
+    a typo is persisted and only fails later at stream-connect time."""
+
+    def _request(self, symbols: str, monkeypatch, probe_verdict: str = "feed_ok"):
+        probe_called = {"n": 0}
+
+        async def fake_probe(token):
+            probe_called["n"] += 1
+            return SimpleNamespace(verdict=probe_verdict, guidance="ok")
+
+        monkeypatch.setattr(wizard, "_probe_market_data", fake_probe)
+        written = {}
+        monkeypatch.setattr(wizard, "update_values",
+                            lambda path, updates, comment="":
+                                (written.update(updates) or {"path": str(path)}))
+        monkeypatch.setattr(wizard, "_rebuild_engine_for", lambda req, s: None)
+        monkeypatch.setattr(wizard, "_initialize_home", lambda s: {"ok": True})
+
+        from app.config.settings import Settings
+        req = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    settings=Settings(),
+                    repository=SimpleNamespace(
+                        get_engine_state=lambda k: None,
+                        record_system_event=lambda **kw: None),
+                    broker=SimpleNamespace(
+                        timeframe="1m", close=lambda: None,
+                        repository=None),
+                    simulator=SimpleNamespace(task=None, stop=lambda: _fake_coro()),
+                )
+            )
+        )
+        payload = wizard.PreparePaperRequest(
+            data_source="upstox",
+            api_token="abc",
+            market_data_access_token="tok",
+            market_data_symbols=symbols,
+        )
+        return probe_called, written, req, payload
+
+    def test_invalid_keys_rejected_before_probe(self, monkeypatch):
+        probe_called, written, req, payload = self._request(
+            "NSE_EQ|INVALID SYMBOL!!!", monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            run(wizard.prepare_paper(payload, req))
+        assert exc.value.status_code == 422
+        assert "Instrument key invalid" in exc.value.detail
+        assert probe_called["n"] == 0, "network probe must not run for invalid keys"
+        assert not written, "nothing must be persisted for invalid keys"
+
+    def test_valid_keys_normalised_and_saved(self, monkeypatch):
+        probe_called, written, req, payload = self._request(
+            f" {INSTRUMENT} , NSE_EQ|INE003A01018 ", monkeypatch)
+        result = run(wizard.prepare_paper(payload, req))
+        assert probe_called["n"] == 1
+        assert written["MARKET_DATA_SYMBOLS"] == f"{INSTRUMENT},NSE_EQ|INE003A01018"
+        assert written["DEFAULT_SYMBOL"] == INSTRUMENT
+
+    def test_empty_symbols_rejected(self, monkeypatch):
+        probe_called, written, req, payload = self._request("  , ,, ", monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            run(wizard.prepare_paper(payload, req))
+        assert exc.value.status_code == 422
+        assert probe_called["n"] == 0
+
+
+def _fake_coro():
+    async def _stop():
+        return None
+    return _stop()

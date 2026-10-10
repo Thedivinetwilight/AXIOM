@@ -148,9 +148,18 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
         })
     else:
         md_token = (payload.market_data_access_token or "").strip()
-        md_symbols = (payload.market_data_symbols or "").strip()
-        if not md_token or not md_symbols:
+        md_symbols_raw = (payload.market_data_symbols or "").strip()
+        if not md_token or not md_symbols_raw:
             raise HTTPException(422, "Live-market paper needs a market-data token and instrument keys.")
+        # Validate instrument keys BEFORE touching the network or writing to
+        # disk. A typo like "NSE_EQ:INE002A01018" should be rejected with a
+        # useful message rather than silently persisted (the engine later
+        # rejects it at stream creation, producing a cryptic error).
+        try:
+            md_symbols_list = _validate_upstox_instrument_keys(md_symbols_raw)
+        except ValueError as exc:
+            raise HTTPException(422, f"Instrument key invalid: {exc}") from exc
+        md_symbols = ",".join(md_symbols_list)
         check = await _probe_market_data(md_token)
         if check.verdict != "feed_ok":
             raise HTTPException(
@@ -162,7 +171,7 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
             "DATA_SOURCE": "upstox",
             "MARKET_DATA_ACCESS_TOKEN": md_token,
             "MARKET_DATA_SYMBOLS": md_symbols,
-            "DEFAULT_SYMBOL": md_symbols.split(",")[0].strip(),
+            "DEFAULT_SYMBOL": md_symbols_list[0],
             "DEFAULT_TIMEFRAME": "1m",
         })
 
