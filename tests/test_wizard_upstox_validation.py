@@ -215,7 +215,7 @@ class TestPreparePaperValidatesInstrumentKeys:
     def test_valid_keys_normalised_and_saved(self, monkeypatch):
         probe_called, written, req, payload = self._request(
             f" {INSTRUMENT} , NSE_EQ|INE003A01018 ", monkeypatch)
-        result = run(wizard.prepare_paper(payload, req))
+        run(wizard.prepare_paper(payload, req))
         assert probe_called["n"] == 1
         assert written["MARKET_DATA_SYMBOLS"] == f"{INSTRUMENT},NSE_EQ|INE003A01018"
         assert written["DEFAULT_SYMBOL"] == INSTRUMENT
