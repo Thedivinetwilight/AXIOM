@@ -300,7 +300,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: "Arena 3.2.0 — executable build"
+          name: "Arena ${{ github.ref_name }} — executable build"
           body: |
             Single-file Arena executables, built and **verified end-to-end** by
             this workflow on each platform. Before an artifact was kept, the

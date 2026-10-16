@@ -600,11 +600,19 @@ mis-diagnosed Upstox response in the system.*
 
 **LIKELY ROOT CAUSES**
 1. Nothing is wrong — this is the expected probe outcome.
-2. A genuine 404 *without* `UDAPI100010` → wrong URL path or host.
+2. A genuine 404 *without* `UDAPI100010` → the environment did not expose the
+   route. Since 3.2.4/2026-10-16 this is classified as
+   `unsupported_endpoint`: **order history is not a documented sandbox-enabled
+   API** (the official SDK sandbox allowlist is place/modify/cancel only), so
+   a 404/405 on the sandbox history path means read-only verification is
+   impossible — the credential is **UNVERIFIED, not rejected**, and the CLI
+   exits 4 with that diagnostic.
 3. Order history retention expired — documented as **one trading day**
-   (`app/brokers/sandbox.py` docstring line 16), so yesterday's orders legitimately 404.
-4. The history endpoint host differs from the order host: history is
-   `https://api.upstox.com/v2/order/history`, orders are `https://api-hft.upstox.com`.
+   (`app/brokers/sandbox.py` module docstring), so yesterday's orders
+   legitimately 404 with `UDAPI100010`.
+4. A *production* history host (`api.upstox.com`) configured in
+   `UPSTOX_SANDBOX_ORDER_HISTORY_URL` — now **refused at startup** (sandbox
+   tokens are documented as sandbox-only and are never sent to production).
 
 **EXACT DIAGNOSTIC COMMANDS**
 ```bash
@@ -616,15 +624,19 @@ sqlite3 "file:trading_bot.db?mode=ro" "SELECT ts, kind, payload FROM system_even
 **HOW TO INTERPRET OUTPUT**
 - `"credential_accepted": true` with `class: documented_not_found` → **your credentials work.**
   Stop diagnosing auth.
-- `credential_accepted: false` with `class: unexpected` and a 404 → the URL or host is wrong; the
-  body did not carry `UDAPI100010`.
+- `class: unsupported_endpoint` (exit 4) → the provider does not expose the read route;
+  credential UNVERIFIED. Next step: `python -m app sandbox-test --place-order` (one small
+  sandbox order is then the authenticated check).
+- `credential_state: rejected` (401/403) → the token itself is refused; issue a new
+  sandbox token from Developer Apps → Sandbox.
 - A 404 only for orders older than one trading day → cause 3, expected.
 
 **FIX**
-Usually none. For cause 2, restore the documented defaults:
+Usually none. If `UPSTOX_SANDBOX_ORDER_HISTORY_URL` was overridden, restore the
+shipped default (a production host is rejected by startup validation):
 ```
-UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api.upstox.com/v2/order/history
-UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com
+UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api-sandbox.upstox.com/v2/order/history
+UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com
 ```
 
 **VERIFICATION**

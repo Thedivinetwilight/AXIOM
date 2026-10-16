@@ -1,6 +1,6 @@
-# AXIOM-MONEY-PRINTER — Product Manual (3.2.0 code line)
+# AXIOM-MONEY-PRINTER — Product Manual (3.2.4 code line)
 
-**Display name:** AXIOM · **Codename:** MONEY-PRINTER (brand only; no profit promise) · **Configured version:** 3.2.0
+**Display name:** AXIOM · **Codename:** MONEY-PRINTER (brand only; no profit promise) · **Configured version:** 3.2.4
 
 > **Evidence boundary.** This manual describes product surfaces and intended behavior; it is not a certification that every feature is production-ready or present in a released binary. The authoritative current-code evidence, exact test results, CI/artifact state, and known limits are in [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md). The repository's master prompt is a requirements document, not implementation or verification evidence. Older final reports and run logs are historical snapshots only.
 

@@ -481,8 +481,12 @@ instrument keys, e.g. `NSE_EQ|INE002A01018`; validated by regex),
 
 **Upstox sandbox (order APIs):**
 `UPSTOX_SANDBOX_ACCESS_TOKEN` (required iff `BROKER=UPSTOX_SANDBOX`),
-`UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com`,
-`UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api.upstox.com/v2/order/history`,
+`UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com`,
+`UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api-sandbox.upstox.com/v2/order/history`
+(a production `api.upstox.com` history URL is **refused** for the sandbox
+broker — a sandbox token is never sent to a production host; order history is
+also not a documented sandbox capability, so the broker reports an explicit
+unavailable-capability state instead of guessing),
 `SANDBOX_PRODUCT=I|D|MTF`, `SANDBOX_ORDER_TAG=arena-v1` (retained setting,
 passed to the broker; since 3.0.2 every ORDER carries the intent-derived
 12-char tag — this setting no longer overrides order tags).

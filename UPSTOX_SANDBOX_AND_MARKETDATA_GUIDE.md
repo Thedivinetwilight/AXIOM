@@ -444,3 +444,60 @@ does double duty — broker reconciliation *and* the `sandbox-test` credential
 probe (`app/__main__.py:562`). Splitting those into two settings would let the
 broker default to a sandbox host without breaking the diagnostic, and would
 reduce the test churn to the two host-matched files.
+
+---
+
+## 6. RESOLUTION (2026-10-16, v3.2.4 line) — §5's remaining gap is closed
+
+The gap §5/§5a scoped ("what the correct sandbox history endpoint is, which
+is not documented") was resolved by re-verifying the provider contract and
+then choosing the only answer that satisfies the safety rules:
+
+**Provider evidence (2026-10-16):**
+
+- Official docs, *Sandbox enabled APIs*: Place Order, Place Order V3, Place
+  Multi Order, Modify Order, Modify Order V3, Cancel Order, Cancel Order V3.
+  **GET `/v2/order/history` is not listed.**
+- Official `upstox-python` SDK (`Configuration.sandbox_urls`): exactly those
+  seven paths; sandbox mode pins **every** host to
+  `https://api-sandbox.upstox.com` and raises
+  `"This API is not available in sandbox mode."` for anything else.
+- Official API Overview (June 2026): "Currently supports place, modify, and
+  cancel order APIs."
+
+**Implemented behavior (commit recorded in `AXIOM_COMPLETION_LEDGER.md`):**
+
+1. `UPSTOX_SANDBOX_ORDER_HISTORY_URL` defaults to
+   `https://api-sandbox.upstox.com/v2/order/history` — the request can never
+   leave the sandbox boundary, so the token never reaches production.
+   A production/unknown history host is refused at Settings validation **and**
+   at broker construction; environment variables cannot bypass it.
+2. The read side is an explicit **capability**:
+   `status_view()["history_capability"]` reports
+   `unknown/available/unsupported/auth_rejected/rate_limited/provider_error/unexpected`
+   with the HTTP reason. An unsupported/erroneous history endpoint never flips
+   `available` (the flag gating order mutations), so a missing read route can
+   no longer disable valid sandbox order operations.
+3. A 401/403 **from the sandbox environment itself** still fails the broker
+   closed (the same token guards the order endpoints).
+4. Orders remain honestly acknowledged-but-unconfirmed when remote status
+   cannot be read; the submission journal keeps blocking blind resubmission,
+   and a durable UNKNOWN/UNRESOLVED intent conservatively blocks new
+   risk-increasing entries (risk-reducing exits are never blocked).
+5. `python -m app sandbox-test` classifies the missing route as
+   `unsupported_endpoint` → credential **UNVERIFIED** (exit 4, with next
+   steps) instead of pretending "rejected"; `--place-order` becomes the
+   authenticated check in that case and a successful placement verifies the
+   credential.
+
+Regression suite: `tests/test_sandbox_history_capability.py` (host boundary,
+capability isolation, CLI contract, unresolved-intent guard, `.env` loading)
+plus the updated host assertions in `tests/test_v1_separation.py`,
+`tests/test_v1_sandbox.py`, `tests/test_v1_engine.py`.
+
+**Still external:** whether *your* sandbox environment in fact answers
+`GET /v2/order/history` on the sandbox host can only be established with a
+real sandbox token (`python -m app sandbox-test`), because the docs and the
+SDK disagree with the 2024 sandbox announcement about data-retrieval
+fidelity. Either answer is handled safely; record the observed verdict in
+`AXIOM_SANDBOX_READINESS.md` when a token is available.

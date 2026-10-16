@@ -98,11 +98,11 @@ python -c "from app.config.settings import Settings as S; s=S.from_env(); [print
 
 Defaults, verified in `app/config/settings.py`:
 
-| Setting | Default | Line |
+| Setting | Default | Source |
 | --- | --- | --- |
-| `upstox_sandbox_base_url` | `https://api-hft.upstox.com` | 101 |
-| `upstox_sandbox_order_history_url` | `https://api.upstox.com/v2/order/history` | 102 |
-| `market_data_authorize_url` | `https://api.upstox.com/v3/feed/market-data-feed/authorize` | 97 |
+| `upstox_sandbox_base_url` | `https://api-sandbox.upstox.com` | `app/config/hosts.py` `DEFAULT_SANDBOX_BASE_URL` |
+| `upstox_sandbox_order_history_url` | `https://api-sandbox.upstox.com/v2/order/history` | `app/config/hosts.py` `DEFAULT_SANDBOX_ORDER_HISTORY_URL` (production history hosts are refused for the sandbox broker) |
+| `market_data_authorize_url` | `https://api.upstox.com/v3/feed/market-data-feed/authorize` | `app/config/settings.py` |
 
 ### 2.4 Risk limits (never secret, always worth checking)
 

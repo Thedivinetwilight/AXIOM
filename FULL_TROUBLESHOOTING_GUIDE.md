@@ -473,13 +473,23 @@ From `app/brokers/sandbox.py` lines 176–178 and the call sites:
 | Modify order | `PUT` | `{base_url}/v3/order/modify` | `modify()` line 886 |
 | Reconcile / probe | `GET` | `{history_url}?order_id=…` | `reconcile()` line 648, `_child_remote_status()` line 751, `lookup_intent_order()` line 488 |
 
-Defaults (`Settings`, lines 104–106):
+Defaults (since 3.2.4 — verified against the official docs and the official
+upstox-python SDK sandbox allowlist on 2026-10-16; source of truth:
+`app/config/hosts.py`):
 
-- `upstox_sandbox_base_url = "https://api-hft.upstox.com"` (line 101)
-- `upstox_sandbox_order_history_url = "https://api.upstox.com/v2/order/history"` (line 102)
+- `upstox_sandbox_base_url = "https://api-sandbox.upstox.com"`
+- `upstox_sandbox_order_history_url = "https://api-sandbox.upstox.com/v2/order/history"`
 
-**Note the split:** orders go to `api-hft.upstox.com`; history goes to `api.upstox.com/v2`. Two
-different hosts. A 404 on history is not evidence about the order endpoint, and vice versa.
+**Everything stays on the sandbox host.** Order mutations and order-history
+reads both target `api-sandbox.upstox.com`; a production history URL
+(`api.upstox.com`) is refused at startup because a sandbox token is
+documented as sandbox-only and must never be sent to a production host.
+Because GET `/v2/order/history` is NOT in the documented sandbox-enabled API
+list, a 404/405 on it marks the READ capability `unsupported`
+(`status_view()["history_capability"]`) while order availability is
+unaffected — a 404 on history is not evidence about the order endpoint, and
+vice versa. Credentials are then verifiable only via
+`python -m app sandbox-test --place-order` (one small sandbox order).
 
 ### 7.2 The safe credential probe
 

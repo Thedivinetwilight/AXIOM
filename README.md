@@ -1,6 +1,7 @@
-# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0 code line)
+# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.4 code line)
 
-> **Current source line:** 3.2.0. `AXIOM_PRODUCT_MANUAL.md` is a qualified
+> **Current source line:** 3.2.4 (`app/__init__.py`, `pyproject.toml`, and the
+> build workflow agree). `AXIOM_PRODUCT_MANUAL.md` is a qualified
 > product overview, not a release-readiness certificate. Use
 > [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the
 > commit-specific test, CI, package, artifact, and external-verification state.
@@ -135,11 +136,14 @@ learning layer** and a **dashboard** on top of the intact V0.6.4 platform.
 Nothing was removed: LOCAL_PAPER remains the default and the paper pipeline is
 pinned by `python -m app paper-test` (17/17 checks, exit 0).
 
-- **Modes.** `BROKER=LOCAL_PAPER` (default) | `UPSTOX_SANDBOX` | `LIVE` is
-  **rejected outright** — no live routing exists in V1. Sandbox requires
-  `UPSTOX_SANDBOX_ACCESS_TOKEN`; sandbox credentials only ever reach the
-  documented sandbox hosts (`api-hft.upstox.com` order APIs +
-  `api.upstox.com/v2/order/history` reconciliation), enforced by test.
+- **Modes.** `BROKER=LOCAL_PAPER` (default) | `UPSTOX_SANDBOX` | live routing
+  exists only behind the four-switch opt-in (see `LIVE_TRADING_ENABLEMENT.md`).
+  Sandbox requires `UPSTOX_SANDBOX_ACCESS_TOKEN`; sandbox credentials only
+  ever reach the documented **sandbox** hosts (`api-sandbox.upstox.com` /
+  `sandbox.upstox.com` for order APIs *and* order-history reads — a sandbox
+  token is never sent to `api.upstox.com` or `api-hft.upstox.com`), enforced
+  by test (`tests/test_sandbox_history_capability.py`,
+  `tests/test_v1_separation.py`).
 - **Engine** (`python -m app engine`, requires `BROKER=UPSTOX_SANDBOX` and
   `DATA_SOURCE=upstox`): real V3 feed → strategies → **hard risk gate**
   (outside learning: max position value / open positions / daily loss /
