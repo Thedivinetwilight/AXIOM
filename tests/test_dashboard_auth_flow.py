@@ -54,7 +54,10 @@ class TestDashboardPageOpenLocally:
         response = client.get("/dashboard")
         assert response.status_code == 200
         assert "Arena" in response.text
-        assert "NOT ENABLED" in response.text
+        # V2 truthfulness: the badge is rendered server-side from Settings
+        # (default: simulated paper, live disabled) — no JS required.
+        assert "LIVE: disabled" in response.text
+        assert "SIMULATED (PAPER)" in response.text
 
     def test_dashboard_still_loads_with_bearer(self, client):
         assert client.get("/dashboard", headers=H).status_code == 200

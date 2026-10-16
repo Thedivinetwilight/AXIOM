@@ -1,4 +1,19 @@
-"""Environment configuration. There is deliberately no real-trading configuration."""
+"""Environment configuration, including the gated real-money (LIVE) mode.
+
+Real-money routing is OFF by default and requires FOUR independent switches to
+agree (V2 live-hardening, see LIVE_TRADING_ENABLEMENT.md):
+
+    MODE=LIVE  +  LIVE_TRADING=true  +  BROKER=UPSTOX_LIVE  +  LIVE_CONFIRM=<phrase>
+
+and, additionally, explicit NON-ZERO hard risk limits (``0`` means "unlimited"
+and is refused in live mode). Any single missing switch raises at startup, so a
+stale ``.env``, a typo or a leftover shell export cannot move real money.
+
+``MODE=PAPER`` / ``LIVE_TRADING=false`` remain the defaults and the only
+permitted combination for every other broker. Broker hosts are classified in
+``app/config/hosts.py``; the sandbox broker can never be pointed at a live
+order host.
+"""
 
 import os
 import types
@@ -6,7 +21,25 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
 
+from app.config.hosts import (
+    DEFAULT_LIVE_BASE_URL,
+    DEFAULT_ORDER_HISTORY_URL,
+    DEFAULT_SANDBOX_BASE_URL,
+    DEFAULT_SANDBOX_ORDER_HISTORY_URL,
+    FORBIDDEN_IN_LIVE,
+    FORBIDDEN_IN_SANDBOX,
+    LIVE_ORDER_HOSTS,
+    READ_AND_AUTH_HOSTS,
+    SANDBOX_ORDER_HOSTS,
+    host_of,
+    is_trusted_upstox_url,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
+
+#: Exact phrase required in LIVE_CONFIRM before real money can be routed. It is
+#: deliberately long and awkward: it must never be guessable from a template.
+LIVE_CONFIRM_PHRASE = "I-ACCEPT-REAL-MONEY-RISK"
 
 
 def _unwrap_optional(annotation):
@@ -75,6 +108,14 @@ class Settings:
     currency: str = "INR"
     market_calendar: str = "continuous"
     default_symbol: str = "DEMO"
+    # AXIOM-MONEY-PRINTER (master spec sections 4-5, 15): the selected market
+    # scopes universes/calendars/execution context; attention mode tunes
+    # ANALYTICAL thresholds only — it can never relax safety controls.
+    market: str = "india"
+    attention_mode: str = "balanced"  # conservative | balanced | aggressive
+    # The engine is intraday-only (1m/5m/15m/30m). A daily default is fine for
+    # research/replay, but a live engine cannot consume it — see the live-mode
+    # validation below, which refuses instead of silently downgrading.
     default_timeframe: str = "1D"
     commission: float = 0.0005
     slippage: float = 0.0005
@@ -88,7 +129,8 @@ class Settings:
     market_data_token: str = field(default="", repr=False)
     data_ws_url: str = field(default="", repr=False)
     data_source: str = "replay"
-    # V0.6.1 real market DATA (read-only Upstox feed). No real-trading config exists.
+    # V0.6.1 real market DATA (read-only Upstox feed). Execution config for
+    # real money lives in the V2 LIVE block further down (four-switch gated).
     market_data_provider: str = "upstox"
     market_data_symbols: str = ""
     market_data_timeframe: str = ""
@@ -96,12 +138,86 @@ class Settings:
     market_data_access_token: str = field(default="", repr=False)
     market_data_authorize_url: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
     # --- V1 (Arena): explicit broker modes + sandbox + hard risk limits ---
-    broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX (LIVE is not enabled)
+    broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX | UPSTOX_LIVE (gated)
     upstox_sandbox_access_token: str = field(default="", repr=False)
-    upstox_sandbox_base_url: str = "https://api-hft.upstox.com"
-    upstox_sandbox_order_history_url: str = "https://api.upstox.com/v2/order/history"
+    # Sandbox order host. This MUST stay a sandbox host: api-hft.upstox.com is
+    # the live order host and is refused by the sandbox broker.
+    upstox_sandbox_base_url: str = DEFAULT_SANDBOX_BASE_URL
+    # Sandbox order-history READS stay on the sandbox host. The production
+    # history endpoint (api.upstox.com) is a LIVE-mode URL: a sandbox token is
+    # documented as sandbox-only and must never be sent to a production host.
+    # Order history is also not in the official sandbox-enabled API list, so a
+    # sandbox environment that does not expose it degrades to an explicit
+    # "capability unavailable" state — never to production fallback.
+    upstox_sandbox_order_history_url: str = DEFAULT_SANDBOX_ORDER_HISTORY_URL
     sandbox_product: str = "I"  # intraday product per documented V3 order API
     sandbox_order_tag: str = "arena-v1"
+    # --- V2 (Arena LIVE): real-money routing, gated by four switches ---
+    # Nothing here is active unless MODE=LIVE + LIVE_TRADING=true +
+    # BROKER=UPSTOX_LIVE + LIVE_CONFIRM (phrase) all agree AND every hard risk
+    # limit is explicitly non-zero.
+    upstox_live_access_token: str = field(default="", repr=False)
+    upstox_live_base_url: str = DEFAULT_LIVE_BASE_URL
+    upstox_live_order_history_url: str = DEFAULT_ORDER_HISTORY_URL
+    live_product: str = "I"  # documented V3 product values: I | D | MTF
+    live_order_tag: str = "arena-live"
+    live_algo_name: str = ""  # optional X-Algo-Name for exchange-approved algos
+    live_confirm: str = field(default="", repr=False)  # must equal LIVE_CONFIRM_PHRASE
+    # --- AXIOM-MONEY-PRINTER (master spec section 39): static-IP compliance.
+    # Upstox enforces that live order traffic originates from user-registered
+    # static IPs; these fields record the REGISTERED values so the readiness
+    # center can surface configuration state. They are metadata, never a
+    # bypass: the broker still rejects unregistered sources itself.
+    upstox_static_ip_primary: str = ""
+    upstox_static_ip_secondary: str = ""
+    # Broker API rate-limit profile for live order traffic (master spec
+    # section 40). Values: REGULAR_ALGO | REGISTERED_ALGO | STANDARD.
+    live_rate_limit_profile: str = "REGULAR_ALGO"
+    # --- V2.1 (Arena L-ops): live operations safety rails -------------------
+    # ALL of these act on NEW ENTRIES only. Exits and protective stops are
+    # never blocked by an operational guard (a guard must not trap the account
+    # in a position); see app/live/.
+    # Canary ramp: while the first ``live_canary_orders`` live entries have not
+    # been placed, an entry is capped to ``live_canary_max_notional`` (0 = off).
+    live_canary_max_notional: float = 0.0
+    live_canary_orders: int = 10
+    # Token freshness: Upstox access tokens expire daily. The engine refuses
+    # NEW ENTRIES when the last verified credential is older than this many
+    # hours, and warns this many minutes before that (0 disables the check).
+    live_token_max_age_hours: float = 20.0
+    live_token_warn_minutes: int = 120
+    # Watchdog: an order left working for longer than this raises an alert
+    # (WARNING), escalating to CRITICAL after live_stuck_order_escalate_minutes.
+    live_stuck_order_minutes: int = 5
+    live_stuck_order_escalate_minutes: int = 15
+    # When True the engine cancels orders the watchdog has escalated to
+    # CRITICAL. Off by default: cancelling is an action, and actions need an
+    # explicit opt-in (matching the rest of this section).
+    live_auto_cancel_stuck: bool = False
+    # Reconciliation silence (no successful reconcile) longer than this raises
+    # an alert.
+    live_reconcile_silence_minutes: int = 10
+    # An unacknowledged CRITICAL alert older than this is itself an incident
+    # (0 disables). Acknowledge with `python -m app live-ack`.
+    live_unacked_critical_minutes: int = 15
+    # Single-engine lock: a LIVE engine refuses to start while another live
+    # engine's heartbeat is this fresh (a crashed engine never blocks a restart).
+    live_lock_stale_seconds: int = 180
+    # Auto-stop: when a live breach is detected (daily loss / equity drawdown)
+    # the engine triggers the persisted EMERGENCY STOP itself. Fail-closed
+    # default is ON for live mode.
+    live_auto_stop_on_breach: bool = True
+    # Equity drawdown kill switch (fraction of peak equity, 0 = disabled).
+    live_max_equity_drawdown: float = 0.0
+    # --- Alerts (any mode; the durable sink is always the system_events table) --
+    # Optional HTTP POST sink for CRITICAL/WARNING alerts. Empty = disabled.
+    alert_webhook_url: str = field(default="", repr=False)
+    alert_min_severity: str = "WARNING"  # INFO | WARNING | CRITICAL
+    alert_dedup_seconds: int = 300  # identical alerts are collapsed in this window
+    # A failed webhook POST is retried with exponential backoff this many times
+    # (0 = do not retry). The durable sink already holds the alert either way.
+    alert_retry_attempts: int = 3
+    alert_retry_backoff_seconds: int = 60
     # Hard risk limits (outside any learning system; 0 = unlimited/disabled).
     max_position_value: float = 0.0
     max_open_positions: int = 0
@@ -142,8 +258,25 @@ class Settings:
     hot_path_max_latency_ms: float = 100.0
 
     def __post_init__(self):
-        if self.mode.upper() != "PAPER" or self.live_trading:
+        # V1 broker modes: paper, documented Upstox SANDBOX orders, and the
+        # V2 gated real-money mode. The live host/token pair is validated only
+        # for BROKER=UPSTOX_LIVE; every other broker stays paper/sandbox.
+        broker = self.broker.upper()
+        if broker == "LIVE":
+            # Legacy alias kept fail-closed: the name alone is never enough.
+            raise ValueError(
+                "LIVE trading is not enabled under the alias BROKER=LIVE; "
+                "real-money routing requires BROKER=UPSTOX_LIVE together with "
+                "MODE=LIVE, LIVE_TRADING=true, LIVE_CONFIRM and non-zero risk "
+                "limits (see LIVE_TRADING_ENABLEMENT.md)"
+            )
+        if broker == "UPSTOX_LIVE":
+            self._validate_live_mode()
+        elif self.mode.upper() != "PAPER" or self.live_trading:
             raise ValueError("Only MODE=PAPER and LIVE_TRADING=false are permitted")
+        if broker not in {"LOCAL_PAPER", "UPSTOX_SANDBOX", "UPSTOX_LIVE"}:
+            raise ValueError(
+                "BROKER must be LOCAL_PAPER, UPSTOX_SANDBOX or UPSTOX_LIVE")
         if not self.database_url.startswith("sqlite:///"):
             raise ValueError("Only SQLite is supported")
         from app.backtesting.costs import ExecutionConfig
@@ -153,18 +286,63 @@ class Settings:
             raise ValueError("Unknown market calendar")
         if self.data_source not in {"replay", "binance", "generic", "upstox"}:
             raise ValueError("Unknown data source")
-        # V1 broker modes: paper and documented Upstox SANDBOX orders only.
-        broker = self.broker.upper()
-        if broker == "LIVE":
-            raise ValueError("LIVE trading is not enabled in V1")
-        if broker not in {"LOCAL_PAPER", "UPSTOX_SANDBOX"}:
-            raise ValueError("BROKER must be LOCAL_PAPER or UPSTOX_SANDBOX")
-        if broker == "UPSTOX_SANDBOX" and not self.upstox_sandbox_access_token.strip():
-            raise ValueError(
-                "BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN in the environment"
-            )
+        if broker == "UPSTOX_SANDBOX":
+            self._validate_sandbox_host()
+            if not self.upstox_sandbox_access_token.strip():
+                raise ValueError(
+                    "BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN "
+                    "in the environment"
+                )
         if self.sandbox_product not in {"I", "D", "MTF"}:
             raise ValueError("SANDBOX_PRODUCT must be I, D or MTF (documented V3 values)")
+        if self.live_product not in {"I", "D", "MTF"}:
+            raise ValueError("LIVE_PRODUCT must be I, D or MTF (documented V3 values)")
+        # V2.1 L-ops: operational rails that can silently do nothing are worse
+        # than an explicit refusal, so malformed values fail closed here.
+        if self.live_canary_max_notional < 0:
+            raise ValueError("LIVE_CANARY_MAX_NOTIONAL cannot be negative")
+        if self.live_canary_orders < 0:
+            raise ValueError("LIVE_CANARY_ORDERS cannot be negative")
+        if self.live_canary_max_notional > 0 and self.live_canary_orders <= 0:
+            raise ValueError(
+                "LIVE_CANARY_MAX_NOTIONAL is set but LIVE_CANARY_ORDERS=0: the "
+                "canary would never end; set LIVE_CANARY_ORDERS>0 or unset the "
+                "canary")
+        if self.live_token_max_age_hours < 0 or self.live_token_max_age_hours > 24:
+            raise ValueError("LIVE_TOKEN_MAX_AGE_HOURS must be 0..24 (0 disables)")
+        if self.live_token_warn_minutes < 0 or self.live_token_warn_minutes > 1440:
+            raise ValueError("LIVE_TOKEN_WARN_MINUTES must be 0..1440")
+        if self.live_stuck_order_minutes <= 0:
+            raise ValueError("LIVE_STUCK_ORDER_MINUTES must be > 0")
+        if self.live_stuck_order_escalate_minutes < self.live_stuck_order_minutes:
+            raise ValueError(
+                "LIVE_STUCK_ORDER_ESCALATE_MINUTES must be >= "
+                "LIVE_STUCK_ORDER_MINUTES (an escalation cannot precede the "
+                "warning it escalates)")
+        if self.live_reconcile_silence_minutes <= 0:
+            raise ValueError("LIVE_RECONCILE_SILENCE_MINUTES must be > 0")
+        if self.live_lock_stale_seconds < 30:
+            raise ValueError("LIVE_LOCK_STALE_SECONDS must be >= 30")
+        if not 0 <= self.live_unacked_critical_minutes <= 1440:
+            raise ValueError("LIVE_UNACKED_CRITICAL_MINUTES must be 0..1440 "
+                             "(0 disables the acknowledgement check)")
+        if not 0 <= self.live_max_equity_drawdown < 1:
+            raise ValueError("LIVE_MAX_EQUITY_DRAWDOWN must be 0..<1 (0 disables)")
+        if self.alert_min_severity.upper() not in {"INFO", "WARNING", "CRITICAL"}:
+            raise ValueError("ALERT_MIN_SEVERITY must be INFO, WARNING or CRITICAL")
+        if self.alert_dedup_seconds < 0:
+            raise ValueError("ALERT_DEDUP_SECONDS cannot be negative")
+        if not 0 <= self.alert_retry_attempts <= 10:
+            raise ValueError("ALERT_RETRY_ATTEMPTS must be 0..10")
+        if self.alert_retry_backoff_seconds <= 0:
+            raise ValueError("ALERT_RETRY_BACKOFF_SECONDS must be > 0")
+        if self.alert_webhook_url and not self.alert_webhook_url.startswith(
+                ("http://", "https://")):
+            raise ValueError("ALERT_WEBHOOK_URL must be an http(s) URL or empty")
+        if self.alert_webhook_url and host_of(self.alert_webhook_url) in (
+                LIVE_ORDER_HOSTS | SANDBOX_ORDER_HOSTS):
+            raise ValueError(
+                "ALERT_WEBHOOK_URL must not point at a trading host")
         for name in ("max_position_value", "max_daily_loss"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name.upper()} cannot be negative")
@@ -215,6 +393,93 @@ class Settings:
                         "keys, e.g. NSE_EQ|INE002A01018"
                     )
 
+    def _validate_sandbox_host(self) -> None:
+        """The sandbox broker must never be pointed at a live order host."""
+        host = host_of(self.upstox_sandbox_base_url)
+        if host in FORBIDDEN_IN_SANDBOX:
+            raise ValueError(
+                f"UPSTOX_SANDBOX_BASE_URL host {host!r} is not a sandbox host "
+                f"(sandbox hosts: {', '.join(sorted(SANDBOX_ORDER_HOSTS))}); "
+                "refusing to configure a sandbox broker against a live/order host"
+            )
+        if not is_trusted_upstox_url(
+                self.upstox_sandbox_base_url, SANDBOX_ORDER_HOSTS):
+            raise ValueError(
+                "UPSTOX_SANDBOX_BASE_URL must be an HTTPS root URL on a "
+                "documented sandbox host")
+        history_host = host_of(self.upstox_sandbox_order_history_url)
+        if history_host in FORBIDDEN_IN_SANDBOX:
+            # A sandbox token must never be sent to a production host: the
+            # provider documents sandbox tokens as sandbox-only, and order
+            # history is not a sandbox-enabled API, so there is no legitimate
+            # production read to fall back to. Refuse instead of leaking the
+            # credential (this is the reconciliation-401 defect class: a
+            # production history 401 used to disable the whole sandbox broker).
+            raise ValueError(
+                f"UPSTOX_SANDBOX_ORDER_HISTORY_URL host {history_host!r} is a "
+                "production host; a sandbox token must never be sent there. "
+                "Use the sandbox host (order history is not a documented "
+                "sandbox capability, so a missing endpoint degrades to an "
+                "unavailable-capability state, never a production request)")
+        if not is_trusted_upstox_url(
+                self.upstox_sandbox_order_history_url, SANDBOX_ORDER_HOSTS,
+                expected_path="/v2/order/history"):
+            raise ValueError(
+                "UPSTOX_SANDBOX_ORDER_HISTORY_URL must be the documented "
+                "HTTPS Upstox order-history endpoint on a sandbox host")
+
+    def _validate_live_mode(self) -> None:
+        """All four locks + non-zero risk limits, or refuse to start.
+
+        Fails closed with a single message naming every missing switch, so a
+        half-configured live mode can never boot "successfully" and then place
+        real orders.
+        """
+        missing: list[str] = []
+        if self.mode.upper() != "LIVE":
+            missing.append("MODE=LIVE")
+        if self.live_trading is not True:
+            missing.append("LIVE_TRADING=true")
+        if self.live_confirm.strip() != LIVE_CONFIRM_PHRASE:
+            missing.append(f"LIVE_CONFIRM={LIVE_CONFIRM_PHRASE}")
+        if not self.upstox_live_access_token.strip():
+            missing.append("UPSTOX_LIVE_ACCESS_TOKEN")
+        # 0 means "unlimited/disabled" everywhere else; in live mode every
+        # hard limit must be explicit, so a runaway loop cannot be unbounded.
+        for name in ("max_position_value", "max_daily_loss"):
+            if not float(getattr(self, name)) > 0:
+                missing.append(f"{name.upper()}>0 (0 = unlimited, refused in live)")
+        for name in ("max_open_positions", "max_trades_per_day"):
+            if not int(getattr(self, name)) > 0:
+                missing.append(f"{name.upper()}>0 (0 = unlimited, refused in live)")
+        if missing:
+            raise ValueError(
+                "BROKER=UPSTOX_LIVE (real money) requires ALL of: "
+                + "; ".join(missing)
+            )
+        host = host_of(self.upstox_live_base_url)
+        if host not in LIVE_ORDER_HOSTS:
+            raise ValueError(
+                f"UPSTOX_LIVE_BASE_URL host {host!r} is not the documented live "
+                f"order host ({', '.join(sorted(LIVE_ORDER_HOSTS))})"
+            )
+        if host in FORBIDDEN_IN_LIVE:
+            raise ValueError(
+                f"UPSTOX_LIVE_BASE_URL host {host!r} is a sandbox/auth host and "
+                "cannot route real orders"
+            )
+        if not is_trusted_upstox_url(
+                self.upstox_live_base_url, LIVE_ORDER_HOSTS):
+            raise ValueError(
+                "UPSTOX_LIVE_BASE_URL must be an HTTPS root URL on the "
+                "documented live order host")
+        if not is_trusted_upstox_url(
+                self.upstox_live_order_history_url, READ_AND_AUTH_HOSTS,
+                expected_path="/v2/order/history"):
+            raise ValueError(
+                "UPSTOX_LIVE_ORDER_HISTORY_URL must be the documented "
+                "HTTPS Upstox order-history endpoint")
+
     def market_data_symbol_list(self) -> list[str]:
         """Comma-separated MARKET_DATA_SYMBOLS → instrument key list."""
         return [item.strip() for item in self.market_data_symbols.split(",") if item.strip()]
@@ -234,10 +499,19 @@ class Settings:
 
     @classmethod
     def from_env(cls):
+        # Load configuration from every applicable .env, most specific first.
+        # When Arena runs from source with no ARENA_HOME this is exactly the
+        # repository's .env as before; a packaged executable instead reads the
+        # per-user one (and a portable .env beside the .exe, if present), since
+        # its own code lives in a temporary extraction directory.
         try:
             from dotenv import load_dotenv
 
-            load_dotenv(ROOT / ".env", override=False)
+            from app import runtime
+
+            for candidate in runtime.env_candidates():
+                if candidate.exists():
+                    load_dotenv(candidate, override=False)
         except ImportError:
             pass  # Core research/replay also works with stdlib and exported env vars.
         # 3.0.2 fix: conversion follows the DECLARED FIELD ANNOTATION
@@ -248,10 +522,13 @@ class Settings:
         hints = get_type_hints(cls)
         values = {}
         # V0.6.2: documented UPSTOX_* aliases for the market-data fields.
-        # Explicit MARKET_DATA_* variables always win.
+        # Explicit MARKET_DATA_* variables always win. 3.1.0: MARKET_DATA_SOURCE
+        # is accepted as an alias for DATA_SOURCE so legacy .env files and old
+        # setup screens keep meaning what they say.
         aliases = {
             "market_data_access_token": "UPSTOX_ACCESS_TOKEN",
             "market_data_symbols": "UPSTOX_INSTRUMENT_KEYS",
+            "data_source": "MARKET_DATA_SOURCE",
         }
         for f in fields(cls):
             name = f.name
@@ -266,4 +543,26 @@ class Settings:
                 # int-lit default survives under a float annotation
                 values[name] = coerce_env_value(
                     name, annotation, getattr(defaults, name))
+
+        # Packaged/portable installs must not depend on the working directory.
+        # A double-clicked .exe on Windows often starts in C:\Windows\System32,
+        # so `sqlite:///trading_bot.db` and `data` would resolve somewhere
+        # unpredictable and the database would look like it reset each launch.
+        # Only UNSET values are redirected: anything the operator wrote in .env
+        # is honoured exactly as given.
+        # Imported rather than assumed: the core research/replay path is
+        # documented to work with a minimal stdlib environment. If the module
+        # is somehow absent we simply keep the classic defaults; any real
+        # failure inside it is allowed to surface rather than being swallowed.
+        try:
+            from app import runtime
+        except ImportError:  # pragma: no cover - optional import
+            runtime = None  # type: ignore[assignment]
+
+        if runtime is not None and runtime.is_portable():
+            if not (os.getenv("DATABASE_URL") or "").strip():
+                values["database_url"] = runtime.default_database_path()
+            if not (os.getenv("DATA_DIR") or "").strip():
+                values["data_dir"] = runtime.default_data_dir()
+
         return cls(**values)

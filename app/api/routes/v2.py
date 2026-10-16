@@ -16,6 +16,7 @@ from fastapi.responses import Response
 
 from app.reporting.activity import explain_all
 from app.reporting.weekly import WeeklyReport
+from app.engine.state import read_equity_state
 
 router = APIRouter(prefix="/api/v2")
 
@@ -28,7 +29,7 @@ def _repo(request: Request):
 async def overview(request: Request):
     repository = _repo(request)
     settings = request.app.state.settings
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     snapshots = repository.list_daily_snapshots(limit=2)
     return {
         "version": __version__,
@@ -36,8 +37,13 @@ async def overview(request: Request):
             sum(request.app.state.api_latencies) / len(request.app.state.api_latencies), 2),
         "api_requests_observed": len(getattr(request.app.state, "api_latencies", [])),
         "execution_mode": settings.broker.upper(),
-        "live_trading": False,
-        "mode_display": f"{settings.broker.upper()} · LIVE DISABLED",
+        "live_trading": bool(settings.live_trading),
+        "mode_display": (
+            f"{settings.broker.upper()} · LIVE — REAL MONEY"
+            if settings.live_trading else
+            f"{settings.broker.upper()} · "
+            + ("SANDBOX ORDERS" if settings.broker.upper() == "UPSTOX_SANDBOX"
+               else "SIMULATED (PAPER)")),
         "emergency_stop": bool((repository.get_engine_state("emergency_stop") or {}).get("stopped")),
         "equity": equity_state.get("equity"),
         "drawdown": equity_state.get("drawdown"),
@@ -61,7 +67,7 @@ async def trades(request: Request):
 @router.get("/performance")
 async def performance(request: Request):
     repository = _repo(request)
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     snapshots = repository.list_daily_snapshots(limit=400)
     equity_curve = [{"date": row["date"], "equity": row["equity"]}
                     for row in reversed(snapshots) if row["equity"] is not None]
@@ -124,7 +130,7 @@ async def market_data(request: Request):
 async def risk(request: Request):
     repository = _repo(request)
     settings = request.app.state.settings
-    equity_state = repository.get_engine_state("sandbox_equity") or {}
+    equity_state = read_equity_state(repository)
     risk_events = [e for e in repository.list_system_events(limit=200)
                    if e["kind"] in {"RISK_REJECT", "EMERGENCY_STOP", "EMERGENCY_STOP_REQUESTED"}]
     limits = {
@@ -170,7 +176,6 @@ async def portfolio(request: Request):
     from app.learning.portfolio import PortfolioIntelligence
 
     repository = _repo(request)
-    engine = getattr(request.app.state, "sandbox_engine", None)
     broker = getattr(request.app.state, "sandbox_broker", None)
     intelligence = PortfolioIntelligence(repository)
     if broker is not None:
@@ -180,7 +185,7 @@ async def portfolio(request: Request):
                              "price": broker.ledger.mark
                              or broker.ledger.position_avg_price}])
     else:
-        equity_state = repository.get_engine_state("sandbox_equity") or {}
+        equity_state = read_equity_state(repository)
         snapshot = {"equity": equity_state.get("equity"),
                     "exposure_ratio": None,
                     "note": "no active sandbox broker; recorded state only"}
@@ -283,3 +288,134 @@ async def report(request: Request, period: str = "weekly",
     if format == "pdf":
         return Response(content=report.pdf(), media_type="application/pdf")
     return Response(content=report.markdown(), media_type="text/markdown")
+
+
+@router.get("/alerts")
+async def alerts(request: Request, limit: int = 50, category: str | None = None):
+    """Operational alerts from the durable sink (V2.1 L-ops).
+
+    Read-only and additive: alerts are recorded by the engine's AlertRouter in
+    ``system_events`` (kind ALERT), so this endpoint works even while no engine
+    process is running. ``limit`` is clamped to keep the response bounded. Each
+    alert carries its durable ``id``, its category (spec §56) and whether a
+    human has acknowledged it — an acknowledged alarm and an unattended one are
+    very different states. ``category`` filters to one of the spec's alert
+    categories; an unknown category filters to nothing (never a guess).
+    """
+    from app.live.alerts import ALERT_CATEGORIES, recent_alerts
+
+    repository = _repo(request)
+    bounded = max(1, min(int(limit), 500))
+    listed = recent_alerts(repository, limit=bounded)
+    if category is not None:
+        wanted = str(category).strip().lower()
+        if wanted not in ALERT_CATEGORIES:
+            return {"alerts": [], "source": "system_events/ALERT",
+                    "category_filter": wanted,
+                    "note": f"unknown category {wanted!r}; expected one of "
+                            f"{', '.join(ALERT_CATEGORIES)}",
+                    "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
+                    "unacknowledged_critical": 0}
+        listed = [alert for alert in listed if alert["category"] == wanted]
+    return {
+        "alerts": listed,
+        "source": "system_events/ALERT",
+        "category_filter": category,
+        "categories": list(ALERT_CATEGORIES),
+        "webhook_enabled": bool(request.app.state.settings.alert_webhook_url),
+        "unacknowledged_critical": sum(
+            1 for alert in listed
+            if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
+    }
+
+
+@router.post("/alerts/ack")
+async def acknowledge_alerts(request: Request):
+    """Acknowledge alerts (local bookkeeping ONLY).
+
+    Writes nothing but acknowledgement state in ``engine_state``; it cannot
+    place, modify or cancel an order and cannot change a risk limit or a
+    switch. Body: ``{"ids": ["..."]}``, ``{"kind": "STUCK_ORDER"}`` or
+    ``{"all": true}``, with optional ``by`` and ``note``.
+    """
+    from app.live.alerts import AlertAcknowledgements, recent_alerts
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    repository = _repo(request)
+    acks = AlertAcknowledgements(repository)
+    by = str(body.get("by") or "api")
+    note = str(body.get("note") or "")
+    if body.get("ids"):
+        result = acks.acknowledge_many(
+            [str(item) for item in body["ids"]], by=by, note=note)
+    elif body.get("kind"):
+        result = acks.acknowledge_kind(str(body["kind"]), by=by, note=note)
+    elif body.get("all"):
+        ids = [alert["id"] for alert in recent_alerts(repository, limit=500)
+               if alert.get("id")]
+        result = acks.acknowledge_many(ids, by=by, note=note)
+    else:
+        result = {"ok": False,
+                  "reason": "provide 'ids', 'kind' or 'all' — nothing to do"}
+    result["status"] = acks.status()
+    return result
+
+
+@router.get("/live/status")
+async def live_status(request: Request):
+    """Live-operations snapshot: mode, guards, canary, token, breaches.
+
+    Deliberately derived from RECORDED state (engine_state + settings) rather
+    than from a running engine object, so it is accurate for a stopped or
+    crashed engine too — which is exactly when an operator looks at it.
+    """
+    from app.config.hosts import LIVE_ORDER_HOSTS, host_of
+    from app.live.alerts import recent_alerts
+    from app.live.guards import CanaryGuard, TokenGuard
+    from app.live.lock import EngineLock
+    from app.live.watchdog import BreachMonitor
+
+    settings = request.app.state.settings
+    repository = _repo(request)
+    broker_mode = (settings.broker or "").upper()
+    live = bool(settings.live_trading) and broker_mode == "UPSTOX_LIVE"
+    token = TokenGuard(
+        repository, max_age_hours=settings.live_token_max_age_hours,
+        warn_minutes=settings.live_token_warn_minutes)
+    canary = CanaryGuard(
+        repository, max_notional=settings.live_canary_max_notional,
+        first_orders=settings.live_canary_orders)
+    breaches = BreachMonitor(
+        repository, max_daily_loss=settings.max_daily_loss,
+        max_equity_drawdown=settings.live_max_equity_drawdown,
+        auto_stop=settings.live_auto_stop_on_breach)
+    host = host_of(settings.upstox_live_base_url)
+    return {
+        "mode": (settings.mode or "PAPER").upper(),
+        "live_trading": live,
+        "broker": broker_mode,
+        "order_host": settings.upstox_live_base_url if live else None,
+        "order_host_is_documented_live": host in LIVE_ORDER_HOSTS if live else None,
+        "token": token.status(),
+        "canary": canary.status(),
+        "breaches": breaches.status(),
+        "last_reconcile_at": repository.get_engine_state("last_reconcile_at"),
+        "emergency_stop": bool(
+            (repository.get_engine_state("emergency_stop") or {}).get("stopped")),
+        "open_live_orders": len(repository.open_live_orders()) if live else 0,
+        "lock": EngineLock(
+            repository,
+            stale_after_seconds=settings.live_lock_stale_seconds,
+            live=live).status(),
+        "unacknowledged_critical": sum(
+            1 for alert in recent_alerts(repository, limit=200)
+            if alert["severity"] == "CRITICAL" and not alert["acknowledged"]),
+        "pending_alert_retries": len(
+            repository.get_engine_state("alert_pending_deliveries", []) or []),
+    }

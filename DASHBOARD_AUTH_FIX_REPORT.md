@@ -1,5 +1,8 @@
 # DASHBOARD AUTH FIX REPORT — Arena 3.0.2
 
+> **Historical snapshot only:** this report describes the 3.0.2 dashboard-auth fix, not current HEAD. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for current verification.
+
+
 **Problem:** `GET /dashboard` returned `{"detail":"Invalid or missing bearer token"}`
 for a local browser: the HTML page sat behind the same router-level bearer
 dependency as every protected API endpoint, so the page could never load long

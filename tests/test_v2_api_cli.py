@@ -46,7 +46,8 @@ class TestV2Api:
         data = client.get("/api/v2/overview", headers=TOKEN).json()
         assert data["execution_mode"] == "LOCAL_PAPER"
         assert data["live_trading"] is False
-        assert "LIVE DISABLED" in data["mode_display"]
+        assert "SIMULATED (PAPER)" in data["mode_display"]
+        assert "REAL MONEY" not in data["mode_display"]
 
     def test_market_data_counts(self, client):
         repository = client.app.state.repository

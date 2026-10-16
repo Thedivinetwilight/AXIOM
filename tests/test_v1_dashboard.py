@@ -36,14 +36,16 @@ class TestDashboardAuthAndBadges:
         assert data["broker_mode"] == "LOCAL_PAPER"
         assert data["mode"] == "PAPER"
         assert data["live_trading"] is False
-        assert data["live_enabled"] == "NOT ENABLED IN V1"
+        assert data["live_enabled"] == "disabled"
+        assert "SIMULATED" in data["display"]
         assert "PAPER" in data["display"]
         assert data["version"] == __version__
 
-    def test_html_page_served_and_warns_live_not_enabled(self, client):
+    def test_html_page_served_and_reports_live_disabled(self, client):
         response = client.get("/dashboard", headers=H)
         assert response.status_code == 200
-        assert "NOT ENABLED IN V1" in response.text
+        assert "LIVE: disabled" in response.text
+        assert "SIMULATED (PAPER)" in response.text
         assert "EMERGENCY STOP" in response.text
 
     def test_sandbox_mode_displayed_when_configured(self, client, tmp_path, monkeypatch):

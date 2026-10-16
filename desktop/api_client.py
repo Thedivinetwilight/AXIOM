@@ -18,11 +18,15 @@ class ArenaApiClient:
         self.token = token
         self.timeout = timeout
 
-    def _request(self, path: str, method: str = "GET") -> dict:
+    def _request(self, path: str, method: str = "GET",
+                 body: dict | None = None) -> dict:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Accept": "application/json"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
-            f"{self.base_url}{path}", method=method,
-            headers={"Authorization": f"Bearer {self.token}",
-                     "Accept": "application/json"})
+            f"{self.base_url}{path}", data=data, method=method, headers=headers)
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode())
 
@@ -98,5 +102,6 @@ class ArenaApiClient:
     def emergency_stop(self) -> dict:
         return self._request("/engine/stop", method="POST")
 
-    def resume(self) -> dict:
-        return self._request("/engine/resume", method="POST")
+    def resume(self, confirmation_phrase: str = "") -> dict:
+        return self._request("/engine/resume", method="POST",
+                             body={"confirmation_phrase": confirmation_phrase})

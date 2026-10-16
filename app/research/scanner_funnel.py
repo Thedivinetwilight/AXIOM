@@ -8,8 +8,8 @@ Caches stable features, invalidates only when required, measures latencies.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import List, Dict, Callable, Any
+from dataclasses import dataclass
+from typing import List, Callable, Any
 
 
 @dataclass
@@ -85,7 +85,6 @@ class ScannerFunnel:
         self.metrics = FunnelMetrics(full_universe=len(universe))
 
         # Stage 1: cheap liquidity filter
-        t0 = time.perf_counter()
         if liquidity_filter:
             stage = [u for u in universe if liquidity_filter(u)]
         else:
@@ -113,11 +112,17 @@ class ScannerFunnel:
         feature_start = time.perf_counter()
         for u in stage:
             key = str(u.get("instrument_key") or u.get("symbol") or id(u))
-            def compute():
+            # Bind the loop variable as a DEFAULT ARGUMENT. The closure is
+            # invoked synchronously today (self._cached_feature calls compute()
+            # on a cache miss), so late binding happens to give the right
+            # answer — but it only stores the value, never the callable, so any
+            # future change that defers the call would silently score every
+            # instrument with whichever `u` the loop finished on.
+            def compute(candidate=u):
                 if deep_scorer:
-                    return deep_scorer(u)
+                    return deep_scorer(candidate)
                 # default scorer: simple
-                return float(u.get("close", 0) or 0) * 0.001
+                return float(candidate.get("close", 0) or 0) * 0.001
             val, _ = self._cached_feature(f"score:{key}", compute)
             scored.append((val, u))
         self.metrics.feature_latency_ms = (time.perf_counter() - feature_start) * 1000

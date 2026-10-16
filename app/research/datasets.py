@@ -28,7 +28,6 @@ class DatasetBuilder:
         parts: dict[str, list] = {}
         hashes: dict[str, dict] = {}
         coverage_refs = []
-        from app.history.store import parse_local
 
         total_rows = 0
         for key in instrument_keys:

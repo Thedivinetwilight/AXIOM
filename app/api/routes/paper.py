@@ -33,6 +33,12 @@ async def trades(request: Request, limit: int = Query(100, ge=1, le=1000)):
 
 @router.post("/paper/start")
 async def start(body: PaperStartRequest, request: Request):
+    return await do_start(body, request)
+
+
+async def do_start(body: PaperStartRequest, request: Request):
+    """The one paper-start implementation, shared by /paper/start and the
+    wizard's one-click /api/paper/start-default. One code path, no drift."""
     if body.timeframe != request.app.state.broker.timeframe:
         raise ValueError(
             "Paper timeframe must match DEFAULT_TIMEFRAME; restart with separate DB to change"

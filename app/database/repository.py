@@ -188,10 +188,17 @@ class _V1RepositoryBase:
                 ).fetchall()
             ]
 
-    def record_sandbox_order(self, record: dict) -> None:
+    # -- order audit (sandbox vs LIVE are separate tables, one implementation) --
+    #
+    # V2 live-hardening: real-money orders are recorded in ``live_orders`` /
+    # ``live_transitions``, never in the sandbox tables. Both modes share the
+    # code below, so behaviour (idempotency, per-child identity, reconciliation
+    # ordering) is identical while the audit trail stays unambiguous.
+
+    def _record_order(self, table: str, record: dict) -> None:
         with self.db.transaction() as db:
             db.execute(
-                "INSERT OR REPLACE INTO sandbox_orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT OR REPLACE INTO {table} VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     record["id"], record.get("upstox_order_id"), record["symbol"],
                     record["side"], record["quantity"], record.get("price"),
@@ -201,9 +208,10 @@ class _V1RepositoryBase:
                 ),
             )
 
-    def record_sandbox_transition(self, order_id: str, upstox_order_id: str | None,
-                                  status: str, filled_quantity: float | None,
-                                  average_price: float | None, ts: str, raw: dict) -> bool:
+    def _record_transition(self, order_table: str, transition_table: str,
+                           order_id: str, upstox_order_id: str | None,
+                           status: str, filled_quantity: float | None,
+                           average_price: float | None, ts: str, raw: dict) -> bool:
         """Idempotent state-transition append. Returns False if already recorded.
 
         3.0.3: the identity includes the CHILD (slice) order id — two children
@@ -212,37 +220,46 @@ class _V1RepositoryBase:
         """
         with self.db.transaction() as db:
             existing = db.execute(
-                "SELECT 1 FROM sandbox_transitions WHERE order_id=? AND status=? "
+                f"SELECT 1 FROM {transition_table} WHERE order_id=? AND status=? "
                 "AND filled_quantity IS ? AND ts=? AND upstox_order_id IS ?",
                 (order_id, status, filled_quantity, ts, upstox_order_id),
             ).fetchone()
             if existing:
                 return False
             db.execute(
-                "INSERT INTO sandbox_transitions VALUES (?,?,?,?,?,?,?)",
+                f"INSERT INTO {transition_table} VALUES (?,?,?,?,?,?,?)",
                 (order_id, upstox_order_id, status, filled_quantity, average_price, ts, encode(raw)),
             )
             if upstox_order_id:
                 db.execute(
-                    "UPDATE sandbox_orders SET upstox_order_id=?, status=?, updated_ts=? WHERE id=?",
+                    f"UPDATE {order_table} SET upstox_order_id=?, status=?, updated_ts=? WHERE id=?",
                     (upstox_order_id, status, ts, order_id),
                 )
             else:
                 db.execute(
-                    "UPDATE sandbox_orders SET status=?, updated_ts=? WHERE id=?",
+                    f"UPDATE {order_table} SET status=?, updated_ts=? WHERE id=?",
                     (status, ts, order_id),
                 )
         return True
 
-    def list_sandbox_orders(self, limit=200):
+    def _list_orders(self, order_table: str, transition_table: str, limit=200):
         with self.db.transaction() as db:
             rows = db.execute(
-                "SELECT * FROM sandbox_orders ORDER BY created_ts DESC LIMIT ?", (limit,)
+                f"SELECT * FROM {order_table} ORDER BY created_ts DESC LIMIT ?", (limit,)
             ).fetchall()
             orders = []
             for row in rows:
                 # Columns are authoritative (payload may be stale after updates).
-                order = json.loads(row["payload"])
+                try:
+                    order = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    # A corrupt payload must not brick the whole orders view
+                    # (monitoring/dashboards read this); the columns below
+                    # still describe the order, and the payload stays in the
+                    # database for forensics.
+                    order = {}
+                if not isinstance(order, dict):
+                    order = {}
                 order.update(
                     id=row["id"],
                     upstox_order_id=row["upstox_order_id"],
@@ -258,19 +275,59 @@ class _V1RepositoryBase:
                 )
                 transitions = [
                     dict(t) for t in db.execute(
-                        "SELECT * FROM sandbox_transitions WHERE order_id=? ORDER BY ts",
+                        f"SELECT * FROM {transition_table} WHERE order_id=? ORDER BY ts",
                         (row["id"],),
                     ).fetchall()
                 ]
                 for transition in transitions:
-                    transition["raw"] = json.loads(transition["raw"])
+                    try:
+                        transition["raw"] = json.loads(transition["raw"])
+                    except (TypeError, ValueError):
+                        # Same tolerance for one corrupt raw row: recover_
+                        # ledger_state parses raw defensively, so the rest of
+                        # the audit trail must stay readable too.
+                        transition["raw"] = {}
                 order["transitions"] = transitions
                 orders.append(order)
         return orders
 
+    def record_sandbox_order(self, record: dict) -> None:
+        self._record_order("sandbox_orders", record)
+
+    def record_sandbox_transition(self, order_id: str, upstox_order_id: str | None,
+                                  status: str, filled_quantity: float | None,
+                                  average_price: float | None, ts: str, raw: dict) -> bool:
+        return self._record_transition(
+            "sandbox_orders", "sandbox_transitions", order_id, upstox_order_id,
+            status, filled_quantity, average_price, ts, raw)
+
+    def list_sandbox_orders(self, limit=200):
+        return self._list_orders("sandbox_orders", "sandbox_transitions", limit)
+
     def open_sandbox_orders(self):
         return [
             order for order in self.list_sandbox_orders(limit=1000)
+            if order["status"] in {"SUBMITTED", "OPEN", "PARTIALLY_FILLED"}
+        ]
+
+    # -- LIVE (real money) audit: separate tables, identical semantics -------
+
+    def record_live_order(self, record: dict) -> None:
+        self._record_order("live_orders", record)
+
+    def record_live_transition(self, order_id: str, upstox_order_id: str | None,
+                               status: str, filled_quantity: float | None,
+                               average_price: float | None, ts: str, raw: dict) -> bool:
+        return self._record_transition(
+            "live_orders", "live_transitions", order_id, upstox_order_id,
+            status, filled_quantity, average_price, ts, raw)
+
+    def list_live_orders(self, limit=200):
+        return self._list_orders("live_orders", "live_transitions", limit)
+
+    def open_live_orders(self):
+        return [
+            order for order in self.list_live_orders(limit=1000)
             if order["status"] in {"SUBMITTED", "OPEN", "PARTIALLY_FILLED"}
         ]
 
@@ -336,10 +393,160 @@ class _V1RepositoryBase:
         with self.db.transaction() as db:
             db.execute("INSERT OR REPLACE INTO engine_state VALUES (?,?)", (key, encode(value)))
 
+    def set_engine_states(self, values: dict) -> None:
+        """Atomically persist related engine state records."""
+        if not isinstance(values, dict) or not values:
+            raise ValueError("engine-state batch must be a non-empty mapping")
+        encoded = [(str(key), encode(value)) for key, value in values.items()]
+        if any(not key for key, _ in encoded):
+            raise ValueError("engine-state keys must be non-empty")
+        with self.db.transaction() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO engine_state(key,payload) VALUES (?,?)",
+                encoded)
+
     def get_engine_state(self, key: str, default=None):
         with self.db.transaction() as db:
             row = db.execute("SELECT payload FROM engine_state WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
+
+    # -------------------------------------------- execution intents (§22) --
+    def insert_submission_intent(self, intent_id: str, payload: dict) -> bool:
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            raise ValueError("submission intent id must be non-empty")
+        encoded = encode(payload)
+        with self.db.transaction() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO submission_intents(intent_id,payload) "
+                "VALUES (?,?)", (intent_id, encoded))
+        return cursor.rowcount == 1
+
+    def update_submission_intent(self, intent_id: str, payload: dict, *,
+                                 expected_state: str | None = None) -> bool:
+        if not isinstance(intent_id, str) or not intent_id.strip():
+            raise ValueError("submission intent id must be non-empty")
+        encoded = encode(payload)
+        with self.db.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT payload FROM submission_intents WHERE intent_id=?",
+                (intent_id,)).fetchone()
+            if row is None:
+                return False
+            current = json.loads(row[0])
+            if not isinstance(current, dict):
+                raise ValueError("durable submission intent is malformed")
+            if (expected_state is not None
+                    and current.get("state") != expected_state):
+                return False
+            cursor = db.execute(
+                "UPDATE submission_intents SET payload=? WHERE intent_id=?",
+                (encoded, intent_id))
+        return cursor.rowcount == 1
+
+    def get_submission_intent(self, intent_id: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT payload FROM submission_intents WHERE intent_id=?",
+                (intent_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_submission_intents(self) -> dict:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT intent_id,payload FROM submission_intents ORDER BY rowid"
+            ).fetchall()
+        return {row[0]: json.loads(row[1]) for row in rows}
+
+    # ------------------------------------------------- engine leases (§15) --
+    # Atomic, conditional ownership. ONE statement decides the owner, so two
+    # engines racing cannot both win. ``stale_before_ts`` is the heartbeat
+    # cutoff: an existing owner whose heartbeat is older than the cutoff is
+    # provably gone and may be replaced; a fresh owner never is.
+    def try_acquire_lease(self, name: str, owner: str, *, pid: int, host: str,
+                          live: bool, now_ts: str, stale_before_ts: str,
+                          stale_proof: dict | None = None) -> dict:
+        """Attempt to own lease ``name``. Returns {acquired, existing}.
+
+        The owner decision remains ONE conditional upsert. A different LIVE
+        owner can only be replaced when EngineLock supplies a proof tuple
+        (owner, PID, host, heartbeat) that it checked as locally dead; the
+        upsert compares every proof field again, closing the race between that
+        OS check and the database write. A fresh, remote, malformed, or
+        still-alive owner is never displaced by heartbeat age alone.
+        """
+        proof = stale_proof if isinstance(stale_proof, dict) else {}
+        proof_owner = str(proof.get("owner") or "")
+        proof_pid = int(proof.get("pid") or -1)
+        proof_host = str(proof.get("host") or "")
+        proof_heartbeat = str(proof.get("heartbeat_ts") or "")
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT owner, pid, host, started_ts, heartbeat_ts, live "
+                "FROM engine_lease WHERE name=?", (name,)).fetchone()
+            existing = None
+            if row:
+                existing = {"owner": row[0], "pid": row[1], "host": row[2],
+                            "started_ts": row[3], "heartbeat_ts": row[4],
+                            "live": row[5]}
+            cur = db.execute(
+                "INSERT INTO engine_lease (name, owner, pid, host, started_ts, "
+                "heartbeat_ts, live) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "owner=excluded.owner, pid=excluded.pid, host=excluded.host, "
+                "started_ts=CASE WHEN engine_lease.owner=excluded.owner "
+                "THEN engine_lease.started_ts ELSE excluded.started_ts END, "
+                "heartbeat_ts=excluded.heartbeat_ts, live=excluded.live "
+                "WHERE (engine_lease.owner=excluded.owner "
+                "AND engine_lease.pid=excluded.pid "
+                "AND engine_lease.host=excluded.host) "
+                "OR engine_lease.live=0 "
+                "OR (engine_lease.owner=? AND engine_lease.pid=? "
+                "AND engine_lease.host=? AND engine_lease.heartbeat_ts=? "
+                "AND datetime(engine_lease.heartbeat_ts) IS NOT NULL "
+                "AND datetime(engine_lease.heartbeat_ts) < datetime(?))",
+                (name, owner, pid, host, now_ts, now_ts, int(bool(live)),
+                 proof_owner, proof_pid, proof_host, proof_heartbeat,
+                 stale_before_ts))
+            acquired = cur.rowcount > 0
+            renewed = bool(
+                acquired and existing and existing["owner"] == owner
+                and existing["pid"] == pid and existing["host"] == host)
+            took_over_stale = bool(
+                acquired and existing and existing["live"] and not renewed
+                and proof_owner == existing["owner"]
+                and proof_pid == existing["pid"]
+                and proof_host == existing["host"]
+                and proof_heartbeat == existing["heartbeat_ts"])
+            return {"acquired": acquired, "existing": existing,
+                    "renewed": renewed, "took_over_stale": took_over_stale}
+
+    def heartbeat_lease(self, name: str, owner: str, *, now_ts: str) -> bool:
+        """Refresh the heartbeat ONLY if we still own the lease."""
+        with self.db.transaction() as db:
+            cur = db.execute(
+                "UPDATE engine_lease SET heartbeat_ts=? WHERE name=? AND owner=?",
+                (now_ts, name, owner))
+            return cur.rowcount > 0
+
+    def release_lease(self, name: str, owner: str) -> bool:
+        """Release ONLY if we own it; never delete someone else's lease."""
+        with self.db.transaction() as db:
+            cur = db.execute(
+                "DELETE FROM engine_lease WHERE name=? AND owner=?",
+                (name, owner))
+            return cur.rowcount > 0
+
+    def read_lease(self, name: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT owner, pid, host, started_ts, heartbeat_ts, live "
+                "FROM engine_lease WHERE name=?", (name,)).fetchone()
+        if not row:
+            return None
+        return {"owner": row[0], "pid": row[1], "host": row[2],
+                "started_ts": row[3], "heartbeat_ts": row[4],
+                "live": row[5]}
 
 
 # ------------------------------------------------------------------ V2.1 ----
@@ -1166,10 +1373,364 @@ class MarketEventRepositoryMixin:
         return d
 
 
+class AxiomWorkstationRepositoryMixin:
+    """AXIOM-MONEY-PRINTER workstation persistence (master spec v1.0).
+
+    Saved universes are market-scoped; state changes are the durable record
+    behind the "what changed?" surface; opportunities carry their own
+    lifecycle; research memory and missed opportunities keep provenance.
+    Live session rows are append-only — the state machine's latest row is the
+    current state, so the audit trail is never rewritten.
+    """
+
+    # ------------------------------------------------------------ universes --
+    def save_universe(self, *, market_id: str, name: str, symbols: list[str],
+                      note: str | None = None) -> dict:
+        universe_id = str(uuid4())
+        ts = _now_iso()
+        payload = encode([str(s) for s in symbols])
+        with self.db.transaction() as db:
+            existing = db.execute(
+                "SELECT id FROM saved_universes WHERE market_id=? AND name=?",
+                (market_id, name)).fetchone()
+            if existing:
+                db.execute(
+                    "UPDATE saved_universes SET symbols=?, note=?, updated_ts=? "
+                    "WHERE id=?", (payload, note, ts, existing["id"]))
+                universe_id = existing["id"]
+            else:
+                db.execute(
+                    "INSERT INTO saved_universes (id, market_id, name, symbols, note,"
+                    " created_ts, updated_ts) VALUES (?,?,?,?,?,?,?)",
+                    (universe_id, market_id, name, payload, note, ts, ts))
+        return {"id": universe_id, "market_id": market_id, "name": name,
+                "symbols": [str(s) for s in symbols], "note": note,
+                "updated_ts": ts}
+
+    def list_universes(self, market_id: str | None = None) -> list[dict]:
+        if market_id:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM saved_universes WHERE market_id=? "
+                    "ORDER BY updated_ts DESC", (market_id,)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM saved_universes ORDER BY updated_ts DESC").fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["symbols"] = json.loads(d["symbols"])
+            except (TypeError, ValueError):
+                d["symbols"] = []
+            out.append(d)
+        return out
+
+    def get_universe(self, universe_id: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute("SELECT * FROM saved_universes WHERE id=?",
+                             (universe_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["symbols"] = json.loads(d["symbols"])
+        except (TypeError, ValueError):
+            d["symbols"] = []
+        return d
+
+    def delete_universe(self, universe_id: str) -> bool:
+        with self.db.transaction() as db:
+            cur = db.execute("DELETE FROM saved_universes WHERE id=?", (universe_id,))
+        return bool(getattr(cur, "rowcount", 0))
+
+    def pin_instrument(self, market_id: str, identity: str) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO universe_pins (market_id, identity, pinned_ts)"
+                " VALUES (?,?,?)", (market_id, identity, _now_iso()))
+
+    def unpin_instrument(self, market_id: str, identity: str) -> None:
+        with self.db.transaction() as db:
+            db.execute("DELETE FROM universe_pins WHERE market_id=? AND identity=?",
+                       (market_id, identity))
+
+    def list_pinned(self, market_id: str) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM universe_pins WHERE market_id=? ORDER BY pinned_ts DESC",
+                (market_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ----------------------------------------------------- what changed -----
+    def record_state_change(self, *, domain: str, object_key: str, field: str,
+                            previous, current, evidence: str | None = None) -> str:
+        change_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO state_changes (id, ts, domain, object_key, field,"
+                " previous, current, evidence) VALUES (?,?,?,?,?,?,?,?)",
+                (change_id, _now_iso(), domain, object_key, field,
+                 None if previous is None else str(previous),
+                 None if current is None else str(current), evidence))
+        return change_id
+
+    def list_state_changes(self, domain: str | None = None, limit: int = 100) -> list[dict]:
+        if domain:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM state_changes WHERE domain=? ORDER BY ts DESC LIMIT ?",
+                    (domain, limit)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM state_changes ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------------------------------------------------- opportunities -----
+    def upsert_opportunity(self, record: dict) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO opportunities (id, market_id, identity, state, created_ts,"
+                " last_evidence_ts, updated_ts, payload, invalidation_reason)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET state=excluded.state,"
+                " last_evidence_ts=excluded.last_evidence_ts,"
+                " updated_ts=excluded.updated_ts, payload=excluded.payload,"
+                " invalidation_reason=excluded.invalidation_reason",
+                (record["id"], record["market_id"], record["identity"], record["state"],
+                 record["created_ts"], record["last_evidence_ts"], record["updated_ts"],
+                 encode(record.get("payload", {})), record.get("invalidation_reason")))
+
+    def list_opportunity_records(self, *, state: str | None = None,
+                           market_id: str | None = None, limit: int = 200) -> list[dict]:
+        query = "SELECT * FROM opportunities"
+        clauses, args = [], []
+        if state:
+            clauses.append("state=?")
+            args.append(state)
+        if market_id:
+            clauses.append("market_id=?")
+            args.append(market_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_ts DESC LIMIT ?"
+        args.append(limit)
+        with self.db.transaction() as db:
+            rows = db.execute(query, tuple(args)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # --------------------------------------------------- research memory ----
+    def record_research_memory(self, *, topic: str, kind: str, payload: dict,
+                               provenance: str, confidence: float,
+                               market_id: str | None = None,
+                               experiment_id: str | None = None) -> str:
+        memory_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO research_memory (id, ts, market_id, topic, kind, payload,"
+                " provenance, confidence, experiment_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                (memory_id, _now_iso(), market_id, topic, kind, encode(payload),
+                 provenance, float(confidence), experiment_id))
+        return memory_id
+
+    def search_research_memory(self, *, query: str = "", market_id: str | None = None,
+                               kind: str | None = None, limit: int = 50) -> list[dict]:
+        clauses, args = [], []
+        if market_id:
+            clauses.append("market_id=?")
+            args.append(market_id)
+        if kind:
+            clauses.append("kind=?")
+            args.append(kind)
+        if query:
+            clauses.append("(topic LIKE ? OR payload LIKE ?)")
+            like = f"%{query}%"
+            args.extend([like, like])
+        sql = "SELECT * FROM research_memory"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(limit)
+        with self.db.transaction() as db:
+            rows = db.execute(sql, tuple(args)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def record_missed_opportunity(self, *, kind: str, payload: dict, knowable: bool,
+                                  market_id: str | None = None, identity: str | None = None,
+                                  counterfactual: str | None = None,
+                                  research_question: str | None = None) -> str:
+        missed_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO missed_opportunities (id, ts, kind, market_id, identity,"
+                " payload, knowable, counterfactual, research_question)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (missed_id, _now_iso(), kind, market_id, identity, encode(payload),
+                 1 if knowable else 0, counterfactual, research_question))
+        return missed_id
+
+    def list_missed_opportunities(self, limit: int = 100) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM missed_opportunities ORDER BY ts DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            d["knowable"] = bool(d.get("knowable"))
+            out.append(d)
+        return out
+
+    # ------------------------------------------------------- live session ---
+    def record_live_session_transition(self, *, state: str, reason: str,
+                                       payload: dict | None = None) -> str:
+        session_id = str(uuid4())
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO live_sessions (id, state, ts_entered, reason, payload)"
+                " VALUES (?,?,?,?,?)",
+                (session_id, state, _now_iso(), reason, encode(payload or {})))
+        return session_id
+
+    def current_live_session(self) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM live_sessions ORDER BY ts_entered DESC, rowid DESC"
+                " LIMIT 1").fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except (TypeError, ValueError):
+            d["payload"] = {}
+        return d
+
+    def list_live_sessions(self, limit: int = 50) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM live_sessions ORDER BY ts_entered DESC, rowid DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # ----------------------------------------------------- latency/tasks ----
+    def upsert_latency_summary(self, *, stage: str, day: str, count: int, p50_ms: float,
+                               p95_ms: float, p99_ms: float, p999_ms: float,
+                               max_ms: float, deadline_misses: int) -> None:
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO latency_summaries (stage, day, count, p50_ms, p95_ms,"
+                " p99_ms, p999_ms, max_ms, deadline_misses) VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(stage, day) DO UPDATE SET count=excluded.count,"
+                " p50_ms=excluded.p50_ms, p95_ms=excluded.p95_ms, p99_ms=excluded.p99_ms,"
+                " p999_ms=excluded.p999_ms, max_ms=excluded.max_ms,"
+                " deadline_misses=excluded.deadline_misses",
+                (stage, day, count, p50_ms, p95_ms, p99_ms, p999_ms, max_ms,
+                 deadline_misses))
+
+    def list_latency_summaries(self, stage: str | None = None, limit: int = 200) -> list[dict]:
+        if stage:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM latency_summaries WHERE stage=? ORDER BY day DESC LIMIT ?",
+                    (stage, limit)).fetchall()
+        else:
+            with self.db.transaction() as db:
+                rows = db.execute(
+                    "SELECT * FROM latency_summaries ORDER BY day DESC LIMIT ?",
+                    (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_task(self, *, task_id: str, name: str, type_: str, state: str,
+                    progress: float, payload: dict | None = None) -> None:
+        ts = _now_iso()
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO background_tasks (id, name, type, state, progress,"
+                " started_ts, updated_ts, payload) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET state=excluded.state,"
+                " progress=excluded.progress, updated_ts=excluded.updated_ts,"
+                " payload=excluded.payload",
+                (task_id, name, type_, state, float(progress), ts, ts,
+                 encode(payload or {})))
+
+    def list_tasks(self, limit: int = 100) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM background_tasks ORDER BY updated_ts DESC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    # ---------------------------------------------- broker connection meta --
+    def upsert_broker_connection(self, *, broker: str, status: str, token_state: str,
+                                 account_hint: str | None = None,
+                                 note: str | None = None) -> None:
+        """Connection METADATA only. Secrets never enter this table."""
+        with self.db.transaction() as db:
+            db.execute(
+                "INSERT INTO broker_connections (broker, status, token_state,"
+                " account_hint, updated_ts, note) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(broker) DO UPDATE SET status=excluded.status,"
+                " token_state=excluded.token_state, account_hint=excluded.account_hint,"
+                " updated_ts=excluded.updated_ts, note=excluded.note",
+                (broker, status, token_state, account_hint, _now_iso(), note))
+
+    def get_broker_connection(self, broker: str) -> dict | None:
+        with self.db.transaction() as db:
+            row = db.execute("SELECT * FROM broker_connections WHERE broker=?",
+                             (broker,)).fetchone()
+        return dict(row) if row else None
+
+    def list_broker_connections(self) -> list[dict]:
+        with self.db.transaction() as db:
+            rows = db.execute(
+                "SELECT * FROM broker_connections ORDER BY updated_ts DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
 class Repository(
     MarketEventRepositoryMixin,
     UniverseRepositoryMixin,
     DataPlatformRepositoryMixin,
     ResearchRepositoryMixin,
+    AxiomWorkstationRepositoryMixin,
     _V1RepositoryBase, FinalRepositoryMixin):
     """V1 repository + V2.1 mixins (universe, data platform, research) + 3.0.4 market events."""

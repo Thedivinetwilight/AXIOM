@@ -1,5 +1,8 @@
 # Verification notes — revisions named “V0.6.1”
 
+> **Historical version report:** these V0.6.1 notes are retained for release history and do not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 Two different pieces of work share the V0.6.1 label; both were fully executed:
 
 1. **Verification revision of the unchanged V0.6 code** (75 pytest + 61

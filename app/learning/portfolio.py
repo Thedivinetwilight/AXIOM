@@ -9,8 +9,7 @@ receive NOTHING.
 
 from __future__ import annotations
 
-import json
-from statistics import correlation as _corr, fmean
+from statistics import correlation as _corr
 
 
 class PortfolioIntelligence:

@@ -262,8 +262,10 @@ class TestDailyRiskAccounting:
         day2 = datetime(2026, 1, 5, 4, 0, tzinfo=timezone.utc)  # 5 Jan IST
         rolled = account.rollover(now=day2)
         assert rolled is True
-        assert account.state() == {"date": "2026-01-05", "trades": 0,
-                                   "realized_pnl": 0.0}
+        state = account.state()
+        assert state["date"] == "2026-01-05"
+        assert state["trades"] == 0 and state["realized_pnl"] == 0.0
+        assert state["fill_accounting_cutover_ts"]
         kinds = [e["kind"] for e in env.list_system_events(limit=50)]
         assert "DAILY_STATE_ROLLOVER" in kinds
 
@@ -302,6 +304,36 @@ class TestDailyRiskAccounting:
         assert second.state() == first.state()
         assert second.trades == 2
         assert second.realized_pnl == pytest.approx(-120.5)
+
+    def test_realized_fill_accounting_is_atomic_idempotent_and_cutover_aware(self, env):
+        from datetime import datetime, timedelta
+
+        from app.engine.state import DailyRiskAccount
+
+        first = DailyRiskAccount(env)
+        cutover = datetime.fromisoformat(
+            first.fill_accounting_cutover_ts.replace("Z", "+00:00"))
+        observed = cutover + timedelta(seconds=1)
+        assert first.record_realized_fill(
+            "fill-after-cutover", 125.5, observed_at=observed.isoformat(),
+            now=observed)
+        assert first.realized_pnl == pytest.approx(125.5)
+        assert first.record_realized_fill(
+            "fill-before-cutover", -900.0,
+            observed_at=(cutover - timedelta(seconds=1)).isoformat(), now=observed)
+        assert first.realized_pnl == pytest.approx(125.5)
+
+        restarted = DailyRiskAccount(env)
+        assert restarted.record_realized_fill(
+            "fill-after-cutover", 125.5, observed_at=observed.isoformat(),
+            now=observed) is False
+        assert restarted.realized_pnl == pytest.approx(125.5)
+        with env.db.transaction() as db:
+            rows = db.execute(
+                "SELECT fill_id, credited FROM daily_risk_fills ORDER BY fill_id"
+            ).fetchall()
+        assert [(row["fill_id"], row["credited"]) for row in rows] == [
+            ("fill-after-cutover", 1), ("fill-before-cutover", 0)]
 
     def test_engine_daily_state_exposed_and_persisted(self, env):
         settings = Settings()
@@ -366,6 +398,50 @@ class TestRestartRecovery:
         assert recovered["realized_pnl"] == pytest.approx(original["realized_pnl"])
         assert recovered["cash"] == pytest.approx(original["cash"])
         assert recovered["position_quantity"] == 0
+
+    def test_recovered_sell_fills_credit_each_delta_once_across_restart(self, env):
+        state = {"placed": 0, "orders": {}, "next": 1001, "auth_mode": "ok"}
+        broker = make_broker(state, env)
+        engine = make_engine(env, broker)  # persists the initial accounting cutover
+
+        def submit_fill(target_broker, target_state, side, quantity, price, intent):
+            target_broker.submit(side, quantity, price, intent_id=intent,
+                                 symbol="RELIANCE")
+            oid = state_next(target_state)
+            target_state["orders"][oid].update(
+                status="complete", filled=quantity, avg=price)
+            return oid
+
+        submit_fill(broker, state, "BUY", 30, 100.0, "seed-position")
+        broker.reconcile()  # broker persisted the fill, engine accounting did not run
+        submit_fill(broker, state, "SELL", 10, 110.0, "exit-a")
+        submit_fill(broker, state, "SELL", 10, 120.0, "exit-b")
+        sell_fills = broker.reconcile()  # simulate a crash before engine accounting
+        sell_fills = [fill for fill in sell_fills if fill["side"] == "SELL"]
+        assert [fill["realized_pnl"] for fill in sell_fills] == pytest.approx(
+            [100.0, 200.0])
+        assert engine.daily.realized_pnl == 0.0
+
+        # Recovery replays the two distinct child-fill deltas, credits each once,
+        # and does not re-add the historical ledger's cumulative P&L.
+        state2 = {"placed": 0, "orders": {}, "next": 5001, "auth_mode": "ok"}
+        broker2 = make_broker(state2, env)
+        engine2 = make_engine(env, broker2)
+        assert broker2.ledger.realized_pnl == pytest.approx(300.0)
+        assert engine2.daily.realized_pnl == pytest.approx(300.0)
+        assert len(engine2._recovery_report["replayed_fills"]) == 2
+
+        # A later exit after restart adds only its own P&L delta.
+        submit_fill(broker2, state2, "SELL", 10, 130.0, "exit-after-restart")
+        engine2.reconcile()
+        assert broker2.ledger.realized_pnl == pytest.approx(600.0)
+        assert engine2.daily.realized_pnl == pytest.approx(600.0)
+
+        state3 = {"placed": 0, "orders": {}, "next": 9001, "auth_mode": "ok"}
+        broker3 = make_broker(state3, env)
+        engine3 = make_engine(env, broker3)
+        assert broker3.ledger.realized_pnl == pytest.approx(600.0)
+        assert engine3.daily.realized_pnl == pytest.approx(600.0)
 
     def test_daily_totals_and_emergency_stop_survive_restart(self, env):
         settings = Settings(max_position_value=0.0)
@@ -520,11 +596,28 @@ class TestProtectiveExits:
         engine2.process_candle(candle(2, 94.0))
         assert state2["placed"] == 1, "exit must work off recovered state"
 
-    def test_emergency_stop_blocks_even_protective_exits(self, env):
+    def test_emergency_stop_never_traps_a_held_position(self, env):
+        # FINAL-11/10 §12: the emergency stop halts NEW RISK, but it must
+        # never hold a position hostage — the protective exit still fires.
         engine, broker, state, baseline = self._engine_with_position(env)
         engine.emergency_stop("test")
         engine.process_candle(candle(2, 94.0))
-        assert state["placed"] == baseline, "STOP halts all order flow"
+        assert state["placed"] == baseline + 1, \
+            "a risk-reducing stop-loss must escape the emergency stop"
+        allowed = [e for e in env.list_system_events(limit=100)
+                   if e["kind"] == "EXECUTION_STOPPED_EXIT_ALLOWED"]
+        assert allowed, "the permitted exit must be audited"
+
+    def test_emergency_stop_still_blocks_new_entries(self, env):
+        state = {"placed": 0, "orders": {}, "next": 8101, "auth_mode": "ok"}
+        broker = make_broker(state, env)
+        engine = make_engine(env, broker, strategy=FixedSignal(Signal.BUY))
+        engine.emergency_stop("test")
+        engine.process_candle(candle(1, 100.0))
+        assert state["placed"] == 0, "new risk stays blocked under STOP"
+        skips = [e for e in env.list_system_events(limit=100)
+                 if e["kind"] == "EXECUTION_STOPPED_SKIP"]
+        assert skips, "the blocked entry must be audited"
 
 
 class TestEventDrivenDecisions:

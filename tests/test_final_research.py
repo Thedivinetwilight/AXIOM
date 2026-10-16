@@ -1,7 +1,11 @@
 """FINAL: decision replay, research director, attribution, command center,
 charts, period reports — over recorded rows only."""
 
+import hashlib
 import json
+import os
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -156,6 +160,105 @@ class TestDirector:
         result = director.schedule(question["id"])  # no candles → honest block
         assert result["scheduled"] is False
         assert "blocked" in result["reason"] or "no local data" in result["reason"]
+
+    # -- deterministic research seeds (fix ported from the 3.2.1 line) ------
+    #
+    # The director used abs(hash(question)) — Python's hash() is randomized
+    # per process (PYTHONHASHSEED), so a recorded experiment's seed could
+    # never be reproduced after a restart or on another host, breaking the
+    # provenance contract that experiments are reproducible from their
+    # recorded inputs.
+
+    def test_seed_is_deterministic_in_process(self, env):
+        """Same question text → same seed, within one process."""
+        from app.research.director import ResearchDirector
+
+        director = ResearchDirector(env)
+        director.survey()
+        qid = env.record_research_question("Deterministic seed question?", {"kind": "test"})
+        a = ResearchDirector(env, experiment_engine=object()).schedule(
+            qid, candles=[1, 2, 3])
+        b = ResearchDirector(env, experiment_engine=object()).schedule(
+            qid, candles=[1, 2, 3])
+        assert a["seed"] == b["seed"]
+        assert 0 <= a["seed"] < 2 ** 31
+
+    def test_seed_differs_for_different_questions(self, env):
+        """Different questions produce different (but still deterministic) seeds."""
+        from app.research.director import ResearchDirector
+
+        q1 = env.record_research_question("Question A?", {"kind": "test"})
+        q2 = env.record_research_question("Question B?", {"kind": "test"})
+        director = ResearchDirector(env, experiment_engine=object())
+        s1 = director.schedule(q1, candles=[1])["seed"]
+        s2 = director.schedule(q2, candles=[1])["seed"]
+        assert s1 != s2
+
+    def test_seed_is_sha256_derived_not_builtin_hash(self, env):
+        """Pin the exact deterministic derivation so it never regresses to hash()."""
+        from app.research.director import ResearchDirector
+
+        text = "Is volatility stable? π"
+        qid = env.record_research_question(text, {"kind": "test"})
+        result = ResearchDirector(env, experiment_engine=object()).schedule(
+            qid, candles=[1, 2, 3])
+        expected = int.from_bytes(
+            hashlib.sha256(text.encode("utf-8")).digest()[:8], "big") % (2 ** 31)
+        assert result["seed"] == expected
+
+    def test_seed_survives_restart_and_hash_randomization(self, tmp_path):
+        """Seed must be identical across processes & PYTHONHASHSEED values."""
+        db = tmp_path / "seeds.db"
+        script = """
+import json, sys
+from app.database.database import Database
+from app.database.repository import Repository
+from app.research.director import ResearchDirector
+store = Database('sqlite:///' + sys.argv[1])
+repo = Repository(store)
+questions = repo.list_research_questions(limit=500)
+qid = questions[0]['id'] if questions else repo.record_research_question(
+    'Is volatility stable? \\u03c0', {'kind': 'test'})
+print(json.dumps(ResearchDirector(repo, experiment_engine=object()).schedule(
+    qid, candles=[1, 2, 3])['seed']))
+store.close()
+"""
+        seeds = []
+        for random_seed in ("0", "11", "875", "random"):
+            env = {**os.environ, "PYTHONHASHSEED": random_seed}
+            result = subprocess.run([sys.executable, "-c", script, str(db)],
+                                    capture_output=True, text=True, check=True,
+                                    env=env, timeout=30)
+            seeds.append(json.loads(result.stdout.strip().splitlines()[-1]))
+        # All four invocations (different processes, different hash seeds, one
+        # explicitly randomized) must produce the same seed.
+        assert len(set(seeds)) == 1, seeds
+        assert 0 <= seeds[0] < 2 ** 31
+
+    def test_schedule_records_seed_and_experiment_metadata(self, env):
+        """Existing provenance / metadata behavior is preserved."""
+        from app.research.director import ResearchDirector
+
+        qid = env.record_research_question("Does this strategy hold?",
+                                          {"kind": "test"})
+        director = ResearchDirector(env, experiment_engine=object())
+        result = director.schedule(qid, candles=[1.0] * 10, timeframe="5m")
+        assert result["scheduled"] is True
+        assert "experiment_id" in result
+        assert "seed" in result
+        assert 0 <= result["seed"] < 2 ** 31
+        # recorded experiment has the same seed and expected metadata
+        exp = next(e for e in env.list_experiments(limit=50)
+                   if e["id"] == result["experiment_id"])
+        config = json.loads(exp["config"])
+        assert config["seed"] == result["seed"]
+        assert config["bars"] == 10
+        assert config["timeframe"] == "5m"
+        assert config["question"] == "Does this strategy hold?"
+        qrow = next(x for x in env.list_research_questions(limit=50)
+                    if x["id"] == qid)
+        assert qrow["status"] == "scheduled"
+        assert qrow["experiment_id"] == result["experiment_id"]
 
 
 class TestCharts:

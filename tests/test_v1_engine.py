@@ -34,7 +34,7 @@ def make_handler(state):
             state["orders"][oid] = {"status": "open pending", "filled": 0, "avg": 0.0}
             return json_response(200, {"status": "success",
                                        "data": {"order_ids": [oid]}})
-        if request.method == "GET" and request.url.host == "api.upstox.com":
+        if request.method == "GET" and request.url.host == "api-sandbox.upstox.com":
             oid = request.url.params["order_id"]
             rec = state["orders"].get(oid)
             if rec is None:
@@ -170,7 +170,8 @@ class TestRiskGate:
         engine.process_candle(candle(100.0, 15))
         status = engine.status()
         assert status["live_trading"] is False
-        assert status["mode"] == "PAPER/SANDBOX"
+        assert status["mode"] == "UPSTOX_SANDBOX"
+        assert status["engine"] == "sandbox"
 
 
 class TestFullLoop:

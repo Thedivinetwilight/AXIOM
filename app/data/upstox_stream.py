@@ -32,11 +32,14 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import logging
+import math
 from random import random
 import re
+import ssl
 import time
 from uuid import uuid4
 
+import certifi
 import httpx
 from google.protobuf.message import DecodeError
 
@@ -45,6 +48,11 @@ from app.data.market_events import MarketEvent
 from app.data.models import Candle
 from app.data.provider import WebSocketProvider
 from app.data.upstox_proto import MarketDataFeed_pb2 as pb2
+
+# Same CA trust store used by app.data.upstox_auth so outbound TLS to Upstox
+# works inside a PyInstaller-frozen executable where certifi's cacert.pem
+# would otherwise not be on disk.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 logger = logging.getLogger("bot.upstox")
 feed_logger = logging.getLogger("bot.market")
@@ -58,6 +66,9 @@ INSTRUMENT_KEY = re.compile(r"^[A-Z]{2,6}(?:_[A-Z]+)*\|[^|\r\n]{1,40}$")
 
 TICK_MODES = frozenset({"ltpc"})  # candles built from LTP ticks
 INTERVAL_MODES = frozenset({"full"})  # official 1m/30m aggregate bars
+#: timeframes the interval ("full") modes can carry; other timeframes are built
+#: locally from ticks, which is what the "ltpc" tick mode is for
+INTERVAL_MODE_TIMEFRAMES = frozenset({"1m", "30m"})
 MODES = TICK_MODES | INTERVAL_MODES
 TIMEFRAMES_LIVE = frozenset({"1m", "5m", "15m", "30m", "1h", "1D"})
 
@@ -246,8 +257,11 @@ class UpstoxStream(WebSocketProvider):
             raise ValueError("Upstox mode must be 'ltpc' or 'full'")
         if timeframe not in TIMEFRAMES_LIVE:
             raise ValueError(f"Upstox adapter supports timeframes {sorted(TIMEFRAMES_LIVE)}")
-        if mode in INTERVAL_MODES and timeframe not in {"1m", "30m"}:
-            raise ValueError("Upstox full mode carries official 1m/30m bars; use ltpc mode otherwise")
+        if mode in INTERVAL_MODES and timeframe not in INTERVAL_MODE_TIMEFRAMES:
+            raise ValueError(
+                "Upstox full mode carries official "
+                f"{'/'.join(sorted(INTERVAL_MODE_TIMEFRAMES))} bars; use ltpc mode "
+                "otherwise")
         if authorize_url.split(":")[0] not in {"https", "http"}:
             raise ValueError("Authorize URL must be http(s) for the local/test override")
         keys: list[str] = []
@@ -275,6 +289,10 @@ class UpstoxStream(WebSocketProvider):
         self._keys = keys
         self._symbol_for = dict(zip(keys, symbols))
         self.symbols = symbols
+        # Best-bid/ask remains a separate observed quote from OHLC candles; it
+        # is never synthesized into candle data. The engine consumes only a
+        # fresh quote through ``quote_for`` for live liquidity checks.
+        self.last_quotes: dict[str, dict] = {}
         self.timeframe, self.mode = timeframe, mode
         self._authorize_url = authorize_url
         self.max_backoff, self.stale_after = max_backoff, stale_after
@@ -326,7 +344,10 @@ class UpstoxStream(WebSocketProvider):
 
     async def _authorize(self) -> str:
         """Exchange the access token for a single-use wss URL (never logged)."""
-        async with httpx.AsyncClient(timeout=self._http_timeout, transport=self._transport) as client:
+        client_kwargs: dict = {"timeout": self._http_timeout}
+        if self._transport is None:
+            client_kwargs["verify"] = _SSL_CONTEXT
+        async with httpx.AsyncClient(transport=self._transport, **client_kwargs) as client:
             response = await client.get(
                 self._authorize_url,
                 headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"},
@@ -393,12 +414,57 @@ class UpstoxStream(WebSocketProvider):
             "instrument_key": event.instrument_key,
             "exchange_ts": event.exchange_ts.isoformat(),
             "ltp": price,
+            "bid": event.bid,
+            "ask": event.ask,
             "kind": event.kind,
         }
+        if event.bid is not None and event.ask is not None:
+            try:
+                bid, ask = float(event.bid), float(event.ask)
+                if (not math.isfinite(bid) or not math.isfinite(ask)
+                        or bid <= 0 or ask < bid):
+                    raise ValueError("invalid observed bid/ask")
+                self.last_quotes[symbol] = {
+                    "symbol": symbol,
+                    "instrument_key": event.instrument_key,
+                    "bid": bid,
+                    "ask": ask,
+                    "exchange_ts": event.exchange_ts.isoformat(),
+                    "received_at": event.received_at.timestamp(),
+                    "provenance": "OBSERVED",
+                    "provider": event.provider,
+                }
+            except (TypeError, ValueError, OverflowError):
+                # Do not let an invalid new quote leave an older quote looking
+                # current. The engine will refuse a live entry until a valid
+                # quote arrives.
+                self.last_quotes.pop(symbol, None)
         logger.debug(
             "UPSTOX_TICK",
             extra={"symbol": symbol, "ltp": price, "kind": event.kind},
         )
+
+    def quote_for(self, symbol: str, *, max_age_seconds: float = 3.0,
+                  now: float | None = None) -> dict | None:
+        """Return a fresh, observed bid/ask pair; never derive one from LTP.
+
+        ``None`` means quote evidence is absent or stale. Consumers must not
+        substitute a model spread for live execution.
+        """
+        quote = self.last_quotes.get(str(symbol))
+        if quote is None:
+            return None
+        try:
+            age = (time.time() if now is None else float(now)) - float(
+                quote["received_at"])
+            maximum = float(max_age_seconds)
+            if not math.isfinite(age) or not math.isfinite(maximum):
+                return None
+            if age < 0 or maximum <= 0 or age > maximum:
+                return None
+            return {**quote, "age_seconds": round(age, 3)}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
 
     def _relevant_market_open(self) -> bool | None:
         """Map segment statuses to open/closed for the subscribed instruments.
@@ -485,13 +551,17 @@ class UpstoxStream(WebSocketProvider):
                     uri = await self._authorize()
                     self.authenticated = True
                     # TLS policy: an explicit context wins (e.g. pinned trust);
-                    # wss:// always uses the library's VERIFIED default context;
+                    # wss:// always uses a VERIFIED default context pointing at
+                    # the certifi CA bundle (so the PyInstaller-frozen Windows
+                    # executable can validate Upstox's certificate — without an
+                    # explicit cafile the frozen bundle has no trust store);
                     # only plain ws:// loopback runs without TLS (ssl=None).
-                    tls = (
-                        self._ssl_context
-                        if self._ssl_context is not None
-                        else (True if uri.startswith("wss://") else None)
-                    )
+                    if self._ssl_context is not None:
+                        tls = self._ssl_context
+                    elif uri.startswith("wss://"):
+                        tls = _SSL_CONTEXT
+                    else:
+                        tls = None
                     async with connect(
                         uri,
                         ssl=tls,

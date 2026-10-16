@@ -6,10 +6,8 @@ never enables LIVE_TRADING.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
 from uuid import uuid4
 
 from app.market_events.models import MarketEvent, MarketEventSource, event_fingerprint
@@ -83,7 +81,8 @@ class MarketEventListener:
     def _market_context(self) -> dict:
         """Current Arena market/strategy context (from repository, not invented)."""
         try:
-            equity = self.repository.get_engine_state("sandbox_equity") or {}
+            from app.engine.state import read_equity_state
+            equity = read_equity_state(self.repository)
             active = self.repository.get_engine_state("active_strategy") or {}
             snapshots = self.repository.list_daily_snapshots(limit=5)
             return {

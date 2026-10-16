@@ -13,7 +13,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-CORE_TABLES = ("signals", "sandbox_orders", "sandbox_transitions", "instruments",
+CORE_TABLES = ("signals", "sandbox_orders", "sandbox_transitions",
+               "live_orders", "live_transitions", "instruments",
                "coverage", "model_versions", "system_events", "engine_state")
 
 

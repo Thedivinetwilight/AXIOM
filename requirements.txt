@@ -2,6 +2,7 @@ fastapi>=0.115,<1
 pydantic>=2.9,<3
 uvicorn>=0.30,<1
 httpx>=0.27,<1
+certifi>=2024.2.2       # CA trust store — shipped inside the frozen executable
 websockets>=14,<16
 # Decodes the OFFICIAL Upstox market-data feed schema (bindings ship in
 # app/data/upstox_proto, generated with protoc from the 5.29 line).

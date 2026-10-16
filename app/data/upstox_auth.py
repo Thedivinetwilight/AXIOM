@@ -22,9 +22,20 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 import getpass
 import os
+import ssl
 import stat
 
+import certifi
 import httpx
+
+# When this module is frozen by PyInstaller, certifi's cacert.pem lives at an
+# on-disk path adjacent to the certifi package inside the bundle. PyInstaller
+# may not ship it without an explicit collect, so resolve it through certifi's
+# API (which the spec's `collect_data_files('certifi')` will include) and pass
+# it explicitly to httpx; without this, outbound HTTPS fails on Windows with an
+# unhelpful "Failed to fetch" because there is no trust store to verify the
+# Upstox certificate chain against.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 LOGIN_DIALOG_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
@@ -107,16 +118,45 @@ async def verify_feed_credential(
             now,
         )
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        client_kwargs: dict = {"timeout": timeout}
+        if transport is None:
+            # Only pin the trust store when using a real network transport;
+            # unit tests inject their own _StaticTransport which does not
+            # accept `verify`.
+            client_kwargs["verify"] = _SSL_CONTEXT
+        async with httpx.AsyncClient(transport=transport, **client_kwargs) as client:
             response = await client.get(
                 authorize_url,
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             )
-    except httpx.HTTPError:
+    except httpx.TimeoutException as exc:
+        return CredentialCheck(
+            "timeout", None, False,
+            f"Connection to Upstox timed out after {timeout:g}s ({type(exc).__name__}); "
+            "check network latency / firewall and retry.",
+            now,
+        )
+    except httpx.ConnectError as exc:
+        return CredentialCheck(
+            "dns_or_connect_failure", None, False,
+            "Could not reach Upstox (DNS/TCP connection failed); verify internet "
+            "connectivity, proxy settings, and firewall. This is a network failure, "
+            "not a credential failure.",
+            now,
+        )
+    except (httpx.RemoteProtocolError, ssl.SSLError) as exc:
+        return CredentialCheck(
+            "tls_failure", None, False,
+            f"TLS handshake failed ({type(exc).__name__}); check that local TLS / "
+            "proxy / antivirus interception is not rewriting the Upstox certificate. "
+            "This is not a credential failure.",
+            now,
+        )
+    except httpx.HTTPError as exc:
         return CredentialCheck(
             "unreachable", None, False,
-            "Upstox authorize endpoint unreachable from this network; connectivity, "
-            "not the credential, failed first.",
+            f"Upstox authorize endpoint unreachable from this network "
+            f"({type(exc).__name__}); connectivity, not the credential, failed first.",
             now,
         )
     if response.status_code == 200:
@@ -180,11 +220,28 @@ def exchange_code_for_token(
     }
     headers = {"Accept": "application/json"}
     try:
+        client_kwargs: dict = {"timeout": timeout}
+        if transport is None:
+            client_kwargs["verify"] = _SSL_CONTEXT
         if transport is not None:  # test seam
-            with httpx.Client(transport=transport, timeout=timeout) as client:
+            with httpx.Client(transport=transport, **client_kwargs) as client:
                 response = client.post(TOKEN_URL, data=data, headers=headers)
         else:
-            response = httpx.post(TOKEN_URL, data=data, headers=headers, timeout=timeout)
+            response = httpx.post(TOKEN_URL, data=data, headers=headers, **client_kwargs)
+    except httpx.TimeoutException:
+        raise UpstoxOAuthError(
+            "Upstox token endpoint timed out; check network connectivity and retry."
+        )
+    except httpx.ConnectError:
+        raise UpstoxOAuthError(
+            "Could not reach Upstox (DNS/TCP connection failed); verify internet "
+            "connectivity and firewall settings."
+        )
+    except (httpx.RemoteProtocolError, ssl.SSLError):
+        raise UpstoxOAuthError(
+            "TLS handshake with Upstox failed; check that local TLS/proxy/antivirus "
+            "interception is not rewriting the Upstox certificate."
+        )
     except httpx.HTTPError:
         raise UpstoxOAuthError("Upstox token endpoint unreachable (network error)")
     if response.status_code != 200:
@@ -206,13 +263,24 @@ def store_token_in_env(token: str, env_path: Path) -> str:
     """
     lines = []
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
+        # utf-8 both ways, always. The operator's .env is hand-editable and can
+        # contain any comment they like; a locale-encoded read raises
+        # UnicodeDecodeError on Windows for a single non-ASCII character, and
+        # a locale-encoded write would corrupt what it did not fail on. This is
+        # the daily token refresh, so a code-page accident here costs a
+        # trading day.
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             if line.startswith("UPSTOX_ACCESS_TOKEN="):
                 continue
             lines.append(line)
     lines.append(f"UPSTOX_ACCESS_TOKEN={token}")
-    env_path.write_text("\n".join(lines) + "\n")
-    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # POSIX honours this; Windows chmod can only toggle the read-only bit, so
+    # the file keeps its inherited ACLs (owner-only under %LOCALAPPDATA%).
+    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    if os.name == "nt":
+        return (f"UPSTOX_ACCESS_TOKEN written to {env_path} "
+                "(file permissions: inherited Windows ACLs)")
     return f"UPSTOX_ACCESS_TOKEN written to {env_path} (file permissions 600)"
 
 

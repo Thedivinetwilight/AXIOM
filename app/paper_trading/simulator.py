@@ -29,10 +29,15 @@ class PaperSimulator:
         self.strategy = None
         self.task: asyncio.Task | None = None
         self.error: str | None = None
+        # set by stop(); makes shutdown idempotent, which matters because
+        # Ctrl+C reaches both the signal handler and the shutdown path.
+        self._stopped = False
         self.signals: dict = {}
         self.processed = 0
         self.symbols: list[str] = []
         self._history: dict[str, list[Candle]] = {}
+        # AXIOM-MONEY-PRINTER research-telemetry hook (None = unchanged).
+        self.workstation = None
         # V0.6.1: wall-clock processing latency stages (rolling aggregates only).
         self.latency = {
             "bars": 0,
@@ -240,6 +245,7 @@ class PaperSimulator:
         # One SQLite transaction for fills, account, dedupe cursor and signal orders.
         self.broker._persist(snapshot)
         self.processed += 1
+        self._observe_workstation(candle)
         logger.debug(
             "signal",
             extra={
@@ -249,6 +255,35 @@ class PaperSimulator:
                 "price": candle.close,
             },
         )
+
+    def _observe_workstation(self, candle) -> None:
+        """Feed observed bar facts into the intelligence layer (telemetry).
+
+        Never part of the execution path: any failure is logged and ignored
+        so research observation cannot disturb paper trading.
+        """
+        workstation = getattr(self, "workstation", None)
+        if workstation is None:
+            return
+        try:
+            history = self._history.get(candle.symbol, [])
+            price_change_pct = None
+            if len(history) >= 2 and history[-2].close > 0:
+                price_change_pct = history[-1].close / history[-2].close - 1.0
+            volume_ratio = None
+            volumes = [float(getattr(c, "volume", 0.0) or 0.0) for c in history]
+            if len(volumes) >= 21:
+                recent = sum(volumes[-5:]) / 5.0
+                prior = sum(volumes[-21:-5]) / 16.0
+                if prior > 0:
+                    volume_ratio = recent / prior
+            workstation.opportunities.observe(
+                market_id=str(getattr(workstation.settings, "market", "india")),
+                identity=str(candle.symbol),
+                price_change_pct=price_change_pct,
+                volume_ratio=volume_ratio)
+        except Exception:  # pragma: no cover - telemetry must not break paper
+            logger.exception("workstation observation failed (telemetry only)")
 
     async def _run(self):
         self.state = BotState.RUNNING
@@ -292,10 +327,42 @@ class PaperSimulator:
         self.state, self.error = BotState.RUNNING, None
         return self.status()
 
-    async def stop(self):
+    def request_stop(self) -> None:
+        """Ask the run loop to finish WITHOUT doing any I/O.
+
+        This is what a signal handler should call. Stopping properly means
+        cancelling open orders and persisting the final broker state, which
+        requires the repository writer — and the writer is released by
+        ``broker.close()`` at the very end of shutdown. A handler that ran the
+        full stop path could therefore race the ordered shutdown and try to
+        write after ownership was released.
+
+        Cancelling the stream task is enough: the run loop exits, the caller
+        falls through to the single awaited ``stop()``, and the ordered
+        shutdown happens exactly once, while the writer is still held.
+        """
         if self.task and not self.task.done():
             self.task.cancel()
-            await self.task
+
+    async def stop(self):
+        """Stop the loop, cancel working orders and persist. Idempotent.
+
+        Being idempotent matters: Ctrl+C reaches both the signal handler and
+        the shutdown path, so a naive implementation ran the whole sequence
+        twice and the second pass failed on a repository it no longer owned,
+        printing a RuntimeError traceback at the end of an otherwise clean
+        session.
+        """
+        if self._stopped:
+            return self.status()
+        self._stopped = True
+
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass  # the loop was cancelled on purpose
         self.broker.cancel_all()
         self.state = BotState.STOPPED
         return self.status()

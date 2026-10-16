@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 
-from app.history.store import parse_local
 
 
 def candidate_id(strategy: str, parameters: dict) -> str:

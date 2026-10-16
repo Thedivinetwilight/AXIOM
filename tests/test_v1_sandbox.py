@@ -13,10 +13,13 @@ import httpx
 import pytest
 
 from app.brokers.sandbox import (
+    SANDBOX_ALLOWED_HOSTS,
+    SANDBOX_FORBIDDEN_HOSTS,
     SandboxAuthError,
     SandboxOrderState,
     SandboxRequestError,
     UpstoxSandboxBroker,
+    host_of,
 )
 from app.config.settings import Settings
 from app.database.database import Database
@@ -25,8 +28,8 @@ from app.engine.sandbox_engine import SandboxEngine
 from app.learning.journal import LearningJournal
 from app.risk.limits import HardRiskLimits
 
-PLACE_URL = "https://api-hft.upstox.com/v3/order/place"
-CANCEL_URL = "https://api-hft.upstox.com/v3/order/cancel"
+PLACE_URL = "https://api-sandbox.upstox.com/v3/order/place"
+CANCEL_URL = "https://api-sandbox.upstox.com/v3/order/cancel"
 INSTRUMENT = "NSE_EQ|INE002A01018"
 
 
@@ -51,7 +54,9 @@ def make_handler(state):
                 json={"status": "success", "data": {"order_ids": [oid]},
                       "metadata": {"latency": 1}},
             )
-        if request.method == "GET" and request.url.host == "api.upstox.com":
+        # 2026-10-16: sandbox history READS stay on the sandbox host — a
+        # sandbox token must never reach the production host at all.
+        if request.method == "GET" and request.url.host == "api-sandbox.upstox.com":
             oid = request.url.params["order_id"]
             rec = state["orders"].get(oid)
             if rec is None:
@@ -298,7 +303,12 @@ class TestFailClosed:
         state["auth_mode"] = "bad"
         stream = io_string()
         handler = logging.StreamHandler(stream)
-        logger = logging.getLogger("bot.broker.sandbox")
+        # Must match the logger app/brokers/sandbox.py actually creates.  This
+        # test previously attached to "bot.broker.sandbox", which no module
+        # uses, so the stream stayed empty and the final assertion could not
+        # fail no matter what the broker logged.  Attaching to the real logger
+        # is what makes the leak check meaningful.
+        logger = logging.getLogger("bot.sandbox")
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
         try:
@@ -312,6 +322,174 @@ class TestFailClosed:
         finally:
             logger.removeHandler(handler)
         assert "SECRET-TOKEN" not in stream.getvalue()
+
+
+class TestConstructionGuards:
+    """The constructor is the last gate before a sandbox token is used.
+
+    Every assertion here runs with no network access: these are the checks
+    that must refuse a misconfiguration before a single request is made.
+    """
+
+    def test_blank_token_is_refused_before_any_http_call(self):
+        for bad in ("", "   ", "\t\n"):
+            with pytest.raises(ValueError) as excinfo:
+                UpstoxSandboxBroker(bad, INSTRUMENT)
+            assert "token" in str(excinfo.value).lower()
+
+    def test_non_string_token_is_refused(self):
+        for bad in (None, 12345, b"token"):
+            with pytest.raises(ValueError):
+                UpstoxSandboxBroker(bad, INSTRUMENT)
+
+    def test_non_http_scheme_is_refused(self):
+        for bad in ("ftp://api.upstox.com", "api.upstox.com", "file:///tmp/x"):
+            with pytest.raises(ValueError) as excinfo:
+                UpstoxSandboxBroker("tok", INSTRUMENT, base_url=bad)
+            assert "http" in str(excinfo.value)
+
+    # --- host allow-list ---------------------------------------------------
+    # This class holds real order-mutating endpoints (POST /v3/order/place,
+    # DELETE /v3/order/cancel, PUT /v3/order/modify) and base_url is
+    # operator-supplied. An unrecognised host used to be logged and allowed to
+    # proceed; it is now refused at construction.
+
+    def test_a_live_looking_host_is_refused_not_merely_logged(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://live-trading.example.com")
+        assert "not a recognised sandbox host" in str(excinfo.value)
+
+    def test_an_arbitrary_host_is_refused(self):
+        for bad in ("https://evil.example.com", "https://sandbox-live-test.example.com",
+                    "https://attacker.test"):
+            with pytest.raises(ValueError):
+                UpstoxSandboxBroker("tok", INSTRUMENT, base_url=bad)
+
+    def test_the_production_host_is_refused_with_its_own_message(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://api.upstox.com")
+        assert "not permitted for UPSTOX_SANDBOX" in str(excinfo.value)
+
+    def test_the_live_order_host_is_refused_by_the_sandbox_broker(self):
+        """api-hft.upstox.com is Upstox's LIVE order host (V2 audit).
+
+        In V1 it was the sandbox DEFAULT, so a live token placed real
+        orders while every label said sandbox. It must now be refused.
+        """
+        from app.config.hosts import LIVE_ORDER_HOSTS
+
+        assert "api-hft.upstox.com" in LIVE_ORDER_HOSTS
+        assert "api-hft.upstox.com" not in SANDBOX_ALLOWED_HOSTS
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://api-hft.upstox.com")
+        assert "not permitted for UPSTOX_SANDBOX" in str(excinfo.value)
+
+    def test_the_default_sandbox_host_is_a_sandbox_host(self):
+        from app.config.hosts import LIVE_ORDER_HOSTS
+
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert host_of(broker._base_url) in {
+            "api-sandbox.upstox.com", "sandbox.upstox.com"}
+        assert host_of(broker._base_url) not in LIVE_ORDER_HOSTS
+
+    def test_the_production_host_is_refused_even_with_a_path(self):
+        with pytest.raises(ValueError):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT, base_url="https://api.upstox.com/v3/order")
+
+    def test_the_refusal_names_the_permitted_hosts(self):
+        with pytest.raises(ValueError) as excinfo:
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://nope.example.com")
+        message = str(excinfo.value)
+        for host in SANDBOX_ALLOWED_HOSTS:
+            assert host in message
+
+    def test_both_sandbox_hosts_are_accepted(self):
+        for host in sorted(SANDBOX_ALLOWED_HOSTS):
+            broker = UpstoxSandboxBroker("tok", INSTRUMENT, base_url=f"https://{host}")
+            assert broker._base_url == f"https://{host}"
+
+    def test_the_default_base_url_is_accepted(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert host_of(broker._base_url) in SANDBOX_ALLOWED_HOSTS
+
+    def test_the_allow_list_contains_no_production_host(self):
+        assert not (SANDBOX_ALLOWED_HOSTS & SANDBOX_FORBIDDEN_HOSTS)
+        assert "api.upstox.com" not in SANDBOX_ALLOWED_HOSTS
+
+    def test_host_of_normalises_case_and_ignores_path(self):
+        assert host_of("https://API-Sandbox.Upstox.COM/v3/order/place") == \
+            "api-sandbox.upstox.com"
+        assert host_of("not a url") == ""
+
+    def test_a_broker_is_never_constructed_for_a_refused_host(self):
+        """The guard must fire before any state is created."""
+        with pytest.raises(ValueError):
+            UpstoxSandboxBroker("tok", INSTRUMENT, base_url="https://api.upstox.com")
+
+    def test_the_token_is_never_in_the_repr(self):
+        broker = UpstoxSandboxBroker("SECRET-TOKEN", INSTRUMENT)
+        assert "SECRET-TOKEN" not in repr(broker)
+        assert "live=False" in repr(broker), "repr must keep stating live is off"
+
+    def test_base_and_history_urls_are_normalised(self):
+        broker = UpstoxSandboxBroker(
+            "tok", INSTRUMENT,
+            base_url="https://api-sandbox.upstox.com///",
+            history_url="https://api-sandbox.upstox.com/v2/order/history/")
+        assert broker._base_url == "https://api-sandbox.upstox.com"
+        assert broker.history_endpoint == "https://api-sandbox.upstox.com/v2/order/history"
+
+    def test_a_production_history_url_is_refused_at_construction(self):
+        """The sandbox token must never be sendable to a production host.
+
+        The historical defect: the shipped default pointed the sandbox broker
+        at the production GET /v2/order/history; its 401 fail-closed the WHOLE
+        broker (disabling valid sandbox order operations) and leaked the
+        sandbox token to a production endpoint.
+        """
+        with pytest.raises(ValueError, match="production host"):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT,
+                history_url="https://api.upstox.com/v2/order/history")
+        with pytest.raises(ValueError, match="production host"):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT,
+                history_url="https://api-hft.upstox.com/v2/order/history")
+
+    def test_settings_refuse_a_production_sandbox_history_url(self):
+        from app.config.settings import Settings
+
+        with pytest.raises(ValueError, match="production host"):
+            Settings(broker="UPSTOX_SANDBOX", upstox_sandbox_access_token="t",
+                     upstox_sandbox_order_history_url=(
+                         "https://api.upstox.com/v2/order/history"))
+
+    def test_the_default_history_url_stays_on_the_sandbox_host(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert broker.history_endpoint == (
+            "https://api-sandbox.upstox.com/v2/order/history")
+
+    def test_a_fresh_broker_is_available_until_rejected(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert broker.available is True
+        assert broker.request_count == 0
+
+    @staticmethod
+    def _capture(action) -> list[str]:
+        """Run ``action``; return the lines the broker's real logger emitted."""
+        stream = io_string()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("bot.sandbox")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            action()
+        finally:
+            logger.removeHandler(handler)
+        return [line for line in stream.getvalue().splitlines() if line.strip()]
 
 
 class TestEmergencyStop:

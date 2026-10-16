@@ -1,5 +1,8 @@
 # V064_VERIFICATION.md — V0.6.4 Termux Offline Market-Feed Verification
 
+> **Historical version report:** this V0.6.4 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 **Scope:** run the complete market-data → candles → strategies → risk →
 PaperBroker pipeline **entirely offline** (Android Termux / any minimal
 Python 3.11+) **without an Upstox credential**, using a deterministic

@@ -1,5 +1,8 @@
 # V1 (Arena) Verification Report
 
+> **Historical version report:** this V1 verification is retained for release history and does not describe the current AXIOM 3.2.0 source line. See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+
+
 Date: 2026-09-25 · Version: 1.0.0 · Base: V0.6.4 (intact, preserved)
 Environment: CPython 3.13.14, Linux sandbox, project venv (requirements installed via pip)
 

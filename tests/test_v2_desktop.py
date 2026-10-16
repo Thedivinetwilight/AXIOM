@@ -101,3 +101,74 @@ class TestApiClientContract:
                 pass
         finally:
             urllib.request.urlopen = original
+
+    @staticmethod
+    def _capture(action, payload=b'{"ok": true}', text=False):
+        """Run ``action(client)``; return the recorded request fields."""
+        import urllib.request
+
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return payload
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["method"] = request.get_method()
+            captured["accept"] = request.headers.get("Accept")
+            captured["auth"] = request.headers.get("Authorization")
+            return FakeResponse()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            action(ArenaApiClient("http://127.0.0.1:8000", "secret-token"))
+        finally:
+            urllib.request.urlopen = original
+        return captured
+
+    def test_markdown_endpoints_ask_for_markdown_not_json(self):
+        captured = self._capture(lambda c: c.report_markdown(), payload=b"# Report")
+        assert captured["url"].endswith("/api/v2/report/weekly")
+        assert captured["accept"] == "text/markdown"
+
+    def test_report_passes_the_period_through(self):
+        captured = self._capture(lambda c: c.report("monthly"), payload=b"# R")
+        assert captured["url"].endswith("/api/v2/report?period=monthly")
+        assert captured["accept"] == "text/markdown"
+
+    def test_command_center_question_is_url_encoded(self):
+        """A question containing '&' or '?' must not corrupt the query string.
+
+        command_center() quotes its parameter; this pins that behaviour, since
+        an unquoted '&' would silently truncate the question server-side.
+        """
+        captured = self._capture(
+            lambda c: c.command_center("stop? why & when"))
+        query = captured["url"].split("?", 1)[1]
+        # quote() (not quote_plus) encodes spaces as %20; the point is that
+        # '?' and '&' are escaped so they cannot be read as delimiters.
+        assert query == "q=stop%3F%20why%20%26%20when", query
+        assert "&" not in query[1:] and "?" not in query[1:]
+
+    def test_resume_posts_to_the_resume_endpoint(self):
+        captured = self._capture(lambda c: c.resume())
+        assert captured["method"] == "POST"
+        assert captured["url"].endswith("/engine/resume")
+
+    def test_the_token_is_only_ever_in_the_header(self):
+        for action in (lambda c: c.overview(),
+                       lambda c: c.command_center("q"),
+                       lambda c: c.report("daily"),
+                       lambda c: c.resume()):
+            captured = self._capture(action)
+            assert "secret-token" not in captured["url"]
+            assert captured["auth"] == "Bearer secret-token"
+

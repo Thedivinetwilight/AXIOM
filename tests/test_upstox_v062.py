@@ -53,10 +53,15 @@ pytest.importorskip("websockets")
 REAL_KEY = KEY
 
 
+# Anchor once at module import so repeated calls cannot jump a minute boundary
+# during a long/parallel test run.
+_DEEP_BUCKET_BASE = int(time.time()) - 1200
+_DEEP_BUCKET_BASE -= _DEEP_BUCKET_BASE % 60
+
+
 def deep_bucket(index: int) -> int:
-    """Minute-aligned bucket ~20 minutes in the past (never crosses 'now')."""
-    base = int(time.time()) - 1200
-    return base - base % 60 + index * 60
+    """Minute-aligned bucket ~20 minutes in the past."""
+    return _DEEP_BUCKET_BASE + index * 60
 
 
 # ---------------------------------------------------------------- decoder
@@ -118,6 +123,32 @@ def test_decoder_ignores_unconfigured_instruments():
     feed = response.feeds["BSE_EQ|500325"]
     feed.ltpc.ltp, feed.ltpc.ltt = 100.0, bucket(0) * 1000
     assert decoder.decode(response.SerializeToString(), time.time()) == []
+
+
+def test_full_feed_quote_is_observed_and_expires_without_synthesis():
+    provider = UpstoxStream(TOKEN, [KEY], timeframe="1m", mode="full")
+    received = time.time()
+    response = FeedResponse(type=1, currentTs=int(received * 1000))
+    full = response.feeds[KEY].fullFeed.marketFF
+    full.ltpc.ltp, full.ltpc.ltt, full.ltpc.ltq = (
+        500.0, int(received * 1000), 2)
+    level = full.marketLevel.bidAskQuote.add()
+    level.bidP, level.bidQ, level.askP, level.askQ = 499.5, 10, 500.5, 10
+    decoder = UpstoxProtobufDecoder({KEY: SYMBOL}, "full")
+    events = decoder.decode(response.SerializeToString(), received)
+    assert len(events) == 1
+    provider._apply_event(events[0], received)
+
+    quote = provider.quote_for(SYMBOL, now=received + 0.5)
+    assert quote is not None
+    assert quote["provenance"] == "OBSERVED"
+    assert quote["instrument_key"] == KEY
+    assert quote["bid"] == 499.5 and quote["ask"] == 500.5
+    assert provider.quote_for(SYMBOL, now=received + 4.0) is None
+
+    invalid = replace(events[0], bid=0.0, ask=500.5)
+    provider._apply_event(invalid, received)
+    assert provider.quote_for(SYMBOL, now=received + 0.1) is None
 
 
 # ---------------------------------------------------------------- gating
@@ -293,25 +324,48 @@ def test_token_exchange_success_failure_and_no_secret_leak():
     def unreachable(request):
         raise httpx.ConnectError("down")
 
-    with pytest.raises(UpstoxOAuthError, match="unreachable"):
+    # 3.2.2: granular network errors for the token exchange too.
+    with pytest.raises(UpstoxOAuthError, match="Could not reach Upstox"):
         exchange_code_for_token(
             "auth-code", "api-key", "super-secret", "https://example.com/cb",
             transport=httpx.MockTransport(unreachable),
+        )
+
+    def tls_down(request):
+        raise httpx.RemoteProtocolError("tls broken")
+
+    with pytest.raises(UpstoxOAuthError, match="TLS"):
+        exchange_code_for_token(
+            "auth-code", "api-key", "super-secret", "https://example.com/cb",
+            transport=httpx.MockTransport(tls_down),
         )
     with pytest.raises(UpstoxOAuthError):
         exchange_code_for_token("", "api-key", "super-secret", "https://example.com/cb")
 
 
 def test_store_token_writes_gitignored_env_atomically(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text("API_TOKEN=local\n")
-    outcome = store_token_in_env("issued-token", env_path)
+    import os
     import stat as stat_module
 
+    env_path = tmp_path / ".env"
+    env_path.write_text("API_TOKEN=local\n", encoding="utf-8")
+    outcome = store_token_in_env("issued-token", env_path)
+
     assert "written" in outcome and "issued-token" not in outcome
-    content = env_path.read_text()
+    content = env_path.read_text(encoding="utf-8")
     assert "API_TOKEN=local" in content and "UPSTOX_ACCESS_TOKEN=issued-token" in content
-    assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+    if os.name == "nt":
+        # Windows has no group/other permission bits. os.chmod can only toggle
+        # the read-only flag, and os.stat reports a synthesised 0o666 for any
+        # writable file, so asserting the POSIX bits here can never pass — the
+        # file is protected by the ACL it inherits (%LOCALAPPDATA% is
+        # owner-only). What must hold is that the write left it usable and the
+        # reported outcome says what actually happened.
+        assert env_path.stat().st_mode & stat_module.S_IWUSR
+        assert "ACLs" in outcome
+    else:
+        assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+        assert "600" in outcome
 
 
 # ---------------------------------------------------------------- pipeline

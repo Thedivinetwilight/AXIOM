@@ -1,11 +1,49 @@
-# Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
+# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.4 code line)
+
+> **Current source line:** 3.2.4 (`app/__init__.py`, `pyproject.toml`, and the
+> build workflow agree). `AXIOM_PRODUCT_MANUAL.md` is a qualified
+> product overview, not a release-readiness certificate. Use
+> [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the
+> commit-specific test, CI, package, artifact, and external-verification state.
+> The master prompt is a requirements document, not evidence that a requirement
+> is implemented or verified. Everything below this banner is retained 3.1.0-
+> and-earlier release history; its release claims and test counts are historical.
+
+---
+
+# Arena — Quantitative Research & Trading Platform (3.1.0)
+
+> **New here?** [Download `Arena.exe`](../../releases) and double-click it.
+> A first-run wizard opens automatically: one click picks **OFFLINE REPLAY**
+> paper trading, Arena generates its own local credential, initializes its
+> database and starts paper trading. **No commands, no configuration files.**
+> (If the release page is empty, the newest build is on the **Actions** tab
+> under *Build executable*.)
 
 **Arena is a working, modular Python research and paper-trading platform,
-identified as `arena` version `3.0.5`. Real-money order routing does not exist
-in this project.** Sections below keep the full release history (V0.1 → V0.6 →
-V1 → V2.1 → FINAL 3.0.0); each historical section describes its own release.
+identified as `arena` version `3.1.0`.** Live order routing is fully
+implemented and shipped in the same executable, but it is fail-closed behind
+four deliberate switches plus canary/drill/emergency-stop gates — nothing on
+the default or wizard paths can enable it. Sections below keep the full
+release history (V0.1 → V0.6 → V1 → V2.1 → FINAL 3.0.0 → FINAL 3.0.5); each
+historical section describes its own release.
 
-**Current release (FINAL 3.0.5) highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
+**Current release (3.1.0) highlights:** Command-center UX — one-file
+`Arena.exe` with zero-command first-run wizard (Welcome → data mode →
+auto-generated local credential → preflight → START PAPER TRADING),
+professional dark trading-terminal design system served as static assets
+(never templated through Python — the 3.0.5 inline-JS bug class is closed by
+construction), state-first dashboard (OFFLINE/CONNECTING/RUNNING/ERROR/LOCKED),
+research & model lab with experiment tracking and leakage warnings, alert
+center, logs/audit, organized settings with credential masking; graceful
+duplicate-instance handling via a single-instance guard (no SQLite lock
+tracebacks, stale locks recovered only when provably safe); LOCAL_PAPER stays
+zero-config and can never route to a live order host; full frozen-executable
+validation suite (~38 checks incl. real JavaScript parsing of the served
+pages and a scripted end-to-end wizard run against the actual binary) runs as
+a hard CI gate on every platform.
+
+**FINAL 3.0.5 highlights (previous release):** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
 
 **FINAL 3.0.5 (additive — Market Event Listener):** internet news ingestion (public sources, wars/escalations/ceasefires, sanctions/relief, tariffs/trade incl. US-China, policy/central-bank, oil/gas, shipping, regulatory, geopolitical) with relevance detection, source validation, normalization/dedup (fingerprint, multi-source merge, conflict reduces confidence, preserves conflict), impact assessment via transmission paths, decision IGNORE/MONITOR/EVALUATE/NO_TRADE with context to Strategy Router + hard-risk gate; never directly trades, never bypasses Router/lifecycle/portfolio-risk/hard-risk/STOP/broker/auth/LIVE; persisted event_id/timestamp/source/headline/summary/type/countries/markets/assets/sectors/confidence/relevance/effect/response/action/strategy/instruments/result; reputable→primary sources, dedup, unavailable→Arena continues; timeout/retry/backoff/rate-limit/cache/dedup/isolation; no eval/exec/shell; learning memory records price/vol/volume/sector response per 5m/30m/1h/1d/3d/5d via existing market-data infra (observational); dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, escaped, no secrets) — additive, no external live dependency; 20 deterministic tests.
 
@@ -40,8 +78,35 @@ event-driven engine with a persisted execution pause, reality-gap/anomaly/
 system monitoring with scheduled database backups, an NL command center over
 recorded data, daily/weekly/monthly reports with attribution, and a
 **PySide6 desktop application** (13 pages — see "Desktop application" below).
-LIVE trading remains gated OFF by design (`MODE=PAPER`, `LIVE_TRADING=false`;
-`BROKER=LIVE` raises). Verification status: **491 tests passed / 0 failed**;
+LIVE (real-money) trading is **OFF by default** and gated behind a
+four-switch opt-in (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE`
++ `LIVE_CONFIRM`) **and** explicit non-zero hard risk limits; see
+[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The bare alias
+`BROKER=LIVE` still raises, and the sandbox broker refuses live order hosts.
+**V2.1 (L-ops)** adds the rails around a live session — token-freshness and
+canary entry guards, a stuck-order/reconcile watchdog with a WARNING→CRITICAL
+escalation ladder (optional auto-cancel, off by default), daily-loss and
+drawdown auto-stop, deduped alerts (durable sink + optional webhook), the
+`live-halt` / `live-resume` / `live-status [--audit]` operator commands
+(halt always works — even when the configuration is rejected; resume refuses
+unless the live opt-in is armed), a whole-system readiness verdict in
+`live-preflight` (including audit-trail integrity and the state a fresh engine
+would inherit), an offline `live-drill` fire drill for the rails themselves, an
+independent audit-trail PnL replay, bounded webhook delivery retries, alert
+acknowledgement (`live-ack`, so an unattended CRITICAL becomes an incident of
+its own), a read-only ops digest (`live-digest`), a single-engine lock (a
+second LIVE engine is refused while the first heartbeats), and
+`GET /api/v2/alerts` ·
+`POST /api/v2/alerts/ack` · `GET /api/v2/live/status` — see
+[LIVE_OPERATIONS.md](LIVE_OPERATIONS.md).
+Replay determinism is checked by `tools/determinism_check.py`: the real backtest
+engine is run twice in-process and again in fresh interpreters with different
+`PYTHONHASHSEED` values, and a canonical fingerprint of orders/fills/trades/
+metrics must match every time (opaque uuid identities are relabelled rather than
+compared, so only decisions are measured). Exit code 0/1; a failure names the
+first differing location, or — when only the cross-process runs diverge — points
+at string-hash ordering, the classic silent cause.
+Verification status: **1180 tests passed / 37 skipped**;
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See
@@ -50,8 +115,17 @@ source and API contracts verified); authenticated Upstox sandbox/feed flows
 ```text
 MODE=PAPER
 LIVE_TRADING=false
-REAL MONEY = DISABLED
+BROKER=LOCAL_PAPER
+REAL MONEY = DISABLED (default)
 ```
+
+**V2 host-classification fix (2026-10-02).** V1 labelled `api-hft.upstox.com`
+— Upstox's *live* order host — as a sandbox host and shipped it as the
+sandbox default, so a live token placed real orders while the broker, the
+audit tables, the dashboard and the reports all said "sandbox". The sandbox
+default is now `api-sandbox.upstox.com`, the live host is refused by the
+sandbox broker, and real-money routing goes through `UpstoxLiveBroker`
+(live audit tables, truthful `mode`/`live` labels, preflight command).
 
 Backtests, validation, and paper trading are simulations. **Historical results are not guarantees of future performance.** A high research score identifies a **selected candidate**, not a strategy guaranteed to make money. Sample prices are explicitly **synthetic**, not actual prices for RELIANCE, any exchange-listed stock, or a cryptocurrency.
 
@@ -62,11 +136,14 @@ learning layer** and a **dashboard** on top of the intact V0.6.4 platform.
 Nothing was removed: LOCAL_PAPER remains the default and the paper pipeline is
 pinned by `python -m app paper-test` (17/17 checks, exit 0).
 
-- **Modes.** `BROKER=LOCAL_PAPER` (default) | `UPSTOX_SANDBOX` | `LIVE` is
-  **rejected outright** — no live routing exists in V1. Sandbox requires
-  `UPSTOX_SANDBOX_ACCESS_TOKEN`; sandbox credentials only ever reach the
-  documented sandbox hosts (`api-hft.upstox.com` order APIs +
-  `api.upstox.com/v2/order/history` reconciliation), enforced by test.
+- **Modes.** `BROKER=LOCAL_PAPER` (default) | `UPSTOX_SANDBOX` | live routing
+  exists only behind the four-switch opt-in (see `LIVE_TRADING_ENABLEMENT.md`).
+  Sandbox requires `UPSTOX_SANDBOX_ACCESS_TOKEN`; sandbox credentials only
+  ever reach the documented **sandbox** hosts (`api-sandbox.upstox.com` /
+  `sandbox.upstox.com` for order APIs *and* order-history reads — a sandbox
+  token is never sent to `api.upstox.com` or `api-hft.upstox.com`), enforced
+  by test (`tests/test_sandbox_history_capability.py`,
+  `tests/test_v1_separation.py`).
 - **Engine** (`python -m app engine`, requires `BROKER=UPSTOX_SANDBOX` and
   `DATA_SOURCE=upstox`): real V3 feed → strategies → **hard risk gate**
   (outside learning: max position value / open positions / daily loss /
@@ -227,8 +304,9 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
-- **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
-  (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
+- **Security**: paper by default; real money requires the four-switch opt-in
+  plus non-zero risk limits, and the sandbox broker refuses live hosts
+  (`BROKER=LIVE` alone raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth
   unchanged (Bearer token, all v2 pages 401 without it).
 - **Performance**: bounded reads everywhere hot (scanner lookback window,
@@ -1143,4 +1221,62 @@ curl http://127.0.0.1:8000/health
 
 Tests cover both successful paths and safe failures, including future-data isolation, final-candle nonexecution, liquidity limits, fee/P&L reconciliation, stop gaps and ambiguity, calendar closures, SQLite rollback/restart, exclusive ownership, protected API routes, replay parity, mocked download caching, WSS reconnect/authentication/heartbeats, and malformed/future data rejection.
 
-**Keep REAL MONEY disabled. Evaluate assumptions, not only scores.**
+**Treat real money as a separate deployment: paper/sandbox first, then the
+gated live path — with non-zero risk limits and the preflight command.
+Evaluate assumptions, not only scores.**
+
+---
+
+## 16. AXIOM Kronos forecasting subsystem (desktop)
+
+Full details: **`KRONOS_INTEGRATION.md`**. Off by default — Kronos does nothing
+unless `AXIOM_KRONOS_ENABLED=true`.
+
+[Kronos](https://github.com/shiyu-coder/Kronos) is a financial time-series
+foundation model. In this repository it is a **forecasting subsystem only**, in a
+new top-level package `axiom/` plus a `Forecast` page in the desktop terminal.
+Arena 3.0.5 (`app/`) is untouched: `git diff 0314db2 -- app/` is empty.
+
+```
+REAL MARKET DATA → MarketDataProvider → validation → closed-candle gate
+   → [IPC] AXIOM-Kronos process (PyTorch, Kronos, tokenizer/model)
+   → forecast validation → ForecastStore → MARKETS overlay / FORECAST panel / research
+```
+
+What it is not: it never places orders, never changes risk limits, never enables
+LIVE trading, and never writes into Arena decisions, risk, account or strategy
+state. Its IPC surface is exactly `ping · load · status · forecast · shutdown`.
+Every predicted value is labelled `Forecast …` with `origin=KRONOS_FORECAST`;
+observed data keeps `origin=MARKET_OBSERVED`. Sample dispersion is reported as
+dispersion, never as calibrated probability.
+
+```bash
+# Base runtime — unchanged, and it never imports torch/pandas/Qt.
+pip install -r requirements.txt
+python -m pytest -q
+
+# Kronos runtime — a SEPARATE dependency set (only the Kronos process needs it).
+desktop\run_kronos_windows.bat          # Windows: .venv-kronos + AXIOM_KRONOS_SOURCE
+pip install -r requirements-kronos.txt  # elsewhere
+
+# Weights are downloaded into %LOCALAPPDATA%\AXIOM\models\kronos and verified by
+# SHA-256 before loading. They are never committed (see .gitignore).
+python tools/build_windows_executables.py   # AXIOM.exe + AXIOM-Kronos.exe
+```
+
+Configuration lives in `AXIOM_KRONOS.env.example` (separate from Arena's `.env`
+on purpose). Initial settings: `NeoQuasar/Kronos-small` +
+`NeoQuasar/Kronos-Tokenizer-base`, lookback 400, pred_len 120, max_context 512,
+T 1.0, top_k 0, top_p 0.9, sample_paths 1, device auto, update_on_closed_bar true
+— with `max_context` validated against the published context length of the model
+rather than assumed, and tokenizer/model pairing checked before inference.
+
+Tests: `tests/test_kronos_*.py` (8 modules) cover valid/invalid OHLCV, NaN/Inf,
+duplicate and unordered timestamps, gaps, wrong timeframe, insufficient history,
+model loading, tokenizer/model mismatch, forecast shape and validation, CPU
+inference against the real Kronos implementation (when `AXIOM_KRONOS_SOURCE` and
+PyTorch are present), GPU where supported, GUI responsiveness, Arena polling
+continuing during inference, Kronos failure isolation, clean worker shutdown,
+cache correctness, model revision tracking, no future leakage, no fabricated
+data, no trading capability, and graceful degradation when Kronos is disabled or
+unavailable.

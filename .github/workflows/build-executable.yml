@@ -1,0 +1,366 @@
+name: Build executable
+
+# Produces a single-file Arena executable for Windows, macOS and Linux.
+# Routine pushes run the Linux source test gate only. The costly three-OS
+# packaging matrix runs only when manually dispatched or when a version tag is pushed.
+# PyInstaller cannot cross-compile — a Windows .exe must be built on Windows —
+# so this workflow exists to do that for you.
+#
+# 3.2.0 HARD GATES (an artifact that merely "builds" is NOT a release):
+#
+#   1. tests          the FULL source suite on ubuntu must pass;
+#   2. packaging      the packaging regression suite (frontend JS integrity,
+#                     wizard flow, instance guard, mode isolation, UI action
+#                     matrix, portability) must pass ON the build platform;
+#   3. full suite     the complete suite must pass on the build platform;
+#   4. frozen e2e     `build_exe.py --test` must pass — it starts the ACTUAL
+#                     built executable in a fresh external home, parses every
+#                     served JavaScript block with a real parser, drives the
+#                     real wizard button flow (start paper -> replay ->
+#                     preflight -> START PAPER TRADING) over HTTP against the
+#                     running artifact, verifies simulated orders/fills/trades,
+#                     stop -> restart -> exact state recovery, graceful
+#                     duplicate-launch handling, external-database placement
+#                     and secret redaction.
+#
+# Any failure discards the artifact. No exceptions, no continue-on-error.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the artifact name (optional)"
+        required: false
+        default: ""
+  push:
+    branches:
+      - "**"
+    paths:
+      - "packaging/**"
+      - "build_exe.py"
+      - "arena.py"
+      - "run.py"
+      - "requirements.txt"
+      - ".github/workflows/build-executable.yml"
+      # The application source is INSIDE the bundle, so a change to it changes
+      # the artifact.
+      - "app/**"
+      # The tests that form the hard gates; a fix to one of them must re-run
+      # the gate that failed.
+      - "tests/test_packaging_single_exe.py"
+      - "tests/test_feature_console.py"
+      - "tests/test_windows_portability.py"
+      - "tests/test_v310_frontend_integrity.py"
+      - "tests/test_v310_wizard_flow.py"
+      - "tests/test_v310_mode_isolation.py"
+      - "tests/test_v310_instance_guard.py"
+      - "tests/test_v310_ui_action_matrix.py"
+      - "tests/test_v310_frozen_e2e.py"
+      # Platform-sensitive tests that previously needed matrix coverage.
+      - "tests/test_kronos_worker.py"
+      - "tests/test_kronos_runtime.py"
+      - "tests/test_upstox_v062.py"
+      - "tests/test_live_ops_v2_1.py"
+      - "axiom/**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    name: Full source suite (hard gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: JavaScript runtime for frontend integrity checks
+        run: node --version
+
+      - name: Run the complete test suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
+
+      - name: Report failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" pytest-output.txt | awk 'NR <= 25' | while IFS= read -r line; do
+            echo "::error title=Suite failure::${line}"
+          done
+          exit 1
+
+  build:
+    name: Build on ${{ matrix.os }}
+    needs: tests
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Arena-windows-x64
+            binary: dist/Arena.exe
+            release_asset: Arena.exe
+            checksum: SHA256SUMS-windows-x64.txt
+          - os: ubuntu-latest
+            artifact: Arena-linux-x64
+            binary: dist/Arena
+            release_asset: Arena-linux-x64
+            checksum: SHA256SUMS-linux-x64.txt
+          - os: macos-latest
+            artifact: Arena-macos
+            binary: dist/Arena
+            release_asset: Arena-macos
+            checksum: SHA256SUMS-macos.txt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: JavaScript runtime for frontend integrity checks
+        shell: bash
+        run: node --version || echo "::error::node is required for the frontend gates"
+
+      - name: Packaging regression suite (hard gate)
+        id: packaging
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header \
+            tests/test_packaging_single_exe.py tests/test_feature_console.py \
+            tests/test_windows_portability.py \
+            tests/test_v310_frontend_integrity.py tests/test_v310_wizard_flow.py \
+            tests/test_v310_mode_isolation.py tests/test_v310_instance_guard.py \
+            tests/test_v310_ui_action_matrix.py \
+            2>&1 | tee packaging-output.txt
+
+      - name: Report packaging failures
+        if: failure() && steps.packaging.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" packaging-output.txt | head -25 | while IFS= read -r line; do
+            echo "::error title=Packaging gate failed on ${{ matrix.os }}::${line}"
+          done
+          exit 1
+
+      - name: Full suite on the build platform (hard gate)
+        id: fullsuite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
+
+      - name: Report full-suite failures
+        if: failure() && steps.fullsuite.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR)" pytest-output.txt | awk 'NR <= 25' | while IFS= read -r line; do
+            echo "::error title=Suite failure on ${{ matrix.os }}::${line}"
+          done
+          exit 1
+
+      - name: Annotate Windows pytest failure details
+        if: always() && matrix.os == 'windows-latest' && steps.fullsuite.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f pytest-output.txt ]; then
+            tail -n 20 pytest-output.txt | while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              printf '::error title=Windows pytest output::%s\n' "$safe"
+            done
+          fi
+          if [ -f pytest-results.xml ]; then
+            python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pytest-results.xml").getroot()
+          for case in root.iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is not None:
+                  name = (case.get("classname", "") + "::" +
+                          case.get("name", "unknown"))
+                  message = " ".join((failure.get("message") or
+                                      failure.text or "").split())[:350]
+                  message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Pytest failure::{name} — {message}")
+          PY
+          else
+            echo "::error title=Windows pytest output::JUnit report is missing"
+          fi
+
+      - name: Upload failed Windows full-suite output
+        if: failure() && matrix.os == 'windows-latest' && steps.fullsuite.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pytest-output-${{ github.run_number }}
+          path: |
+            pytest-output.txt
+            pytest-results.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Build the executable and verify it end-to-end (hard gate)
+        # --test runs packaging/frozen_e2e.py against the ACTUAL artifact:
+        # fresh home, frontend JS parsed with a real parser, the real wizard
+        # flow driven over HTTP, simulated executions, stop/restart recovery,
+        # duplicate-launch handling, external database, secret redaction.
+        run: python build_exe.py --test
+
+      - name: Verify the artifact against the frozen e2e test module
+        shell: bash
+        run: |
+          python -m pytest -q --no-header tests/test_v310_frozen_e2e.py
+
+      - name: Name the release asset per platform
+        shell: bash
+        run: |
+          mkdir -p release
+          cp "${{ matrix.binary }}" "release/${{ matrix.release_asset }}"
+          ls -l release/
+
+      - name: Record the artifact checksum and build identity
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib
+          target = pathlib.Path("release") / "${{ matrix.release_asset }}"
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          size_bytes = target.stat().st_size
+          pathlib.Path("${{ matrix.checksum }}").write_text(
+              f"{digest}  {target.name}\n", encoding="utf-8")
+          meta_path = pathlib.Path("app/BUILD_META.json")
+          meta = json.loads(meta_path.read_text(encoding="utf-8"))
+          expected_commit = "${{ github.sha }}"
+          if meta.get("commit") != expected_commit:
+              raise SystemExit(
+                  f"Build identity mismatch: expected {expected_commit}, "
+                  f"found {meta.get('commit')!r}")
+          build_id = f"{meta.get('version', 'unknown')}-{meta['commit'][:10]}"
+          record = {
+              "artifact": target.name,
+              "version": meta.get("version", "unknown"),
+              "build_id": build_id,
+              "commit": meta["commit"],
+              "built_at": meta.get("built_at", "unknown"),
+              "platform": meta.get("platform", "unknown"),
+              "size_bytes": size_bytes,
+              "sha256": digest,
+          }
+          record_path = pathlib.Path("release") / f"{target.name}.build-info.json"
+          record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          print(f"::notice title={target.name} build identity::{build_id}; "
+                f"commit={record['commit']}; built_at={record['built_at']}; "
+                f"platform={record['platform']}")
+          print(f"::notice title={target.name} size (bytes)::{size_bytes}")
+          print(f"::notice title={target.name} SHA-256::{digest}")
+          print(f"{target}  {size_bytes} bytes")
+          print(f"sha256 {digest}")
+          print(f"built from commit {record['commit']} at {record['built_at']}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/${{ matrix.release_asset }}
+            ${{ matrix.checksum }}
+            release/${{ matrix.release_asset }}.build-info.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Arena ${{ github.ref_name }} — executable build"
+          body: |
+            Single-file Arena executables, built and **verified end-to-end** by
+            this workflow on each platform. Before an artifact was kept, the
+            workflow:
+
+            - ran the complete source suite on ubuntu and on the build
+              platform;
+            - ran the packaging regression gates (frontend JavaScript
+              integrity under a real JS parser, first-run wizard flow,
+              instance-guard behaviour, paper/live mode isolation, the UI
+              action matrix);
+            - started the ACTUAL built executable in a fresh external data
+              directory, drove the real wizard button flow (START PAPER ->
+              OFFLINE REPLAY -> preflight -> START PAPER TRADING) over HTTP,
+              verified simulated orders/fills/trades, stop -> restart ->
+              exact state recovery, graceful duplicate-launch handling,
+              database placement outside the bundle, and that no credential
+              ever reached a log.
+
+            - `Arena.exe` — Windows x64 (double-click it; first run opens the
+              guided setup and starts paper trading in one click)
+            - `Arena` — Linux x64
+            - `Arena` — macOS
+            - `SHA256SUMS-*.txt` — checksum per platform
+
+            Start with **paper trading**: it needs no credentials, no
+            commands, and no money. The complete live-trading rail ships
+            inside the same executable and stays locked behind the documented
+            multi-switch opt-in (see `LIVE_TRADING_ENABLEMENT.md`). The
+            executables are unsigned, so Windows SmartScreen asks once
+            (More info → Run anyway).
+          files: |
+            release/${{ matrix.release_asset }}
+            ${{ matrix.checksum }}
+            release/${{ matrix.release_asset }}.build-info.json
+          fail_on_unmatched_files: true
+          allowUpdates: true
+          prerelease: true
+
+      - name: Summarise the build
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.artifact }} — ${{ matrix.os }}"
+            echo
+            echo "- Full source suite (ubuntu hard gate): **${{ needs.tests.result }}**"
+            echo "- Packaging gates on this platform: **${{ steps.packaging.outcome }}**"
+            echo "- Full suite on this platform: **${{ steps.fullsuite.outcome }}**"
+            if [ -f "release/${{ matrix.release_asset }}" ]; then
+              echo "- Artifact: **built and verified end-to-end** — \`${{ matrix.release_asset }}\`, $(wc -c < "release/${{ matrix.release_asset }}" | tr -d ' ') bytes"
+              if [ -f "release/${{ matrix.release_asset }}.build-info.json" ]; then
+                echo "- Build record: \`$(cat "release/${{ matrix.release_asset }}.build-info.json" | tr -d '\n')\`"
+              fi
+              if [ -f "${{ matrix.checksum }}" ]; then
+                echo "- Checksum: \`$(cat "${{ matrix.checksum }}")\`"
+              fi
+              echo
+              echo "Download it from the **Artifacts** section of this run page."
+            else
+              echo "- Artifact: **NOT built** — a hard gate failed before packaging completed"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

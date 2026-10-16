@@ -1,4 +1,17 @@
-"""Upstox SANDBOX broker (V1) — documented V3 sandbox order APIs only.
+"""Upstox SANDBOX broker — documented sandbox order APIs only (V1, host-fixed V2).
+
+HOST CLASSIFICATION (V2 live-hardening, 2026-10-02)
+---------------------------------------------------
+Upstox's live order host is ``api-hft.upstox.com`` ("enhanced URL for orders");
+the sandbox base is ``api-sandbox.upstox.com`` (SDK ``Configuration(sandbox=True)``).
+V1 shipped the LIVE host as the default ``UPSTOX_SANDBOX_BASE_URL`` and listed it
+as a *sandbox* host, so a live token pasted into the sandbox variable placed real
+orders while every label said "sandbox". That is fixed here:
+
+* the default sandbox base URL is a sandbox host;
+* ``api-hft.upstox.com`` is **refused at construction** by this class;
+* the live host is reachable only through ``app.brokers.live.UpstoxLiveBroker``,
+  which requires the full four-switch opt-in validated in ``Settings``.
 
 CURRENT documentation verified 2026-09-22 (V1 implementation):
 - Place Order V3 (sandbox-enabled): POST {base}/v3/order/place
@@ -11,27 +24,45 @@ CURRENT documentation verified 2026-09-22 (V1 implementation):
   (documented UDAPI100040) — treated as already-closed, never fatal.
 - Modify Order V3 (sandbox-enabled): PUT {base}/v3/order/modify.
 - Reconciliation: GET {history_url}?order_id=… (documented `GET /order/history`
-  on api.upstox.com/v2; default https://api.upstox.com/v2/order/history) returns
-  the full ordered list of
+  on api.upstox.com/v2; LIVE default https://api.upstox.com/v2/order/history)
+  returns the full ordered list of
   status transitions (…, "open", "complete"/"rejected") including
   filled_quantity and average_price. Orders are retained for one trading day.
+  That production URL applies to the LIVE broker only.
+
+SANDBOX ORDER-HISTORY CAPABILITY (re-verified 2026-10-16 against the official
+Upstox docs and the official upstox-python SDK):
+- The documented sandbox-enabled API list is place/modify/cancel (+multi);
+  GET /v2/order/history is NOT sandbox-enabled. The official SDK's sandbox
+  allowlist is exactly {/v2/order/place, /v2/order/modify, /v2/order/cancel,
+  /v2/order/multi/place, /v3/order/place, /v3/order/modify, /v3/order/cancel}
+  and its sandbox mode pins every host to api-sandbox.upstox.com.
+- Consequences enforced by this class: the sandbox broker NEVER contacts a
+  production host — its history URL defaults to the sandbox host and a
+  production history URL is refused at construction (and by Settings). If the
+  sandbox environment does not expose the history path, the read side is
+  marked an unavailable capability (status_view/history_capability) while
+  order operations keep their own availability; orders stay in their
+  honestly-known local state (acknowledged, not confirmed) and the submission
+  journal keeps blocking blind resubmission. No production fallback, no
+  fabricated fills, no global order-disable caused by an unsupported read.
+- A 401/403 from the SANDBOX environment itself is a genuine credential
+  rejection (the same token the order APIs use) and still fails closed.
 - Documented operational caveats surfaced honestly: sandbox tokens are for
   sandbox orders only; order APIs can be static-IP restricted (UDAPI1154);
   order placement may require an exchange-approved algo name header
   (X-Algo-Name, optional).
 
 SAFETY:
-- This broker talks ONLY to the configured sandbox/order base URL with the
-  dedicated UPSTOX_SANDBOX_ACCESS_TOKEN. It is never constructed for live
-  trading and there is no live order path in this project (BROKER=LIVE is
-  rejected by Settings).
+- This broker talks ONLY to the configured sandbox base URL with the dedicated
+  UPSTOX_SANDBOX_ACCESS_TOKEN. Live hosts are refused at construction; the
+  real-money subclass lives in ``app.brokers.live``.
 - Fails closed on auth errors (token rejected → broker disabled until
   re-created) and records every transition for audit/reconciliation.
 - All requests inject the Bearer token per request; the token is never
   logged, printed, or embedded in exceptions.
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,7 +70,37 @@ from uuid import uuid4
 
 import httpx
 
+from app.config.hosts import (
+    DEFAULT_SANDBOX_BASE_URL,
+    DEFAULT_SANDBOX_ORDER_HISTORY_URL,
+    FORBIDDEN_IN_SANDBOX,
+    READ_AND_AUTH_HOSTS,
+    SANDBOX_ORDER_HOSTS,
+    host_of,
+    is_trusted_upstox_request_url,
+    is_trusted_upstox_url,
+)
+
 logger = logging.getLogger("bot.sandbox")
+
+#: Hosts this broker is permitted to send an order to.
+#:
+#: ``PLACE_PATH`` / ``CANCEL_PATH`` / ``MODIFY_PATH`` are real order-mutating
+#: endpoints, and ``base_url`` is operator-supplied via
+#: ``UPSTOX_SANDBOX_BASE_URL``. A single typo there must not be able to reach a
+#: production host, so anything outside this set is refused at construction
+#: rather than logged and allowed to proceed.
+SANDBOX_ALLOWED_HOSTS = SANDBOX_ORDER_HOSTS
+
+#: Hosts that must never receive a sandbox order, even if explicitly
+#: allow-listed. This is a second, non-overridable gate: the order APIs are the
+#: dangerous surface, so no caller — including a test — may opt a live or
+#: auth/production host into the sandbox broker.
+#:
+#: ``api-hft.upstox.com`` is Upstox's LIVE order host and is FORBIDDEN here.
+#: ``api.upstox.com`` serves auth/read APIs (a sandbox token 401s there).
+SANDBOX_FORBIDDEN_HOSTS = FORBIDDEN_IN_SANDBOX
+
 
 
 class SandboxAuthError(RuntimeError):
@@ -165,6 +226,17 @@ def classify_history_probe(response) -> dict:
     if status in {400, 404} and "UDAPI100010" in codes:
         return {"credential_accepted": True, "class": "documented_not_found",
                 "http_status": status, "codes": sorted(codes)}
+    if status in {404, 405}:
+        # No documented not-found code: the environment is telling us the
+        # ROUTE is not there (order history is not a documented sandbox
+        # capability). This says nothing about the credential — it is
+        # UNVERIFIED, which is a different answer from "rejected".
+        return {"credential_accepted": False, "class": "unsupported_endpoint",
+                "credential_state": "unverified", "http_status": status,
+                "codes": sorted(codes), "parse_ok": parse_ok,
+                "note": ("the sandbox environment did not expose GET "
+                         "/v2/order/history (not a documented sandbox "
+                         "capability); credential validity is UNVERIFIED")}
     return {"credential_accepted": False, "class": "unexpected",
             "http_status": status, "codes": sorted(codes),
             "parse_ok": parse_ok}
@@ -177,13 +249,29 @@ class UpstoxSandboxBroker:
     CANCEL_PATH = "/v3/order/cancel"
     MODIFY_PATH = "/v3/order/modify"
 
+    #: Truthful identity of this broker. ``LIVE`` is False for sandbox and True
+    #: for the real-money subclass in app.brokers.live; every label (repr,
+    #: status_view, dashboard, reports) is derived from these attributes rather
+    #: than hardcoded, so a real-money session can never be displayed as paper.
+    MODE = "UPSTOX_SANDBOX"
+    LIVE = False
+    ALLOWED_HOSTS = SANDBOX_ALLOWED_HOSTS
+    FORBIDDEN_HOSTS = SANDBOX_FORBIDDEN_HOSTS
+    DEFAULT_BASE_URL = DEFAULT_SANDBOX_BASE_URL
+    #: Hosts whose /v2/order/history this broker may READ. For sandbox that is
+    #: the sandbox hosts only: the production read/auth host is refused so a
+    #: sandbox token can never be sent to production (the live subclass
+    #: overrides this to the documented production history host, which serves
+    #: the live broker's real orders).
+    ALLOWED_HISTORY_HOSTS = SANDBOX_ORDER_HOSTS
+
     def __init__(
         self,
         access_token: str,
         instrument_key: str,
         *,
-        base_url: str = "https://api-hft.upstox.com",
-        history_url: str = "https://api.upstox.com/v2/order/history",
+        base_url: str = DEFAULT_SANDBOX_BASE_URL,
+        history_url: str = DEFAULT_SANDBOX_ORDER_HISTORY_URL,
         product: str = "I",
         tag: str = "arena-v1",
         repository=None,
@@ -193,12 +281,57 @@ class UpstoxSandboxBroker:
         algo_name: str = "",
     ):
         if not isinstance(access_token, str) or not access_token.strip():
-            raise ValueError("A sandbox access token is required (UPSTOX_SANDBOX_ACCESS_TOKEN)")
+            raise ValueError("An access token is required")
         if base_url.split(":")[0] not in {"https", "http"}:
-            raise ValueError("Sandbox base URL must be http(s)")
-        if "live" in base_url.lower() and "sandbox" not in base_url.lower():
-            # Guard against ever pointing this class at a live-looking host.
-            logger.warning("SANDBOX_BASE_URL_REVIEW", extra={"base_url": base_url})
+            raise ValueError("Base URL must be http(s)")
+        host = host_of(base_url)
+        if host in self.FORBIDDEN_HOSTS:
+            # Non-overridable: a live/production host must never receive an
+            # order from this class, whatever the configuration says.
+            raise ValueError(
+                f"Base URL host {host!r} is not permitted for "
+                f"{self.MODE}: this class places orders and must only ever "
+                f"point at {'sandbox' if not self.LIVE else 'live'} hosts "
+                f"({', '.join(sorted(self.ALLOWED_HOSTS))})"
+            )
+        if host not in self.ALLOWED_HOSTS:
+            # Previously this only logged SANDBOX_BASE_URL_REVIEW and continued,
+            # which meant a typo in UPSTOX_SANDBOX_BASE_URL could aim a real
+            # POST /v3/order/place at an arbitrary host. Refuse instead.
+            raise ValueError(
+                f"Base URL host {host!r} is not a recognised "
+                f"{'live' if self.LIVE else 'sandbox'} host. "
+                f"Permitted hosts: {', '.join(sorted(self.ALLOWED_HOSTS))}. "
+                f"Set the base URL to one of them."
+            )
+        if not is_trusted_upstox_url(base_url, self.ALLOWED_HOSTS):
+            raise ValueError("Broker base URL must be a secure HTTPS root on its order host")
+        if not is_trusted_upstox_url(
+                history_url, self.ALLOWED_HISTORY_HOSTS,
+                expected_path="/v2/order/history"):
+            # The specific message for the dangerous case: a production
+            # history host configured on a SANDBOX broker. That was the
+            # reconciliation defect class — a 401 from production read APIs
+            # (which can never know about sandbox orders) fail-closed the
+            # whole broker AND leaked the sandbox token to a production host.
+            history_host = host_of(history_url)
+            if (not self.LIVE and history_host
+                    and history_host not in self.ALLOWED_HISTORY_HOSTS):
+                kind = ("a production host"
+                        if history_host in READ_AND_AUTH_HOSTS |
+                        {"api-hft.upstox.com"} else "not a sandbox host")
+                raise ValueError(
+                    f"Order-history URL host {history_host!r} is {kind}; "
+                    f"{self.MODE} must never send its token there. The URL "
+                    "must be the documented HTTPS Upstox order-history "
+                    "endpoint on a sandbox host "
+                    f"({', '.join(sorted(self.ALLOWED_HISTORY_HOSTS))}); "
+                    "order history is not a documented sandbox capability, "
+                    "so there is no production fallback")
+            raise ValueError(
+                "Order-history URL must be the documented HTTPS Upstox "
+                "order-history endpoint on an allowed host ("
+                f"{', '.join(sorted(self.ALLOWED_HISTORY_HOSTS))})")
         self._token = access_token
         self.instrument_key = instrument_key
         # 3.0.1: authoritative symbol → instrument_key resolution. The broker
@@ -215,15 +348,43 @@ class UpstoxSandboxBroker:
         self._timeout, self._transport = http_timeout, transport
         self._algo_name = algo_name
         self.available = True  # False after an auth rejection (fail closed)
-        self.mode = "UPSTOX_SANDBOX"
+        #: Independent READ-side capability state for the order-history
+        #: endpoint (sandbox read APIs are provider-limited). A history
+        #: endpoint that is missing/unsupported/erroneous NEVER flips
+        #: ``available`` — order mutations and remote-status reads fail and
+        #: recover independently, per capability.
+        self.history_capability: dict = {
+            "state": "unknown", "reason": None, "checked_at": None}
+        self.mode = self.MODE
         self.orders: dict[str, SandboxOrderState] = {}
         self.request_count = 0
 
     def __repr__(self):
         return (
-            f"UpstoxSandboxBroker(instrument_key={self.instrument_key!r}, "
-            f"mode={self.mode!r}, live=False)"
+            f"{type(self).__name__}(instrument_key={self.instrument_key!r}, "
+            f"mode={self.mode!r}, live={self.LIVE})"
         )
+
+    # -- audit routing -------------------------------------------------------
+    #
+    # Sandbox and live orders are recorded in SEPARATE tables so an operator
+    # reading the database can never mistake a real fill for a simulated one.
+    # The live subclass overrides these two hooks; every call site below goes
+    # through them.
+
+    def _record_order(self, record: dict) -> None:
+        if self.repository is None:
+            return
+        self.repository.record_sandbox_order(record)
+
+    def _record_transition(self, order_id: str, upstox_order_id: str | None,
+                           status: str, filled_quantity: float | None,
+                           average_price: float | None, ts: str, raw: dict) -> bool:
+        if self.repository is None:
+            return True
+        return self.repository.record_sandbox_transition(
+            order_id, upstox_order_id, status, filled_quantity, average_price, ts, raw)
+
 
     # -- HTTP core -----------------------------------------------------------
 
@@ -237,10 +398,26 @@ class UpstoxSandboxBroker:
             headers["X-Algo-Name"] = self._algo_name  # optional per current docs
         return headers
 
+    def _authorize_request(self, method: str, url: str, **kwargs) -> None:
+        """Pin bearer-token requests to the configured order/history hosts."""
+        method = str(method).upper()
+        base_host = host_of(self._base_url)
+        allowed_hosts = {base_host}
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            allowed_hosts.add(host_of(self._history_url))
+        if not is_trusted_upstox_request_url(url, allowed_hosts):
+            raise SandboxRequestError(
+                "Broker request refused: endpoint must use HTTPS on a configured "
+                "Upstox host")
+
     def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """HTTP core. 401/403 fail closed. Reads (GET) retry 429/5xx with
         bounded backoff; writes (POST/PUT/DELETE) NEVER auto-retry — the
         remote outcome could already exist (duplicate-order safety)."""
+        # Dispatch the authorization hook here rather than only in a subclass
+        # override: even an explicit call to this base method must pass the
+        # live broker's final transport gate.
+        self._authorize_request(method, url, **kwargs)
         if not self.available:
             raise SandboxAuthError("Sandbox broker disabled after an auth failure")
         import time as _time
@@ -253,6 +430,14 @@ class UpstoxSandboxBroker:
                     with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                         response = client.request(method, url, headers=self._headers(), **kwargs)
                 else:
+                    # Use a plain httpx.request call (preserving the public
+                    # signature used by the live-broker test harness and
+                    # protocol-authorization checks) and rely on httpx's
+                    # default SSL context; a bundled certifi CA is wired up
+                    # at the frozen-exe entrypoint via SSL_CERT_FILE (see
+                    # arena.py / build_exe.py) rather than per-call, so we
+                    # don't need to pass verify= here and break the tests
+                    # that mock httpx.request.
                     response = httpx.request(
                         method, url, headers=self._headers(), timeout=self._timeout, **kwargs
                     )
@@ -260,12 +445,19 @@ class UpstoxSandboxBroker:
                 if attempt < attempts:
                     _time.sleep(0.05)  # bounded, tests stay fast
                     continue
-                raise SandboxRequestError("Sandbox API unreachable (network error)")
+                raise SandboxRequestError(
+                    f"{self.MODE} API unreachable (network error) at "
+                    f"{host_of(url) or 'configured host'}")
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt < attempts:
                     _time.sleep(0.05)
                     continue
             break
+        # Record the READ-side capability before the fail-closed auth branch
+        # so an auth rejection is attributable to the endpoint that produced
+        # it, and a missing/unsupported history endpoint never looks like a
+        # healthy-but-empty read.
+        self._note_history_capability(url, response.status_code)
         if response.status_code in {401, 403}:
             self.available = False  # fail closed on auth errors
             logger.error("SANDBOX_AUTH_FAILURE", extra={"http_status": response.status_code})
@@ -273,6 +465,48 @@ class UpstoxSandboxBroker:
                 f"Sandbox credential rejected (HTTP {response.status_code}); broker disabled"
             )
         return response
+
+    def _note_history_capability(self, url: str, status_code: int) -> None:
+        """Classify an order-history response into the read capability state.
+
+        Scope: ONLY requests whose target is the configured order-history
+        endpoint. Order mutations and this read capability are tracked
+        independently — an unsupported/erroneous history endpoint marks the
+        READ side unavailable (with the HTTP reason) and never flips the
+        broker-wide ``available`` flag that gates order operations.
+        """
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(str(url))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return
+        path = (parsed.path or "").rstrip("/")
+        if path != "/v2/order/history" or host_of(url) != host_of(self._history_url):
+            return
+        if status_code == 200:
+            state = "available"
+        elif status_code in {401, 403}:
+            state = "auth_rejected"
+        elif status_code in {404, 405}:
+            state = "unsupported"
+        elif status_code == 429:
+            state = "rate_limited"
+        elif status_code >= 500:
+            state = "provider_error"
+        else:
+            state = "unexpected"
+        reason = f"HTTP {status_code}"
+        previous = self.history_capability.get("state")
+        self.history_capability.update(
+            {"state": state, "reason": reason,
+             "checked_at": datetime.now(timezone.utc).isoformat()})
+        if previous != state:
+            # One log per transition; never contains the token or the query.
+            logger.warning(
+                "SANDBOX_HISTORY_CAPABILITY",
+                extra={"state": state, "reason": reason},
+            )
 
     # -- order flow ----------------------------------------------------------
 
@@ -304,8 +538,12 @@ class UpstoxSandboxBroker:
     def submit(self, side: str, quantity: float, price: float, *,
                order_type: str = "MARKET", intent_id: str | None = None,
                symbol: str | None = None,
-               instrument_key: str | None = None) -> str:
+               instrument_key: str | None = None, **extra) -> str:
         """Place one sandbox order; returns OUR id (idempotent per intent_id).
+
+        ``extra`` carries provenance metadata (strategy, reason, …) that the
+        live gateway consumes to build a complete ExecutionIntent; the sandbox
+        broker ignores it so paper behaviour stays byte-for-byte identical.
 
         3.0.1 crash-safety: the intent is durably persisted (DURABLY_PERSISTED)
         BEFORE the remote call, marked SUBMISSION_ATTEMPTED before the POST and
@@ -331,22 +569,34 @@ class UpstoxSandboxBroker:
             return intent_id  # duplicate submission protection (in-process)
         if self.repository is not None:
             from app.engine.state import (SubmissionJournal, SUBMISSION_ATTEMPTED,
-                                          ACKNOWLEDGED, UNKNOWN, FINAL_STATE,
-                                          RECONCILED)
+                                          ACKNOWLEDGED, UNKNOWN, FINAL_STATE)
 
             self._journal = getattr(self, "_journal", None) or SubmissionJournal(
                 self.repository)
-            if self._journal.resubmission_forbidden(intent_id):
-                # durable journal says this intent may already exist remotely
+            gateway_authorization_id = str(
+                extra.pop("_gateway_authorization_id", "") or "")
+            existing_entry = self._journal.get(intent_id)
+            detail = (existing_entry.get("detail")
+                      if isinstance(existing_entry, dict) else None)
+            gateway_authorized_attempt = bool(
+                gateway_authorization_id
+                and isinstance(existing_entry, dict)
+                and existing_entry.get("state") == SUBMISSION_ATTEMPTED
+                and isinstance(detail, dict)
+                and detail.get("gateway_authorization_id") == gateway_authorization_id)
+            if (self._journal.resubmission_forbidden(intent_id)
+                    and not gateway_authorized_attempt):
+                # Durable journal says this intent may already exist remotely.
                 logger.warning("DUPLICATE_INTENT_BLOCKED",
                                extra={"intent": intent_id[:8]})
                 return intent_id
-            self._journal.record(
-                intent_id, instrument_key=resolved_key, symbol=symbol or "",
-                side=side, quantity=float(quantity), price=float(price),
-                strategy="", params_version="", tag=intent_tag)
-            self._journal.mark(intent_id, SUBMISSION_ATTEMPTED)
-        our_id = f"sbox-{intent_id[:12]}"
+            if not gateway_authorized_attempt:
+                self._journal.record(
+                    intent_id, instrument_key=resolved_key, symbol=symbol or "",
+                    side=side, quantity=float(quantity), price=float(price),
+                    strategy="", params_version="", tag=intent_tag)
+                self._journal.mark(intent_id, SUBMISSION_ATTEMPTED)
+        our_id = f"{'live' if self.LIVE else 'sbox'}-{intent_id[:12]}"
         state = SandboxOrderState(
             our_id=our_id, symbol=symbol or resolved_key.split("|")[-1],
             side=side, quantity=float(quantity), price=float(price),
@@ -382,7 +632,7 @@ class UpstoxSandboxBroker:
                                    detail={"phase": "post_network_error"})
                 if self.repository is not None:
                     record["status"] = "UNKNOWN"
-                    self.repository.record_sandbox_order(record)
+                    self._record_order(record)
             raise
         if response.status_code in {429} or response.status_code >= 500:
             # Rate-limited / provider error: remote outcome is uncertain.
@@ -390,17 +640,17 @@ class UpstoxSandboxBroker:
                 self._journal.mark(intent_id, UNKNOWN,
                                    detail={"http_status": response.status_code})
                 record["status"] = "UNKNOWN"
-                self.repository.record_sandbox_order(record)
+                self._record_order(record)
             raise SandboxRequestError(
-                f"Sandbox order outcome unknown (HTTP {response.status_code}); "
+                f"Order outcome unknown (HTTP {response.status_code}) for {self.MODE}; "
                 "intent kept UNKNOWN for reconciliation, never retried blindly")
         if response.status_code != 200:
             state.status = "REJECTED"
             record["status"] = "REJECTED"
             self.orders[intent_id] = state
             if self.repository:
-                self.repository.record_sandbox_order(record)
-                self.repository.record_sandbox_transition(
+                self._record_order(record)
+                self._record_transition(
                     our_id, None, "REJECTED", None, None, now,
                     {"http_status": response.status_code},
                 )
@@ -408,7 +658,7 @@ class UpstoxSandboxBroker:
                                    detail={"outcome": "REJECTED",
                                            "http_status": response.status_code})
             raise SandboxRequestError(
-                f"Sandbox order rejected with HTTP {response.status_code}"
+                f"Order rejected with HTTP {response.status_code} ({self.MODE})"
             )
         try:
             upstox_ids = response.json()["data"]["order_ids"]
@@ -417,15 +667,17 @@ class UpstoxSandboxBroker:
                 self._journal.mark(intent_id, UNKNOWN,
                                    detail={"phase": "malformed_response"})
                 record["status"] = "UNKNOWN"
-                self.repository.record_sandbox_order(record)
-            raise SandboxRequestError("Sandbox place response missing data.order_ids")
+                self._record_order(record)
+            raise SandboxRequestError(
+                f"Place response missing data.order_ids ({self.MODE})")
         if not isinstance(upstox_ids, list) or not upstox_ids:
             if self.repository is not None:
                 self._journal.mark(intent_id, UNKNOWN,
                                    detail={"phase": "empty_order_ids"})
                 record["status"] = "UNKNOWN"
-                self.repository.record_sandbox_order(record)
-            raise SandboxRequestError("Sandbox place response has no order ids")
+                self._record_order(record)
+            raise SandboxRequestError(
+                f"Place response has no order ids ({self.MODE})")
         state.status = "SUBMITTED"
         state.upstox_order_ids = [str(item) for item in upstox_ids]
         record["upstox_order_id"] = state.upstox_order_ids[0]
@@ -433,14 +685,14 @@ class UpstoxSandboxBroker:
         record["upstox_order_ids"] = state.upstox_order_ids
         self.orders[intent_id] = state
         logger.info(
-            "SANDBOX_ORDER_SUBMITTED",
+            "LIVE_ORDER_SUBMITTED" if self.LIVE else "SANDBOX_ORDER_SUBMITTED",
             extra={"side": side, "quantity": quantity, "order_type": order_type,
                    "instrument_key": resolved_key,
                    "slices": len(state.upstox_order_ids)},
         )
         if self.repository:
-            self.repository.record_sandbox_order(record)
-            self.repository.record_sandbox_transition(
+            self._record_order(record)
+            self._record_transition(
                 our_id, state.upstox_order_ids[0], "SUBMITTED", None, None, now,
                 {"order_ids": state.upstox_order_ids},
             )
@@ -581,7 +833,8 @@ class UpstoxSandboxBroker:
         state = self.orders.get(intent_id)
         if state is None:
             state = SandboxOrderState(
-                our_id=f"sbox-{intent_id[:12]}", symbol=entry.get("symbol", ""),
+                our_id=f"{'live' if self.LIVE else 'sbox'}-{intent_id[:12]}",
+                symbol=entry.get("symbol", ""),
                 side=entry["side"], quantity=float(entry["quantity"]),
                 price=float(entry["price"]))
         # adopt EVERY child; per-child remote statuses are audited, fills stay
@@ -597,7 +850,7 @@ class UpstoxSandboxBroker:
             remote_statuses[order_id] = mapped
             state.child_status[order_id] = mapped
             if self.repository is not None:
-                self.repository.record_sandbox_transition(
+                self._record_transition(
                     state.our_id, order_id, "REMOTE_LOOKUP_ADOPTED", None, None,
                     str(final.get("order_timestamp") or ""),
                     {"adopted_via": "REMOTE_LOOKUP", "tag": tag,
@@ -630,6 +883,8 @@ class UpstoxSandboxBroker:
         recorded once (idempotent transitions keyed by child id), so restarts
         never double count and no child is ever lost or applied twice.
         """
+        from app.engine.state import reconciled_fill_id
+
         new_fills: list[dict] = []
         if self.repository is not None:
             from app.engine.state import (SubmissionJournal, UNKNOWN,
@@ -657,7 +912,8 @@ class UpstoxSandboxBroker:
                 try:
                     history = response.json()["data"]
                 except (KeyError, TypeError, ValueError):
-                    raise SandboxRequestError("Sandbox history response missing data")
+                    raise SandboxRequestError(
+                    f"Order-history response missing data ({self.MODE})")
                 final = history[-1] if isinstance(history, list) and history else None
                 if final is None:
                     continue
@@ -666,10 +922,12 @@ class UpstoxSandboxBroker:
                 average = float(final.get("average_price") or 0)
                 ts = str(final.get("order_timestamp") or "")
                 mapped = self._map_status(status, filled)
+                observed_at = datetime.now(timezone.utc).isoformat()
+                transition_raw = {**final, "_axiom_observed_at": observed_at}
                 if self.repository:
-                    fresh = self.repository.record_sandbox_transition(
-                        state.our_id, upstox_order_id, mapped, filled, average, ts, final
-                    )
+                    fresh = self._record_transition(
+                        state.our_id, upstox_order_id, mapped, filled, average, ts,
+                        transition_raw)
                 else:
                     fresh = True  # without a repository, apply conservatively
                 if not fresh:
@@ -691,7 +949,9 @@ class UpstoxSandboxBroker:
                             incremental = average
                     elif average <= 0 and prev_avg > 0:
                         incremental = prev_avg
+                    realized_before = self.ledger.realized_pnl
                     self.ledger.apply_fill(state.side, delta, incremental)
+                    realized_delta = self.ledger.realized_pnl - realized_before
                     state.child_filled[upstox_order_id] = filled
                     state.child_avg_price[upstox_order_id] = \
                         average if average > 0 else prev_avg
@@ -700,7 +960,12 @@ class UpstoxSandboxBroker:
                         {"intent_id": intent_id, "order_id": state.our_id,
                          "upstox_order_id": upstox_order_id,
                          "side": state.side, "quantity": delta,
-                         "price": incremental}
+                         "cumulative_filled": filled,
+                         "fill_id": reconciled_fill_id(
+                             state.our_id, upstox_order_id, filled),
+                         "price": incremental,
+                         "realized_pnl": realized_delta,
+                         "observed_at": observed_at}
                     )
                     logger.info(
                         "SANDBOX_FILL_RECONCILED",
@@ -844,7 +1109,7 @@ class UpstoxSandboxBroker:
         logical = self._aggregate_child_status(state)
         state.status = logical
         if self.repository:
-            self.repository.record_sandbox_transition(
+            self._record_transition(
                 state.our_id,
                 state.upstox_order_ids[0] if state.upstox_order_ids else None,
                 logical, None, None, datetime.now(timezone.utc).isoformat(),
@@ -900,7 +1165,9 @@ class UpstoxSandboxBroker:
     def status_view(self) -> dict:
         return {
             "mode": self.mode,
+            "live": self.LIVE,
             "available": self.available,
+            "history_capability": dict(self.history_capability),
             "instrument_key": self.instrument_key,
             "orders_tracked": len(self.orders),
             "open_orders": len(self.open_orders()),

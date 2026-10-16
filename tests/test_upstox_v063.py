@@ -70,7 +70,14 @@ def test_verify_feed_credential_verdicts():
         raise httpx.ConnectError("no route")
 
     check = async_check(TOKEN, httpx.MockTransport(down))
-    assert check.verdict == "unreachable" and check.authenticated is False
+    # 3.2.1: granular verdicts distinguish TCP/DNS failure from a generic error.
+    assert check.verdict == "dns_or_connect_failure" and check.authenticated is False
+
+    def timed_out(request):
+        raise httpx.ConnectTimeout("timed out")
+
+    check = async_check(TOKEN, httpx.MockTransport(timed_out))
+    assert check.verdict == "timeout" and check.authenticated is False
 
     empty = asyncio.run(
         verify_feed_credential("", authorize_url="https://api.upstox.com/v3/feed/market-data-feed/authorize")

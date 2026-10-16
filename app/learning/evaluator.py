@@ -14,10 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.backtesting.engine import BacktestEngine
-from app.backtesting.costs import ExecutionConfig
 from app.data.models import Candle
-from app.learning.regime import classify_regime
-from app.validation.train_test import split_data
 
 
 @dataclass(frozen=True)

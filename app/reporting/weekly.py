@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from app.utils.clock import utc_today
 
 from app.reporting.pdf import simple_pdf
 
@@ -26,7 +27,7 @@ class WeeklyReport:
         self.broker = broker
 
     def assemble(self, *, today: date | None = None) -> dict:
-        today = today or date.today()
+        today = today or utc_today()
         week_start = today - timedelta(days=7)
         snapshots = [row for row in self.repository.list_daily_snapshots(limit=30)
                      if row["date"] >= week_start.isoformat()]
@@ -55,9 +56,12 @@ class WeeklyReport:
         quality = self.repository.list_quality_events(limit=10)
         universe = self.repository.instrument_counts()
         broker_mode = str(getattr(self.settings, "broker", "LOCAL_PAPER")) if self.settings else "LOCAL_PAPER"
+        live_label = ("ENABLED — REAL MONEY"
+                      if bool(getattr(self.settings, "live_trading", False))
+                      and broker_mode.upper() == "UPSTOX_LIVE" else "DISABLED")
         return {
             "week_start": week_start.isoformat(), "today": today.isoformat(),
-            "broker_mode": broker_mode, "live": "DISABLED",
+            "broker_mode": broker_mode, "live": live_label,
             "initial_capital": initial,
             "equity": equity, "realized": realized, "unrealized": unrealized,
             "trades": trades_count, "orders": len(orders), "fills": len(fills),
@@ -76,7 +80,7 @@ class WeeklyReport:
         data = self.assemble(today=today)
         lines = [
             f"# Arena Weekly Report — {data['week_start']} → {data['today']}", "",
-            f"Mode: **{data['broker_mode']}** · Live trading: **{data['live']}** (not enabled in this build)", "",
+            f"Mode: **{data['broker_mode']}** · Live trading: **{data['live']}**", "",
             "## Account",
             f"- Capital (initial): {_money(data['initial_capital'])} — OBSERVED (config)",
             f"- Current equity: {_money(data['equity'])} — "
@@ -121,8 +125,8 @@ class WeeklyReport:
             lines.append("- No historical coverage recorded yet.")
         lines.append(f"- Instruments tracked: {data['universe'].get('total', 0)} "
                      f"({data['universe'].get('state_active', 0)} active) — OBSERVED")
-        lines += ["", "*Generated from recorded data only. Sandbox/paper only; "
-                  "live trading is not enabled.*"]
+        lines += ["", "*Generated from recorded data only. Execution mode: "
+                  f"{data['broker_mode']}; live trading: {data['live']}.*"]
         return "\n".join(lines) + "\n"
 
     def pdf(self, *, today: date | None = None) -> bytes:
@@ -150,9 +154,9 @@ class PeriodReport(WeeklyReport):
         self.title = title
 
     def assemble(self, *, today=None):
-        from datetime import date as date_type, timedelta as timedelta_type
+        from datetime import timedelta as timedelta_type
 
-        today = today or date_type.today()
+        today = today or utc_today()
         week_start = today - timedelta_type(days=self.days)
         snapshots = [row for row in self.repository.list_daily_snapshots(limit=400)
                      if row["date"] >= week_start.isoformat()]
@@ -174,7 +178,10 @@ class PeriodReport(WeeklyReport):
         return {
             "week_start": week_start.isoformat(), "today": today.isoformat(),
             "broker_mode": str(getattr(self.settings, "broker", "LOCAL_PAPER")) if self.settings else "LOCAL_PAPER",
-            "live": "DISABLED", "initial_capital": float(getattr(self.settings, "initial_capital", 100000)) if self.settings else 100000,
+            "live": ("ENABLED — REAL MONEY"
+                     if bool(getattr(self.settings, "live_trading", False))
+                     else "DISABLED"),
+            "initial_capital": float(getattr(self.settings, "initial_capital", 100000)) if self.settings else 100000,
             "equity": equity, "realized": realized, "unrealized": unrealized,
             "trades": trades_count,
             "orders": len([e for e in events if e["kind"] == "SANDBOX_ORDER_SUBMITTED"]),

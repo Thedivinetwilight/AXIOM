@@ -1,4 +1,12 @@
-"""24/7 trading engine for the Upstox SANDBOX mode (V1).
+"""24/7 trading engine for the Upstox execution modes (V1 sandbox, V2 gated LIVE).
+
+The mode is the BROKER's own identity: an UpstoxSandboxBroker routes to a
+sandbox host and records sandbox audit rows; an UpstoxLiveBroker routes to the
+documented live order host and records LIVE audit rows. Real money is reachable
+ONLY when Settings accepted the four-switch opt-in (MODE=LIVE,
+LIVE_TRADING=true, BROKER=UPSTOX_LIVE, LIVE_CONFIRM) plus explicit non-zero
+hard risk limits — see LIVE_TRADING_ENABLEMENT.md. The engine itself can never
+enable live trading, alter risk limits, or pick a host.
 
 Pipeline per completed candle (market OPEN only, provider gate respected):
 
@@ -21,7 +29,6 @@ them, and nothing in this engine can enable live trading.
 """
 
 import logging
-import math
 import time
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
@@ -35,7 +42,6 @@ from app.data.cross_market import CrossMarketCache
 from app.research.entry_timing import EntryTimingEngine
 from app.research.alpha_decay import AlphaDecayTracker
 from app.engine.hot_path import HotPathMonitor, ColdPathQueue
-from app.utils.numerical import is_valid_price, is_valid_quantity, sanitize_candle
 
 logger = logging.getLogger("bot.engine")
 
@@ -58,6 +64,7 @@ class SandboxEngine:
                  event_engine=None, pause_gate=None, monitor=None,
                  maintenance_scheduler=None, strategy_source=None,
                  allocator=None, instrument_keys=None,
+                 live_ops=None,
                  market_timezone: str = "Asia/Kolkata",
                  stop_loss: float | None = 0.0,
                  take_profit: float | None = 0.0,
@@ -71,7 +78,8 @@ class SandboxEngine:
                  alpha_decay=None,
                  hot_path_monitor=None,
                  cold_queue=None,
-                 settings=None):
+                 settings=None,
+                 workstation=None):
         if timeframe not in {"1m", "5m", "15m", "30m"}:
             raise ValueError("Engine supports intraday timeframes")
         self.provider = provider
@@ -84,19 +92,36 @@ class SandboxEngine:
         self.evaluate_every = max(1, int(evaluate_every))
         self.sizing_fraction = float(sizing_fraction)
         self.state = "STOPPED"
+        self._live_emergency_handled = False
+        self._live_drain_cancellation_attempted = False
         self.processed = 0
         self.submitted = 0
         self.rejected_by_risk = 0
+        # V2.1 L-ops: single-engine lock. Enforced for LIVE engines only;
+        # paper/sandbox runs record it but are never blocked by it.
+        self.live_lock = None
+        if live_ops is not None and hasattr(live_ops, "make_lock"):
+            try:
+                self.live_lock = live_ops.make_lock()
+            except Exception:  # pragma: no cover - a lock must not block start
+                logger.exception("could not construct the engine lock")
+        # V2.1 L-ops: optional live safety rails (guards/watchdog/breaches).
+        # None = the paper/sandbox behaviour is byte-for-byte unchanged.
+        self.live_ops = live_ops
         self.signals: dict = {}
         self.regime: str | None = None
         self._history: list = []
         self._peak_equity = 0.0
         self._trades_today = 0
         self._last_realized = 0.0
+        self._unaccounted_fills: dict[str, dict] = {}
         self.evaluation: dict | None = None
         self.regime_engine = regime_engine
         self.shadow_engine = shadow_engine
         self.event_engine = event_engine
+        # AXIOM-MONEY-PRINTER: research-telemetry hook (opportunity center,
+        # regime bridge). None keeps historic behaviour byte-for-byte.
+        self.workstation = workstation
         self.pause_gate = pause_gate
         self.monitor = monitor
         self.maintenance_scheduler = maintenance_scheduler
@@ -114,6 +139,8 @@ class SandboxEngine:
 
         self.intent_journal = SubmissionJournal(repository) \
             if repository is not None else None
+        if live_ops is not None:
+            live_ops.attach_journal(self.intent_journal)
         self.daily = DailyRiskAccount(repository, market_timezone) \
             if repository is not None else None
         # authoritative symbol → instrument key resolution.
@@ -165,10 +192,19 @@ class SandboxEngine:
             self.scanner_funnel = None
         # durable account recovery BEFORE anything can trade
         if repository is not None:
-            self._recovery_report = recover_ledger_state(broker.ledger, repository)
+            self._recovery_report = recover_ledger_state(
+                broker.ledger, repository, live=bool(getattr(broker, "LIVE", False)))
             if self._recovery_report.get("orders_replayed"):
                 logger.warning("LEDGER_RECOVERED",
                                extra={"orders": self._recovery_report["orders_replayed"]})
+            if self.daily is not None:
+                for fill in self._recovery_report.get("replayed_fills", []):
+                    self.daily.record_realized_fill(
+                        fill.get("fill_id"), fill.get("realized_pnl", 0.0),
+                        observed_at=fill.get("observed_at"))
+        # The non-persisted fallback is a baseline, never zero: recovery may
+        # have replayed historical realized P&L into the ledger above.
+        self._last_realized = float(self.broker.ledger.realized_pnl)
         self.restore_from_repository()
         self._surface_unresolved_intents()
         self._snapshot_dates: set[str] = set()
@@ -208,7 +244,10 @@ class SandboxEngine:
         restored = 0
         if self.repository is None or not hasattr(self.broker, "orders"):
             return restored
-        for record in self.repository.open_sandbox_orders():
+        open_orders = (self.repository.open_live_orders()
+                       if getattr(self.broker, "LIVE", False)
+                       else self.repository.open_sandbox_orders())
+        for record in open_orders:
             intent_id = record.get("intent_id")
             if not intent_id or intent_id in self.broker.orders:
                 continue
@@ -260,7 +299,9 @@ class SandboxEngine:
             self.broker.orders[intent_id] = state
             restored += 1
         if restored:
-            logger.info("SANDBOX_ORDERS_RESTORED", extra={"count": restored})
+            logger.info(
+                "LIVE_ORDERS_RESTORED" if getattr(self.broker, "LIVE", False)
+                else "SANDBOX_ORDERS_RESTORED", extra={"count": restored})
         return restored
 
     def _surface_unresolved_intents(self):
@@ -282,23 +323,51 @@ class SandboxEngine:
     # -- safety --------------------------------------------------------------
 
     def emergency_stop(self, reason: str = "manual") -> dict:
-        """Persisted emergency stop: cancels open sandbox orders and halts."""
+        """Persist the kill switch, revoke live entry authority, and cancel orders.
+
+        For a LIVE broker the gateway facade routes every cancellation through
+        its durable lease/audit boundary. The live process remains available to
+        manage risk-reducing exits; this method does not close positions.
+        """
         self.repository.set_engine_state(
-            "emergency_stop", {"stopped": True, "ts": datetime.now(timezone.utc).isoformat(),
-                               "reason": reason}
-        )
+            "emergency_stop", {"stopped": True,
+                               "ts": datetime.now(timezone.utc).isoformat(),
+                               "reason": reason})
         self.repository.record_system_event("EMERGENCY_STOP", {"reason": reason})
+        if bool(getattr(self.broker, "LIVE", False)):
+            sessions = getattr(getattr(self.broker, "gateway", None), "sessions", None)
+            if sessions is not None:
+                try:
+                    sessions.block(reason=f"emergency stop: {reason}")
+                except Exception as exc:
+                    logger.error("LIVE_SESSION_BLOCK_FAILED",
+                                 extra={"error_type": type(exc).__name__})
         cancelled = []
-        for intent_id, state in list(self.broker.orders.items()):
-            if state.status in FINAL_STATUSES:
+        try:
+            orders = list(getattr(self.broker, "orders", {}).items())
+        except Exception as exc:
+            orders = []
+            logger.error("EMERGENCY_ORDER_LIST_UNAVAILABLE",
+                         extra={"error_type": type(exc).__name__})
+        for intent_id, order in orders:
+            if getattr(order, "status", "UNKNOWN") in FINAL_STATUSES:
                 continue
             try:
                 self.broker.cancel(intent_id)
-                cancelled.append(state.our_id)
-            except Exception as exc:  # never hide a cancel failure
-                self.repository.record_system_event(
-                    "CANCEL_FAILURE", {"order": state.our_id, "error": type(exc).__name__}
-                )
+                cancelled.append(getattr(order, "our_id", str(intent_id)))
+            except Exception as exc:  # cancellation failure remains visible
+                try:
+                    self.repository.record_system_event(
+                        "CANCEL_FAILURE",
+                        {"order": getattr(order, "our_id", str(intent_id)),
+                         "error_type": type(exc).__name__})
+                except Exception as audit_exc:
+                    logger.error("CANCEL_FAILURE_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.error("EMERGENCY_CANCEL_FAILED",
+                             extra={"error_type": type(exc).__name__})
+        self._live_emergency_handled = True
+        self._live_drain_cancellation_attempted = True
         self.state = "EMERGENCY_STOPPED"
         logger.error("EMERGENCY_STOP", extra={"reason": reason})
         return {"stopped": True, "cancelled": cancelled}
@@ -309,43 +378,640 @@ class SandboxEngine:
         self.state = "STOPPED"
         return {"stopped": False}
 
+    def _publish_live_runtime(self, state: str, *, error_type: str | None = None,
+                              audit_event: bool = True) -> None:
+        """Publish the supervised process state used by readiness checks.
+
+        READY is written only after this process owns the atomic lease and a
+        successful startup reconciliation has stamped ``last_reconcile_at``.
+        Sensitive exception text is never persisted.
+        """
+        lock = getattr(self, "live_lock", None)
+        if lock is None or not bool(getattr(lock, "live", False)):
+            return
+        import os
+        import socket
+
+        control = self._live_control()
+        generation = control.get("generation") if isinstance(control, dict) else None
+        if state == "READY" and (type(generation) is not int or generation <= 0):
+            raise RuntimeError("live runtime READY requires a valid supervisor generation")
+        payload = {"state": str(state), "owner": getattr(lock, "owner", ""),
+                   "pid": os.getpid(), "host": socket.gethostname(),
+                   "generation": generation,
+                   "updated_at": datetime.now(timezone.utc).isoformat(),
+                   "error_type": error_type}
+        reconcile = self.repository.get_engine_state("last_reconcile_at", {}) or {}
+        reconcile_status = self.repository.get_engine_state(
+            "live_reconcile_status", {}) or {}
+        if isinstance(reconcile, dict):
+            payload["reconciled_at"] = reconcile.get("ts")
+        if isinstance(reconcile_status, dict):
+            payload["reconciliation_ok"] = reconcile_status.get("ok")
+        if state == "READY" and (
+                not payload.get("reconciled_at")
+                or reconcile_status.get("ok") is not True
+                or reconcile_status.get("ts") != payload.get("reconciled_at")):
+            raise RuntimeError(
+                "live runtime READY requires a proven successful reconciliation")
+        if audit_event:
+            self.repository.record_system_event(
+                f"LIVE_ENGINE_RUNTIME_{str(state).upper()}", payload)
+        self.repository.set_engine_state("live_engine_runtime", payload)
+
     def _check_emergency(self) -> bool:
-        flag = self.repository.get_engine_state("emergency_stop", {}) or {}
-        return bool(flag.get("stopped"))
+        from app.live.ops import read_emergency_stop
+
+        active, _reason = read_emergency_stop(self.repository)
+        return active
+
+    def _live_control(self) -> dict:
+        """Read child stop state; database uncertainty means stop requested."""
+        try:
+            control = self.repository.get_engine_state("live_engine_control", {})
+            if not isinstance(control, dict):
+                raise TypeError("live-engine control has an invalid shape")
+            stop_requested = control.get("stop_requested")
+            if type(stop_requested) is not bool:
+                raise ValueError("live-engine stop state is not an explicit boolean")
+            generation = control.get("generation")
+            if (type(generation) is not int or generation < 0
+                    or (not stop_requested and generation <= 0)):
+                raise ValueError("live-engine control generation is invalid")
+            return control
+        except Exception as exc:
+            logger.error("LIVE_CONTROL_UNREADABLE: draining fail-closed",
+                         extra={"error_type": type(exc).__name__})
+            return {"stop_requested": True, "unreadable": True}
+
+    def _live_session_state(self) -> str:
+        try:
+            row = self.repository.current_live_session()
+            return str(row.get("state", "UNKNOWN")) if row else "OFF"
+        except Exception as exc:
+            logger.error("LIVE_SESSION_UNREADABLE: entries disabled",
+                         extra={"error_type": type(exc).__name__})
+            return "BLOCKED"
+
+    def _cancel_open_live_orders(self, *, reason: str) -> list[str]:
+        """Request cancels through the live gateway, preserving unknown outcomes."""
+        cancelled = []
+        try:
+            orders = list(getattr(self.broker, "orders", {}).items())
+        except Exception as exc:
+            logger.error("LIVE_DRAIN_ORDER_LIST_UNAVAILABLE",
+                         extra={"error_type": type(exc).__name__})
+            return cancelled
+        for intent_id, order in orders:
+            if getattr(order, "status", "UNKNOWN") in FINAL_STATUSES:
+                continue
+            order_id = getattr(order, "our_id", str(intent_id))
+            try:
+                result = self.broker.cancel(intent_id)
+                cancelled.append(str(order_id))
+                self.repository.record_system_event(
+                    "LIVE_DRAIN_CANCEL_RESULT",
+                    {"order": str(order_id), "intent_id": str(intent_id),
+                     "reason": str(reason),
+                     "status": (result.get("status") if isinstance(result, dict)
+                                else "UNKNOWN")})
+            except Exception as exc:
+                try:
+                    self.repository.record_system_event(
+                        "LIVE_DRAIN_CANCEL_FAILED",
+                        {"order": str(order_id), "intent_id": str(intent_id),
+                         "reason": str(reason),
+                         "error_type": type(exc).__name__})
+                except Exception as audit_exc:
+                    logger.error("LIVE_DRAIN_CANCEL_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.error("LIVE_DRAIN_CANCEL_FAILED",
+                             extra={"error_type": type(exc).__name__})
+        return cancelled
+
+    def _live_book_flat(self) -> bool:
+        """Require reconciled, locally flat positions and no unresolved orders."""
+        try:
+            # Reconcile before declaring drain complete: a local order status
+            # is not enough to prove that the remote broker has stopped working.
+            self.reconcile()
+            open_orders = self.broker.open_orders()
+            if open_orders:
+                return False
+            ledger = self.broker.ledger
+            quantity = float(getattr(ledger, "position_quantity", 0.0))
+            if not (quantity == quantity and abs(quantity) <= 1e-9):
+                return False
+            if self.intent_journal is not None and self.intent_journal.unresolved():
+                return False
+            return True
+        except Exception as exc:
+            # Unknown remote outcome, position, or database state is NOT flat.
+            logger.error("LIVE_DRAIN_FLATNESS_UNKNOWN",
+                         extra={"error_type": type(exc).__name__})
+            return False
 
     # -- main loop -----------------------------------------------------------
 
     def run(self, *, max_candles: int | None = None):
-        """Consume the provider stream until it ends / max_candles / stop flag."""
+        """Consume the provider stream until it ends / max_candles / stop flag.
+
+        Refuses to start when another LIVE engine is heartbeating against the
+        same database: two live engines on one account double every entry.
+        FINAL-11/10 §15: ownership is an atomic lease; there is no force
+        bypass, only provably-stale takeover.
+        """
+        broker_is_live = bool(getattr(self.broker, "LIVE", False))
+        if broker_is_live and max_candles is not None:
+            self.state = "BLOCKED_BOUNDED_LIVE_RUN"
+            return {"ok": False,
+                    "reason": "a live engine must not exit after a bounded candle count",
+                    **self.status()}
+        if broker_is_live and (self.live_lock is None
+                               or not bool(getattr(self.live_lock, "live", False))):
+            self.state = "BLOCKED_LEASE_UNAVAILABLE"
+            logger.critical("LIVE_ENGINE_REFUSED_WITHOUT_ATOMIC_LEASE")
+            return {"ok": False,
+                    "reason": "live execution requires a supervised atomic lease",
+                    **self.status()}
+        decision = None
+        if self.live_lock is not None:
+            decision = self.live_lock.acquire()
+            if not decision.granted:
+                self.state = "REFUSED_DUPLICATE_ENGINE"
+                self.repository.record_system_event(
+                    "ENGINE_REFUSED_DUPLICATE",
+                    {"reason": decision.reason,
+                     "existing": (decision.existing.to_dict()
+                                  if decision.existing else None)})
+                logger.error("ENGINE_REFUSED_DUPLICATE",
+                             extra={"reason": decision.reason})
+                return {"ok": False, "reason": decision.reason,
+                        "lock": decision.to_dict(), **self.status()}
+            if decision.took_over_stale and getattr(self.live_lock, "live", False):
+                # FINAL-11/10 §15: a stale takeover means the previous owner's
+                # open positions and in-flight intents are UNKNOWN. Reconcile
+                # against the broker BEFORE submitting anything, so the engine
+                # never trades on a fabricated view of the book.
+                self.repository.record_system_event(
+                    "LIVE_TAKEOVER_RECONCILE",
+                    {"reason": decision.reason,
+                     "existing": (decision.existing.to_dict()
+                                  if decision.existing else None)})
+                logger.warning("LIVE_TAKEOVER_RECONCILE",
+                               extra={"reason": decision.reason})
+                # The dead owner's authorization epoch must not be reusable.
+                try:
+                    from app.live.gateway import AuthorizationEpochs
+
+                    invalidated = AuthorizationEpochs(self.repository).invalidate(
+                        reason="stale lease takeover")
+                    if invalidated:
+                        self.repository.record_system_event(
+                            "LIVE_EPOCH_INVALIDATED_ON_TAKEOVER",
+                            {"epoch": invalidated.get("epoch")})
+                except Exception:
+                    logger.exception("could not invalidate epoch on takeover")
+                try:
+                    self.reconcile()
+                except Exception:
+                    # Reconciliation is a precondition for trading after a
+                    # takeover; if it fails we must NOT trade. Fail closed.
+                    self.state = "BLOCKED_TAKEOVER_RECONCILE_FAILED"
+                    logger.exception("takeover reconciliation failed; "
+                                     "refusing to trade")
+                    if self.live_lock is not None:
+                        self.live_lock.release()
+                    return {"ok": False,
+                            "reason": "stale takeover: reconciliation failed",
+                            "lock": decision.to_dict(), **self.status()}
+        live_owned = bool(self.live_lock is not None
+                          and getattr(self.live_lock, "live", False))
+        if live_owned:
+            # A new process never inherits an old ACTIVE/PAUSED epoch. Even a
+            # successful lease takeover is only permission to reconcile, not
+            # permission to resume entries; the operator must ARM/ACTIVATE anew.
+            try:
+                sessions = getattr(
+                    getattr(self.broker, "gateway", None), "sessions", None)
+                if sessions is None:
+                    from app.live.session import LiveSessionManager
+
+                    sessions = LiveSessionManager(self.repository)
+                previous = sessions.current()
+                if previous.state in {"ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                    sessions.stop(
+                        reason="engine process restart requires fresh ARM and ACTIVATE")
+            except Exception as exc:
+                self.state = "BLOCKED_SESSION_RECOVERY_FAILED"
+                logger.error("LIVE_SESSION_RECOVERY_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                try:
+                    self.live_lock.release()
+                except Exception as release_exc:
+                    logger.error("LIVE_LEASE_RELEASE_FAILED",
+                                 extra={"error_type": type(release_exc).__name__})
+                return {"ok": False,
+                        "reason": "could not invalidate prior live authorization",
+                        **self.status()}
+        if live_owned and not (decision and decision.took_over_stale):
+            # A fresh process must reconcile the broker account before the
+            # supervisor can call it READY. Unknown remote state is not a safe
+            # starting point for real-money execution.
+            try:
+                self.reconcile()
+            except Exception as exc:
+                self.state = "BLOCKED_STARTUP_RECONCILE_FAILED"
+                logger.error("LIVE_STARTUP_RECONCILE_FAILED",
+                             extra={"error_type": type(exc).__name__})
+                try:
+                    self._publish_live_runtime(
+                        "FAILED", error_type=type(exc).__name__)
+                except Exception as state_exc:
+                    logger.error("LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                 extra={"error_type": type(state_exc).__name__})
+                self.live_lock.release()
+                return {"ok": False,
+                        "reason": "live startup reconciliation failed; refusing to trade",
+                        **self.status()}
+        if live_owned:
+            try:
+                self._publish_live_runtime("STARTING")
+            except Exception as exc:
+                self.state = "BLOCKED_RUNTIME_STATE_UNAVAILABLE"
+                logger.error("LIVE_RUNTIME_START_STATE_UNAVAILABLE",
+                             extra={"error_type": type(exc).__name__})
+                self.live_lock.release()
+                return {"ok": False,
+                        "reason": "could not persist supervised runtime state",
+                        **self.status()}
         self.state = "RUNNING"
+        runtime_ready = False
         try:
             import asyncio
+            import inspect
+
+            drain_completed = asyncio.Event()
+            lease_lost = asyncio.Event()
+
+            async def close_provider():
+                close = getattr(self.provider, "close", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+
+            async def watch_live_control():
+                """Observe stop/lease state without relying on another candle."""
+                last_ops_tick = 0.0
+                last_reconcile = 0.0
+                last_flatness_check = 0.0
+                last_cancel_retry = 0.0
+                while live_owned:
+                    now = time.monotonic()
+                    if now - last_ops_tick >= 5.0:
+                        self._ops_tick()
+                        last_ops_tick = now
+                    if self.state == "BLOCKED_LEASE_LOST":
+                        lease_lost.set()
+                        try:
+                            await close_provider()
+                        except Exception as exc:
+                            logger.error("LIVE_PROVIDER_CLOSE_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                        return
+                    if now - last_reconcile >= 30.0:
+                        try:
+                            self.reconcile()
+                        except Exception as exc:
+                            logger.error("LIVE_PERIODIC_RECONCILIATION_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                        last_reconcile = now
+
+                    emergency = self._check_emergency()
+                    control = self._live_control()
+                    stop_requested = control.get("stop_requested") is True
+                    if emergency and not self._live_emergency_handled:
+                        reason = "persisted emergency stop"
+                        try:
+                            flag = self.repository.get_engine_state(
+                                "emergency_stop", {}) or {}
+                            if isinstance(flag, dict) and flag.get("reason"):
+                                reason = str(flag["reason"])
+                        except Exception as exc:
+                            logger.warning("LIVE_EMERGENCY_REASON_UNAVAILABLE",
+                                           extra={"error_type": type(exc).__name__})
+                        self.emergency_stop(reason=reason)
+                    draining = emergency or stop_requested
+                    if not draining:
+                        self._live_drain_cancellation_attempted = False
+                    elif not self._live_drain_cancellation_attempted:
+                        if not emergency:
+                            self._cancel_open_live_orders(
+                                reason=str(control.get("reason") or "supervisor stop"))
+                            self._live_drain_cancellation_attempted = True
+                        last_cancel_retry = now
+                    elif last_cancel_retry == 0.0:
+                        # Emergency handling may have made the first attempt
+                        # on the candle task before this watcher started.
+                        last_cancel_retry = now
+
+                    if draining and now - last_flatness_check >= 5.0:
+                        last_flatness_check = now
+                        if self._live_book_flat():
+                            self.state = ("EMERGENCY_STOPPED" if emergency
+                                          else "STOPPED")
+                            drain_completed.set()
+                            try:
+                                await close_provider()
+                            except Exception as exc:
+                                logger.error("LIVE_PROVIDER_CLOSE_FAILED",
+                                             extra={"error_type": type(exc).__name__})
+                            return
+                        if now - last_cancel_retry >= 30.0:
+                            drain_reason = control.get("reason") or (
+                                "persisted emergency stop" if emergency
+                                else "supervisor stop")
+                            self._cancel_open_live_orders(
+                                reason=str(drain_reason))
+                            last_cancel_retry = now
+                    await asyncio.sleep(0.5)
 
             async def consume():
-                async for candle in self.provider.stream(self.provider.symbols, self.timeframe):
-                    if self._check_emergency():
-                        self.state = "EMERGENCY_STOPPED"
-                        break
-                    if self.maintenance_scheduler is not None:
+                nonlocal runtime_ready
+                control_task = (asyncio.create_task(watch_live_control())
+                                if live_owned else None)
+                try:
+                    while True:
                         try:
-                            self.maintenance_scheduler.run_due()
-                        except Exception:  # maintenance must never kill the loop
-                            logger.exception("maintenance job failed")
-                    self.process_candle(candle)
-                    if max_candles is not None and self.processed >= max_candles:
-                        break
+                            async for candle in self.provider.stream(
+                                    self.provider.symbols, self.timeframe):
+                                emergency = self._check_emergency()
+                                if emergency and not live_owned:
+                                    self.state = "EMERGENCY_STOPPED"
+                                    break
+                                if emergency and not self._live_emergency_handled:
+                                    self.emergency_stop(
+                                        reason="persisted emergency stop")
+                                if self.maintenance_scheduler is not None:
+                                    try:
+                                        self.maintenance_scheduler.run_due()
+                                    except Exception:  # maintenance must never kill the loop
+                                        logger.exception("maintenance job failed")
+                                self._ops_tick()
+                                if self.state == "BLOCKED_LEASE_LOST":
+                                    lease_lost.set()
+                                    break
+                                if live_owned:
+                                    try:
+                                        feed = self.provider.metrics()
+                                        if (feed.get("market_open") is True
+                                                and not feed.get("stale_feed")):
+                                            completed_at = candle.available_at(self.timeframe)
+                                            self.repository.set_engine_state(
+                                                "last_market_data_ts",
+                                                completed_at.isoformat())
+                                            if not runtime_ready:
+                                                self._publish_live_runtime("READY")
+                                                runtime_ready = True
+                                    except Exception as exc:
+                                        # Readiness depends on durable, fresh
+                                        # market data as well as reconciliation.
+                                        logger.error(
+                                            "LIVE_RUNTIME_READINESS_FAILED",
+                                            extra={"error_type": type(exc).__name__})
+                                        self.state = "BLOCKED_RUNTIME_READINESS_FAILED"
+                                        await close_provider()
+                                        break
+                                    control = self._live_control()
+                                    session_state = self._live_session_state()
+                                    risk_only = (
+                                        emergency
+                                        or control.get("stop_requested") is True
+                                        or session_state != "ACTIVE")
+                                else:
+                                    risk_only = False
+                                self.process_candle(
+                                    candle, risk_reducing_only=risk_only)
+                                if max_candles is not None and self.processed >= max_candles:
+                                    break
+                        except Exception as exc:
+                            if not live_owned:
+                                raise
+                            logger.error("LIVE_PROVIDER_STREAM_FAILED",
+                                         extra={"error_type": type(exc).__name__})
+                            try:
+                                self.repository.record_system_event(
+                                    "LIVE_PROVIDER_STREAM_FAILED",
+                                    {"error_type": type(exc).__name__})
+                            except Exception as audit_exc:
+                                logger.error("LIVE_PROVIDER_FAILURE_AUDIT_UNAVAILABLE",
+                                             extra={"error_type": type(audit_exc).__name__})
+                            # A data-stream failure invalidates entry authority,
+                            # but leaves the process alive to retain the lease
+                            # and manage a risk-reducing exit after recovery.
+                            try:
+                                sessions = getattr(
+                                    getattr(self.broker, "gateway", None),
+                                    "sessions", None)
+                                if sessions is None:
+                                    from app.live.session import LiveSessionManager
+
+                                    sessions = LiveSessionManager(self.repository)
+                                if sessions.current().state in {
+                                        "ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                                    sessions.block(
+                                        reason=("live market-data stream failed; "
+                                                "fresh ARM required"))
+                            except Exception as block_exc:
+                                logger.error("LIVE_STREAM_SESSION_BLOCK_FAILED",
+                                             extra={"error_type": type(block_exc).__name__})
+                            try:
+                                self._publish_live_runtime(
+                                    "FAILED", error_type=type(exc).__name__)
+                            except Exception as state_exc:
+                                logger.error("LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                             extra={"error_type": type(state_exc).__name__})
+                            runtime_ready = False
+                        else:
+                            if (live_owned and broker_is_live
+                                    and not drain_completed.is_set()
+                                    and not lease_lost.is_set()
+                                    and (max_candles is None
+                                         or self.processed < max_candles)):
+                                # A clean iterator end without an explicit drain
+                                # is still a provider failure, not permission to
+                                # keep an ACTIVE authorization silently.
+                                self.state = "BLOCKED_PROVIDER_STREAM_ENDED"
+                                try:
+                                    sessions = getattr(
+                                        getattr(self.broker, "gateway", None),
+                                        "sessions", None)
+                                    if sessions is None:
+                                        from app.live.session import LiveSessionManager
+
+                                        sessions = LiveSessionManager(self.repository)
+                                    if sessions.current().state in {
+                                            "ARMED", "ACTIVE", "PAUSED", "RECONCILING"}:
+                                        sessions.block(
+                                            reason=("live market-data stream ended; "
+                                                    "fresh ARM required"))
+                                except Exception as block_exc:
+                                    logger.error(
+                                        "LIVE_STREAM_SESSION_BLOCK_FAILED",
+                                        extra={"error_type": type(block_exc).__name__})
+                                try:
+                                    self._publish_live_runtime(
+                                        "FAILED", error_type="StreamEnded")
+                                except Exception as state_exc:
+                                    logger.error(
+                                        "LIVE_RUNTIME_FAILURE_STATE_UNAVAILABLE",
+                                        extra={"error_type": type(state_exc).__name__})
+                                runtime_ready = False
+
+                        if (not live_owned or drain_completed.is_set()
+                                or lease_lost.is_set()
+                                or (max_candles is not None
+                                    and (self.processed >= max_candles
+                                         or not broker_is_live))):
+                            break
+                        # A live stream ending unexpectedly is not permission to
+                        # release the account lease or resume trading. Re-open
+                        # it after a bounded delay; session blocking above keeps
+                        # the gateway entry path closed.
+                        await asyncio.sleep(2.0)
+                finally:
+                    if control_task is not None:
+                        control_task.cancel()
+                        try:
+                            await control_task
+                        except asyncio.CancelledError:
+                            pass
 
             asyncio.run(consume())
             self.reconcile()
-            self._maybe_evaluate(force=self._seen_closed)
+            if not live_owned:
+                self._maybe_evaluate(force=self._seen_closed)
             if self.monitor is not None:
                 self.monitor.snapshot()
         finally:
             if self.state == "RUNNING":
                 self.state = "STOPPED"
+            if live_owned:
+                final_runtime = ("STOPPED" if self.state in
+                                 ("STOPPED", "EMERGENCY_STOPPED") else "FAILED")
+                try:
+                    self._publish_live_runtime(final_runtime)
+                except Exception as exc:
+                    logger.error("LIVE_RUNTIME_SHUTDOWN_STATE_FAILED",
+                                 extra={"error_type": type(exc).__name__})
+            if self.live_lock is not None:
+                self.live_lock.release()
         return self.status()
 
-    def process_candle(self, candle) -> None:
+    def _ops_tick(self, *, now=None) -> None:
+        """Observe operational health and escalate breaches (V2.1 L-ops).
+
+        Runs every loop iteration — including when the market is closed —
+        because the failures worth catching (a stuck order, an auth fail,
+        reconciliation going quiet) happen precisely while nothing is being
+        traded. Never raises: an operations check must not break the loop.
+        """
+        now = now or datetime.now(timezone.utc)
+        live_lock = getattr(self, "live_lock", None)
+        if live_lock is not None:
+            # Proving this engine is alive is what makes a stale lock harmless.
+            # A lost/unreadable LIVE lease deauthorizes this engine immediately;
+            # it may not continue processing signals under stale ownership.
+            try:
+                heartbeat_ok = bool(live_lock.heartbeat(now=now))
+            except Exception as exc:
+                heartbeat_ok = False
+                heartbeat_error = type(exc).__name__
+            else:
+                heartbeat_error = "HeartbeatRefused"
+            if bool(getattr(live_lock, "live", False)) and not heartbeat_ok:
+                self.state = "BLOCKED_LEASE_LOST"
+                try:
+                    self.repository.record_system_event(
+                        "ENGINE_BLOCKED_LEASE_LOST",
+                        {"owner": getattr(live_lock, "owner", None),
+                         "error_type": heartbeat_error,
+                         "ts": now.isoformat()})
+                except Exception as exc:
+                    logger.error("ENGINE_LEASE_LOSS_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(exc).__name__})
+                logger.critical("ENGINE_BLOCKED_LEASE_LOST",
+                                extra={"error_type": heartbeat_error})
+                return
+        if self.live_ops is None:
+            return
+        try:
+            findings = self.live_ops.observe(now=now)
+            self._auto_cancel_escalated_stuck_orders(findings)
+            self._retry_failed_alerts_once(now=now)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops observe failed")
+        try:
+            equity = self.broker.ledger.equity()
+            realized_today = (self.daily.realized_pnl if self.daily is not None
+                              else self._last_realized)
+            breach = self.live_ops.breach(
+                realized_today=realized_today, equity=equity,
+                peak_equity=self._peak_equity or None)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("live_ops breach check failed")
+            breach = None
+        if breach and breach.get("stop") and not self._check_emergency():
+            self.emergency_stop(
+                reason=f"AUTO_STOP {breach['kind']}: {breach['message']}")
+
+    def _retry_failed_alerts_once(self, *, now=None) -> dict:
+        """Give a failed page another chance on the ops cadence.
+
+        Paging is the one rail that depends on a third party being reachable;
+        a single transient 502 must not be the difference between an operator
+        knowing and not knowing. Bounded by the router's attempt cap.
+        """
+        result = self.live_ops.retry_failed_alerts(now=now)
+        if result.get("delivered") or result.get("dropped"):
+            logger.warning("ALERT_RETRY_TICK", extra={"result": result})
+        return result
+
+    def _auto_cancel_escalated_stuck_orders(self, findings) -> list[str]:
+        """Cancel orders the watchdog has escalated, when explicitly enabled.
+
+        The watchdog only *reports*; acting is the engine's job (it owns the
+        broker). This runs only when ``LIVE_AUTO_CANCEL_STUCK`` is on — the
+        default is to alert a human, never to cancel silently. Failures are
+        recorded, never swallowed, and a cancel that cannot be confirmed leaves
+        the order working (the broker decides, not this method).
+        """
+        if not getattr(self.live_ops, "auto_cancel_stuck", False) or not findings:
+            return []
+        targets = self.live_ops.escalated_stuck_order_ids(findings)
+        if not targets:
+            return []
+        cancelled: list[str] = []
+        for intent_id, state in list(self.broker.orders.items()):
+            if state.our_id not in targets or state.status in FINAL_STATUSES:
+                continue
+            try:
+                self.broker.cancel(intent_id)
+                cancelled.append(state.our_id)
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL",
+                    {"order": state.our_id, "intent_id": intent_id,
+                     "reason": "escalated by the L-ops watchdog"})
+                logger.warning("STUCK_ORDER_AUTO_CANCEL", extra={"order": state.our_id})
+            except Exception as exc:  # a failed cancel must never be silent
+                self.repository.record_system_event(
+                    "STUCK_ORDER_AUTO_CANCEL_FAILED",
+                    {"order": state.our_id, "error": type(exc).__name__})
+                logger.exception("STUCK_ORDER_AUTO_CANCEL_FAILED")
+        return cancelled
+
+    def process_candle(self, candle, *, risk_reducing_only: bool = False) -> None:
         metrics = self.provider.metrics()
         if not metrics.get("market_open", False):
             self._seen_closed = True
@@ -366,8 +1032,10 @@ class SandboxEngine:
         self._history[:] = self._history[-limit:]
         self.processed += 1
         self.ledger_mark(candle.close)
+        regime_evaluation = None
         if self.regime_engine is not None:
-            self.regime_engine.evaluate(self._history)
+            regime_evaluation = self.regime_engine.evaluate(self._history)
+        self._workstation_observe(candle, regime_evaluation)
         if self.shadow_engine is not None:
             self.shadow_engine.on_candle(candle)
         self._daily_snapshot(candle)
@@ -378,8 +1046,15 @@ class SandboxEngine:
             candle, self._history, self.regime_engine) \
             if self.event_engine is not None else []
         triggers = [decision.trigger for decision in self.last_events]
-        # protective exits run FIRST and independently of strategy signals
+        # Protective exits run FIRST and independently of strategy signals.
+        # While live authorization is absent or stop/drain is requested, no
+        # strategy, allocator, or learning path may create new risk.
         self._check_protective_exits(candle)
+        if risk_reducing_only:
+            self.signals[candle.symbol] = {
+                "signal": "HOLD", "timestamp": candle.timestamp.isoformat(),
+                "reason": "live risk-reducing-only mode"}
+            return
         if self.processed % self.evaluate_every == 0:
             self._maybe_evaluate(force=True)  # scheduled rolling batch
         self.regime = classify_regime_safe(self._history)
@@ -392,6 +1067,40 @@ class SandboxEngine:
         signal = self.strategy.generate_signal(tuple(self._history))
         self.signals[candle.symbol] = {"signal": signal.value, "timestamp": candle.timestamp.isoformat()}
         self._act(signal, candle, triggers=triggers)
+
+    def _workstation_observe(self, candle, regime_evaluation: dict | None) -> None:
+        """Feed observed candle facts into the intelligence layer.
+
+        Research telemetry only: a failure here must never disturb the
+        trading path. Inputs are OBSERVED values from the candle history —
+        nothing synthetic is invented to force a trigger.
+        """
+        workstation = getattr(self, "workstation", None)
+        if workstation is None:
+            return
+        try:
+            identity = str(getattr(candle, "symbol", "") or "")
+            closes = [c.close for c in self._history[-2:]]
+            price_change_pct = None
+            if len(closes) == 2 and closes[0] > 0:
+                price_change_pct = closes[1] / closes[0] - 1.0
+            volume_ratio = None
+            volumes = [float(getattr(c, "volume", 0.0) or 0.0) for c in self._history]
+            if len(volumes) >= 21:
+                recent = sum(volumes[-5:]) / 5.0
+                prior = sum(volumes[-21:-5]) / 16.0
+                if prior > 0:
+                    volume_ratio = recent / prior
+            bridge = getattr(workstation, "regime_bridge", None)
+            if bridge is not None and regime_evaluation:
+                bridge.observe(identity, regime_evaluation)
+            workstation.opportunities.observe(
+                market_id=str(getattr(workstation.settings, "market", "india")),
+                identity=identity,
+                price_change_pct=price_change_pct,
+                volume_ratio=volume_ratio)
+        except Exception:  # pragma: no cover - telemetry must not break trading
+            logger.exception("workstation observation failed (telemetry only)")
 
     def _strategy_evaluation_due(self, triggers: list[str]) -> bool:
         """Cadence + event triggers decide whether the strategy is evaluated.
@@ -481,11 +1190,39 @@ class SandboxEngine:
                      reason=reason)
         return True
 
+    def _reject_entry_gate_failure(self, gate: str, candle, exc: Exception) -> None:
+        """Fail closed when an entry-only decision cannot be established.
+
+        Record the gate and exception class, not the exception message (which
+        can expose secrets, URLs, or local paths from an adapter/driver).
+        Failure to persist this diagnostic never turns a refused entry into an
+        order.
+        """
+        self.rejected_by_risk += 1
+        payload = {"gate": gate, "symbol": getattr(candle, "symbol", None),
+                   "error_type": type(exc).__name__,
+                   "ts": (candle.timestamp.isoformat()
+                          if getattr(candle, "timestamp", None) else None)}
+        try:
+            self.repository.record_system_event("ENTRY_GATE_FAILURE", payload)
+        except Exception as audit_exc:
+            logger.error("ENTRY_GATE_FAILURE_AUDIT_UNAVAILABLE",
+                         extra={"gate": gate,
+                                "error_type": type(audit_exc).__name__})
+        logger.error("ENTRY_GATE_FAILURE: refusing new risk",
+                     extra={"gate": gate, "symbol": payload["symbol"],
+                            "error_type": payload["error_type"]})
+
     def _act(self, signal, candle, triggers=None) -> None:
         from app.strategies.base import Signal
 
         triggers = triggers or []
         if signal == Signal.HOLD:
+            logger.debug(
+                "SIGNAL_NOT_AN_ORDER",
+                extra={"reason": "HOLD", "symbol": candle.symbol,
+                       "price": candle.close, "processed": self.processed},
+            )
             return
         params = dict(self.strategy.parameters)
         self.journal.record_signal(
@@ -500,6 +1237,13 @@ class SandboxEngine:
             if ledger.position_quantity > 0:
                 self._submit("SELL", ledger.position_quantity, candle.close, candle,
                              reason="STRATEGY_EXIT")
+            else:
+                logger.info(
+                    "SIGNAL_NOT_AN_ORDER",
+                    extra={"reason": "EXIT_WITH_NO_POSITION",
+                           "signal": signal.value, "symbol": candle.symbol,
+                           "price": candle.close, "processed": self.processed},
+                )
             return
         # --- BUY: size FIRST, then gate the EXACT final quantity (3.0.1) -----
         # 3.0.2: with a strategy source, entries require an ELIGIBLE router
@@ -603,11 +1347,30 @@ class SandboxEngine:
             # Use candle bid/ask if available, else estimate
             bid = getattr(candle, "bid", None)
             ask = getattr(candle, "ask", None)
-            # If no bid/ask, synthesize from close and spread config
-            if bid is None or ask is None:
-                # Use configured spread as proxy
+            # Synthetic spread estimates are acceptable for local simulation,
+            # never for real-money execution. A live order must obtain a fresh,
+            # provenance-labelled quote from the market-data provider.
+            if bool(getattr(self.broker, "LIVE", False)):
+                quote_reader = getattr(self.provider, "quote_for", None)
+                if not callable(quote_reader):
+                    raise ValueError("live quote provider is unavailable")
+                quote = quote_reader(candle.symbol, max_age_seconds=3.0)
+                if not isinstance(quote, dict) or \
+                        quote.get("provenance") != "OBSERVED":
+                    raise ValueError("fresh observed live bid/ask evidence unavailable")
+                expected_key = self.instrument_keys.get(candle.symbol)
+                if not expected_key or quote.get("instrument_key") != expected_key:
+                    raise ValueError("live quote instrument identity mismatch")
+                received_at = float(quote.get("received_at"))
+                quote_age = time.time() - received_at
+                if not 0 <= quote_age <= 3.0:
+                    raise ValueError("live quote is stale or has an invalid timestamp")
+                bid, ask = float(quote["bid"]), float(quote["ask"])
+                if bid <= 0 or ask < bid:
+                    raise ValueError("live quote has invalid bid/ask values")
+            elif bid is None or ask is None:
                 mid = float(candle.close)
-                half = mid * 0.0001  # 1 bps half-spread default
+                half = mid * 0.0001  # simulation-only 1 bps half-spread estimate
                 bid, ask = mid - half, mid + half
             liq_snap = self.liquidity_intel.assess(candle.symbol, bid=bid, ask=ask, last_price=float(candle.close), volume=float(getattr(candle, "volume", 0) or 0), volatility=vol if 'vol' in locals() else None, timestamp=time.time())
             # Store for later use in quality/net edge
@@ -618,8 +1381,8 @@ class SandboxEngine:
                 return
         except Exception as exc:
             liq_snap = None
-            import logging as _lg2
-            _lg2.getLogger("bot.engine").debug("liquidity_check_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("liquidity", candle, exc)
+            return
 
         # --- 3.0.5: net edge gate (immediately before hard risk, fail closed) ---
         try:
@@ -656,8 +1419,8 @@ class SandboxEngine:
                 self.repository.record_system_event("NET_EDGE_REJECT", {"symbol": candle.symbol, "gross": net_res.gross_expected, "net": net_res.net_expected, "threshold": net_res.threshold, "reason": net_res.reason})
                 return
         except Exception as exc:
-            import logging as _lg3
-            _lg3.getLogger("bot.engine").debug("net_edge_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("net_edge", candle, exc)
+            return
 
         # --- 3.0.5: trade quality scorer (ranking/context, not overriding hard risk) ---
         try:
@@ -732,8 +1495,8 @@ class SandboxEngine:
                 self.repository.record_system_event("ENTRY_TIMING_WAIT", {"symbol": candle.symbol, "preferred": timing_decision.preferred_entry, "reason": timing_decision.reasons})
                 return
         except Exception as exc:
-            import logging as _lg5
-            _lg5.getLogger("bot.engine").debug("entry_timing_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("entry_timing", candle, exc)
+            return
 
         # --- 3.0.5: alpha decay check ---
         try:
@@ -742,8 +1505,8 @@ class SandboxEngine:
                 self.repository.record_system_event("ALPHA_DECAY_REJECT", {"symbol": candle.symbol, "reason": reason})
                 return
         except Exception as exc:
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug("ignored", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("alpha_decay", candle, exc)
+            return
 
         instrument_key = self.instrument_keys.get(candle.symbol)
         if instrument_key is None:
@@ -828,19 +1591,68 @@ class SandboxEngine:
                 allocated_capital: float | None = None,
                 estimated_fees: float = 0.0) -> None:
         triggers = triggers or []
-        # emergency stop blocks EVERYTHING (entries AND protective exits);
-        # the pause gate blocks ENTRIES but never risk-reducing exits.
-        if self._check_emergency():
-            self.repository.record_system_event(
-                "EXECUTION_STOPPED_SKIP", {"side": side, "reason": reason,
-                                           "ts": candle.timestamp.isoformat()})
+        # A LIVE engine that no longer owns its atomic lease must not submit
+        # through a stale session. The replacement owner reconciles the account
+        # before taking over; this process has no authority to alter it.
+        live_lock = getattr(self, "live_lock", None)
+        if (live_lock is not None and bool(getattr(live_lock, "live", False))
+                and not bool(getattr(live_lock, "held", False))):
+            try:
+                self.repository.record_system_event(
+                    "ENGINE_ORDER_BLOCKED_LEASE_LOST",
+                    {"side": side, "reason": reason,
+                     "ts": candle.timestamp.isoformat()})
+            except Exception as exc:
+                logger.error("ENGINE_ORDER_BLOCKED_AUDIT_UNAVAILABLE",
+                             extra={"error_type": type(exc).__name__})
+            logger.critical("ENGINE_ORDER_BLOCKED_LEASE_LOST",
+                            extra={"side": side})
             return
+        # FINAL-11/10 §12: the emergency stop blocks NEW RISK (entries) but
+        # must never trap a held position — risk-reducing exits stay allowed.
+        # The pause gate likewise blocks ENTRIES but never exits.
+        if self._check_emergency():
+            if side != "SELL":
+                self.repository.record_system_event(
+                    "EXECUTION_STOPPED_SKIP",
+                    {"side": side, "reason": reason,
+                     "ts": candle.timestamp.isoformat()})
+                return
+            self.repository.record_system_event(
+                "EXECUTION_STOPPED_EXIT_ALLOWED",
+                {"side": side, "reason": reason,
+                 "note": "emergency stop active; risk-reducing exit permitted",
+                 "ts": candle.timestamp.isoformat()})
         if (self.pause_gate is not None and self.pause_gate.is_paused("execution")
                 and side == "BUY"):
             self.repository.record_system_event(
                 "EXECUTION_PAUSED_SKIP", {"side": side, "ts": candle.timestamp.isoformat(),
                                           "reason": reason})
             return
+        # Conservative exposure guard: an intent stuck UNKNOWN/UNRESOLVED
+        # means we cannot know what is already working at the broker (the
+        # response was lost or ambiguous, and remote lookup may be an
+        # unavailable capability). While ANY such intent exists, no new
+        # risk-increasing order may be sent — a second entry could duplicate
+        # exposure we cannot see. Risk-reducing exits (SELL) are NEVER blocked
+        # by this guard, exactly like the emergency-stop and pause gates.
+        if side == "BUY" and self.intent_journal is not None:
+            unresolved = self.intent_journal.unresolved()
+            if unresolved:
+                self.rejected_by_risk += 1
+                payload = {"reason": "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                           "side": side, "count": len(unresolved),
+                           "symbol": getattr(candle, "symbol", None),
+                           "ts": candle.timestamp.isoformat()}
+                try:
+                    self.repository.record_system_event("RISK_REJECT", payload)
+                except Exception as audit_exc:
+                    logger.error("UNRESOLVED_BLOCK_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.warning(
+                    "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                    extra={"count": len(unresolved), "symbol": payload["symbol"]})
+                return
         intent_key = intent_id_for(self.strategy.name, candle.symbol, candle,
                                    side)  # V1 invariant format (dedup-safe)
         if self.intent_journal is not None \
@@ -862,6 +1674,29 @@ class SandboxEngine:
             logger.warning("INSTRUMENT_IDENTITY_MISSING",
                            extra={"symbol": candle.symbol, "side": side})
             return
+        # V2.1 L-ops: operational guards gate NEW ENTRIES only. Exits and
+        # protective stops are never blocked by an operational rail.
+        if self.live_ops is not None:
+            decision = self.live_ops.guard_entry(
+                side=side, quantity=quantity, price=price)
+            if not decision.allowed:
+                self.rejected_by_risk += 1
+                self.repository.record_system_event("ENTRY_GUARD_BLOCKED", {
+                    "reason": decision.reason, "side": side,
+                    "quantity": quantity, "price": price,
+                    "symbol": candle.symbol, "intent_reason": reason,
+                    "ts": candle.timestamp.isoformat()})
+                logger.warning("ENTRY_GUARD_BLOCKED",
+                               extra={"reason": decision.reason[:120]})
+                return
+            if decision.adjusted_quantity is not None:
+                self.repository.record_system_event("ENTRY_GUARD_REDUCED", {
+                    "reason": decision.reason, "side": side,
+                    "from_quantity": quantity,
+                    "to_quantity": decision.adjusted_quantity,
+                    "price": price, "symbol": candle.symbol,
+                    "ts": candle.timestamp.isoformat()})
+                quantity = decision.adjusted_quantity
         # full decision observability (3.0.1): reconstructable end-to-end
         self.repository.record_system_event("DECISION", {
             "ts": candle.timestamp.isoformat(),
@@ -879,9 +1714,21 @@ class SandboxEngine:
             } if self.last_router_decision else None,
             "intent_id": intent_key,
         })
+        submit_kwargs = {"intent_id": intent_key, "symbol": candle.symbol,
+                         "instrument_key": instrument_key}
+        if bool(getattr(self.broker, "LIVE", False)):
+            # Strategy data carries an OPEN timestamp. A signal from the
+            # completed candle becomes available at its close; preserve that
+            # event time through the facade instead of fabricating submission
+            # time at the last authorization boundary.
+            try:
+                submit_kwargs["signal_ts"] = candle.available_at(
+                    self.timeframe).timestamp()
+            except Exception as exc:
+                self._reject_entry_gate_failure("SIGNAL_TIMESTAMP", candle, exc)
+                return
         try:
-            self.broker.submit(side, quantity, price, intent_id=intent_key,
-                               symbol=candle.symbol, instrument_key=instrument_key)
+            self.broker.submit(side, quantity, price, **submit_kwargs)
         except Exception as exc:
             self.repository.record_system_event(
                 "SANDBOX_SUBMIT_FAILURE", {"error": type(exc).__name__,
@@ -895,33 +1742,98 @@ class SandboxEngine:
         self.repository.set_engine_state("processed_signals", sorted(processed)[-2000:])
         self.submitted += 1
         if side == "BUY":
+            is_gateway_routed_live = (
+                bool(getattr(self.broker, "LIVE", False))
+                and getattr(self.broker, "gateway", None) is not None)
+            if self.live_ops is not None and not is_gateway_routed_live:
+                self.live_ops.record_submitted_entry(quantity=quantity, price=price)
             if self.daily is not None:
                 self.daily.register_trade()
             else:
                 self._trades_today += 1
 
     def reconcile(self) -> list[dict]:
-        fills = self.broker.reconcile() if hasattr(self.broker, "reconcile") else []
-        for fill in fills:
-            if fill["side"] == "SELL":
-                realized_delta = self.broker.ledger.realized_pnl - self._last_realized
+        try:
+            if not hasattr(self.broker, "reconcile"):
+                raise RuntimeError("live broker does not expose reconciliation")
+            fills = self.broker.reconcile()
+            if not isinstance(fills, (list, tuple)):
+                raise RuntimeError("broker reconciliation returned a malformed result")
+            for fill in fills:
+                if not isinstance(fill, dict):
+                    raise RuntimeError("broker reconciliation contains a malformed fill")
+                if fill.get("side") == "SELL":
+                    fill_id = fill.get("fill_id")
+                    if not fill_id:
+                        from app.engine.state import reconciled_fill_id
+                        order_id = fill.get("order_id")
+                        child_id = fill.get("upstox_order_id")
+                        cumulative = fill.get("cumulative_filled")
+                        if order_id and cumulative is not None:
+                            fill_id = reconciled_fill_id(
+                                str(order_id), child_id, float(cumulative))
+                    if not isinstance(fill_id, str) or not fill_id:
+                        raise RuntimeError("reconciled SELL fill has no stable identity")
+                    if "realized_pnl" not in fill:
+                        raise RuntimeError("reconciled SELL fill has no realized P&L")
+                    try:
+                        realized_delta = float(fill["realized_pnl"])
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError("reconciled SELL P&L is malformed") from exc
+                    queued = dict(fill)
+                    queued["fill_id"] = fill_id
+                    queued["realized_pnl"] = realized_delta
+                    previous = self._unaccounted_fills.get(fill_id)
+                    if previous is not None and previous != queued:
+                        raise RuntimeError("reconciled fill identity changed its contents")
+                    self._unaccounted_fills[fill_id] = queued
+            for fill_id, fill in list(self._unaccounted_fills.items()):
+                realized_delta = float(fill["realized_pnl"])
+                if self.daily is not None:
+                    self.daily.record_realized_fill(
+                        fill_id, realized_delta,
+                        observed_at=fill.get("observed_at"))
+                else:
+                    self._last_realized += realized_delta
                 _order = self.broker.orders.get(fill.get("intent_id"))
                 self.journal.record_outcome(
                     strategy=self.strategy.name,
                     symbol=(fill.get("symbol")
                             or (_order.symbol if _order is not None else None)
-                            or "UNKNOWN"),  # honest: never substitute an instrument
-                    entry=fill["price"], exit=fill["price"], quantity=fill["quantity"],
-                    pnl=realized_delta,
+                            or "UNKNOWN"),
+                    entry=fill["price"], exit=fill["price"],
+                    quantity=fill["quantity"], pnl=realized_delta,
                     fees=self.broker.ledger.fees, slippage=0.0,
-                    duration_bars=self.processed, outcome="closed", regime=self.regime or "unknown",
-                )
-                self._last_realized = self.broker.ledger.realized_pnl
-                if self.daily is not None:
-                    self.daily.add_realized(realized_delta)
-        if fills:
-            self._persist_equity()
-        return fills
+                    duration_bars=self.processed, outcome="closed",
+                    regime=self.regime or "unknown")
+                del self._unaccounted_fills[fill_id]
+            if fills:
+                self._persist_equity()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            self.repository.set_engine_states({
+                "last_reconcile_at": {"ts": timestamp, "fills": len(fills)},
+                "live_reconcile_status": {"ok": True, "ts": timestamp,
+                                           "fills": len(fills)},
+            })
+            lock = getattr(self, "live_lock", None)
+            if (lock is not None and bool(getattr(lock, "live", False))
+                    and bool(getattr(lock, "held", False))):
+                runtime = self.repository.get_engine_state(
+                    "live_engine_runtime", {}) or {}
+                control = self._live_control()
+                if (isinstance(runtime, dict) and runtime.get("state") == "READY"
+                        and control.get("stop_requested") is False):
+                    self._publish_live_runtime("READY", audit_event=False)
+            return list(fills)
+        except Exception as exc:
+            try:
+                self.repository.set_engine_state("live_reconcile_status", {
+                    "ok": False, "ts": datetime.now(timezone.utc).isoformat(),
+                    "error_type": type(exc).__name__})
+            except Exception as status_exc:
+                logger.error("LIVE_RECONCILIATION_FAILURE_STATE_UNAVAILABLE",
+                             extra={"error_type": type(status_exc).__name__})
+            raise
 
     def _daily_snapshot(self, candle) -> None:
         from app.history.store import parse_local
@@ -945,8 +1857,9 @@ class SandboxEngine:
         equity = self.broker.ledger.equity()
         self._peak_equity = max(self._peak_equity, equity)
         drawdown = (self._peak_equity - equity) / self._peak_equity if self._peak_equity > 0 else 0.0
+        from app.engine.state import equity_state_key
         self.repository.set_engine_state(
-            "sandbox_equity",
+            equity_state_key(bool(getattr(self.broker, "LIVE", False))),
             {"equity": equity, "peak": self._peak_equity, "drawdown": drawdown,
              "ts": datetime.now(timezone.utc).isoformat()},
         )
@@ -981,10 +1894,10 @@ class SandboxEngine:
 
     def status(self) -> dict:
         return {
-            "engine": "sandbox",
+            "engine": "live" if getattr(self.broker, "LIVE", False) else "sandbox",
             "state": self.state,
-            "mode": "PAPER/SANDBOX",
-            "live_trading": False,
+            "mode": getattr(self.broker, "mode", "LOCAL_PAPER"),
+            "live_trading": bool(getattr(self.broker, "LIVE", False)),
             "processed": self.processed,
             "submitted": self.submitted,
             "rejected_by_risk": self.rejected_by_risk,
@@ -1005,6 +1918,9 @@ class SandboxEngine:
             "unresolved_intents": (
                 len(self.intent_journal.unresolved()) if self.intent_journal else 0),
             "recovery": self._recovery_report,
+            "live_ops": self.live_ops.status() if self.live_ops is not None else None,
+            "engine_lock": (getattr(self, "live_lock", None).status()
+                            if getattr(self, "live_lock", None) is not None else None),
         }
 
 

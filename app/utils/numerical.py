@@ -7,7 +7,7 @@ Consistent decimal/float handling.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 def is_valid_price(v) -> bool:

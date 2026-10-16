@@ -25,7 +25,7 @@ class DataCache:
         path = self.root / f"{key}.csv"
         if not path.exists():
             return None
-        with path.open(newline="") as file:
+        with path.open(newline="", encoding="utf-8") as file:
             return [Candle.from_dict(row) for row in csv.DictReader(file)]
 
     def put(self, key: str, candles: list[Candle]):
@@ -37,7 +37,7 @@ class DataCache:
         writer.writerows(c.to_dict() for c in candles)
         fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as file:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
                 file.write(buffer.getvalue())
             os.replace(tmp, self.root / f"{key}.csv")
         finally:

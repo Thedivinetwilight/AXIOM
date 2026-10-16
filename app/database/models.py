@@ -207,6 +207,22 @@ CREATE TABLE IF NOT EXISTS market_event_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_market_observations_event ON market_event_observations (event_id, window);
 
+-- Arena V2 LIVE: real-money order audit, deliberately SEPARATE from the
+-- sandbox tables so a real fill can never be read back as a simulated one.
+-- Additive only; created empty on every existing database.
+INSERT OR IGNORE INTO schema_version VALUES (8);
+CREATE TABLE IF NOT EXISTS live_orders (
+ id TEXT PRIMARY KEY, upstox_order_id TEXT, symbol TEXT NOT NULL, side TEXT NOT NULL,
+ quantity REAL NOT NULL, price REAL, order_type TEXT, status TEXT NOT NULL, tag TEXT,
+ created_ts TEXT NOT NULL, updated_ts TEXT, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_transitions (
+ order_id TEXT NOT NULL, upstox_order_id TEXT, status TEXT NOT NULL,
+ filled_quantity REAL, average_price REAL, ts TEXT NOT NULL, raw TEXT NOT NULL,
+ PRIMARY KEY (order_id, upstox_order_id, status, filled_quantity, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_live_orders_status ON live_orders (status, created_ts);
+
 -- Arena 3.0.5: performance / trade-quality hardening — bounded caches, numerical, attribution. Additive only.
 INSERT OR IGNORE INTO schema_version VALUES (7);
 CREATE TABLE IF NOT EXISTS quality_scores (
@@ -255,6 +271,101 @@ CREATE TABLE IF NOT EXISTS hot_path_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_quality_ts ON quality_scores (ts, symbol);
 CREATE INDEX IF NOT EXISTS idx_liquidity_ts ON liquidity_snapshots (ts, symbol);
+
+-- AXIOM-MONEY-PRINTER (master spec v1.0) workstation state. Additive only:
+-- saved market-scoped universes, what-changed deltas, opportunity lifecycle,
+-- research memory, missed opportunities, live session state machine,
+-- latency summaries, background tasks, broker connection METADATA (never
+-- secrets — tokens stay in the secure credential path).
+INSERT OR IGNORE INTO schema_version VALUES (9);
+CREATE TABLE IF NOT EXISTS saved_universes (
+ id TEXT PRIMARY KEY, market_id TEXT NOT NULL, name TEXT NOT NULL,
+ symbols TEXT NOT NULL, note TEXT, created_ts TEXT NOT NULL, updated_ts TEXT NOT NULL,
+ UNIQUE (market_id, name)
+);
+CREATE TABLE IF NOT EXISTS universe_pins (
+ market_id TEXT NOT NULL, identity TEXT NOT NULL, pinned_ts TEXT NOT NULL,
+ PRIMARY KEY (market_id, identity)
+);
+CREATE TABLE IF NOT EXISTS state_changes (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, domain TEXT NOT NULL, object_key TEXT NOT NULL,
+ field TEXT NOT NULL, previous TEXT, current TEXT, evidence TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_state_changes_domain ON state_changes (domain, ts);
+CREATE TABLE IF NOT EXISTS opportunities (
+ id TEXT PRIMARY KEY, market_id TEXT NOT NULL, identity TEXT NOT NULL,
+ state TEXT NOT NULL, created_ts TEXT NOT NULL, last_evidence_ts TEXT NOT NULL,
+ updated_ts TEXT NOT NULL, payload TEXT NOT NULL, invalidation_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opportunities_state ON opportunities (state, updated_ts);
+CREATE TABLE IF NOT EXISTS research_memory (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, market_id TEXT, topic TEXT NOT NULL,
+ kind TEXT NOT NULL, payload TEXT NOT NULL, provenance TEXT NOT NULL,
+ confidence REAL NOT NULL, experiment_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_memory_topic ON research_memory (topic, ts);
+CREATE TABLE IF NOT EXISTS missed_opportunities (
+ id TEXT PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL, market_id TEXT,
+ identity TEXT, payload TEXT NOT NULL, knowable INTEGER NOT NULL,
+ counterfactual TEXT, research_question TEXT
+);
+CREATE TABLE IF NOT EXISTS live_sessions (
+ id TEXT PRIMARY KEY, state TEXT NOT NULL, ts_entered TEXT NOT NULL,
+ reason TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_live_sessions_state ON live_sessions (ts_entered);
+CREATE TABLE IF NOT EXISTS latency_summaries (
+ stage TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL,
+ p50_ms REAL NOT NULL, p95_ms REAL NOT NULL, p99_ms REAL NOT NULL,
+ p999_ms REAL NOT NULL, max_ms REAL NOT NULL, deadline_misses INTEGER NOT NULL,
+ PRIMARY KEY (stage, day)
+);
+CREATE TABLE IF NOT EXISTS background_tasks (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, state TEXT NOT NULL,
+ progress REAL NOT NULL, started_ts TEXT NOT NULL, updated_ts TEXT NOT NULL,
+ payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broker_connections (
+ broker TEXT PRIMARY KEY, status TEXT NOT NULL, token_state TEXT NOT NULL,
+ account_hint TEXT, updated_ts TEXT NOT NULL, note TEXT
+);
+
+-- FINAL-11/10 §15: atomic live-engine leases. Ownership is decided by ONE
+-- conditional SQL statement (INSERT ... ON CONFLICT ... WHERE), never by a
+-- read-then-write pair, so two engines starting at the same instant cannot
+-- both conclude they own execution.
+INSERT OR IGNORE INTO schema_version VALUES (10);
+CREATE TABLE IF NOT EXISTS engine_lease (
+ name TEXT PRIMARY KEY,
+ owner TEXT NOT NULL,
+ pid INTEGER NOT NULL,
+ host TEXT NOT NULL,
+ started_ts TEXT NOT NULL,
+ heartbeat_ts TEXT NOT NULL,
+ live INTEGER NOT NULL
+);
+
+-- V3.2: permanent per-intent submission journal. The legacy engine_state
+-- snapshot remains migratable, while rows are never evicted from this table.
+INSERT OR IGNORE INTO schema_version VALUES (11);
+CREATE TABLE IF NOT EXISTS submission_intents (
+ intent_id TEXT PRIMARY KEY,
+ payload TEXT NOT NULL
+);
+
+-- V3.2.1: idempotent daily-risk fill accounting. A unique fill key and the
+-- daily aggregate are updated in one SQLite transaction, so a restart between
+-- broker reconciliation and risk accounting cannot lose or double-count P&L.
+INSERT OR IGNORE INTO schema_version VALUES (12);
+CREATE TABLE IF NOT EXISTS daily_risk_fills (
+ fill_id TEXT PRIMARY KEY,
+ observed_ts TEXT,
+ trading_date TEXT NOT NULL,
+ realized_pnl REAL NOT NULL,
+ credited INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_daily_risk_fills_date
+ ON daily_risk_fills (trading_date);
 """
 
 # ---------------------------------------------------------------------------

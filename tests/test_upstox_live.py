@@ -467,7 +467,8 @@ def _plan_router(first, second):
 
 
 def test_production_wss_uses_verified_default_tls(monkeypatch):
-    """ssl must never be None for wss://; the library default context verifies TLS."""
+    """ssl must never be None for wss://; an SSLContext with CA verification is used."""
+    import ssl as _ssl
     import websockets.asyncio.client
 
     def authorize_ok(request):
@@ -511,7 +512,8 @@ def test_production_wss_uses_verified_default_tls(monkeypatch):
 
     asyncio.run(scenario())
     assert captured["uri"].startswith("wss://")
-    assert captured["ssl"] is True, "wss must use the verified default TLS context"
+    assert isinstance(captured["ssl"], _ssl.SSLContext), "wss must use a verified SSLContext"
+    assert captured["ssl"].check_hostname is True
 
 
 # ------------------------------------------------------- trading/restart safety
@@ -601,7 +603,11 @@ def test_health_and_status_are_paper_only(tmp_path):
         health = client.get("/health").json()
         assert health["version"] == __version__
         assert health["mode"] == "PAPER" and health["live_trading"] is False
-        assert health["real_order_routing"] == "NOT_IMPLEMENTED"
+        # V2 truthfulness: default routing is simulated LOCAL_PAPER; the value
+        # now reflects the ACTUAL broker instead of a hardcoded claim.
+        assert health["real_order_routing"] == "SIMULATED_LOCAL_PAPER"
+        assert health["broker"] == "LOCAL_PAPER"
+        assert health["warning"] is None
         headers = {"Authorization": "Bearer local-test-token"}
         status = client.get("/market/status", headers=headers).json()
         assert status["paper_mode"] is True and status["mode"] == "PAPER"

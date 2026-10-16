@@ -1,13 +1,26 @@
 [project]
 name = "arena"
-version = "3.0.5"
+version = "3.2.4"
 requires-python = ">=3.11"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
+# Generated code is excluded from lint/format runs. The protobuf binding below
+# imports a symbol ruff reports as unused but that protobuf REQUIRES for
+# descriptor registration; auto-fixing it broke feed decoding with
+# "Couldn't build proto file into descriptor pool".
+exclude = [
+    "app/data/upstox_proto/MarketDataFeed_pb2.py",
+    ".venv",
+    "build",
+    "dist",
+]
 
 [tool.setuptools.packages.find]
-include = ["app*", "desktop*"]
+# axiom* is the Kronos forecasting subsystem. It must be included or an
+# installed distribution ships no axiom package at all — notably omitting
+# axiom.worker.child, the entry point of the AXIOM-Kronos process.
+include = ["app*", "desktop*", "axiom*"]
 exclude = ["app.tests*", "tests*"]
