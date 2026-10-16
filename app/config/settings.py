@@ -25,6 +25,7 @@ from app.config.hosts import (
     DEFAULT_LIVE_BASE_URL,
     DEFAULT_ORDER_HISTORY_URL,
     DEFAULT_SANDBOX_BASE_URL,
+    DEFAULT_SANDBOX_ORDER_HISTORY_URL,
     FORBIDDEN_IN_LIVE,
     FORBIDDEN_IN_SANDBOX,
     LIVE_ORDER_HOSTS,
@@ -142,7 +143,13 @@ class Settings:
     # Sandbox order host. This MUST stay a sandbox host: api-hft.upstox.com is
     # the live order host and is refused by the sandbox broker.
     upstox_sandbox_base_url: str = DEFAULT_SANDBOX_BASE_URL
-    upstox_sandbox_order_history_url: str = DEFAULT_ORDER_HISTORY_URL
+    # Sandbox order-history READS stay on the sandbox host. The production
+    # history endpoint (api.upstox.com) is a LIVE-mode URL: a sandbox token is
+    # documented as sandbox-only and must never be sent to a production host.
+    # Order history is also not in the official sandbox-enabled API list, so a
+    # sandbox environment that does not expose it degrades to an explicit
+    # "capability unavailable" state — never to production fallback.
+    upstox_sandbox_order_history_url: str = DEFAULT_SANDBOX_ORDER_HISTORY_URL
     sandbox_product: str = "I"  # intraday product per documented V3 order API
     sandbox_order_tag: str = "arena-v1"
     # --- V2 (Arena LIVE): real-money routing, gated by four switches ---
@@ -400,12 +407,26 @@ class Settings:
             raise ValueError(
                 "UPSTOX_SANDBOX_BASE_URL must be an HTTPS root URL on a "
                 "documented sandbox host")
+        history_host = host_of(self.upstox_sandbox_order_history_url)
+        if history_host in FORBIDDEN_IN_SANDBOX:
+            # A sandbox token must never be sent to a production host: the
+            # provider documents sandbox tokens as sandbox-only, and order
+            # history is not a sandbox-enabled API, so there is no legitimate
+            # production read to fall back to. Refuse instead of leaking the
+            # credential (this is the reconciliation-401 defect class: a
+            # production history 401 used to disable the whole sandbox broker).
+            raise ValueError(
+                f"UPSTOX_SANDBOX_ORDER_HISTORY_URL host {history_host!r} is a "
+                "production host; a sandbox token must never be sent there. "
+                "Use the sandbox host (order history is not a documented "
+                "sandbox capability, so a missing endpoint degrades to an "
+                "unavailable-capability state, never a production request)")
         if not is_trusted_upstox_url(
-                self.upstox_sandbox_order_history_url, READ_AND_AUTH_HOSTS,
+                self.upstox_sandbox_order_history_url, SANDBOX_ORDER_HOSTS,
                 expected_path="/v2/order/history"):
             raise ValueError(
                 "UPSTOX_SANDBOX_ORDER_HISTORY_URL must be the documented "
-                "HTTPS Upstox order-history endpoint")
+                "HTTPS Upstox order-history endpoint on a sandbox host")
 
     def _validate_live_mode(self) -> None:
         """All four locks + non-zero risk limits, or refuse to start.

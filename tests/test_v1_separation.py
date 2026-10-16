@@ -28,7 +28,10 @@ class RecordingTransport(httpx.BaseTransport):
             self.state["orders"][oid] = {"status": "open", "filled": 0, "avg": 0.0}
             return httpx.Response(200, json={"status": "success",
                                              "data": {"order_ids": [oid]}})
-        if request.method == "GET" and request.url.host == "api.upstox.com":
+        # Sandbox history READS stay on the sandbox host: the sandbox token
+        # must never be sent to a production endpoint (2026-10-16 capability
+        # verification against the official docs/SDK sandbox allowlist).
+        if request.method == "GET" and request.url.host == "api-sandbox.upstox.com":
             rec = self.state["orders"].get(request.url.params["order_id"])
             if rec is None:
                 return httpx.Response(400, json={"errors": [{"errorCode": "UDAPI100010"}]})
@@ -62,12 +65,17 @@ class TestSandboxHostIsolation:
         intent2 = broker.submit("SELL", 5, 0.0, intent_id="iso2", symbol="RELIANCE")
         broker.cancel(intent2)
         hosts = {httpx.URL(u).host for u in transport.urls}
-        # V2 audit: api-hft.upstox.com is Upstox's LIVE order host and is
-        # never contacted by the sandbox broker — only sandbox hosts plus
-        # the documented read-only history endpoint.
-        assert hosts == {"api-sandbox.upstox.com", "api.upstox.com"}
+        # 2026-10-16 capability verification: EVERY request the sandbox
+        # broker makes — order mutations AND remote-status reads — stays on
+        # the sandbox host. No production host whatsoever is contacted: the
+        # live order host (api-hft.upstox.com) and the production read/auth
+        # host (api.upstox.com) must both be absent from the recorded
+        # traffic, so a sandbox token can never leave the sandbox boundary.
+        assert hosts == {"api-sandbox.upstox.com"}
         assert "api-hft.upstox.com" not in hosts, \
             "the live order host must never be contacted in sandbox mode"
+        assert "api.upstox.com" not in hosts, \
+            "the production host must never be contacted in sandbox mode"
         paths = {httpx.URL(u).path for u in transport.urls}
         assert paths == {"/v3/order/place", "/v2/order/history", "/v3/order/cancel"}
 

@@ -1109,7 +1109,9 @@ def cmd_live_preflight(args) -> int:
             probe=f"HTTP {verdict['http_status']} {verdict['class']} "
                   f"codes={verdict.get('codes', [])}",
         )
-        if verdict["class"] == "unexpected":
+        if verdict["class"] in {"unexpected", "unsupported_endpoint"}:
+            # Production exposes GET /v2/order/history; anything but the
+            # documented responses is an unexpected probe result here.
             payload["unexpected_probe_response"] = True
         if verdict["credential_accepted"] and repository is not None:
             # This is what unblocks NEW ENTRIES in the engine's TokenGuard.
@@ -1138,15 +1140,26 @@ def cmd_live_preflight(args) -> int:
 
 
 def cmd_sandbox_test(args) -> int:
-    """Verify SANDBOX credentials against the documented order APIs (read-only).
+    """Verify SANDBOX credentials against the sandbox environment (read-only).
 
-    Uses the documented GET /order/history with a probe order id:
-    401/403 → credential rejected (fail closed); HTTP 400/404 with the
-    documented 'order not found' code → credential ACCEPTED (no order placed);
-    network error → unreachable. --place-order explicitly submits one real
-    sandbox order at a tiny quantity (requires the flag, never default).
+    Probe: GET <sandbox order-history URL>?order_id=0 against the SANDBOX
+    host (a sandbox token is never sent to a production host):
+    401/403            → credential rejected (fail closed)          → exit 1
+    400/404 UDAPI100010→ credential ACCEPTED (no order placed)      → exit 0
+    404/405 otherwise  → read capability not exposed by the provider;
+                         credential UNVERIFIED (not "rejected")     → exit 4
+    network error      → unreachable                                → exit 1
+    Configuration refused → exit 2; token missing → exit 3 (no request).
+
+    --place-order explicitly submits one real sandbox order at a tiny
+    quantity (requires the flag, never default). When the read capability is
+    not exposed, --place-order is the ONLY honest credential check, so it is
+    permitted there; a refused credential (401/403) still refuses to place.
+    A placed order verifies the credential by authentication itself → exit 0.
     """
     import os
+
+    from app.config.hosts import host_of
 
     # Settings MUST be loaded before the token is read: Settings.from_env()
     # is what calls load_dotenv(), so reading os.environ first silently misses
@@ -1186,8 +1199,13 @@ def cmd_sandbox_test(args) -> int:
         "performed": True,
         "credential_accepted": False,
         "order_placed": False,
-        "note": "read-only history probe; sandbox orders only; never live",
+        "mode": broker.MODE,
+        # Hostnames only — never the token, never a credential-bearing URL.
+        "order_host": host_of(settings.upstox_sandbox_base_url),
+        "history_host": host_of(settings.upstox_sandbox_order_history_url),
+        "note": "read-only probe on the SANDBOX host; sandbox orders only; never live",
     }
+    probe_unverified_capability = False
     try:
 
         response = broker._request(
@@ -1197,16 +1215,38 @@ def cmd_sandbox_test(args) -> int:
 
         verdict = classify_history_probe(response)
         summary["credential_accepted"] = verdict["credential_accepted"]
+        summary["credential_state"] = (
+            "accepted" if verdict["credential_accepted"]
+            else "rejected" if verdict["class"] == "auth_rejected"
+            else "not_verified")
         summary["probe"] = (f"HTTP {verdict['http_status']} {verdict['class']} "
                             f"codes={verdict.get('codes', [])}")
         if verdict["class"] == "unexpected":
             summary["unexpected_probe_response"] = True
+        if verdict["class"] == "unsupported_endpoint":
+            # Not a rejection: the provider does not expose this read route
+            # in the sandbox, so read-only verification is impossible.
+            probe_unverified_capability = True
+            summary["credential_state"] = "unverified"
+            summary["capability"] = "order_history_not_exposed"
+            summary["diagnostic"] = (
+                "read-only verification unavailable: the sandbox environment "
+                "does not expose GET /v2/order/history (not a documented "
+                "sandbox capability). Credential validity is UNVERIFIED — "
+                "neither accepted nor rejected. Next step: run again with "
+                "--place-order for one authenticated sandbox order, or see "
+                "AXIOM_SANDBOX_READINESS.md.")
     except SandboxAuthError:
         summary["credential_accepted"] = False
+        summary["credential_state"] = "rejected"
         summary["probe"] = "credential rejected (401/403)"
     except SandboxRequestError as exc:
         summary["probe"] = str(exc)
-    if summary["credential_accepted"] and args.place_order:
+    # Place-order is permitted when the read probe VERIFIED the credential or
+    # when the read capability simply does not exist (then the authenticated
+    # order itself is the verification). A rejected credential never places.
+    may_place = (summary["credential_accepted"] or probe_unverified_capability)
+    if may_place and args.place_order:
         # FINAL-11/10 §60: this CLI path may only ever touch the SANDBOX. A
         # live order must never be placed from a CLI flag — real-money
         # submission exists only through the live execution gateway. Refuse
@@ -1220,15 +1260,37 @@ def cmd_sandbox_test(args) -> int:
                 "only through the live execution gateway.")
             print(json.dumps(summary, indent=2, default=str))
             return 2
-        intent = broker.submit("BUY", args.quantity, 0, order_type="MARKET",
-                               instrument_key=args.instrument)
+        try:
+            intent = broker.submit("BUY", args.quantity, 0, order_type="MARKET",
+                                   instrument_key=args.instrument)
+        except (SandboxAuthError, SandboxRequestError) as exc:
+            # The order attempt is itself an authenticated check: a 401 here
+            # is an authoritative credential rejection; a transport/provider
+            # failure leaves the credential state unchanged and honest.
+            summary["order_placed"] = False
+            summary["order_attempt_error"] = type(exc).__name__
+            if isinstance(exc, SandboxAuthError):
+                summary["credential_state"] = "rejected"
+                summary["probe"] = "credential rejected during order placement (401/403)"
+            print(json.dumps(summary, indent=2, default=str))
+            return 1
         fills = broker.reconcile()
         summary["order_placed"] = True
+        # Authentication succeeded end-to-end: the credential is verified by
+        # the only sandbox operation the provider documents for it.
+        summary["credential_accepted"] = True
+        summary["credential_state"] = "accepted"
+        summary["credential_verified_by"] = "authenticated order placement"
         summary["submitted_intent"] = intent[:12]
         summary["fills_after_reconcile"] = fills
+        summary["history_capability"] = dict(broker.history_capability)
         summary["ledger"] = broker.ledger.snapshot()
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if summary["credential_accepted"] else 1
+    if summary["order_placed"] or summary["credential_accepted"]:
+        return 0
+    if probe_unverified_capability:
+        return 4  # unverified (provider read capability not exposed)
+    return 1
 
 
 class DatasetBuilderRepositoryShim:

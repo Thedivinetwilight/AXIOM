@@ -1629,6 +1629,30 @@ class SandboxEngine:
                 "EXECUTION_PAUSED_SKIP", {"side": side, "ts": candle.timestamp.isoformat(),
                                           "reason": reason})
             return
+        # Conservative exposure guard: an intent stuck UNKNOWN/UNRESOLVED
+        # means we cannot know what is already working at the broker (the
+        # response was lost or ambiguous, and remote lookup may be an
+        # unavailable capability). While ANY such intent exists, no new
+        # risk-increasing order may be sent — a second entry could duplicate
+        # exposure we cannot see. Risk-reducing exits (SELL) are NEVER blocked
+        # by this guard, exactly like the emergency-stop and pause gates.
+        if side == "BUY" and self.intent_journal is not None:
+            unresolved = self.intent_journal.unresolved()
+            if unresolved:
+                self.rejected_by_risk += 1
+                payload = {"reason": "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                           "side": side, "count": len(unresolved),
+                           "symbol": getattr(candle, "symbol", None),
+                           "ts": candle.timestamp.isoformat()}
+                try:
+                    self.repository.record_system_event("RISK_REJECT", payload)
+                except Exception as audit_exc:
+                    logger.error("UNRESOLVED_BLOCK_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.warning(
+                    "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                    extra={"count": len(unresolved), "symbol": payload["symbol"]})
+                return
         intent_key = intent_id_for(self.strategy.name, candle.symbol, candle,
                                    side)  # V1 invariant format (dedup-safe)
         if self.intent_journal is not None \

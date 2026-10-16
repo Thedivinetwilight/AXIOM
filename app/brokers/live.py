@@ -36,6 +36,7 @@ from app.config.hosts import (
     DEFAULT_ORDER_HISTORY_URL,
     FORBIDDEN_IN_LIVE,
     LIVE_ORDER_HOSTS,
+    READ_AND_AUTH_HOSTS,
     host_of,
 )
 from app.config.settings import LIVE_CONFIRM_PHRASE
@@ -146,6 +147,9 @@ class UpstoxLiveBroker(UpstoxSandboxBroker):
     ALLOWED_HOSTS = LIVE_ORDER_HOSTS
     FORBIDDEN_HOSTS = FORBIDDEN_IN_LIVE
     DEFAULT_BASE_URL = DEFAULT_LIVE_BASE_URL
+    #: Live orders exist on the production platform, so their history is read
+    #: from the documented production read host (never a sandbox host).
+    ALLOWED_HISTORY_HOSTS = READ_AND_AUTH_HOSTS
     READ_API_BASE_URL = "https://api.upstox.com"
     POSITIONS_PATH = "/v2/portfolio/short-term-positions"
     HOLDINGS_PATH = "/v2/portfolio/long-term-holdings"

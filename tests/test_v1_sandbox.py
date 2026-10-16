@@ -54,7 +54,9 @@ def make_handler(state):
                 json={"status": "success", "data": {"order_ids": [oid]},
                       "metadata": {"latency": 1}},
             )
-        if request.method == "GET" and request.url.host == "api.upstox.com":
+        # 2026-10-16: sandbox history READS stay on the sandbox host — a
+        # sandbox token must never reach the production host at all.
+        if request.method == "GET" and request.url.host == "api-sandbox.upstox.com":
             oid = request.url.params["order_id"]
             rec = state["orders"].get(oid)
             if rec is None:
@@ -436,9 +438,39 @@ class TestConstructionGuards:
         broker = UpstoxSandboxBroker(
             "tok", INSTRUMENT,
             base_url="https://api-sandbox.upstox.com///",
-            history_url="https://api.upstox.com/v2/order/history/")
+            history_url="https://api-sandbox.upstox.com/v2/order/history/")
         assert broker._base_url == "https://api-sandbox.upstox.com"
-        assert broker.history_endpoint == "https://api.upstox.com/v2/order/history"
+        assert broker.history_endpoint == "https://api-sandbox.upstox.com/v2/order/history"
+
+    def test_a_production_history_url_is_refused_at_construction(self):
+        """The sandbox token must never be sendable to a production host.
+
+        The historical defect: the shipped default pointed the sandbox broker
+        at the production GET /v2/order/history; its 401 fail-closed the WHOLE
+        broker (disabling valid sandbox order operations) and leaked the
+        sandbox token to a production endpoint.
+        """
+        with pytest.raises(ValueError, match="production host"):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT,
+                history_url="https://api.upstox.com/v2/order/history")
+        with pytest.raises(ValueError, match="production host"):
+            UpstoxSandboxBroker(
+                "tok", INSTRUMENT,
+                history_url="https://api-hft.upstox.com/v2/order/history")
+
+    def test_settings_refuse_a_production_sandbox_history_url(self):
+        from app.config.settings import Settings
+
+        with pytest.raises(ValueError, match="production host"):
+            Settings(broker="UPSTOX_SANDBOX", upstox_sandbox_access_token="t",
+                     upstox_sandbox_order_history_url=(
+                         "https://api.upstox.com/v2/order/history"))
+
+    def test_the_default_history_url_stays_on_the_sandbox_host(self):
+        broker = UpstoxSandboxBroker("tok", INSTRUMENT)
+        assert broker.history_endpoint == (
+            "https://api-sandbox.upstox.com/v2/order/history")
 
     def test_a_fresh_broker_is_available_until_rejected(self):
         broker = UpstoxSandboxBroker("tok", INSTRUMENT)
