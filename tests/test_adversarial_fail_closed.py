@@ -852,3 +852,93 @@ class TestEnvFileIntegrity:
         assert path.read_text(encoding="utf-8") == "A=1\n"
         leftovers = [p for p in tmp_path.iterdir() if p.name != ".env"]
         assert leftovers == []
+
+
+# ------------------------------------------- final safety-branch closures ----
+
+class TestRiskLimitBranches:
+    def test_total_exposure_includes_execution_costs(self):
+        from app.risk.limits import OrderIntent
+
+        intent = OrderIntent("X", "BUY", 2, 100.0, estimated_fees=2.5)
+        assert intent.notional == 200.0
+        assert intent.total_exposure == 202.5
+
+    def test_sell_exits_pass_even_when_every_cap_is_breached(self):
+        from app.risk.limits import HardRiskLimits, OrderIntent
+
+        limits = HardRiskLimits(max_position_value=100.0, max_open_positions=1,
+                                max_daily_loss=1.0, max_trades_per_day=1)
+        decision = limits.check(
+            OrderIntent("X", "SELL", 10, 100.0),
+            open_positions=5, open_position_value=10_000.0,
+            trades_today=9, realized_today=-99_999.0)
+        assert decision.allowed is True
+        assert decision.reason == "risk_reducing_exit_allowed"
+
+    def test_new_buys_refuse_on_position_and_trade_caps(self):
+        from app.risk.limits import HardRiskLimits, OrderIntent
+
+        positions_full = HardRiskLimits(max_open_positions=2).check(
+            OrderIntent("X", "BUY", 1, 100.0),
+            open_positions=2, open_position_value=0.0,
+            trades_today=0, realized_today=0.0)
+        assert positions_full.allowed is False
+        assert positions_full.reason == "max_open_positions_reached"
+
+        trades_full = HardRiskLimits(max_trades_per_day=3).check(
+            OrderIntent("X", "BUY", 1, 100.0),
+            open_positions=0, open_position_value=0.0,
+            trades_today=3, realized_today=0.0)
+        assert trades_full.allowed is False
+        assert trades_full.reason == "max_trades_per_day_reached"
+
+
+class TestHostParserFailures:
+    def test_out_of_range_port_fails_closed_in_both_parsers(self):
+        from app.config.hosts import (
+            is_trusted_upstox_request_url,
+            is_trusted_upstox_url,
+        )
+
+        hostile = "https://api-sandbox.upstox.com:99999/"
+        assert is_trusted_upstox_url(hostile, {"api-sandbox.upstox.com"}) is False
+        assert is_trusted_upstox_request_url(
+            hostile, {"api-sandbox.upstox.com"}) is False
+        # and a non-numeric port is the same story
+        broken = "https://api-sandbox.upstox.com:notaport/"
+        assert is_trusted_upstox_url(broken, {"api-sandbox.upstox.com"}) is False
+        assert is_trusted_upstox_request_url(
+            broken, {"api-sandbox.upstox.com"}) is False
+
+
+class TestAggregateWithNoChildren:
+    def test_aggregate_without_children_returns_current_status(self):
+        broker, _ = make_broker(handler=_place_ok)
+        broker.submit("BUY", 1, 100.0, intent_id="agg-1",
+                      instrument_key=INSTRUMENT)
+        state = broker.orders["agg-1"]
+        state.upstox_order_ids.clear()
+        assert broker._aggregate_child_status(state) == state.status
+
+
+class TestClosingGapEdges:
+    def test_mark_of_a_missing_intent_returns_none_not_error(self, journal):
+        assert journal.mark("no-such-intent", SUBMISSION_ATTEMPTED) is None
+
+    def test_legacy_loader_treats_a_null_blob_as_empty(self):
+        repo = _LegacyRepo()
+        repo.state[SubmissionJournal.KEY] = None
+        legacy = SubmissionJournal(repo)
+        assert legacy.get("anything") is None
+
+    def test_envfile_reads_empty_values_and_keeps_malformed_lines(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("EMPTY=\nnot-an-assignment line\nA=1\n", encoding="utf-8")
+        values = envfile.read_values(path)
+        assert values["EMPTY"] == ""
+        summary = envfile.update_values(path, {"A": "2"})
+        text = path.read_text(encoding="utf-8")
+        assert "not-an-assignment line" in text
+        assert "A=2" in text
+        assert summary["added"] == []
