@@ -250,7 +250,16 @@ class _V1RepositoryBase:
             orders = []
             for row in rows:
                 # Columns are authoritative (payload may be stale after updates).
-                order = json.loads(row["payload"])
+                try:
+                    order = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    # A corrupt payload must not brick the whole orders view
+                    # (monitoring/dashboards read this); the columns below
+                    # still describe the order, and the payload stays in the
+                    # database for forensics.
+                    order = {}
+                if not isinstance(order, dict):
+                    order = {}
                 order.update(
                     id=row["id"],
                     upstox_order_id=row["upstox_order_id"],
@@ -271,7 +280,13 @@ class _V1RepositoryBase:
                     ).fetchall()
                 ]
                 for transition in transitions:
-                    transition["raw"] = json.loads(transition["raw"])
+                    try:
+                        transition["raw"] = json.loads(transition["raw"])
+                    except (TypeError, ValueError):
+                        # Same tolerance for one corrupt raw row: recover_
+                        # ledger_state parses raw defensively, so the rest of
+                        # the audit trail must stay readable too.
+                        transition["raw"] = {}
                 order["transitions"] = transitions
                 orders.append(order)
         return orders
