@@ -72,26 +72,28 @@ jobs:
         if: failure() && steps.frozen-build.outcome == 'failure'
         shell: bash
         run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          lines = Path("frozen-build-output.txt").read_text(
-              encoding="utf-8", errors="replace").splitlines()
-          markers = ("[FAIL", "ERROR", "Traceback", "RuntimeError", "SMOKE TEST FAILED")
-          selected = [line for line in lines if any(marker in line for marker in markers)]
-          if not selected:
-              selected = lines[-20:]
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-          with summary.open("a", encoding="utf-8") as handle:
-              handle.write("## Frozen-build failure details\n\n```text\n")
-              handle.write("\n".join(selected[-30:]))
-              handle.write("\n```\n")
-          for line in selected[-30:]:
-              safe = (line.replace("%", "%25").replace("\r", "%0D")
-                      .replace("\n", "%0A"))
-              print(f"::error title=Frozen build diagnostic::{safe}")
-          PY
+          if [ -f frozen-build-output.txt ]; then
+            details=$(grep -E 'FAIL|ERROR|Traceback|RuntimeError|SMOKE TEST FAILED' \
+              frozen-build-output.txt | tail -n 30 || true)
+            if [ -z "$details" ]; then
+              details=$(tail -n 30 frozen-build-output.txt)
+            fi
+            {
+              echo "## Frozen-build failure details"
+              echo
+              echo '```text'
+              printf '%s\n' "$details"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$details" | while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              printf '::error title=Frozen build diagnostic::%s\n' "$safe"
+            done
+          else
+            echo "::error title=Frozen build diagnostics::frozen-build-output.txt was not created"
+          fi
 
       - name: Prepare executable artifact and checksum
         shell: bash
