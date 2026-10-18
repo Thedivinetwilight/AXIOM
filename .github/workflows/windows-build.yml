@@ -132,20 +132,8 @@ jobs:
           }
 
       - name: Build Inno Setup installer
-        shell: cmd
-        run: |
-          copy release\Arena.exe packaging\Arena.exe /Y
-          python -c "import sys; sys.path.insert(0,'.'); from app import __version__; print(__version__)" > _ver.tmp
-          set /p VERSION=<_ver.tmp
-          del _ver.tmp
-          echo Building installer for version %VERSION%
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss /DArenaExe=Arena.exe /DAppVersion=%VERSION% /Orelease /FAXIOM-Setup
-          if errorlevel 1 (
-            echo Inno Setup failed with exit code %errorlevel%
-            exit /b 1
-          )
-          echo Installer built: release\AXIOM-Setup.exe
-          dir release\AXIOM-Setup.exe
+        shell: bash
+        run: python packaging/build_installer.py
 
       - name: Record installer checksum
         shell: bash
