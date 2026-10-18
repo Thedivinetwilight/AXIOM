@@ -23,6 +23,7 @@ from app.engine.sandbox_engine import SandboxEngine
 from app.learning.journal import LearningJournal
 from app.risk.limits import HardRiskLimits
 from app.strategies.base import Signal
+from tests.support import PassingNetEdgeGate
 
 from tests.test_v3_0_1_execution_safety import (FixedSignal, RELIANCE_KEY,
                                                 TCS_KEY, _P, _approve,
@@ -147,7 +148,8 @@ def engine302(env, broker, **kwargs):
         provider=_P(), strategy=FixedSignal(Signal.HOLD), broker=broker,
         repository=env, risk_limits=HardRiskLimits.from_settings(Settings()),
         journal=LearningJournal(env), timeframe="1m", evaluate_every=5,
-        instrument_keys={"RELIANCE": RELIANCE_KEY, "TCS": TCS_KEY})
+        instrument_keys={"RELIANCE": RELIANCE_KEY, "TCS": TCS_KEY},
+        net_edge_gate=PassingNetEdgeGate())
     defaults.update(kwargs)
     return SandboxEngine(**defaults)
 

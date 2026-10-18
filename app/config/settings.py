@@ -15,6 +15,7 @@ permitted combination for every other broker. Broker hosts are classified in
 order host.
 """
 
+import math
 import os
 import types
 from dataclasses import dataclass, field, fields
@@ -96,6 +97,33 @@ def coerce_env_value(name: str, annotation, raw):
             raise ValueError(
                 f"{name.upper()} must be a number (got {raw!r})") from None
     return raw  # str and any other annotation: verbatim
+
+
+def _validate_numeric_fields(instance) -> None:
+    """Reject malformed numeric config before range checks can be bypassed.
+
+    In Python, comparisons with NaN are false in both directions, so checks
+    such as ``value < 0`` do not validate it. Dataclass annotations are also
+    not runtime type checks. Validate every declared int/float field once,
+    including optional protective exits, before any safety logic consumes it.
+    """
+    hints = get_type_hints(type(instance))
+    for item in fields(instance):
+        optional, base = _unwrap_optional(hints.get(item.name, item.type))
+        value = getattr(instance, item.name)
+        if value is None and optional:
+            continue
+        if base is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{item.name.upper()} must be a finite number")
+            try:
+                finite = math.isfinite(float(value))
+            except (OverflowError, TypeError, ValueError):
+                finite = False
+            if not finite:
+                raise ValueError(f"{item.name.upper()} must be finite")
+        elif base is int and type(value) is not int:
+            raise ValueError(f"{item.name.upper()} must be an integer")
 
 
 @dataclass(frozen=True)
@@ -251,6 +279,7 @@ class Settings:
     hot_path_max_latency_ms: float = 100.0
 
     def __post_init__(self):
+        _validate_numeric_fields(self)
         # V1 broker modes: paper, documented Upstox SANDBOX orders, and the
         # V2 gated real-money mode. The live host/token pair is validated only
         # for BROKER=UPSTOX_LIVE; every other broker stays paper/sandbox.

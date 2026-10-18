@@ -488,11 +488,22 @@ def check(env_file: Path = DEFAULT_ENV_FILE, target: str = "auto") -> dict:
             Settings(**values)
         except ValueError as exc:
             app_verdict, app_error = "refused", str(exc)
-            # If the app refuses for a reason the checks above did not name,
-            # say so rather than reporting a clean bill of health.
-            if not any(f["level"] == BLOCKER for f in findings):
+            # If the app names a known setting, surface that field as the key
+            # even when the per-key static checks could not reason about a
+            # non-finite value. Keep an unnamed refusal as the generic
+            # Settings blocker, and avoid duplicating a blocker already found.
+            candidate_key = app_error.partition(" ")[0].rstrip(":").upper()
+            setting_names = {field.name.upper() for field in fields(Settings)}
+            blocker_key = (candidate_key if candidate_key in setting_names
+                           else "Settings")
+            has_duplicate = any(
+                f["level"] == BLOCKER and f["key"] == blocker_key
+                for f in findings)
+            has_other_blocker = any(f["level"] == BLOCKER for f in findings)
+            if not has_duplicate and not (blocker_key == "Settings"
+                                          and has_other_blocker):
                 findings.append(finding(
-                    BLOCKER, "Settings", app_error,
+                    BLOCKER, blocker_key, app_error,
                     "the application refuses this configuration"))
 
     blockers = [f for f in findings if f["level"] == BLOCKER]

@@ -631,6 +631,7 @@ def cmd_engine(args) -> int:
         live_ops=live_ops,
         instrument_keys=instrument_keys,
         market_timezone=settings.market_timezone,
+        settings=settings,
         stop_loss=float(settings.stop_loss or 0.0),
         take_profit=float(settings.take_profit or 0.0),
     )

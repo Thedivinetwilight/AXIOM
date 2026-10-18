@@ -15,6 +15,7 @@ from app.engine.sandbox_engine import SandboxEngine
 from app.learning.journal import LearningJournal
 from app.risk.limits import HardRiskLimits, OrderIntent
 from app.strategies.base import Signal
+from tests.support import PassingNetEdgeGate
 
 RELIANCE_KEY = "NSE_EQ|INE002A01018"
 TCS_KEY = "NSE_EQ|TCS"
@@ -96,7 +97,9 @@ def make_engine(repository, broker, *, strategy=None, **kwargs):
         journal=LearningJournal(repository), timeframe="1m", evaluate_every=5,
         # 3.0.2: explicit configured identity (the broker-default fallback is
         # gone; tests configure the symbol→key map explicitly)
-        instrument_keys={"RELIANCE": RELIANCE_KEY})
+        instrument_keys={"RELIANCE": RELIANCE_KEY},
+        # This file tests downstream engine invariants, not edge estimation.
+        net_edge_gate=PassingNetEdgeGate())
     defaults.update(kwargs)
     return SandboxEngine(**defaults)
 

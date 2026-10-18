@@ -27,6 +27,7 @@ from app.database.repository import Repository
 from app.engine.sandbox_engine import SandboxEngine
 from app.learning.journal import LearningJournal
 from app.risk.limits import HardRiskLimits
+from tests.support import PassingNetEdgeGate
 
 PLACE_URL = "https://api-sandbox.upstox.com/v3/order/place"
 CANCEL_URL = "https://api-sandbox.upstox.com/v3/order/cancel"
@@ -111,7 +112,8 @@ def stub_engine(broker, repo):
                          repository=repo,
                          risk_limits=HardRiskLimits.from_settings(Settings()),
                          journal=LearningJournal(repo),
-                         instrument_keys={"RELIANCE": INSTRUMENT})
+                         instrument_keys={"RELIANCE": INSTRUMENT},
+                         net_edge_gate=PassingNetEdgeGate())
 
 
 class TestSandboxLifecycle:

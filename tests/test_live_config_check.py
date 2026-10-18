@@ -136,6 +136,15 @@ class TestTheFourSwitches:
 
 
 class TestRiskLimits:
+    @pytest.mark.parametrize("key,value", [
+        ("MAX_POSITION_VALUE", "nan"),
+        ("MAX_DAILY_LOSS", "inf"),
+    ])
+    def test_non_finite_limits_are_blockers(self, tmp_path, key, value):
+        report = lcc.check(write_env(tmp_path, dict(VALID_LIVE, **{key: value})))
+        assert report["ok"] is False
+        assert key in keys_of(report["blockers"])
+
     @pytest.mark.parametrize("key", ["MAX_POSITION_VALUE", "MAX_OPEN_POSITIONS",
                                      "MAX_DAILY_LOSS", "MAX_TRADES_PER_DAY"])
     def test_zero_limit_is_a_blocker(self, tmp_path, key):
