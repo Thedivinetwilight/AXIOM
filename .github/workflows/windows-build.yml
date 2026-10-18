@@ -139,7 +139,7 @@ jobs:
           set /p VERSION=<_ver.tmp
           del _ver.tmp
           echo Building installer for version %VERSION%
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss /DArenaExe=packaging\Arena.exe /DAppVersion=%VERSION% /Orelease /FAXIOM-Setup
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss /DArenaExe=Arena.exe /DAppVersion=%VERSION% /Orelease /FAXIOM-Setup
           if errorlevel 1 (
             echo Inno Setup failed with exit code %errorlevel%
             exit /b 1
