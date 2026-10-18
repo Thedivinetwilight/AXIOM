@@ -127,23 +127,25 @@ jobs:
           if (Test-Path $iscc) {
             Write-Host "Inno Setup found at: $iscc"
           } else {
-            Write-Error "Inno Setup not found"
+            Write-Error "Inno Setup not found after install"
             exit 1
           }
 
       - name: Build Inno Setup installer
-        shell: powershell
+        shell: cmd
         run: |
-          $version = python -c "import sys; sys.path.insert(0,'.'); from app import __version__; print(__version__)"
-          Write-Host "Building installer for version: $version"
-          Copy-Item "release\Arena.exe" "packaging\Arena.exe" -Force
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\installer.iss" "/DArenaExe=packaging\Arena.exe" "/DAppVersion=$version" "/Orelease" "/FAXIOM-Setup"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Inno Setup failed with exit code $LASTEXITCODE"
-            exit 1
-          }
-          Write-Host "Installer built: release\AXIOM-Setup.exe"
-          Get-Item "release\AXIOM-Setup.exe" | Select-Object Name, Length
+          copy release\Arena.exe packaging\Arena.exe /Y
+          python -c "import sys; sys.path.insert(0,'.'); from app import __version__; print(__version__)" > _ver.tmp
+          set /p VERSION=<_ver.tmp
+          del _ver.tmp
+          echo Building installer for version %VERSION%
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss /DArenaExe=packaging\Arena.exe /DAppVersion=%VERSION% /Orelease /FAXIOM-Setup
+          if errorlevel 1 (
+            echo Inno Setup failed with exit code %errorlevel%
+            exit /b 1
+          )
+          echo Installer built: release\AXIOM-Setup.exe
+          dir release\AXIOM-Setup.exe
 
       - name: Record installer checksum
         shell: bash
