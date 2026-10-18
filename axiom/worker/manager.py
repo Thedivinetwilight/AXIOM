@@ -20,6 +20,7 @@ import os
 import queue
 import subprocess
 import sys
+from pathlib import Path
 import threading
 import uuid
 from collections import deque
@@ -136,6 +137,15 @@ class KronosManager:
     def child_command(self) -> list[str]:
         if self.command:
             return list(self.command)
+        if getattr(sys, "frozen", False):
+            # A frozen AXIOM.exe is not a Python interpreter and cannot run
+            # ``-m axiom.worker.child``. The Windows distribution ships the
+            # console worker beside the GUI; launch that sibling directly.
+            # Preserve the no-suffix form for non-Windows frozen builds.
+            launcher = Path(self.python_executable)
+            suffix = ".exe" if launcher.suffix.lower() == ".exe" else ""
+            sibling = launcher.with_name(f"AXIOM-Kronos{suffix}")
+            return [str(sibling)]
         return [self.python_executable, "-m", "axiom.worker.child"]
 
     def start(self) -> KronosStatus:

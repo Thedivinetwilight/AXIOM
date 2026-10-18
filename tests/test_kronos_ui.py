@@ -307,7 +307,7 @@ class TestDesktopStartup:
         from desktop import app as desktop_app
 
         monkeypatch.setitem(sys.modules, "PySide6.QtCore", None)
-        assert desktop_app.main() == 2
+        assert desktop_app.main([]) == 2
         out = capsys.readouterr().out
         assert "PySide6 is required" in out
         assert "requirements-desktop.txt" in out

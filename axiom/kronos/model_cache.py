@@ -1,9 +1,10 @@
 """Runtime model cache and integrity manifest for Kronos weights.
 
-Weights never live in Git. They are downloaded once into a per-user runtime
-cache and tracked by a manifest that records model id, revision, file size,
-SHA-256 and the download timestamp. Loading verifies the digest first, so a
-corrupted or swapped file cannot be silently loaded.
+Weights never live in Git and the verified runtime does not download them.
+Externally staged model/tokenizer files live in a per-user cache and are tracked
+by a manifest that records model id, revision, file size, SHA-256 and the
+staging timestamp. Loading verifies the digest first, so a corrupted or swapped
+file cannot be silently loaded.
 
 Windows:  ``%LOCALAPPDATA%\\AXIOM\\models\\kronos``
 macOS:    ``~/Library/Caches/AXIOM/models/kronos``

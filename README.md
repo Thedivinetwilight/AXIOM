@@ -1252,13 +1252,18 @@ dispersion, never as calibrated probability.
 pip install -r requirements.txt
 python -m pytest -q
 
-# Kronos runtime — a SEPARATE dependency set (only the Kronos process needs it).
+# Kronos runtime — a SEPARATE dependency set (only the worker needs it).
 desktop\run_kronos_windows.bat          # Windows: .venv-kronos + AXIOM_KRONOS_SOURCE
 pip install -r requirements-kronos.txt  # elsewhere
 
-# Weights are downloaded into %LOCALAPPDATA%\AXIOM\models\kronos and verified by
-# SHA-256 before loading. They are never committed (see .gitignore).
-python tools/build_windows_executables.py   # AXIOM.exe + AXIOM-Kronos.exe
+# Verified inference does not auto-download model weights. Stage approved model
+# and tokenizer files under %LOCALAPPDATA%\AXIOM\models\kronos, then verify
+# their SHA-256 manifests. Weights are never committed (see .gitignore).
+
+# Build on Windows with isolated environments: the desktop env has
+# requirements.txt + requirements-desktop.txt + PyInstaller and NO PyTorch;
+# the Kronos env has requirements-kronos.txt + PyInstaller.
+.venv-kronos\Scripts\python.exe tools\build_windows_executables.py --desktop-python .venv-desktop\Scripts\python.exe --kronos-python .venv-kronos\Scripts\python.exe
 ```
 
 Configuration lives in `AXIOM_KRONOS.env.example` (separate from Arena's `.env`

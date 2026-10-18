@@ -99,12 +99,77 @@ class TestNoWeightsInGit:
 
 
 class TestExecutableTargets:
+    def test_desktop_offscreen_smoke_entry_is_available(self):
+        source = (ROOT / "desktop" / "app.py").read_text(encoding="utf-8")
+        assert "smoke_mode = \"--smoke\" in argv" in source
+        assert "QTimer.singleShot(0, window.close)" in source
+
+    def test_package_target_resolves_to_its_main_script(self):
+        from tools.build_windows_executables import _entry_point
+
+        assert Path(_entry_point("desktop")) == ROOT / "desktop" / "__main__.py"
+        assert Path(_entry_point("axiom.worker.child")) == \
+            ROOT / "axiom" / "worker" / "child.py"
+
+    def test_frozen_gui_launches_the_sibling_kronos_executable(self, tmp_path,
+                                                               monkeypatch):
+        from axiom.models import KronosConfig
+        from axiom.worker.manager import KronosManager
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        gui = tmp_path / "AXIOM.exe"
+        worker = tmp_path / "AXIOM-Kronos.exe"
+        gui.write_bytes(b"test-only GUI marker")
+        worker.write_bytes(b"test-only worker marker")
+        manager = KronosManager(
+            KronosConfig(enabled=True, backend="stub"),
+            mode="process",
+            python_executable=str(gui),
+        )
+
+        assert manager.child_command() == [str(worker)]
+
     def test_build_script_defines_both_executables(self):
         source = (ROOT / "tools" / "build_windows_executables.py").read_text(
             encoding="utf-8")
         for required in ('"AXIOM"', '"AXIOM-Kronos"', "axiom.worker.child",
-                         "PyInstaller"):
+                         "PyInstaller", "--desktop-python", "--kronos-python"):
             assert required in source, f"build script is missing {required}"
+
+    def test_builder_uses_the_requested_interpreter_for_each_target(self, monkeypatch):
+        from tools import build_windows_executables as builder
+
+        commands = []
+        monkeypatch.setattr(
+            builder.subprocess, "call",
+            lambda command, **kwargs: commands.append((command, kwargs)) or 0)
+        desktop_python = "C:/build-envs/desktop/python.exe"
+        kronos_python = "C:/build-envs/kronos/python.exe"
+
+        assert builder.build(builder.TARGETS[0], python_executable=desktop_python,
+                             onedir=False, clean=False) == 0
+        assert builder.build(builder.TARGETS[1], python_executable=kronos_python,
+                             onedir=False, clean=False) == 0
+        assert commands[0][0][0] == desktop_python
+        assert commands[1][0][0] == kronos_python
+        assert Path(commands[0][0][-1]).as_posix().endswith("desktop/__main__.py")
+        assert Path(commands[1][0][-1]).as_posix().endswith("axiom/worker/child.py")
+
+    def test_gui_target_refuses_to_bundle_pytorch(self, monkeypatch, capsys):
+        from types import ModuleType
+
+        from tools import build_windows_executables as builder
+
+        monkeypatch.setitem(sys.modules, "PyInstaller", ModuleType("PyInstaller"))
+        monkeypatch.setattr(builder, "_has_pyinstaller", lambda _python: True)
+        monkeypatch.setattr(builder, "_module_available", lambda _python, _name: True)
+
+        result = builder.main([
+            "--only", "AXIOM", "--desktop-python", "gui-python",
+        ])
+
+        assert result == 2
+        assert "GUI environment must be PyTorch-free" in capsys.readouterr().err
 
     def test_targets_are_separate_processes(self):
         """The GUI target must not bundle the Kronos entry point and vice versa."""

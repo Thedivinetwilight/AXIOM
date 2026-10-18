@@ -39,11 +39,11 @@ These were **never demonstrated** in this environment. Do not claim otherwise.
 
 | Not verified | Why |
 | --- | --- |
-| **Real pretrained NeoQuasar weights** | `huggingface.co` is unreachable from this sandbox (`TLS/SSL connection has been closed (EOF)`). No weight file was ever downloaded. |
+| **Real pretrained NeoQuasar weights** | The local model cache contains none of the three supported model/tokenizer bundles (0/3 verified). This environment cannot fetch Hugging Face artifacts, and no credentials or unverified downloads were used. |
 | **Weight-backed inference** | Every inference test uses either the labelled stub backend or the real architecture with **random** weights. Forecast *quality* is entirely unassessed. |
 | **GPU / CUDA inference** | No CUDA device here; the GPU test skips itself. |
-| **A rendered PySide6 GUI** | `libGL.so.1` is missing and package indexes are unreachable, so no Qt widget was ever instantiated. The FORECAST panel is verified through its Qt-free controller/view models plus source-contract assertions on `desktop/app.py` — that is **not** the same as seeing it render. |
-| **`AXIOM.exe` / `AXIOM-Kronos.exe`** | No Windows host and no PyInstaller run. `tools/build_windows_executables.py` has **never been executed**; the packaging tests assert its configuration, not its output. |
+| **A rendered PySide6 GUI** | No Qt widget has yet been instantiated in this sandbox (PySide6 is not installed). The FORECAST panel is verified through its Qt-free controller/view models plus source-contract assertions — that is **not** a rendered-GUI verification. |
+| **`AXIOM.exe` / `AXIOM-Kronos.exe`** | The pair build and frozen-process tests are pending the dedicated genuine Windows workflow; packaging source tests alone are not executable verification. |
 
 Consequences to keep in mind:
 
@@ -349,22 +349,34 @@ desktop\run_kronos_windows.bat
 which creates `.venv-kronos`, installs `requirements-kronos.txt`, clones Kronos
 to `%LOCALAPPDATA%\AXIOM\Kronos` and sets `AXIOM_KRONOS_SOURCE`.
 
-Executables (Windows, inside `.venv-kronos`):
+Windows executable pair (build on Windows in two isolated environments; the
+GUI environment must not contain PyTorch):
 
 ```bat
-pip install pyinstaller
-python tools\build_windows_executables.py
+py -3.11 -m venv .venv-desktop
+.venv-desktop\Scripts\python.exe -m pip install -r requirements.txt -r requirements-desktop.txt pyinstaller
+py -3.11 -m venv .venv-kronos
+.venv-kronos\Scripts\python.exe -m pip install -r requirements-kronos.txt pyinstaller
+.venv-kronos\Scripts\python.exe tools\build_windows_executables.py --desktop-python .venv-desktop\Scripts\python.exe --kronos-python .venv-kronos\Scripts\python.exe
 ```
 
-→ `dist\AXIOM.exe` (GUI, no PyTorch) and `dist\AXIOM-Kronos.exe`
-(`python -m axiom.worker.child`). Weights are not bundled.
+The builder refuses to use a GUI interpreter where `torch` is importable. The
+pair is `dist\AXIOM.exe` (PySide6 GUI) plus `dist\AXIOM-Kronos.exe` (console
+worker and JSON-lines IPC). The Windows pair workflow smoke-tests the GUI
+offscreen and runs the worker protocol with the labelled **stub** backend; that
+is a packaging/process check, not pretrained inference.
 
-**Never executed.** There is no Windows host in the development environment, so
-`tools/build_windows_executables.py` has not been run and neither executable
-exists. The packaging tests assert the build *configuration* (targets, hidden
-imports, dependency separation, cache policy) — they do not prove a working
-binary. Treat the Windows path as untested until it has been built and launched
-on a real machine.
+Weights are not bundled and the verified backend does not download them
+automatically. Stage the approved complete model and tokenizer bundles under
+`%LOCALAPPDATA%\AXIOM\models\kronos`, record their local SHA-256 manifests, and
+verify them before inference. A passing stub smoke never establishes genuine
+Kronos model quality.
+
+At the time of this edit, the dedicated Windows workflow has not yet run on the
+current changes. Until it passes, neither executable pair startup nor packaged
+IPC is verified. Even after that workflow passes, genuine weight-backed
+inference remains unverified unless the artifact verifier confirms real local
+weights and a successful upstream inference.
 
 ---
 

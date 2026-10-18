@@ -1,0 +1,153 @@
+name: AXIOM Windows executable pair
+
+on:
+  push:
+    branches:
+      - arena/f97e3dd9-axiom
+    paths:
+      - "axiom/**"
+      - "desktop/**"
+      - "tools/build_windows_executables.py"
+      - "tools/kronos_executable_e2e.py"
+      - "requirements.txt"
+      - "requirements-desktop.txt"
+      - "requirements-kronos.txt"
+      - "tests/test_kronos_*.py"
+      - "tests/test_v2_desktop.py"
+      - "tests/test_final_api_desktop.py"
+      - "tests/test_risk_numeric_guards.py"
+      - "tests/test_live_config_check.py"
+      - ".github/workflows/kronos-windows-pair.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-pair:
+    name: Isolated GUI and Kronos executables, Windows E2E
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-desktop.txt
+            requirements-kronos.txt
+
+      - name: Install test and Kronos build dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-kronos.txt pyinstaller
+
+      - name: Create a PyTorch-free GUI build environment
+        shell: bash
+        run: |
+          python -m venv .venv-desktop
+          .venv-desktop/Scripts/python.exe -m pip install --upgrade pip
+          .venv-desktop/Scripts/python.exe -m pip install \
+            -r requirements.txt -r requirements-desktop.txt pyinstaller
+          .venv-desktop/Scripts/python.exe -c \
+            "import importlib.util; assert importlib.util.find_spec('torch') is None, 'PyTorch leaked into GUI build environment'"
+
+      - name: Run risk, numeric, desktop, and Kronos regressions
+        shell: bash
+        run: |
+          python -m pytest -q --no-header \
+            tests/test_risk_numeric_guards.py \
+            tests/test_live_config_check.py \
+            tests/test_v2_desktop.py \
+            tests/test_final_api_desktop.py \
+            tests/test_kronos_artifacts.py \
+            tests/test_kronos_end_to_end.py \
+            tests/test_kronos_input_contract.py \
+            tests/test_kronos_market_data.py \
+            tests/test_kronos_packaging.py \
+            tests/test_kronos_pipeline_store.py \
+            tests/test_kronos_research.py \
+            tests/test_kronos_runtime.py \
+            tests/test_kronos_safety.py \
+            tests/test_kronos_ui.py \
+            tests/test_kronos_worker.py
+
+      - name: Build both Windows executables from isolated environments
+        shell: bash
+        run: |
+          python -u tools/build_windows_executables.py --clean \
+            --desktop-python .venv-desktop/Scripts/python.exe \
+            --kronos-python python
+
+      - name: Smoke-test the actual AXIOM desktop executable
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ARENA_BACKEND_URL: http://127.0.0.1:1
+          ARENA_API_TOKEN: ""
+          AXIOM_KRONOS_ENABLED: "false"
+          MODE: PAPER
+          LIVE_TRADING: "false"
+          BROKER: LOCAL_PAPER
+        shell: bash
+        run: |
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          executable = Path("dist/AXIOM.exe")
+          if not executable.is_file():
+              raise SystemExit(f"missing desktop executable: {executable}")
+          result = subprocess.run(
+              [str(executable), "--smoke"], timeout=90, check=False)
+          if result.returncode:
+              raise SystemExit(f"AXIOM.exe --smoke exited {result.returncode}")
+          print("PASS: frozen AXIOM GUI initialized and closed (offscreen)")
+          PY
+
+      - name: Smoke-test the actual AXIOM-Kronos process and JSON-lines IPC
+        shell: bash
+        run: python tools/kronos_executable_e2e.py dist/AXIOM-Kronos.exe
+
+      - name: Record Windows pair hashes and sizes
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          records = []
+          for name in ("AXIOM.exe", "AXIOM-Kronos.exe"):
+              path = Path("dist") / name
+              if not path.is_file():
+                  raise SystemExit(f"missing built executable: {path}")
+              digest = hashlib.sha256()
+              with path.open("rb") as executable:
+                  for chunk in iter(lambda: executable.read(8 * 1024 * 1024), b""):
+                      digest.update(chunk)
+              records.append({"file": name, "size_bytes": path.stat().st_size,
+                              "sha256": digest.hexdigest()})
+          output = Path("dist/AXIOM-Windows-pair.build-info.json")
+          output.write_text(json.dumps({
+              "platform": "Windows x64",
+              "verification": "GUI smoke + labelled-stub worker/IPC smoke",
+              "real_pretrained_inference": "NOT VERIFIED; weights are not bundled",
+              "executables": records,
+          }, indent=2) + "\n", encoding="utf-8")
+          print(output.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload the verified Windows executable pair
+        uses: actions/upload-artifact@v4
+        with:
+          name: AXIOM-Windows-executable-pair
+          path: |
+            dist/AXIOM.exe
+            dist/AXIOM-Kronos.exe
+            dist/AXIOM-Windows-pair.build-info.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

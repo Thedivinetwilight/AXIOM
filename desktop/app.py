@@ -13,11 +13,18 @@ a running Arena backend via ARENA_BACKEND_URL and ARENA_API_TOKEN).
 from __future__ import annotations
 
 import os
+import sys
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    smoke_mode = "--smoke" in argv
+    unsupported = [arg for arg in argv if arg != "--smoke"]
+    if unsupported:
+        print("unsupported desktop argument(s): " + " ".join(unsupported))
+        return 2
     try:
-        from PySide6.QtCore import QPoint, QRect, Qt
+        from PySide6.QtCore import QPoint, QRect, Qt, QTimer
         from PySide6.QtGui import QPainter, QPen
         from PySide6.QtWidgets import (
             QApplication, QComboBox, QHBoxLayout, QHeaderView, QLabel,
@@ -495,6 +502,10 @@ def main() -> int:
     app = QApplication([])
     window = ArenaWindow()
     window.show()
+    if smoke_mode:
+        # Used by the Windows frozen-product gate: instantiate the real window,
+        # exercise initialization/close cleanup, and exit without a user action.
+        QTimer.singleShot(0, window.close)
     return app.exec()
 
 

@@ -15,7 +15,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from axiom.market.provider import MarketDataBar
+from axiom.market.provider import MarketDataBar, MarketDataError
+from axiom.market.validation import validate_market_data
 from axiom.models import KronosConfig
 from axiom.research.baselines import BASELINES, run_baseline
 from axiom.research.metrics import ForecastMetrics, aggregate, compute_metrics
@@ -128,7 +129,21 @@ class WalkForwardEvaluator:
 
     # -- evaluation ----------------------------------------------------------
     def run(self) -> WalkForwardReport:
-        notes: list[str] = []
+        # Validate before scoring so malformed prices cannot be silently hidden
+        # by non-finite metric aggregation. Gaps remain explicit research notes;
+        # this evaluator has no exchange calendar unless its caller supplies one.
+        quality = validate_market_data(
+            self.bars,
+            self.timeframe,
+            min_history=1,
+            strict_gaps=False,
+            expected_instrument=self.instrument or None,
+        )
+        if not quality.ok:
+            detail = "; ".join(quality.errors[:8])
+            raise MarketDataError(f"walk-forward data rejected: {detail}")
+
+        notes: list[str] = list(quality.warnings)
         if self.kronos_forecaster is None:
             notes.append("no Kronos forecaster supplied; baselines only")
         origins = self.origins()

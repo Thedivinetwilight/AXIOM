@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from axiom.market.provider import MarketDataBar
+from axiom.market.provider import MarketDataBar, MarketDataError
 from axiom.market.replay import ReplayMarketDataProvider
 from axiom.models import KronosConfig
 from axiom.research.baselines import (
@@ -208,6 +208,21 @@ class TestWalkForward:
         report = WalkForwardEvaluator(bars, config, timeframe="1D", stride=30).run()
         assert set(report.models) == {"drift", "last_close", "moving_average"}
         assert any("no Kronos forecaster" in note for note in report.notes)
+
+    def test_walk_forward_rejects_nonfinite_market_data_before_scoring(self):
+        bars = fixture_bars(100)
+        original = bars[20]
+        bars[20] = MarketDataBar(
+            original.timestamp, original.open, original.high, original.low,
+            float("nan"), original.volume, original.instrument,
+        )
+        config = KronosConfig(enabled=True, backend="stub", lookback=32, pred_len=4,
+                              min_history=16)
+
+        with pytest.raises(MarketDataError, match="non-finite"):
+            WalkForwardEvaluator(
+                bars, config, instrument="DEMO", timeframe="1D", stride=30
+            ).run()
 
     def test_unknown_baseline_is_rejected(self):
         config = KronosConfig(enabled=True, backend="stub", lookback=16, pred_len=2,

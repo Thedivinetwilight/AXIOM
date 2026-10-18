@@ -8,14 +8,18 @@ They are built separately on purpose: the GUI process must stay small and must
 never load PyTorch, while the Kronos process is allowed to be heavy because a
 crash, an OOM or a long inference cannot take the terminal down.
 
-Run this on Windows inside the Kronos virtual environment:
+Run this on Windows with separate build environments so the GUI bundle cannot
+collect PyTorch from the Kronos environment. Install ``requirements.txt`` and
+``requirements-desktop.txt`` plus PyInstaller into the desktop environment
+(without PyTorch); install ``requirements-kronos.txt`` plus PyInstaller into the
+worker environment. Run the builder from the worker environment:
 
-    .venv-kronos\\Scripts\\activate.bat
-    pip install pyinstaller
-    python tools\\build_windows_executables.py
+    python tools/build_windows_executables.py --desktop-python <desktop-python.exe> --kronos-python <kronos-python.exe>
 
-Model weights are NOT bundled. They are downloaded on first load into
-%LOCALAPPDATA%\\AXIOM\\models\\kronos and verified against the SHA-256 manifest.
+Model weights are NOT bundled or automatically downloaded by verified
+inference. Stage the complete model/tokenizer artifacts under
+%LOCALAPPDATA%\\AXIOM\\models\\kronos and verify them against the local
+SHA-256 manifests before enabling inference.
 """
 
 from __future__ import annotations
@@ -51,9 +55,38 @@ TARGETS = (
 )
 
 
-def build(target: dict, *, onedir: bool, clean: bool) -> int:
+def _has_pyinstaller(python_executable: str) -> bool:
+    try:
+        result = subprocess.run(
+            [python_executable, "-m", "PyInstaller", "--version"],
+            capture_output=True, text=True, check=False)
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _module_available(python_executable: str, module: str) -> bool | None:
+    """Return module presence, or None if the target interpreter could not run."""
+    probe = (
+        "import importlib.util, sys; "
+        "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [python_executable, "-c", probe, module],
+            capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def build(target: dict, *, python_executable: str, onedir: bool, clean: bool) -> int:
     command = [
-        sys.executable, "-m", "PyInstaller",
+        python_executable, "-m", "PyInstaller",
         "--name", target["name"],
         "--noconfirm",
         "--console" if target["name"] == "AXIOM-Kronos" else "--windowed",
@@ -75,7 +108,22 @@ def build(target: dict, *, onedir: bool, clean: bool) -> int:
 
 
 def _entry_point(module: str) -> str:
-    return module.replace(".", os.sep) + ".py"
+    """Resolve a module name to its package entry script.
+
+    ``desktop`` is a package, not a top-level ``desktop.py`` file; PyInstaller
+    must receive its ``__main__.py``. Plain leaf modules such as
+    ``axiom.worker.child`` still resolve to their matching ``.py`` file.
+    """
+    module_path = ROOT / module.replace(".", os.sep)
+    if module_path.is_dir():
+        entry = module_path / "__main__.py"
+        if not entry.is_file():
+            raise FileNotFoundError(f"package entry point not found: {entry}")
+        return str(entry)
+    entry = module_path.with_suffix(".py")
+    if not entry.is_file():
+        raise FileNotFoundError(f"module entry point not found: {entry}")
+    return str(entry)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clean", action="store_true", help="clear PyInstaller caches")
     parser.add_argument("--only", choices=[t["name"] for t in TARGETS],
                         help="build a single target")
+    parser.add_argument(
+        "--desktop-python", default=sys.executable,
+        help="Python environment for AXIOM.exe (install PySide6, but not PyTorch)")
+    parser.add_argument(
+        "--kronos-python", default=sys.executable,
+        help="Python environment for AXIOM-Kronos.exe (install the Kronos dependencies)")
     args = parser.parse_args(argv)
 
     if os.name != "nt":  # informational only; the build itself needs Windows
@@ -96,13 +150,40 @@ def main(argv: list[str] | None = None) -> int:
         print("PyInstaller is required:  pip install pyinstaller", file=sys.stderr)
         return 2
 
+    selected = [target for target in TARGETS
+                if not args.only or target["name"] == args.only]
+    interpreters = {
+        "AXIOM": args.desktop_python,
+        "AXIOM-Kronos": args.kronos_python,
+    }
+    for target in selected:
+        python_executable = interpreters[target["name"]]
+        if not _has_pyinstaller(python_executable):
+            print(
+                f"PyInstaller is required in the {target['name']} build "
+                f"environment ({python_executable})",
+                file=sys.stderr,
+            )
+            return 2
+        if not target["heavy"]:
+            torch_available = _module_available(python_executable, "torch")
+            if torch_available is not False:
+                reason = ("PyTorch is installed" if torch_available else
+                          "the target Python environment could not be inspected")
+                print(
+                    f"Refusing to build AXIOM.exe: the GUI environment must be "
+                    f"PyTorch-free ({reason}; {python_executable})",
+                    file=sys.stderr,
+                )
+                return 2
+
     DIST.mkdir(parents=True, exist_ok=True)
     failures = []
-    for target in TARGETS:
-        if args.only and target["name"] != args.only:
-            continue
+    for target in selected:
         print(f"\n=== {target['name']} ({target['module']}) ===")
-        code = build(target, onedir=args.onedir, clean=args.clean)
+        python_executable = interpreters[target["name"]]
+        code = build(target, python_executable=python_executable,
+                     onedir=args.onedir, clean=args.clean)
         if code != 0:
             failures.append(target["name"])
     if failures:

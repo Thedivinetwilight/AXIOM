@@ -14,8 +14,9 @@ if not exist "%LOCALAPPDATA%\AXIOM\Kronos" (
 )
 setx AXIOM_KRONOS_SOURCE "%LOCALAPPDATA%\AXIOM\Kronos"
 
-REM 3) Weights are downloaded on first load into the runtime model cache:
-REM    %%LOCALAPPDATA%%\AXIOM\models\kronos  (never committed to Git)
+REM 3) Verified inference does NOT download weights automatically. Stage the
+REM    approved model/tokenizer files under %%LOCALAPPDATA%%\AXIOM\models\kronos,
+REM    then record and verify the SHA-256 manifests before enabling inference.
 echo.
 echo AXIOM-Kronos runtime ready. Start the terminal with:
 echo   python -m desktop
