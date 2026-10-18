@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import socket
-import sys
 import threading
 import time
 import urllib.error

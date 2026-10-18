@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 
 
 def _load_avg() -> float | None:

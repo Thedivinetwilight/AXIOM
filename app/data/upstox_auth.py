@@ -136,7 +136,7 @@ async def verify_feed_credential(
             "check network latency / firewall and retry.",
             now,
         )
-    except httpx.ConnectError as exc:
+    except httpx.ConnectError:
         return CredentialCheck(
             "dns_or_connect_failure", None, False,
             "Could not reach Upstox (DNS/TCP connection failed); verify internet "

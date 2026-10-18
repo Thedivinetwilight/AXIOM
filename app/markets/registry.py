@@ -11,7 +11,7 @@ are never silently assumed to be UTC.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Mapping
 from zoneinfo import ZoneInfo

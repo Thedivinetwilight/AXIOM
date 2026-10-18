@@ -17,7 +17,7 @@ Rules:
 from __future__ import annotations
 
 import math
-from typing import Callable, Iterable
+from typing import Iterable
 
 
 class ChangeEngine:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import bisect
 import threading
 import time
-from collections import deque
 from contextlib import contextmanager
 
 STAGES = (
