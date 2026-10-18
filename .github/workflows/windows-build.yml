@@ -120,25 +120,30 @@ jobs:
           retention-days: 90
 
       - name: Install Inno Setup
-        shell: bash
+        shell: powershell
         run: |
           choco install innosetup -y --no-progress
-          # Inno Setup 6 default install path
-          echo "C:\\Program Files (x86)\\Inno Setup 6" >> $GITHUB_PATH
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            Write-Host "Inno Setup found at: $iscc"
+          } else {
+            Write-Error "Inno Setup not found"
+            exit 1
+          }
 
       - name: Build Inno Setup installer
-        shell: bash
+        shell: powershell
         run: |
-          cd packaging
-          cp ../release/Arena.exe ./Arena.exe
-          VERSION=$(python -c "import sys; sys.path.insert(0,'..'); from app import __version__; print(__version__)")
-          ISCC.exe installer.iss \
-            /DArenaExe="./Arena.exe" \
-            /DAppVersion="$VERSION" \
-            /O"../release" \
-            /F"AXIOM-Setup"
-          echo "Installer built: release/AXIOM-Setup.exe"
-          ls -la ../release/AXIOM-Setup.exe
+          $version = python -c "import sys; sys.path.insert(0,'.'); from app import __version__; print(__version__)"
+          Write-Host "Building installer for version: $version"
+          Copy-Item "release\Arena.exe" "packaging\Arena.exe" -Force
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\installer.iss" "/DArenaExe=packaging\Arena.exe" "/DAppVersion=$version" "/Orelease" "/FAXIOM-Setup"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "Installer built: release\AXIOM-Setup.exe"
+          Get-Item "release\AXIOM-Setup.exe" | Select-Object Name, Length
 
       - name: Record installer checksum
         shell: bash
