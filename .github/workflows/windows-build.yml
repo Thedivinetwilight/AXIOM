@@ -1,0 +1,203 @@
+name: Windows Build and Installer
+
+on:
+  push:
+    branches:
+      - arena/a936d05d-axiom
+    paths:
+      - "packaging/**"
+      - "build_exe.py"
+      - "arena.py"
+      - "run.py"
+      - "requirements.txt"
+      - ".github/workflows/windows-build.yml"
+      - "app/**"
+      - "tests/test_packaging_single_exe.py"
+      - "tests/test_feature_console.py"
+      - "tests/test_windows_portability.py"
+      - "tests/test_v310_frontend_integrity.py"
+      - "tests/test_v310_wizard_flow.py"
+      - "tests/test_v310_mode_isolation.py"
+      - "tests/test_v310_instance_guard.py"
+      - "tests/test_v310_ui_action_matrix.py"
+      - "tests/test_v310_frozen_e2e.py"
+      - "tests/test_safety_and_quality_regressions.py"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows executable and installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify JavaScript runtime
+        shell: bash
+        run: node --version || echo "::error::node is required for frontend integrity checks"
+
+      - name: Packaging regression suite (hard gate)
+        id: packaging
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header \
+            tests/test_packaging_single_exe.py tests/test_feature_console.py \
+            tests/test_windows_portability.py \
+            tests/test_v310_frontend_integrity.py tests/test_v310_wizard_flow.py \
+            tests/test_v310_mode_isolation.py tests/test_v310_instance_guard.py \
+            tests/test_v310_ui_action_matrix.py \
+            2>&1 | tee packaging-output.txt
+
+      - name: Full suite on Windows (hard gate)
+        id: fullsuite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
+
+      - name: Build executable with E2E verification (hard gate)
+        shell: bash
+        run: python build_exe.py --test
+
+      - name: Run frozen E2E gate
+        shell: bash
+        run: python -m pytest -q --no-header tests/test_v310_frozen_e2e.py
+
+      - name: Record build identity and checksums
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib, os
+
+          exe = pathlib.Path("dist/Arena.exe")
+          if not exe.exists():
+              raise SystemExit("Arena.exe not found after build")
+
+          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+          size_bytes = exe.stat().st_size
+
+          # Read build metadata
+          meta_path = pathlib.Path("app/BUILD_META.json")
+          meta = json.loads(meta_path.read_text(encoding="utf-8"))
+          commit = meta.get("commit", "unknown")
+          version = meta.get("version", "unknown")
+
+          # Create release directory
+          release = pathlib.Path("release")
+          release.mkdir(exist_ok=True)
+
+          # Copy and hash
+          target = release / "Arena.exe"
+          target.write_bytes(exe.read_bytes())
+          checksum_file = release / "SHA256SUMS-windows-x64.txt"
+          checksum_file.write_text(f"{digest}  Arena.exe\n", encoding="utf-8")
+
+          # Build info
+          build_id = f"{version}-{commit[:10]}"
+          record = {
+              "artifact": "Arena.exe",
+              "version": version,
+              "build_id": build_id,
+              "commit": commit,
+              "built_at": meta.get("built_at", "unknown"),
+              "platform": meta.get("platform", "unknown"),
+              "size_bytes": size_bytes,
+              "sha256": digest,
+          }
+          record_path = release / "Arena.exe.build-info.json"
+          record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+          print(f"Artifact: Arena.exe")
+          print(f"Size: {size_bytes} bytes ({size_bytes / 1024 / 1024:.1f} MB)")
+          print(f"SHA-256: {digest}")
+          print(f"Commit: {commit}")
+          print(f"Build ID: {build_id}")
+          PY
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-windows-x64
+          path: |
+            release/Arena.exe
+            release/SHA256SUMS-windows-x64.txt
+            release/Arena.exe.build-info.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Install Inno Setup
+        shell: bash
+        run: |
+          choco install innosetup -y --no-progress
+          echo "C:\Program Files (x86)\Inno Setup 6" >> $GITHUB_PATH
+
+      - name: Build installer
+        shell: bash
+        run: |
+          cd packaging
+          # Copy the exe to packaging directory for the installer
+          cp ../release/Arena.exe ./Arena.exe
+          ISCC.exe installer.iss /DArenaExe="./Arena.exe" /DAppVersion="$(python -c 'import sys; sys.path.insert(0,"."); from app import __version__; print(__version__)')" /O"../release" /F"AXIOM-Setup"
+          echo "Installer built successfully"
+
+      - name: Record installer checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib
+          installer = pathlib.Path("release/AXIOM-Setup.exe")
+          if installer.exists():
+              digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+              size = installer.stat().st_size
+              pathlib.Path("release/SHA256SUMS-installer.txt").write_text(
+                  f"{digest}  AXIOM-Setup.exe\n", encoding="utf-8")
+              print(f"Installer: {size} bytes ({size / 1024 / 1024:.1f} MB)")
+              print(f"SHA-256: {digest}")
+          else:
+              print("WARNING: Installer not found")
+          PY
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AXIOM-Installer-Windows
+          path: |
+            release/AXIOM-Setup.exe
+            release/SHA256SUMS-installer.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows Build — $(date -u)"
+            echo
+            echo "- Source commit: $(git rev-parse HEAD)"
+            echo "- Packaging gates: **${{ steps.packaging.outcome }}**"
+            echo "- Full suite: **${{ steps.fullsuite.outcome }}**"
+            if [ -f "release/Arena.exe" ]; then
+              echo "- Executable: **$(wc -c < release/Arena.exe | tr -d ' ') bytes**"
+              echo "- SHA-256: \`$(cat release/SHA256SUMS-windows-x64.txt)\`"
+            fi
+            if [ -f "release/AXIOM-Setup.exe" ]; then
+              echo "- Installer: **$(wc -c < release/AXIOM-Setup.exe | tr -d ' ') bytes**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
