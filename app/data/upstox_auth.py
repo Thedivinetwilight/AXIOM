@@ -16,7 +16,7 @@ Secrets (client_secret, access_token) are never logged, printed, or embedded in
 exceptions. Tokens obtained here belong in `.env` (gitignored), never in code.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -56,19 +56,21 @@ CREDENTIAL_DOCS = {
 }
 
 GUIDANCE_REJECTED = (
-    "Credential not authorized for Market Data Feed V3 (HTTP 401). Do not assume "
-    "an Analytics Token works for the V3 feed: the current analytics-token docs "
-    "list a 'Websocket' category among supported read-only APIs, but access must "
-    "be verified behaviorally with your own token. A standard OAuth login access "
-    "token (python -m app upstox-login) is the documented path for the feed; "
-    "regenerate your token if it expired."
+    "Upstox returned HTTP 401 from the Market Data Feed V3 authorize endpoint: "
+    "it did not accept this bearer access token. HTTP 401 alone cannot distinguish "
+    "an expired, revoked, malformed, or unsupported token; the response body is "
+    "intentionally omitted. Obtain a fresh standard OAuth login token with "
+    "python -m app upstox-login, confirm it is stored as "
+    "MARKET_DATA_ACCESS_TOKEN or UPSTOX_ACCESS_TOKEN, and retry. Do not assume an "
+    "Analytics Token works for the V3 feed; access is verified behaviorally."
 )
 GUIDANCE_FORBIDDEN = (
-    "Credential refused for Market Data Feed V3 (HTTP 403). If this is an "
-    "Analytics Token, websocket/feed access depends on current Upstox policy and "
-    "account state — the documented safe path for the V3 market-data feed is a "
-    "standard OAuth login access token. Check the official analytics-token and "
-    "authorize pages before retrying."
+    "Upstox returned HTTP 403 from the Market Data Feed V3 authorize endpoint: "
+    "the request reached Upstox, but this account/token was refused feed access. "
+    "This is an authorization/permission result, not a network or TLS failure. "
+    "Check the account and app's Market Data Feed permissions, use the standard "
+    "OAuth login access token documented for the feed, and contact Upstox if the 403 "
+    "continues. The response body is intentionally omitted."
 )
 
 
@@ -97,6 +99,186 @@ class CredentialCheck:
         }
 
 
+@dataclass(frozen=True)
+class _FeedAuthorizationProbe:
+    """Internal authorization result; the one-use socket URL is never public."""
+
+    check: CredentialCheck
+    websocket_uri: str | None = field(default=None, repr=False, compare=False)
+
+
+def _has_tls_error(exc: BaseException) -> bool:
+    """Find TLS/certificate errors wrapped by httpx/httpcore connect errors."""
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLError):
+            return True
+        for wrapped in (current.__cause__, current.__context__):
+            if isinstance(wrapped, BaseException):
+                pending.append(wrapped)
+    return False
+
+
+def _is_upstox_websocket_uri(uri: object) -> bool:
+    """Accept only secure Upstox hosts before handing over its one-use URL."""
+    if not isinstance(uri, str):
+        return False
+    try:
+        parsed = urlsplit(uri)
+        host = (parsed.hostname or "").rstrip(".").lower()
+        return (
+            parsed.scheme.lower() == "wss"
+            and (host == "upstox.com" or host.endswith(".upstox.com"))
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+        )
+    except ValueError:
+        return False
+
+
+async def _probe_feed_credential(
+    token: str,
+    *,
+    authorize_url: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout: float = 20.0,
+) -> _FeedAuthorizationProbe:
+    """Internal read-only probe. The signed one-use URI stays in memory only."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    def result(verdict, status, authenticated, guidance, websocket_uri=None):
+        return _FeedAuthorizationProbe(
+            CredentialCheck(verdict, status, authenticated, guidance, now),
+            websocket_uri,
+        )
+
+    if not isinstance(token, str) or not token.strip():
+        return result(
+            "invalid_input", None, False,
+            "No Upstox market-data access token is configured. Set "
+            "MARKET_DATA_ACCESS_TOKEN or UPSTOX_ACCESS_TOKEN in the environment/.env.",
+        )
+    try:
+        client_kwargs: dict = {"timeout": timeout, "follow_redirects": False}
+        if transport is None:
+            # Keep certificate and hostname verification enabled. The spec ships
+            # this certifi bundle into frozen builds; test transports bypass TLS.
+            client_kwargs["verify"] = _SSL_CONTEXT
+        async with httpx.AsyncClient(transport=transport, **client_kwargs) as client:
+            response = await client.get(
+                authorize_url,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+    except httpx.TimeoutException as exc:
+        return result(
+            "timeout", None, False,
+            f"Connection to Upstox timed out after {timeout:g}s ({type(exc).__name__}); "
+            "check network latency / firewall and retry. This is not a credential verdict.",
+        )
+    except TimeoutError as exc:
+        return result(
+            "timeout", None, False,
+            f"Connection to Upstox timed out ({type(exc).__name__}); check network "
+            "latency / firewall and retry. This is not a credential verdict.",
+        )
+    except httpx.ConnectError as exc:
+        if _has_tls_error(exc):
+            return result(
+                "tls_failure", None, False,
+                "TLS certificate/handshake validation failed; verify the PC clock, "
+                "certifi CA bundle, and any proxy or antivirus HTTPS inspection. "
+                "The credential was not evaluated.",
+            )
+        return result(
+            "dns_or_connect_failure", None, False,
+            "Could not reach Upstox (DNS/TCP connection failed); verify internet "
+            "connectivity, proxy settings, and firewall. This is a network failure, "
+            "not a credential failure.",
+        )
+    except ssl.SSLError as exc:
+        return result(
+            "tls_failure", None, False,
+            "TLS certificate/handshake validation failed; verify the PC clock, "
+            "certifi CA bundle, and any proxy or antivirus HTTPS inspection. "
+            "The credential was not evaluated.",
+        )
+    except httpx.RemoteProtocolError as exc:
+        if _has_tls_error(exc):
+            return result(
+                "tls_failure", None, False,
+                "TLS certificate/handshake validation failed; verify the PC clock, "
+                "certifi CA bundle, and any proxy or antivirus HTTPS inspection. "
+                "The credential was not evaluated.",
+            )
+        return result(
+            "protocol_failure", None, False,
+            f"Upstox returned an invalid HTTPS protocol response ({type(exc).__name__}); "
+            "check proxy/firewall behavior. The credential was not evaluated.",
+        )
+    except OSError as exc:
+        if _has_tls_error(exc):
+            return result(
+                "tls_failure", None, False,
+                "TLS certificate/handshake validation failed; verify the PC clock, "
+                "certifi CA bundle, and any proxy or antivirus HTTPS inspection. "
+                "The credential was not evaluated.",
+            )
+        return result(
+            "dns_or_connect_failure", None, False,
+            "Could not establish the HTTPS connection to Upstox (DNS/TCP failure); "
+            "verify internet connectivity, proxy settings, and firewall. "
+            "The credential was not evaluated.",
+        )
+    except httpx.HTTPError as exc:
+        if _has_tls_error(exc):
+            return result(
+                "tls_failure", None, False,
+                "TLS certificate/handshake validation failed; verify the PC clock, "
+                "certifi CA bundle, and any proxy or antivirus HTTPS inspection. "
+                "The credential was not evaluated.",
+            )
+        return result(
+            "unreachable", None, False,
+            f"Upstox authorize endpoint could not be reached ({type(exc).__name__}); "
+            "connectivity failed before the credential could be evaluated.",
+        )
+
+    if response.status_code == 200:
+        try:
+            body = response.json()
+            uri = body["data"]["authorized_redirect_uri"] if isinstance(body, dict) else None
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError):
+            uri = None
+        if _is_upstox_websocket_uri(uri):
+            return result(
+                "feed_ok", 200, True,
+                "Credential is authorized for Market Data Feed V3 via the documented "
+                "GET authorize probe. The WebSocket has not yet been tested.",
+                uri,
+            )
+        return result(
+            "unexpected_response", 200, False,
+            "Upstox returned HTTP 200 but the response body or secure Upstox "
+            "authorized_redirect_uri was malformed; refusing to connect.",
+        )
+    if response.status_code == 401:
+        return result("rejected", 401, False, GUIDANCE_REJECTED)
+    if response.status_code == 403:
+        return result("forbidden", 403, False, GUIDANCE_FORBIDDEN)
+    return result(
+        f"http_{response.status_code}", response.status_code, False,
+        f"Upstox authorize returned HTTP {response.status_code}; the HTTPS endpoint "
+        "was reached, but this response does not prove credential authorization. "
+        "See the official documentation before retrying.",
+    )
+
+
 async def verify_feed_credential(
     token: str,
     *,
@@ -109,84 +291,10 @@ async def verify_feed_credential(
     Performs the documented GET authorize probe — nothing else, no WebSocket
     connection, no order endpoint, and the token is never logged or returned.
     """
-    now = datetime.now(timezone.utc).isoformat()
-    if not isinstance(token, str) or not token.strip():
-        return CredentialCheck(
-            "invalid_input", None, False,
-            "No credential provided. Set MARKET_DATA_ACCESS_TOKEN or UPSTOX_ACCESS_TOKEN "
-            "in the environment/.env.",
-            now,
-        )
-    try:
-        client_kwargs: dict = {"timeout": timeout}
-        if transport is None:
-            # Only pin the trust store when using a real network transport;
-            # unit tests inject their own _StaticTransport which does not
-            # accept `verify`.
-            client_kwargs["verify"] = _SSL_CONTEXT
-        async with httpx.AsyncClient(transport=transport, **client_kwargs) as client:
-            response = await client.get(
-                authorize_url,
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            )
-    except httpx.TimeoutException as exc:
-        return CredentialCheck(
-            "timeout", None, False,
-            f"Connection to Upstox timed out after {timeout:g}s ({type(exc).__name__}); "
-            "check network latency / firewall and retry.",
-            now,
-        )
-    except httpx.ConnectError as exc:
-        return CredentialCheck(
-            "dns_or_connect_failure", None, False,
-            "Could not reach Upstox (DNS/TCP connection failed); verify internet "
-            "connectivity, proxy settings, and firewall. This is a network failure, "
-            "not a credential failure.",
-            now,
-        )
-    except (httpx.RemoteProtocolError, ssl.SSLError) as exc:
-        return CredentialCheck(
-            "tls_failure", None, False,
-            f"TLS handshake failed ({type(exc).__name__}); check that local TLS / "
-            "proxy / antivirus interception is not rewriting the Upstox certificate. "
-            "This is not a credential failure.",
-            now,
-        )
-    except httpx.HTTPError as exc:
-        return CredentialCheck(
-            "unreachable", None, False,
-            f"Upstox authorize endpoint unreachable from this network "
-            f"({type(exc).__name__}); connectivity, not the credential, failed first.",
-            now,
-        )
-    if response.status_code == 200:
-        try:
-            uri = response.json()["data"]["authorized_redirect_uri"]
-        except (KeyError, TypeError, ValueError):
-            uri = None
-        if isinstance(uri, str) and uri.startswith("wss://"):
-            return CredentialCheck(
-                "feed_ok", 200, True,
-                "Credential is authorized for Market Data Feed V3 (verified via the "
-                "documented GET authorize probe). Safe to open the WebSocket.",
-                now,
-            )
-        return CredentialCheck(
-            "unexpected_response", 200, False,
-            "Authorize returned 200 but an unexpected body shape; refusing to "
-            "connect. The official response must carry data.authorized_redirect_uri.",
-            now,
-        )
-    if response.status_code == 401:
-        return CredentialCheck("rejected", 401, False, GUIDANCE_REJECTED, now)
-    if response.status_code == 403:
-        return CredentialCheck("forbidden", 403, False, GUIDANCE_FORBIDDEN, now)
-    return CredentialCheck(
-        f"http_{response.status_code}", response.status_code, False,
-        f"Upstox authorize returned HTTP {response.status_code}; see the official "
-        "documentation before retrying.",
-        now,
+    outcome = await _probe_feed_credential(
+        token, authorize_url=authorize_url, transport=transport, timeout=timeout,
     )
+    return outcome.check
 
 
 def build_login_url(client_id: str, redirect_uri: str, state: str | None = None) -> str:

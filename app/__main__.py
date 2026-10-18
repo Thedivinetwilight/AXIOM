@@ -1,8 +1,8 @@
 """Paper-only CLI: `python -m app <command>` (V0.6.2).
 
 Commands:
-  upstox-test     Real authentication + connectivity test (needs UPSTOX/MARKET
-                  DATA token in the environment; safe, read-only, no orders).
+  upstox-test     Safe Upstox HTTPS authorization probe; optionally checks a
+                  bounded WebSocket subscription for actual market data.
   market-stream   Connect and print normalized completed-candle market events
                   (plus market-status changes) from the real feed.
   paper-live      Full pipeline: Upstox → candles → strategies → risk →
@@ -43,8 +43,10 @@ import argparse
 import asyncio
 import importlib
 import json
-from app.utils.clock import utc_today_iso
+import math
 from pathlib import Path
+
+from app.utils.clock import utc_today_iso
 
 
 def _load_settings():
@@ -64,61 +66,22 @@ def _provider_or_exit(settings):
 
 
 def cmd_upstox_test(args) -> int:
-    """Credential verification BEFORE connecting, then auth+connectivity proof."""
+    """Read-only HTTPS authorization probe plus an optional bounded feed check."""
     settings = _load_settings()
-    provider = _provider_or_exit(settings)
+    from app.data.upstox_diagnostic import run_upstox_diagnostic
 
-    async def scenario():
-        from app.data.upstox_auth import verify_feed_credential
-
-        summary = {
-            "command": "upstox-test",
-            "ok": False,
-            "credential_check": None,
-            "authenticated": False,
-            "websocket": "not_tried",
-            "frames": 0,
-            "candles": 0,
-            "market_status": None,
-            "provider": "upstox",
-            "instrument_keys": provider.metrics()["instrument_keys"],
-            "note": "read-only market data; orders remain simulated (PAPER ONLY)",
-        }
-        try:
-            # V0.6.3: never assume the credential type — verify feed access
-            # behaviorally BEFORE any WebSocket connection. Tokens are opaque;
-            # only the documented GET authorize probe can prove feed access.
-            check = await verify_feed_credential(
-                settings.market_data_access_token,
-                authorize_url=settings.market_data_authorize_url,
-            )
-            summary["credential_check"] = check.public_view()
-            if check.verdict != "feed_ok":
-                summary["note"] += "; credential NOT verified for feed V3 → connection NOT attempted"
-                return summary
-            agen = provider.stream(provider.symbols, provider.timeframe)
-            try:
-                bar = await asyncio.wait_for(anext(agen), timeout=args.timeout)
-                summary["websocket"] = "connected"
-                summary["candles"] = 1
-                summary["first_completed_candle"] = bar.to_dict()
-            except (asyncio.TimeoutError, StopAsyncIteration):
-                summary["websocket"] = (
-                    "connected_no_completed_candle_in_window"
-                    if provider.status in {"CONNECTED", "STALE"}
-                    else provider.status
-                )
-            metrics = provider.metrics()
-            summary["authenticated"] = metrics["authenticated"]
-            summary["market_status"] = metrics["market_status"]
-            summary["frames"] = metrics["feed_counters"]["completed_candles"]
-            summary["ok"] = summary["websocket"] == "connected"
-        finally:
-            await provider.close()
-        return summary
-
-    summary = asyncio.run(scenario())
+    summary = asyncio.run(run_upstox_diagnostic(
+        settings.market_data_access_token,
+        instrument_keys=settings.market_data_symbol_list(),
+        mode=settings.market_data_mode,
+        test_websocket=args.websocket,
+        duration=args.duration,
+    ))
+    # The report contains only stage/status/guidance fields. The credential and
+    # Upstox's one-use signed WebSocket URL are deliberately not serializable.
     print(json.dumps(summary, indent=2, allow_nan=False))
+    if summary["credential_authorization"]["status"] == "missing_credential":
+        return 2
     return 0 if summary["ok"] else 1
 
 
@@ -1727,6 +1690,16 @@ def cmd_upstox_login(args) -> int:
     return 0
 
 
+def _diagnostic_duration_arg(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("duration must be a number") from None
+    if not math.isfinite(value) or value <= 0 or value > 120:
+        raise argparse.ArgumentTypeError("duration must be finite and between 0 and 120 seconds")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     from app import __version__
 
@@ -1739,9 +1712,25 @@ def parser() -> argparse.ArgumentParser:
                    version=f"Arena {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    test = sub.add_parser("upstox-test", help="test Upstox auth + connectivity (read-only)")
-    test.add_argument("--timeout", type=float, default=15.0,
-                      help="seconds to wait for a first completed candle")
+    test = sub.add_parser(
+        "upstox-test",
+        help="verify Upstox Market Data Feed authorization (read-only)",
+        description=(
+            "Reads MARKET_DATA_ACCESS_TOKEN / UPSTOX_ACCESS_TOKEN from Arena's "
+            "local configuration, probes the documented HTTPS authorize endpoint, "
+            "and optionally opens a bounded read-only WebSocket subscription. "
+            "No orders are placed and no configuration is changed."
+        ),
+    )
+    test.add_argument(
+        "--websocket", action=argparse.BooleanOptionalAction, default=True,
+        help="after successful HTTPS authorization, test the feed handshake and "
+             "wait for one valid market-data message (default: enabled)",
+    )
+    test.add_argument(
+        "--duration", "--timeout", dest="duration", type=_diagnostic_duration_arg, default=30.0,
+        help="maximum WebSocket wait in seconds (0 < value <= 120; default: 30)",
+    )
     test.set_defaults(func=cmd_upstox_test)
 
     stream = sub.add_parser("market-stream", help="print normalized real market events")

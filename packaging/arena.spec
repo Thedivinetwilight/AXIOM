@@ -42,6 +42,7 @@ hiddenimports = [
     # cannot silently drop them from the bundle.
     "app.data.upstox_auth",
     "app.data.upstox_stream",
+    "app.data.upstox_diagnostic",
     "app.brokers.sandbox",
     "app.api.routes.console",
     "app.api.routes.setup",

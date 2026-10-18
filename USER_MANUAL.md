@@ -201,15 +201,33 @@ python -m app upstox-login
 
 ### `upstox-test`
 ```bash
-python -m app upstox-test [--timeout SECONDS]
+python -m app upstox-test --websocket --duration 45
+# HTTPS authorization only (skip the WebSocket):
+python -m app upstox-test --no-websocket
 ```
-- Behavioral credential verification for the **market data feed** (documented
-  authorize probe) and, if verified, one WebSocket connection attempt waiting
-  up to `--timeout` for a first completed candle. Read-only.
-- Orders: **no** · Credentials: **yes** (`MARKET_DATA_ACCESS_TOKEN` /
-  `UPSTOX_ACCESS_TOKEN`) · Network: **yes**.
-- Output JSON: `credential_check`, `authenticated`, `websocket`, `frames`,
-  `market_status`. Exit 0 only when `websocket == "connected"`.
+On an installed Windows build, run the same read-only diagnostic through the
+frozen CLI (the token is read from Arena's local `.env`, never from the command
+line):
+```powershell
+& "C:\Program Files\AXIOM\Arena.exe" --cli upstox-test --websocket --duration 45
+```
+- Reads `MARKET_DATA_ACCESS_TOKEN` (or `UPSTOX_ACCESS_TOKEN`) from Arena's
+  local configuration. It never asks for, prints, or changes the credential.
+- Reports HTTPS/TLS reachability separately from the authorization result
+  (`authorized`, HTTP 401, HTTP 403, timeout, DNS/TCP, TLS, malformed response,
+  or other HTTP status). A network failure is never labelled an invalid token.
+- With `--websocket`, it subscribes to configured `MARKET_DATA_SYMBOLS` and
+  waits at most the requested duration (maximum 120 seconds) for one valid
+  protobuf message for a subscribed instrument. It reports handshake success
+  separately from actual market-data receipt and closes the socket cleanly.
+- It calls no order endpoint, writes no configuration, and does not change
+  `MODE=PAPER`, `LIVE_TRADING=false`, or `BROKER=LOCAL_PAPER`.
+- Output JSON: `https_reachability`, `credential_authorization`,
+  `websocket_check`, and `market_data.received`. Exit 0 means authorization
+  passed (and, when WebSocket testing is requested, at least one valid feed
+  message arrived). Exit 2 means no token is configured and no network request
+  was attempted. An exit 1 can mean rejection, network failure, or no data; use
+  the distinct JSON statuses to identify which.
 
 ### `market-stream`
 ```bash
@@ -891,8 +909,10 @@ Every step persists durable events (`INTENT_STATE`, `INTENT_PERSISTED`,
 | `BROKER must be LOCAL_PAPER or UPSTOX_SANDBOX` | invalid broker value | `grep BROKER .env` | set `LOCAL_PAPER` or `UPSTOX_SANDBOX` |
 | `BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN` | token missing | `python -m app sandbox-test …` (exit 3) | add token to `.env` |
 | sandbox probe `credential rejected (401/403)` | invalid/expired sandbox token | `python -m app sandbox-test --instrument …` | regenerate the sandbox token |
-| `upstox-test` → `credential NOT verified for feed V3` | wrong/expired data token | same command; read `credential_check` | `python -m app upstox-login` |
-| WebSocket `connected_no_completed_candle_in_window` | market closed / long candle timeframe | `/market/status` metrics | retry during market hours or increase `--timeout` |
+| `upstox-test` → `rejected_401` | HTTP 401: Upstox did not accept the bearer token; this status alone cannot distinguish expired, revoked, malformed, or unsupported tokens | inspect `credential_authorization.guidance` (the response body is intentionally omitted) | refresh via `python -m app upstox-login`; confirm the configured key name |
+| `upstox-test` → `forbidden_403` | Upstox refused feed permission for this account/token | inspect `credential_authorization.guidance` | check app/account feed permissions; use the documented OAuth login token |
+| `https_reachability` → `dns_or_tcp_failure`, `timeout`, or `tls_failure` | network, proxy/firewall, or certificate failure before credential verdict | inspect `https_reachability.status` | fix the named connectivity/TLS issue; do not regenerate a token for a network failure |
+| `websocket_check.handshake=connected` but `market_data.received=false` | subscription succeeded, but no valid subscribed-instrument feed message arrived in the window | `market_data.reason` | check configured instrument keys and market hours; retry with a bounded longer `--duration` |
 | `STALE_FEED_SIGNALS_PAUSED` in logs | feed gone quiet | `python -m app monitor`; feed metrics | waits for fresh data; check connectivity |
 | `RISK_REJECT:NO_QUALIFIED_CANDIDATE` | no lifecycle-eligible candidate | `python -m app lifecycle status` | approve a candidate through research/lifecycle (do NOT bypass) |
 | `RISK_REJECT` with a limit reason | hard limit hit | the event payload in `/dashboard/data` | raise the limit deliberately or reduce size |
@@ -934,8 +954,8 @@ live-trading procedure: LIVE is not implemented and cannot be enabled.**
    `MAX_TRADES_PER_DAY=10`, `MAX_DAILY_LOSS=1000`). Restart the server.
 7. **Credential test** — `python -m app sandbox-test --instrument
    NSE_EQ|INE002A01018` → `"credential_accepted": true`, `order_placed` false.
-8. **Market/data test** — `python -m app upstox-test --timeout 30` (feed
-   probe) and/or `python -m app market-stream --duration 30`.
+8. **Market/data test** — `python -m app upstox-test --websocket --duration 30`
+   (read-only feed probe) and/or `python -m app market-stream --duration 30`.
 9. **ONE sandbox BUY** — either `python -m app sandbox-test --instrument
    NSE_EQ|INE002A01018 --place-order --quantity 1` (single explicit order) or
    start the engine (`python -m app engine --max-candles 200`) with an

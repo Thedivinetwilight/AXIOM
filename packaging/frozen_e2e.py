@@ -216,11 +216,21 @@ class FrozenE2E:
         env["ARENA_HOME"] = str(self.home)
         env["ARENA_PORT"] = str(self.port)
         env["ARENA_BROWSER_CAPTURE_FILE"] = str(self.browser_capture)
+        env["MODE"] = "PAPER"
+        env["LIVE_TRADING"] = "false"
+        env["BROKER"] = "LOCAL_PAPER"
         browser_python = Path(sys.executable).resolve().as_posix()
         browser_script = self.browser_stub.resolve().as_posix()
         env["BROWSER"] = f'"{browser_python}" "{browser_script}" %s'
         for key in ("DATABASE_URL", "DATA_DIR", "API_TOKEN"):
             env.pop(key, None)
+        # Empty values remain set so dotenv's override=False cannot pull a
+        # workstation token back in from any .env candidate in the frozen test.
+        for key in (
+            "MARKET_DATA_ACCESS_TOKEN", "UPSTOX_ACCESS_TOKEN", "MARKET_DATA_TOKEN",
+            "UPSTOX_SANDBOX_ACCESS_TOKEN", "UPSTOX_LIVE_ACCESS_TOKEN",
+        ):
+            env[key] = ""
         return env
 
     def _browser_urls(self) -> list[str]:
@@ -328,8 +338,41 @@ class FrozenE2E:
             self.check("--cli re-entry works inside the frozen bundle",
                        ok and isinstance(parsed, dict),
                        f"exit={proc.returncode}")
+
+            # The installed diagnostic must be callable from Arena.exe without
+            # a Python installation. The E2E environment intentionally removes
+            # every Upstox credential, so this proves safe local-config lookup
+            # and the no-network/missing-credential path without any secret.
+            diag = subprocess.run(
+                [str(self.artifact), "--cli", "upstox-test", "--no-websocket"],
+                cwd=str(self.workdir), env=self._env(),
+                capture_output=True, text=True, timeout=60)
+            diagnostic = None
+            try:
+                diagnostic = json.loads((diag.stdout or "").strip())
+            except ValueError:
+                pass
+            diagnostic_ok = (
+                diag.returncode == 2
+                and isinstance(diagnostic, dict)
+                and diagnostic.get("https_reachability", {}).get("status") == "not_attempted"
+                and diagnostic.get("credential_authorization", {}).get("status")
+                    == "missing_credential"
+                and diagnostic.get("websocket") == "not_requested"
+                and diagnostic.get("scope", {}).get("order_endpoints_called") is False
+            )
+            self.check(
+                "frozen Upstox diagnostic is bundled and fails closed without credentials",
+                diagnostic_ok,
+                f"exit={diag.returncode}; no credential configured; no network probe",
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             self.check("--cli re-entry works inside the frozen bundle", False, str(exc))
+            self.check(
+                "frozen Upstox diagnostic is bundled and fails closed without credentials",
+                False,
+                "CLI subprocess could not be started",
+            )
 
     def _phase_frontend_integrity(self) -> None:
         status, setup_html = _get(self.base, "/setup")

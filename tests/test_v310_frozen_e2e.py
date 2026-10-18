@@ -56,6 +56,35 @@ def _build_artifact() -> Path:
     return build_exe.build(onefile=True)
 
 
+def test_frozen_e2e_environment_forces_paper_and_clears_credentials(tmp_path, monkeypatch):
+    """Even a workstation .env cannot turn the no-credential gate into a probe."""
+    from frozen_e2e import FrozenE2E
+
+    diagnostic_secrets = (
+        "MARKET_DATA_ACCESS_TOKEN", "UPSTOX_ACCESS_TOKEN", "MARKET_DATA_TOKEN",
+        "UPSTOX_SANDBOX_ACCESS_TOKEN", "UPSTOX_LIVE_ACCESS_TOKEN",
+    )
+    for key in diagnostic_secrets:
+        monkeypatch.setenv(key, "synthetic-secret-that-must-not-survive")
+    monkeypatch.setenv("MODE", "LIVE")
+    monkeypatch.setenv("LIVE_TRADING", "true")
+    monkeypatch.setenv("BROKER", "UPSTOX_LIVE")
+
+    e2e = FrozenE2E.__new__(FrozenE2E)
+    e2e.workdir = tmp_path
+    e2e.home = tmp_path / "arena-home"
+    e2e.port = 38471
+    e2e.browser_capture = tmp_path / "browser-launches.txt"
+    e2e.browser_stub = tmp_path / "browser_capture.py"
+    env = e2e._env()
+
+    assert env["MODE"] == "PAPER"
+    assert env["LIVE_TRADING"] == "false"
+    assert env["BROKER"] == "LOCAL_PAPER"
+    assert all(env[key] == "" for key in diagnostic_secrets)
+    assert "synthetic-secret-that-must-not-survive" not in repr(env)
+
+
 @pytest.fixture(scope="module")
 def artifact():
     found = _artifact()
@@ -117,6 +146,7 @@ def test_core_frozen_gates_individually(e2e_result):
     gate("app shell references the bundled stylesheet")
     gate("frozen stylesheet serves")
     gate("token endpoint returns a secure token")
+    gate("frozen Upstox diagnostic is bundled and fails closed without credentials")
     gate("frozen Upstox key validation reaches upstream HTTPS")
     gate("dummy Upstox credential is absent from frozen process logs")
     gate("frozen runtime reports exact build identity")

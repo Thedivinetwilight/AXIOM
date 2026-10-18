@@ -9,9 +9,8 @@ behavior, and secret hygiene.
 """
 
 import asyncio
-from dataclasses import replace
 import json
-import os
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -24,7 +23,6 @@ from app.data.upstox_auth import (
     verify_feed_credential,
 )
 from app.data.upstox_stream import UpstoxStream
-
 from tests.test_upstox_live import KEY, TOKEN
 
 
@@ -40,13 +38,13 @@ def test_verify_feed_credential_verdicts():
     def ok(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         return httpx.Response(
-            200, json={"data": {"authorized_redirect_uri": "wss://feed.example/xyz"}}
+            200, json={"data": {"authorized_redirect_uri": "wss://feed.upstox.com/xyz"}}
         )
 
     check = async_check(TOKEN, httpx.MockTransport(ok))
     assert isinstance(check, CredentialCheck)
     assert check.verdict == "feed_ok" and check.authenticated is True
-    assert check.http_status == 200 and "Safe to open the WebSocket" in check.guidance
+    assert check.http_status == 200 and "WebSocket has not yet been tested" in check.guidance
 
     def bad_shape(request):
         return httpx.Response(200, json={"data": {}})
@@ -58,7 +56,7 @@ def test_verify_feed_credential_verdicts():
 
     check = async_check(TOKEN, httpx.MockTransport(rejected))
     assert check.verdict == "rejected" and check.authenticated is False
-    assert "Analytics Token" in check.guidance and check == check  # dataclass eq ok
+    assert "Analytics Token" in check.guidance
 
     def forbidden(request):
         return httpx.Response(403, json={"status": "error"})
@@ -88,7 +86,7 @@ def test_verify_feed_credential_verdicts():
 def test_credential_check_never_contains_token():
     def ok(request):
         return httpx.Response(
-            200, json={"data": {"authorized_redirect_uri": "wss://feed.example/xyz?code=secret-code"}}
+            200, json={"data": {"authorized_redirect_uri": "wss://feed.upstox.com/xyz?code=secret-code"}}
         )
 
     for verdict_case in (
@@ -122,66 +120,59 @@ def test_auth_error_includes_credential_guidance():
     assert provider.status == "AUTH_FAILED" and provider.reconnects == 0
 
 
-def test_upstox_test_preflight_blocks_connection_on_rejected_credential(capsys):
-    """Rejected credential → NO WebSocket connection attempt (verdict first)."""
-    import socket
-    import threading
+def test_upstox_test_preflight_blocks_connection_on_rejected_credential(capsys, monkeypatch):
+    """Rejected credential → NO WebSocket attempt; status is not a network failure."""
+    from app.data import upstox_diagnostic
 
-    def serve_401(ready, accepted, holder):
-        server = socket.socket()
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("127.0.0.1", 0))
-        server.listen(1)
-        holder.append(server.getsockname()[1])
-        ready.set()
-        connection, _ = server.accept()
-        connection.recv(4096)
-        connection.sendall(
-            b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n"
-            b"Connection: close\r\nContent-Length: 34\r\n\r\n"
-            b'{"status":"error","errors":[{"x":1}]}'
+    class One401(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.calls = 0
+
+        async def handle_async_request(self, request):
+            self.calls += 1
+            assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+            return httpx.Response(
+                401, json={"status": "error", "errors": [{"code": "invalid_token"}]},
+                request=request,
+            )
+
+    transport = One401()
+    original = upstox_diagnostic.run_upstox_diagnostic
+
+    async def mocked_diagnostic(token, **kwargs):
+        return await original(
+            token,
+            authorize_url="http://local.test/authorize",
+            http_transport=transport,
+            websocket_connector=lambda *_args, **_kwargs: pytest.fail(
+                "WebSocket must not be attempted after HTTP 401"),
+            **kwargs,
         )
-        connection.close()
-        server.close()
-        accepted.set()
 
-    ready, accepted, holder = threading.Event(), threading.Event(), []
-    worker = threading.Thread(target=serve_401, args=(ready, accepted, holder), daemon=True)
-    worker.start()
-    assert ready.wait(timeout=5)
-    auth_port = holder[0]
+    monkeypatch.setattr(upstox_diagnostic, "run_upstox_diagnostic", mocked_diagnostic)
+    monkeypatch.setenv("DATA_SOURCE", "upstox")
+    monkeypatch.setenv("MARKET_DATA_SYMBOLS", KEY)
+    monkeypatch.setenv("MARKET_DATA_ACCESS_TOKEN", TOKEN)
+    monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("DEFAULT_TIMEFRAME", raising=False)
+    monkeypatch.delenv("MARKET_DATA_TIMEFRAME", raising=False)
+    # This override is intentionally ignored by the diagnostic: it always
+    # targets the documented Upstox endpoint, except for the private test seam.
+    monkeypatch.setenv("MARKET_DATA_AUTHORIZE_URL", "http://not-used.invalid/")
 
-    saved = {k: os.environ.get(k) for k in (
-        "DATA_SOURCE", "MARKET_DATA_SYMBOLS", "MARKET_DATA_ACCESS_TOKEN",
-        "MARKET_DATA_AUTHORIZE_URL", "DEFAULT_TIMEFRAME", "MARKET_DATA_TIMEFRAME",
-        "UPSTOX_ACCESS_TOKEN", "MARKET_DATA_TOKEN",
-    )}
-    os.environ["DATA_SOURCE"] = "upstox"
-    os.environ["MARKET_DATA_SYMBOLS"] = KEY
-    os.environ["MARKET_DATA_ACCESS_TOKEN"] = TOKEN
-    os.environ["MARKET_DATA_AUTHORIZE_URL"] = (
-        f"http://127.0.0.1:{auth_port}/v3/feed/market-data-feed/authorize"
-    )
-    for name in ("DEFAULT_TIMEFRAME", "MARKET_DATA_TIMEFRAME"):
-        os.environ.pop(name, None)
-    try:
-        from app.__main__ import main
+    from app.__main__ import main
 
-        with pytest.raises(SystemExit) as excinfo:
-            main(["upstox-test"])
-        assert excinfo.value.code == 1
-        summary = json.loads(capsys.readouterr().out)
-        assert summary["credential_check"]["verdict"] == "rejected"
-        assert summary["websocket"] == "not_tried"  # never connected
-        assert summary["ok"] is False and TOKEN not in json.dumps(summary)
-        assert accepted.wait(timeout=5)  # exactly one authorize probe was made
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        worker.join(timeout=5)
+    with pytest.raises(SystemExit) as excinfo:
+        main(["upstox-test", "--websocket"])
+    assert excinfo.value.code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["https_reachability"]["status"] == "reachable"
+    assert summary["credential_authorization"]["status"] == "rejected_401"
+    assert summary["credential_check"]["verdict"] == "rejected"
+    assert summary["websocket"] == "not_tried"
+    assert summary["websocket_check"]["handshake"] == "not_attempted"
+    assert summary["ok"] is False and TOKEN not in json.dumps(summary)
+    assert transport.calls == 1
 
 
 def test_settings_version_is_063_and_defaults_unchanged():

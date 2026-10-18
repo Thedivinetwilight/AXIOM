@@ -668,8 +668,9 @@ V0.6.2 hardens the V0.6.1 adapter without changing the architecture:
   `suppressed_by_market_status`; `/paper/status` adds `risk_counters`
   (actionable signals vs orders created vs risk-skipped) and per-stage
   processing latency.
-- **CLI** (paper-only): `python -m app upstox-test` (real auth + connectivity
-  proof), `python -m app market-stream` (print normalized real events),
+- **CLI** (paper-only): `python -m app upstox-test --websocket --duration 45`
+  (read-only HTTPS authorization plus a bounded feed-message probe; reads the
+  credential locally and never prints it), `python -m app market-stream` (print normalized real events),
   `python -m app paper-live` (full pipeline), `python -m app upstox-login`
   (official OAuth 2.0 authorization-code helper; exchanges the code via the
   documented token endpoint and stores the token in the gitignored `.env` with
