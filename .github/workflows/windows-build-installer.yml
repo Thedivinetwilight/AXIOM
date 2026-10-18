@@ -51,8 +51,22 @@ jobs:
             --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
 
       - name: Build and test the real frozen executable (hard gate)
+        id: frozen-build
         shell: bash
-        run: python build_exe.py --test
+        run: |
+          set -o pipefail
+          python -u build_exe.py --test 2>&1 | tee frozen-build-output.txt
+
+      - name: Upload frozen-build diagnostics on failure
+        if: failure() && steps.frozen-build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-build-diagnostics-${{ github.run_number }}
+          path: |
+            frozen-build-output.txt
+            build/recovery-e2e-workdir/frozen-recovery.log
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Prepare executable artifact and checksum
         shell: bash
