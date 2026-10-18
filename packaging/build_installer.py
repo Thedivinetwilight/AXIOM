@@ -55,40 +55,37 @@ def main() -> int:
     version = __version__
     print(f"Version: {version}")
 
-    # Run ISCC with minimal script first for debugging
-    minimal_iss = PACKAGING / "installer-minimal.iss"
-    for iss_file in [minimal_iss, ISS]:
-        argv = [
-            str(iscc),
-            str(iss_file),
-            f"/DArenaExe=Arena.exe",
-            f"/DAppVersion={version}",
-            f"/O{RELEASE}",
-            "/FAXIOM-Setup",
-        ]
-        print(f"\nRunning ISCC with {iss_file.name}:")
-        print(f"  CWD: {PACKAGING}")
-        print(f"  CMD: {' '.join(argv)}")
-        result = subprocess.run(argv, cwd=str(PACKAGING))
-        print(f"  Exit code: {result.returncode}")
+    # Run ISCC
+    argv = [
+        str(iscc),
+        str(ISS),
+        f"/DArenaExe=Arena.exe",
+        f"/DAppVersion={version}",
+        f"/O{RELEASE}",
+        "/FAXIOM-Setup",
+    ]
+    print(f"\nRunning ISCC:")
+    print(f"  CWD: {PACKAGING}")
+    print(f"  CMD: {' '.join(argv)}")
+    result = subprocess.run(argv, cwd=str(PACKAGING))
+    print(f"  Exit code: {result.returncode}")
 
-        installer = RELEASE / "AXIOM-Setup.exe"
-        if result.returncode == 0 and installer.exists():
-            size = installer.stat().st_size
-            digest = hashlib.sha256(installer.read_bytes()).hexdigest()
-            (RELEASE / "SHA256SUMS-installer.txt").write_text(
-                f"{digest}  AXIOM-Setup.exe\n", encoding="utf-8",
-            )
-            print(f"\nInstaller built successfully with {iss_file.name}!")
-            print(f"  File:    {installer}")
-            print(f"  Size:    {size:,} bytes ({size / 1024 / 1024:.1f} MB)")
-            print(f"  SHA-256: {digest}")
-            return 0
-        else:
-            print(f"  Failed with {iss_file.name}, trying next...")
+    installer = RELEASE / "AXIOM-Setup.exe"
+    if result.returncode != 0 or not installer.exists():
+        print(f"ERROR: ISCC failed with exit code {result.returncode}")
+        return result.returncode or 1
 
-    print("ERROR: All ISS scripts failed")
-    return 1
+    size = installer.stat().st_size
+    digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+    (RELEASE / "SHA256SUMS-installer.txt").write_text(
+        f"{digest}  AXIOM-Setup.exe\n", encoding="utf-8",
+    )
+
+    print(f"\nInstaller built successfully!")
+    print(f"  File:    {installer}")
+    print(f"  Size:    {size:,} bytes ({size / 1024 / 1024:.1f} MB)")
+    print(f"  SHA-256: {digest}")
+    return 0
 
 
 if __name__ == "__main__":
