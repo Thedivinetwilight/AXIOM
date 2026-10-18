@@ -477,12 +477,12 @@ class Settings:
         return {name: getattr(self, name) for name in names}
 
     @classmethod
-    def from_env(cls):
-        # Load configuration from every applicable .env, most specific first.
-        # When Arena runs from source with no ARENA_HOME this is exactly the
-        # repository's .env as before; a packaged executable instead reads the
-        # per-user one (and a portable .env beside the .exe, if present), since
-        # its own code lives in a temporary extraction directory.
+    def from_env(cls, *, apply_paper_database_override: bool = True):
+        # Load every existing .env in priority order. Process environment
+        # variables already present always win (override=False); then the
+        # first file wins for duplicate keys. In a frozen install this is the
+        # per-user/ARENA_ENV_FILE candidate, the executable-adjacent .env, and
+        # finally the bundled/repository-root candidate.
         try:
             from dotenv import load_dotenv
 
@@ -543,5 +543,28 @@ class Settings:
                 values["database_url"] = runtime.default_database_path()
             if not (os.getenv("DATA_DIR") or "").strip():
                 values["data_dir"] = runtime.default_data_dir()
+
+        # An explicitly selected recovery database is a persistent pointer,
+        # not a one-launch environment override. It takes precedence over
+        # DATABASE_URL and all .env files so a later launch cannot silently
+        # fall back to the incompatible original account. The dedicated CLI
+        # clear action removes only this pointer; it never deletes either DB.
+        if runtime is not None and apply_paper_database_override:
+            override = runtime.read_paper_database_override()
+            if override is not None:
+                if (
+                    str(values.get("mode", "PAPER")).upper() != "PAPER"
+                    or bool(values.get("live_trading", False))
+                    or str(values.get("broker", "LOCAL_PAPER")).upper()
+                    != "LOCAL_PAPER"
+                ):
+                    raise ValueError(
+                        "A paper database recovery selection is valid only with "
+                        "MODE=PAPER, LIVE_TRADING=false, BROKER=LOCAL_PAPER; "
+                        "Arena will not change or enable an execution mode."
+                    )
+                values["database_url"] = runtime.sqlite_url_for_path(
+                    override["database_path"]
+                )
 
         return cls(**values)

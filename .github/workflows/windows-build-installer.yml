@@ -1,0 +1,149 @@
+name: Windows Build and Installer (paper recovery)
+
+on:
+  push:
+    branches:
+      - arena/f97e3dd9-axiom
+    paths:
+      - "app/**"
+      - "arena.py"
+      - "build_exe.py"
+      - "packaging/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/windows-build-installer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build-and-install:
+    name: Windows executable, installer, and recovery E2E
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project and build dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify JavaScript runtime
+        shell: bash
+        run: node --version
+
+      - name: Full Windows test suite (hard gate)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" \
+            --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
+
+      - name: Build and test the real frozen executable (hard gate)
+        shell: bash
+        run: python build_exe.py --test
+
+      - name: Prepare executable artifact and checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, pathlib
+
+          source = pathlib.Path("dist/Arena.exe")
+          if not source.is_file():
+              raise SystemExit("dist/Arena.exe is missing")
+          release = pathlib.Path("release")
+          release.mkdir(exist_ok=True)
+          target = release / "Arena.exe"
+          target.write_bytes(source.read_bytes())
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          (release / "SHA256SUMS-windows-x64.txt").write_text(
+              f"{digest}  Arena.exe\n", encoding="utf-8")
+          metadata = json.loads(pathlib.Path("app/BUILD_META.json").read_text(
+              encoding="utf-8"))
+          if metadata.get("commit") != "${{ github.sha }}":
+              raise SystemExit("Frozen build commit does not match this push")
+          record = {
+              "artifact": "Arena.exe",
+              "version": metadata.get("version"),
+              "commit": metadata.get("commit"),
+              "build_id": f"{metadata.get('version')}-{metadata.get('commit', '')[:10]}",
+              "built_at": metadata.get("built_at"),
+              "platform": metadata.get("platform"),
+              "size_bytes": target.stat().st_size,
+              "sha256": digest,
+          }
+          (release / "Arena.exe.build-info.json").write_text(
+              json.dumps(record, indent=2) + "\n", encoding="utf-8")
+          print(f"Arena.exe bytes: {record['size_bytes']}")
+          print(f"Arena.exe SHA-256: {digest}")
+          print(f"Build commit: {record['commit']}")
+          PY
+
+      - name: Upload verified Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: AXIOM-Arena-Windows-x64
+          path: |
+            release/Arena.exe
+            release/SHA256SUMS-windows-x64.txt
+            release/Arena.exe.build-info.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Install Inno Setup 6
+        shell: powershell
+        run: |
+          choco install innosetup --yes --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            Write-Error "Inno Setup 6 compiler not found after installation"
+            exit 1
+          }
+          Write-Host "Inno Setup compiler is ready."
+
+      - name: Build the real setup installer
+        shell: bash
+        run: python packaging/build_installer.py
+
+      - name: Install, recover, restart, and uninstall the packaged setup (hard gate)
+        shell: bash
+        run: python packaging/installer_e2e.py release/AXIOM-Setup.exe build/installer-e2e
+
+      - name: Upload verified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AXIOM-Setup-Windows-x64
+          path: |
+            release/AXIOM-Setup.exe
+            release/SHA256SUMS-installer.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summarize Windows artifacts and hashes
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows build and installer"
+            echo
+            echo "- Full Windows suite: **${{ job.status }}**"
+            if [ -f release/SHA256SUMS-windows-x64.txt ]; then
+              echo "- Executable checksum: \`$(cat release/SHA256SUMS-windows-x64.txt)\`"
+            fi
+            if [ -f release/SHA256SUMS-installer.txt ]; then
+              echo "- Installer checksum: \`$(cat release/SHA256SUMS-installer.txt)\`"
+            fi
+            echo "- The frozen recovery E2E exercises startup refusal, the explicit new-paper-database flow, restart, and local UI against the installed executable."
+          } >> "$GITHUB_STEP_SUMMARY"

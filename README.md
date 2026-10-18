@@ -800,7 +800,7 @@ curl -X POST -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8000/paper/s
 | `POST /paper/pause` | Stop new signal orders; cancel pending entries; continue received-bar risk handling |
 | `POST /paper/resume` | Explicitly allow strategy signals again |
 
-Paper-start timeframe must match `DEFAULT_TIMEFRAME`. Paper capital/cost/currency/calendar settings come from server configuration, not arbitrary per-request account resets. Changing a saved account's execution settings or currency/timeframe/calendar requires a new database. Changing strategy/source with open inventory or pending orders is rejected.
+Paper-start timeframe must match `DEFAULT_TIMEFRAME`. Paper capital/cost/currency/calendar settings come from server configuration, not arbitrary per-request account resets. Changing a saved account's execution settings or currency/timeframe/calendar requires a new database. Changing strategy/source with open inventory or pending orders is rejected. On mismatch, Arena reports the differing field names and resolved database path without values; it never resets or migrates the account. See [paper-account startup diagnostics and explicit recovery](docs/PAPER_ACCOUNT_RECOVERY.md) for database/.env precedence and the persistent separate-database recovery command.
 
 States: `STOPPED → STARTING → RUNNING ↔ PAUSED`; failures enter `ERROR`. Connection state (`CONNECTING`, `CONNECTED`, `RECONNECTING`, `DISCONNECTED`) is separate; `RUNNING` does not imply a fresh feed. EOF in replay stops the controller. SIGINT/SIGTERM in the CLI or server shutdown closes the stream and checkpoints state. Client stop controls the **bot task**, not the API server process.
 
