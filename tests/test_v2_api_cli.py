@@ -169,10 +169,29 @@ class TestCli:
         import sys
 
         env = dict(os.environ)
-        env.update({"DATABASE_URL": f"sqlite:///{tmp_path}/cli.db",
-                    "DATA_DIR": str(tmp_path / "data"),
-                    "DATA_SOURCE": "generic",
-                    "UNIVERSE_SYNC_URL": "https://invalid.invalid/x.json.gz"})
+        env_file = tmp_path / "cli.env"
+        env_file.write_text(
+            "MODE=PAPER\nLIVE_TRADING=false\nBROKER=LOCAL_PAPER\n",
+            encoding="utf-8",
+        )
+        env.update({
+            "ARENA_HOME": str(tmp_path / "arena-home"),
+            "ARENA_ENV_FILE": str(env_file),
+            "DATABASE_URL": f"sqlite:///{tmp_path}/cli.db",
+            "DATA_DIR": str(tmp_path / "data"),
+            "DATA_SOURCE": "generic",
+            "UNIVERSE_SYNC_URL": "https://invalid.invalid/x.json.gz",
+            "MODE": "PAPER",
+            "LIVE_TRADING": "false",
+            "BROKER": "LOCAL_PAPER",
+        })
+        # These subprocesses are local CLI tests, not account diagnostics.
+        # Never inherit an operator/CI token or load one back from a .env file.
+        for key in (
+            "MARKET_DATA_ACCESS_TOKEN", "UPSTOX_ACCESS_TOKEN", "MARKET_DATA_TOKEN",
+            "UPSTOX_SANDBOX_ACCESS_TOKEN", "UPSTOX_LIVE_ACCESS_TOKEN",
+        ):
+            env[key] = ""
         env.update(env_extra or {})
         return subprocess.run([sys.executable, "-m", "app", *args],
                               capture_output=True, text=True, env=env, timeout=300,
