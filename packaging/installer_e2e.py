@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # Running `python packaging/installer_e2e.py` puts only packaging/ at
+    # sys.path[0]. The installer test imports app.config.envfile, so make the
+    # checkout root explicit rather than relying on cwd/PYTHONPATH behavior.
+    sys.path.insert(0, str(ROOT))
 
 
 def _run_recovery_e2e(executable: Path, workdir: Path) -> dict:

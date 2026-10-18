@@ -159,8 +159,50 @@ jobs:
         run: python packaging/build_installer.py
 
       - name: Install, recover, restart, and uninstall the packaged setup (hard gate)
+        id: installer-e2e
         shell: bash
-        run: python packaging/installer_e2e.py release/AXIOM-Setup.exe build/installer-e2e
+        run: |
+          set -o pipefail
+          python -u packaging/installer_e2e.py release/AXIOM-Setup.exe \
+            build/installer-e2e 2>&1 | tee installer-e2e-output.txt
+
+      - name: Upload installer-test diagnostics on failure
+        if: failure() && steps.installer-e2e.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-e2e-diagnostics-${{ github.run_number }}
+          path: |
+            installer-e2e-output.txt
+            build/installer-e2e/recovery-test/frozen-recovery.log
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Report installer-test failure details
+        if: failure() && steps.installer-e2e.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f installer-e2e-output.txt ]; then
+            details=$(grep -E 'FAIL|ERROR|Traceback|Exception|SMOKE TEST FAILED' \
+              installer-e2e-output.txt | tail -n 30 || true)
+            if [ -z "$details" ]; then
+              details=$(tail -n 30 installer-e2e-output.txt)
+            fi
+            {
+              echo "## Installer-test failure details"
+              echo
+              echo '```text'
+              printf '%s\n' "$details"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$details" | while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              printf '::error title=Installer test diagnostic::%s\n' "$safe"
+            done
+          else
+            echo "::error title=Installer test diagnostics::installer-e2e-output.txt was not created"
+          fi
 
       - name: Upload verified installer
         uses: actions/upload-artifact@v4
