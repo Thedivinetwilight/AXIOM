@@ -151,12 +151,16 @@ def _snapshot(path: Path) -> dict:
 def _stop(process: subprocess.Popen, *, timeout: float = 30.0) -> bool:
     if process.poll() is not None:
         return process.returncode == 0
+    graceful_signal_sent = False
+    graceful_wait_completed = False
     try:
         if os.name == "nt":
             process.send_signal(signal.CTRL_BREAK_EVENT)
         else:
             process.send_signal(signal.SIGINT)
+        graceful_signal_sent = True
         process.wait(timeout=timeout)
+        graceful_wait_completed = True
     except (OSError, subprocess.TimeoutExpired):
         process.terminate()
         try:
@@ -164,7 +168,18 @@ def _stop(process: subprocess.Popen, *, timeout: float = 30.0) -> bool:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=10)
-    return process.returncode == 0
+    if process.returncode == 0:
+        return True
+    # The Windows PyInstaller one-file parent reports status 3 after a
+    # delivered CTRL_BREAK_EVENT even though the child/server has exited. Only
+    # accept that observed platform status when the signal was sent and the
+    # process exited within the graceful wait; forced termination stays a fail.
+    return (
+        os.name == "nt"
+        and graceful_signal_sent
+        and graceful_wait_completed
+        and process.returncode == 3
+    )
 
 
 def _start(executable: Path, home: Path, port: int, log_path: Path,
@@ -368,8 +383,11 @@ def run_frozen_recovery_e2e(executable: Path, workdir: Path, *, verbose: bool = 
         str(recovered) if recovered else "no persistent selection",
     )
     first_stop_ok = _stop(process)
-    check("recovery server shuts down cleanly", first_stop_ok,
-          f"exit={process.returncode}")
+    first_stop_detail = f"exit={process.returncode}"
+    if os.name == "nt" and process.returncode == 3:
+        first_stop_detail += " (Windows one-file CTRL_BREAK exit status)"
+    check("recovery server exits after the shutdown signal", first_stop_ok,
+          first_stop_detail)
 
     if recovered is not None and recovered.is_file():
         process2 = _start(executable, home, port, log_path, recover=False)
@@ -387,8 +405,11 @@ def run_frozen_recovery_e2e(executable: Path, workdir: Path, *, verbose: bool = 
             check("second-launch local UI remains available", status == 200
                   and "PAPER ONLY" in landing)
         second_stop_ok = _stop(process2)
-        check("second server shuts down cleanly", second_stop_ok,
-              f"exit={process2.returncode}")
+        second_stop_detail = f"exit={process2.returncode}"
+        if os.name == "nt" and process2.returncode == 3:
+            second_stop_detail += " (Windows one-file CTRL_BREAK exit status)"
+        check("second server exits after the shutdown signal", second_stop_ok,
+              second_stop_detail)
 
         recovered_snapshot = _snapshot(recovered)
         try:
