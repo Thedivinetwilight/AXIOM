@@ -299,18 +299,20 @@ def main(argv: list[str] | None = None) -> int:
             layout.addWidget(self.stack)
             self.setCentralWidget(central)
             self._show_page("Command Center")
-            # Kronos stack: built from env, off by default, never fatal.
-            self.forecast.bootstrap()
-            if self.forecast.series_labels():
-                self.forecast_selector.addItems([])
-                self.forecast_selector.clear()
-                self.forecast_selector.addItems(self.forecast.series_labels())
-            self._refresh()
-            from PySide6.QtCore import QTimer
+            if not smoke_mode:
+                # Normal startup integrates the optional Kronos stack and polls
+                # the Arena API. The packaged --smoke path deliberately avoids
+                # all external services and state changes.
+                self.forecast.bootstrap()
+                if self.forecast.series_labels():
+                    self.forecast_selector.clear()
+                    self.forecast_selector.addItems(self.forecast.series_labels())
+                self._refresh()
+                from PySide6.QtCore import QTimer
 
-            self.timer = QTimer(self)
-            self.timer.timeout.connect(self._refresh)
-            self.timer.start(5000)
+                self.timer = QTimer(self)
+                self.timer.timeout.connect(self._refresh)
+                self.timer.start(5000)
 
         def closeEvent(self, event):
             # Clean Kronos worker shutdown; the Arena client needs none.

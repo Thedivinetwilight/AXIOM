@@ -355,3 +355,12 @@ class TestDesktopWiring:
         assert "self.forecast.refresh()" in source
         assert ".forecast(" not in source, "the GUI must not call the model directly"
         assert "manager.load(" not in source
+
+    def test_packaged_smoke_skips_backend_and_kronos_services(self):
+        """The frozen GUI gate must exercise widgets without external effects."""
+        source = DESKTOP_APP.read_text()
+        smoke_gate = source[source.index("if not smoke_mode:"):
+                             source.index("def closeEvent")]
+        assert "self.forecast.bootstrap()" in smoke_gate
+        assert "self._refresh()" in smoke_gate
+        assert "self.timer.start(5000)" in smoke_gate
