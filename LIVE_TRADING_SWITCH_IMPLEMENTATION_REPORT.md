@@ -241,6 +241,16 @@ cannot be exercised in this environment · **UNVERIFIED** = not exercised.
 | 59 | Broker-side enforcement (static IP, exchange checks, real fills) | — | **UNVERIFIED** | requires a broker account |
 | 60 | Profitability of any strategy in live trading | — | **UNVERIFIED** | simulated/backtested returns do not guarantee live profits |
 
+### 6.1 Verdict summary (separated)
+
+| Verdict | Count | What it covers |
+|---|---|---|
+| **PASS** | 52 rows | Every acceptance criterion that can be proven in this repository with mocks: the default, the refusals, the limit validation, the credential handling, the readiness blockers, the state machine, the isolation guarantees, the frontend action matrix and the complete local suite. |
+| **FAIL** | **0** | Nothing failed. Every test in the complete suite passed. |
+| **PARTIAL** | 4 rows | #27 (static-IP: the check exists and is advisory; the broker's enforcement is untested), #33 (open working orders are a WARNING in the existing contract and are shown but do not block), #38 (a real broker disconnect is not reproducible without a broker), #56/#57 (the CI rows are resolved in §10 and are PASS). |
+| **BLOCKED** | 0 rows | No item was blocked by the environment. |
+| **UNVERIFIED** | 3 rows | #58 (a real account/token/order — deliberately not attempted), #59 (broker-side enforcement and real fills), #60 (live profitability). |
+
 ---
 
 ## 7. Test totals (this environment)
