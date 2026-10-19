@@ -1,11 +1,11 @@
 # AXIOM Current Audit Report
 
-**Audit date:** 2026-10-06 (Asia/Calcutta)
+**Audit snapshot date:** 2026-10-06 (Asia/Calcutta)
 **Repository:** `Thedivinetwilight/AXIOM`
-**Session branch:** `arena/01a102dd-axiom`
-**Scope:** source, tests, operator/product documentation, updater/backup boundaries, and executable-build workflow. This report is the current evidence index for the commit that contains it; the full commit SHA and commit-matched CI/build records are authoritative in Git/GitHub.
+**Original audit branch:** `arena/01a102dd-axiom`
+**Scope:** source, tests, operator/product documentation, updater/backup boundaries, and executable-build workflow at that snapshot. Sections 1–8 are not a re-audit of later HEADs. Section 9 records subsequent, commit-matched work from the AXIOM mission branch without extending the earlier audit's claims; full commit SHAs and CI/build records remain authoritative in Git/GitHub.
 
-> **Verdict:** The source-level audit and implementation pass is complete, and the local full test suite passes. The live execution boundary is fail-closed within AXIOM's first-party broker path. This is **not** a claim of production readiness, legal approval, profitability, a live Upstox session, genuine Kronos weights, or a signed/published release. Cross-platform frozen-build evidence is valid only when the GitHub `Build executable` run and each build record name the exact current commit.
+> **Verdict at the 2026-10-06 audit snapshot:** The source-level audit and implementation pass was complete, and the local full test suite passed. The live execution boundary was fail-closed within AXIOM's first-party broker path. This was **not** a claim of production readiness, legal approval, profitability, a live Upstox session, genuine Kronos weights, or a signed/published release. Frozen-build evidence is commit-specific; subsequent Windows results are recorded in §9 and must not be generalized to other platforms or real model inference.
 
 ## 1. Executive findings
 
@@ -81,7 +81,7 @@ The [GitHub Actions **Build executable** workflow](https://github.com/Thedivinet
 5. a build-identity assertion that `app/BUILD_META.json` contains the workflow's `github.sha`;
 6. upload of the binary, SHA-256 sums, and JSON build record including commit, platform, byte size, and artifact digest.
 
-For final verification, match the workflow run's `head_sha` and every artifact JSON `commit` to the exact branch `HEAD`; a successful earlier run on another SHA does not count. Branch builds produce Actions artifacts, not an attached GitHub release; the workflow attaches to a release only for a tag. Artifact SHA-256 values establish byte equality with the recorded digest, not who published the artifact or whether it is signed. The final commit-specific CI result and artifact names are reported in the completion message after GitHub finishes the matching run.
+For final verification, match the workflow run's `head_sha` and every artifact JSON `commit` to the exact branch `HEAD`; a successful earlier run on another SHA does not count. Branch builds produce Actions artifacts, not an attached GitHub release; the workflow attaches to a release only for a tag. Artifact SHA-256 values establish byte equality with the recorded digest, not who published the artifact or whether it is signed. At the original audit snapshot, commit-matched results were pending; later Windows results for the mission branch are recorded in §9.
 
 ## 8. Explicitly unverified / not claimed
 
@@ -89,7 +89,30 @@ For final verification, match the workflow run's `head_sha` and every artifact J
 - Real Kronos weights, publisher signature/origin, measured forecast quality, or production GPU/model runtime.
 - Statistical edge, profitable strategy, independent OOS validation, or legal/regulatory compliance.
 - Control of arbitrary out-of-band HTTP calls or hostile code already holding credentials.
-- A local Windows/macOS/Linux frozen artifact before the commit-matched GitHub matrix completes; PyInstaller was absent locally.
+- A local sandbox-built Windows/macOS/Linux frozen artifact; PyInstaller was absent locally. The mission branch's commit-matched Windows binaries and installer are recorded separately in §9; no new commit-matched macOS/Linux frozen artifact is established there.
 - Signed updater/release authenticity. Caller-provided checksum matching is the only updater digest claim.
 
-**Bottom line:** source-level safety and regression gates pass; default testing is paper/mock/sandbox only. Live mode remains fail-closed and unverified for production. Treat this report as a software audit, not authorization to trade.
+**Bottom line at the 2026-10-06 snapshot:** source-level safety and regression gates passed; default testing was paper/mock/sandbox only. Live mode remained fail-closed and unverified for production. Treat this report as a software audit, not authorization to trade.
+
+## 9. Subsequent mission-branch verification (2026-10-19 Asia/Calcutta)
+
+This addendum records selected follow-up work after the 2026-10-06 snapshot. It is not a blanket re-audit of every claim in Sections 1–8. The branch is `arena/f97e3dd9-axiom`; the Windows builds and latest targeted UI/packaging tests were verified at code SHA `8288ff615f521c4ba2fe8c33b71b4688c6e44c9c`, the latest code commit before this documentation-only update.
+
+### Code fixes and local regressions
+
+- Fee-aware net-edge gating now applies the hurdle to proposed notional; invalid numeric/cost inputs or missing expectancy fail closed. Router confidence alone is not treated as expected gross P&L.
+- Risk/config/live-config numeric boundaries reject non-finite and malformed values. Regression tests use an explicitly labelled test-only passing gate when edge estimation is outside that test's scope.
+- Walk-forward research rejects malformed/non-finite market bars before scoring and retains gap warnings; it does not silently repair or invent data.
+- The full local non-slow suite passed on commit `22ba167`: **1,992 passed, 39 skipped, 1 warning**. After the GUI smoke isolation fix on `8288ff6`, the targeted UI/packaging/API set passed **69 tests**. The full local suite was not rerun after that last UI-only change.
+
+### Commit-matched Windows verification
+
+- [Windows pair workflow run 39158169376](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39158169376), head SHA `8288ff615f521c4ba2fe8c33b71b4688c6e44c9c`, passed on Windows x64. It built the GUI and worker in separate environments, verified the GUI environment had no PyTorch, ran the selected risk/numeric/desktop/Kronos regressions, launched the actual `AXIOM.exe --smoke` offscreen, and exercised the actual `AXIOM-Kronos.exe` JSON-lines process using the explicitly labelled stub backend. The worker smoke used a synthetic fixture and a temporary cache, and verified ping/load/forecast/status/clean shutdown; it is not genuine model inference.
+- The `AXIOM-Windows-executable-pair` Actions artifact is **223,174,721 bytes**, archive SHA-256 `a316983336edb4ba56c3d3ec23953f7674a097e6e997fa3beaaf7f6aa367f811`, expires 2026-11-01 UTC. Its build-info file records individual executable sizes and digests. Artifact byte hashes are not a publisher signature.
+- [Windows build/installer run 39158169240](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39158169240), also at the final mission-branch SHA, passed the full Windows non-slow test suite, frozen Arena executable test, installer build, and install/recovery/restart/uninstall E2E. Artifacts: `AXIOM-Arena-Windows-x64` (19,740,003 bytes; SHA-256 `dc712f9eefddf8c6bcb8c1d97732f5d73a5501f89780ddb054d28ad7c7aefad1`) and `AXIOM-Setup-Windows-x64` (21,192,851 bytes; SHA-256 `4b51c3d122c4537c76bd7a0034bf619f1eea69688701c10d3a80f03af21b9505`), both expire 2027-01-16 UTC.
+
+### Remaining limits and safety
+
+- Genuine pretrained weights remain **0/3 verified**; real weight-backed inference and forecast quality remain unverified. The Windows stub smoke does not change this.
+- No GPU inference, genuine external market-data execution, or persistent trading process was tested.
+- No live order was placed or modified, and no paper-trading process was launched. No existing user/account database was touched; the installer recovery E2E uses an isolated CI work directory and generated test databases only. The packaged GUI smoke was explicitly configured as `MODE=PAPER`, `LIVE_TRADING=false`, `BROKER=LOCAL_PAPER`. No credentials were added to source, CI, or artifacts.

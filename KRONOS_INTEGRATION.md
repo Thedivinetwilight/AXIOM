@@ -1,6 +1,6 @@
 # KRONOS INTEGRATION — HISTORICAL TECHNICAL NOTES
 
-> **Historical snapshot only:** this guide and its §0 test counts describe an earlier integration snapshot (`0314db2`), before later AXIOM app integration and forecast-contract/cache hardening. The implementation and claims below are not a current HEAD runbook or verification report. The old source maps, test counts, and statements such as “Arena 3.0.5 is untouched” are preserved as historical context, not promoted as current facts. For current code paths and evidence, see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+> **Historical technical notes with a current packaging addendum:** the original §0 test counts and repository map describe the earlier integration snapshot (`0314db2`), before later AXIOM app integration and forecast-contract/cache hardening. The Windows-pair evidence and build instructions below were refreshed on 2026-10-19 IST and apply to commit `8288ff615f521c4ba2fe8c33b71b4688c6e44c9c`; the old source maps and baseline totals remain historical, not current HEAD claims. The broader source audit dated 2026-10-06 is in [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
 
 Historical status at that snapshot: implemented and tested at the integration level, **off by default**
 (`AXIOM_KRONOS_ENABLED=false`). **Not production-ready**, and **never verified
@@ -18,7 +18,7 @@ orders, never overrides risk and never enables LIVE trading.
 This section is the authority on what has actually been demonstrated. Anything
 not listed under *Verified* is **unverified** and must not be assumed to work.
 
-### Verified in this environment
+### Original sandbox verification (historical snapshot)
 
 | Claim | Evidence |
 | --- | --- |
@@ -35,15 +35,25 @@ not listed under *Verified* is **unverified** and must not be assumed to work.
 
 ### Explicitly NOT verified
 
-These were **never demonstrated** in this environment. Do not claim otherwise.
+These remain **unverified or only partially verified** as of this addendum. Do not claim otherwise; the Windows packaging checks below do not establish real model inference or interactive visual QA.
 
 | Not verified | Why |
 | --- | --- |
 | **Real pretrained NeoQuasar weights** | The local model cache contains none of the three supported model/tokenizer bundles (0/3 verified). This environment cannot fetch Hugging Face artifacts, and no credentials or unverified downloads were used. |
 | **Weight-backed inference** | Every inference test uses either the labelled stub backend or the real architecture with **random** weights. Forecast *quality* is entirely unassessed. |
 | **GPU / CUDA inference** | No CUDA device here; the GPU test skips itself. |
-| **A rendered PySide6 GUI** | No Qt widget has yet been instantiated in this sandbox (PySide6 is not installed). The FORECAST panel is verified through its Qt-free controller/view models plus source-contract assertions — that is **not** a rendered-GUI verification. |
-| **`AXIOM.exe` / `AXIOM-Kronos.exe`** | The pair build and frozen-process tests are pending the dedicated genuine Windows workflow; packaging source tests alone are not executable verification. |
+| **Interactive GUI visual QA** | The genuine frozen GUI was initialized and closed with Qt's offscreen platform on Windows (run 39158169376). No interactive desktop session, screenshot, or visual inspection was performed. The sandbox itself does not have PySide6. |
+
+### Verified Windows executable pair (2026-10-18 UTC)
+
+The dedicated [Windows pair workflow](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39158169376) passed on Windows x64 at commit `8288ff615f521c4ba2fe8c33b71b4688c6e44c9c`:
+
+- Build used separate GUI and worker environments; the builder's PyTorch-free GUI check passed.
+- The actual `AXIOM.exe --smoke` initialized and closed the PySide6 window with Qt offscreen. Smoke mode skips Arena API polling and Kronos startup; no trading or persistent state is touched.
+- The actual `AXIOM-Kronos.exe` passed its JSON-lines process test with the explicitly labelled **stub** backend: `ping`, `load`, four synthetic forecast steps, `status`, and clean `shutdown`.
+- GitHub artifact `AXIOM-Windows-executable-pair` was uploaded (223,174,721 bytes; artifact archive SHA-256 `a316983336edb4ba56c3d3ec23953f7674a097e6e997fa3beaaf7f6aa367f811`; expires 2026-11-01 UTC). The artifact contains individual executable hashes/sizes in `AXIOM-Windows-pair.build-info.json`.
+
+This verifies packaging, offscreen GUI initialization, and the frozen worker/IPC path only. It does **not** verify pretrained inference, forecast quality, GPU behavior, or the real model weights.
 
 Consequences to keep in mind:
 
@@ -51,8 +61,9 @@ Consequences to keep in mind:
   files, never against a real weight download.
 * Latency figures in this document come from the stub backend or tiny random
   models and say nothing about real inference cost.
-* The Windows child environment fix (inheriting the full environment) is
-  reasoned and unit-tested on Linux, but has not been exercised on Windows.
+* The Windows child launch and inherited runtime environment were exercised
+  by the packaged worker/IPC smoke on Windows, using only the labelled stub;
+  real-model inference remains unverified.
 
 ---
 
@@ -372,11 +383,13 @@ automatically. Stage the approved complete model and tokenizer bundles under
 verify them before inference. A passing stub smoke never establishes genuine
 Kronos model quality.
 
-At the time of this edit, the dedicated Windows workflow has not yet run on the
-current changes. Until it passes, neither executable pair startup nor packaged
-IPC is verified. Even after that workflow passes, genuine weight-backed
-inference remains unverified unless the artifact verifier confirms real local
-weights and a successful upstream inference.
+The dedicated Windows workflow passed on commit
+`8288ff615f521c4ba2fe8c33b71b4688c6e44c9c`; see the dated evidence in §0 and
+[run 39158169376](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39158169376).
+The uploaded artifact includes hashes and sizes for both executables. This does
+not change the separate status of real weights: genuine weight-backed inference
+remains unverified until an approved local model/tokenizer bundle passes the
+artifact verifier and a successful upstream inference is demonstrated.
 
 ---
 
@@ -466,7 +479,7 @@ confirmed to **fail against the pre-fix code** and pass afterwards.
 | 14 | **`ModelCache.verify()` used `self.root / entry.relative_path`**, and `Path` discards the left operand when the right is absolute. | A tampered `manifest.json` pointed integrity verification at any readable file; the check passed, because the digest is compared against the file it was pointed at. Demonstrated returning `ok=True` for a file outside the cache. | `resolve_within_root()` confines verification to the cache root. |
 | 15 | **Bare `float()` at the JSON boundary.** | `float(True) == 1.0` turned a boolean price into a real one; `json.loads` accepts the non-JSON literals `NaN`/`Infinity`. | `parse_number_field()` refuses booleans, non-finites and non-scalars, naming the field. |
 | 16 | **`decode_bars` accepted naive timestamps** over IPC. | A naive/aware comparison fails deep in the pipeline, far from the cause. | `decode_timestamp()` requires an offset and names the field; `decode_number()` applies the same numeric rules to the wire. |
-| 17 | **The child environment was stripped to an allowlist.** | No `SYSTEMROOT`/`PATH`/`TEMP` → a Python child cannot start on Windows, so `AXIOM-Kronos.exe` would not launch. | `child_environment()` inherits the full environment and applies explicit overrides. *Reasoned and unit-tested on Linux; not exercised on Windows.* |
+| 17 | **The child environment was stripped to an allowlist.** | No `SYSTEMROOT`/`PATH`/`TEMP` → a Python child cannot start on Windows, so `AXIOM-Kronos.exe` would not launch. | `child_environment()` inherits the full environment and applies explicit overrides. The frozen worker's launch and JSON-lines IPC passed on a Windows runner in [run 39158169376](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39158169376), using the labelled stub backend only. |
 
 ---
 
