@@ -280,6 +280,26 @@ def _paper_account_mismatch_message(mismatch) -> str:
     )
 
 
+def _install_break_handler(server) -> None:
+    """Stop the server cleanly when the console is interrupted.
+
+    On Windows a console sends CTRL_BREAK (SIGBREAK) to the process group,
+    and neither uvicorn nor Python treats it as an error: the default
+    action kills the process outright, so the session is never persisted
+    and the console shows a traceback instead of a clean stop. Treating it
+    like the other interrupts makes Ctrl+Break behave like Ctrl+C.
+    """
+    import signal
+
+    break_signal = getattr(signal, "SIGBREAK", None)
+    if break_signal is None:
+        return
+    try:
+        signal.signal(break_signal, lambda *_: setattr(server, "should_exit", True))
+    except (OSError, ValueError):  # pragma: no cover - not a main thread
+        pass
+
+
 def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
     import uvicorn
 
@@ -393,6 +413,7 @@ def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
             workers=1,
         )
         server = uvicorn.Server(config)
+        _install_break_handler(server)
 
         def open_when_ready() -> None:
             for _ in range(200):  # up to ~20s

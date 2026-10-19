@@ -21,9 +21,16 @@ name: Windows build and installer
 #                            INSTALLED silently, the installed executable is
 #                            driven through the same recovery, and the
 #                            uninstaller is run to prove the user's data
-#                            survives (hard gate).
+#                            survives (hard gate);
+#   6. artifacts             uploaded ONLY after every gate above passed.
 #
 # Any failure discards the artifact. No exceptions, no continue-on-error.
+#
+# The Inno Setup compiler is RESOLVED, not assumed: the Windows runner image
+# already ships Inno Setup, and a pinned `choco install --version=...`
+# refuses to downgrade it, which used to kill this workflow before a single
+# test ran. packaging/prepare_innosetup.py detects the installed compiler
+# and verifies it, and installs one explicitly when there is none.
 
 on:
   workflow_dispatch:
@@ -51,6 +58,7 @@ jobs:
   windows:
     name: Windows executable and installer
     runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -60,18 +68,18 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -o pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Install Inno Setup 6
+      - name: Resolve and verify the Inno Setup compiler (hard gate)
+        shell: bash
         run: |
-          choco install innosetup --version=6.2.2 -y --no-progress
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
-          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          set -o pipefail
+          python packaging/prepare_innosetup.py --install --github-env "$GITHUB_ENV"
 
       - name: Full source suite on Windows (hard gate)
         id: fullsuite
@@ -103,34 +111,90 @@ jobs:
           }
 
       - name: Build the Windows executable
-        shell: pwsh
+        shell: bash
         run: |
+          set -o pipefail
           python build_exe.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path dist\Arena.exe)) { throw "dist\Arena.exe was not produced" }
+          if [ ! -f dist/Arena.exe ]; then echo "::error::dist\\Arena.exe was not produced"; exit 1; fi
 
       - name: Frozen gates on the real artifact (hard gate)
-        shell: pwsh
+        id: frozen
+        shell: bash
         run: |
-          python build_exe.py --test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -o pipefail
+          python -u build_exe.py --test 2>&1 | tee frozen-build-output.txt
 
-      - name: Build the installer
-        shell: pwsh
+      - name: Report frozen-gate failures
+        if: failure() && steps.frozen.outcome == 'failure'
+        shell: bash
         run: |
-          python packaging\build_installer.py --verify
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-ChildItem dist\installer
+          if [ -f frozen-build-output.txt ]; then
+            grep -E "FAIL|ERROR|Traceback|RuntimeError|SMOKE TEST FAILED" frozen-build-output.txt \
+              | tail -n 30 || true
+          else
+            echo "::error::frozen-build-output.txt was not created"
+          fi
+
+      - name: Build the installer (hard gate)
+        id: installer
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u packaging/build_installer.py --verify 2>&1 | tee installer-build-output.txt
+          if [ ! -d dist/installer ]; then echo "::error::no installer directory was produced"; exit 1; fi
+          ls -l dist/installer
+
+      - name: Report installer-build failures
+        if: failure() && steps.installer.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f installer-build-output.txt ]; then
+            tail -n 40 installer-build-output.txt || true
+          else
+            echo "::error::installer-build-output.txt was not created"
+          fi
 
       - name: Install, exercise and uninstall (hard gate)
-        shell: pwsh
+        id: installere2e
+        shell: bash
         run: |
-          $installer = (Get-ChildItem dist\installer\*.exe | Select-Object -First 1).FullName
-          if (-not $installer) { throw "no installer was produced" }
-          python packaging\installer_e2e.py $installer build\installer-e2e
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -o pipefail
+          installer="$(ls -1 dist/installer/*.exe | head -n 1)"
+          if [ -z "$installer" ]; then echo "::error::no installer was produced"; exit 1; fi
+          python -u packaging/installer_e2e.py "$installer" build/installer-e2e \
+            2>&1 | tee installer-e2e-output.txt
+
+      - name: Report installer-test failures
+        if: failure() && steps.installere2e.outcome == 'failure'
+        shell: bash
+        run: |
+          if [ -f installer-e2e-output.txt ]; then
+            grep -E "FAIL|ERROR|Traceback|Exception" installer-e2e-output.txt \
+              | tail -n 30 || true
+          else
+            echo "::error::installer-e2e-output.txt was not created"
+          fi
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-failure-diagnostics-${{ github.run_number }}
+          path: |
+            pytest-results.xml
+            pytest-output.txt
+            frozen-build-output.txt
+            installer-build-output.txt
+            installer-e2e-output.txt
+            build/recovery-e2e-workdir/**
+            build/installer-e2e/**
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload the Windows artifacts
+        # Only after every gate above passed: a failed run must not publish
+        # an artifact that was never verified.
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Arena-windows-x64
@@ -138,3 +202,4 @@ jobs:
             dist/Arena.exe
             dist/installer/*.exe
           if-no-files-found: error
+          retention-days: 90

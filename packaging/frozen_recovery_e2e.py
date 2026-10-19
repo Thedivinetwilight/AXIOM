@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -47,6 +48,17 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _port_is_free(port: int) -> bool:
+    """True when nothing is listening on the port any more."""
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def _get(base: str, path: str, timeout: float = 10.0):
@@ -140,18 +152,63 @@ class FrozenRecoveryE2E:
 
     def start(self, *extra: str) -> subprocess.Popen:
         log = open(self.output_log, "ab")
-        return subprocess.Popen(
-            [str(self.artifact), *extra],
-            cwd=str(self._launch_dir()), env=self._env(),
-            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        # A frozen one-file build runs the application in a CHILD process.
+        # On Windows the child belongs to the parent's process group only if
+        # the group is created explicitly, so the whole tree can be stopped
+        # later instead of leaving a server behind holding the port and the
+        # session lock.
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        try:
+            return subprocess.Popen(
+                [str(self.artifact), *extra],
+                cwd=str(self._launch_dir()), env=self._env(),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                creationflags=flags)
+        finally:
+            # Popen duplicated the handle into the child; release our copy so
+            # the log is flushed and closed deterministically.
+            log.close()
 
     def stop(self, process: subprocess.Popen) -> None:
-        process.terminate()
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=10)
+        """Stop the artifact and everything it started.
+
+        A frozen one-file build runs the application in a CHILD process, so
+        on Windows the whole tree is stopped: signalling only the parent
+        would leave the server running, holding the port and the session
+        lock, and the next phase could not start.
+        """
+        if process.poll() is None:
+            try:
+                if os.name == "nt":
+                    # Ctrl+Break reaches the whole process group; the
+                    # launcher treats it as a clean stop.
+                    process.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    process.terminate()
+                process.wait(timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                if os.name == "nt":
+                    # Kill the whole tree: the bootloader AND its child.
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True, timeout=120, check=False)
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+        self._wait_port_free()
+
+    def _wait_port_free(self, timeout: float = 60.0) -> bool:
+        """Wait until the artifact released the port it was serving on."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _port_is_free(self.port):
+                return True
+            time.sleep(0.25)
+        return False
 
     def _read_log(self) -> str:
         try:
@@ -200,12 +257,22 @@ class FrozenRecoveryE2E:
                        f"status={status}")
         except (urllib.error.URLError, OSError) as exc:
             self.check("wizard prepares the paper environment", False, str(exc))
-        # A graceful stop persists the account (the broker writes its state).
+
+        database = self.home / "trading_bot.db"
+        # The account must be ON DISK, not merely in memory: the harness
+        # waits for the saved state instead of trusting the shutdown path,
+        # so the result is the same on every platform.
+        state = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            state = _read_paper_state(database)
+            if state and state.get("timeframe") == "1D":
+                break
+            time.sleep(0.5)
         self.stop(process)
         time.sleep(1.0)
 
-        database = self.home / "trading_bot.db"
-        state = _read_paper_state(database)
+        state = _read_paper_state(database) or state
         self.check("a paper account is saved in the external home",
                    bool(state) and state.get("timeframe") == "1D",
                    f"timeframe={(state or {}).get('timeframe')}")
@@ -217,9 +284,11 @@ class FrozenRecoveryE2E:
         self._reset_log()
         env_file = self.home / ".env"
         text = env_file.read_text(encoding="utf-8")
-        env_file.write_text(
-            text.replace("DEFAULT_TIMEFRAME=1D", "DEFAULT_TIMEFRAME=1m"),
-            encoding="utf-8")
+        if "DEFAULT_TIMEFRAME=1D" in text:
+            updated = text.replace("DEFAULT_TIMEFRAME=1D", "DEFAULT_TIMEFRAME=1m")
+        else:
+            updated = text.rstrip("\n") + "\nDEFAULT_TIMEFRAME=1m\n"
+        env_file.write_text(updated, encoding="utf-8")
 
         process = self.start("--no-browser")
         try:
@@ -257,6 +326,11 @@ class FrozenRecoveryE2E:
         """The documented recovery, through the real executable."""
         self._reset_log()
         before = self.database.read_bytes()
+        original_state = _read_paper_state(self.database) or {}
+        original_orders = {str(order.get("id"))
+                           for order in original_state.get("orders", [])}
+        original_fills = {str(fill.get("id"))
+                          for fill in original_state.get("fills", [])}
         process = self.start("--recover-paper-account",
                              "--confirm-new-empty-paper-account", "--no-browser")
         pointer = self.home / "paper-database-override.json"
@@ -267,6 +341,11 @@ class FrozenRecoveryE2E:
             time.sleep(0.25)
         self.check("the recovery writes a durable selection", pointer.exists(),
                    self._read_log()[-300:])
+        # The recovery continues into a normal start, so the selection is
+        # only proven when the recovered installation actually serves.
+        healthy = _wait_health(self.base, timeout=180)
+        self.check("the recovered installation serves after the recovery",
+                   healthy, self._read_log()[-300:])
         self.stop(process)
         time.sleep(1.0)
 
@@ -289,8 +368,24 @@ class FrozenRecoveryE2E:
             self.check("the selected database is a new, separate file",
                        selected.exists() and selected != self.database,
                        str(selected))
-            self.check("the selected database holds no paper account",
-                       _read_paper_state(selected) is None)
+            # The new account is a DIFFERENT account: it starts empty, so
+            # none of the original account's orders or fills may appear in
+            # it. (Once the recovered installation serves, it holds its own
+            # fresh account - that is the point of the recovery.)
+            selected_state = _read_paper_state(selected) or {}
+            selected_orders = {str(order.get("id"))
+                               for order in selected_state.get("orders", [])}
+            selected_fills = {str(fill.get("id"))
+                              for fill in selected_state.get("fills", [])}
+            copied_orders = original_orders & selected_orders
+            copied_fills = original_fills & selected_fills
+            self.check(
+                "the selected database holds none of the original account's "
+                "orders or fills",
+                not copied_orders and not copied_fills,
+                f"orders={len(copied_orders)} fills={len(copied_fills)} "
+                f"of {len(original_orders)}/{len(original_fills)}",
+            )
             self.selected = selected
         else:
             self.selected = None

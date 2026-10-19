@@ -806,7 +806,10 @@ class TestPackagedGates:
                           ".env", "paper-recovery"):
             assert forbidden not in uninstall
         # The recovery documentation must be installed with the executable.
-        assert "PAPER_ACCOUNT_RECOVERY.md" in script
+        assert "{#RecoveryDoc}" in script
+        builder = (ROOT / "packaging" / "build_installer.py").read_text(
+            encoding="utf-8")
+        assert "PAPER_ACCOUNT_RECOVERY.md" in builder
 
     def test_the_documentation_exists(self):
         doc = ROOT / "docs" / "PAPER_ACCOUNT_RECOVERY.md"
@@ -815,6 +818,145 @@ class TestPackagedGates:
         assert "--recover-paper-account" in text
         assert "--clear-paper-database-recovery" in text
         assert "--diagnostics" in text
+
+
+# ---------------------------------------------------------------------------
+# 8. the Windows CI environment: the compiler is RESOLVED, never assumed
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsCompilerResolution:
+    """The Windows workflow must not die in the environment-setup step.
+
+    The Windows runner image already ships Inno Setup (6.7.1 at the time of
+    writing). A pinned ``choco install innosetup --version=6.2.2`` refuses
+    to downgrade it, exits non-zero, and killed the whole workflow before a
+    single test ran - run 39201347608 failed exactly there.
+
+    So the compiler is DETECTED (and proven by compiling a probe script) and
+    only installed, explicitly and verifiably, when there is none.
+    """
+
+    def test_the_preparation_script_exists(self):
+        module = ROOT / "packaging" / "prepare_innosetup.py"
+        assert module.is_file()
+        source = module.read_text(encoding="utf-8")
+        assert "def detect_iscc" in source
+        assert "def probe_iscc" in source
+        assert "def install_with_chocolatey" in source
+        assert "def install_with_official_installer" in source
+
+    def test_the_preparation_script_never_downgrades_an_installed_compiler(self):
+        source = (ROOT / "packaging" / "prepare_innosetup.py").read_text(
+            encoding="utf-8")
+        # Chocolatey is invoked WITHOUT a version pin: a pinned version is
+        # what refuses to run against a newer installed one. Only the actual
+        # invocation counts, not the comment that explains it.
+        invocation = [
+            line for line in source.splitlines()
+            if '"choco", "install"' in line
+        ]
+        assert invocation, "the chocolatey fallback is missing"
+        for line in invocation:
+            assert "--version" not in line
+
+    def test_the_version_comparison_is_testable(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "arena_prepare_innosetup", ROOT / "packaging" / "prepare_innosetup.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert module.parse_version("6.7.1") == (6, 7, 1)
+        assert module.parse_version("Inno Setup Setup Compiler (Version 6.4.3)") \
+            == (6, 4, 3)
+        assert module.parse_version("no version here") is None
+
+        assert module.version_at_least((6, 7, 1), (6, 3, 0))
+        assert module.version_at_least((6, 3, 0), (6, 3, 0))
+        assert not module.version_at_least((6, 2, 2), (6, 3, 0))
+        assert not module.version_at_least(None, (6, 3, 0))
+
+    def test_the_probe_script_exercises_the_features_the_installer_needs(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "arena_prepare_innosetup", ROOT / "packaging" / "prepare_innosetup.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        probe = module.PROBE_SCRIPT
+        # A /D define and the x64compatible identifier are both needed by
+        # packaging/installer.iss, so the probe must use them.
+        assert "ProbeValue" in probe
+        assert "x64compatible" in probe
+        assert "#error" in probe
+
+    def test_the_candidate_paths_include_every_known_install_location(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "arena_prepare_innosetup", ROOT / "packaging" / "prepare_innosetup.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        candidates = [str(path) for path in module.candidate_iscc_paths()]
+        assert any("Program Files (x86)" in path for path in candidates)
+        assert any("Program Files" in path and "(x86)" not in path
+                   for path in candidates)
+        assert any("chocolatey" in path for path in candidates)
+
+    def test_the_workflow_resolves_the_compiler_instead_of_pinning_it(self):
+        workflow = (ROOT / ".github" / "workflows" / "windows-build-installer.yml")
+        text = workflow.read_text(encoding="utf-8")
+        assert "prepare_innosetup.py" in text
+        # The pin that broke run 39201347608 must not come back.
+        assert "choco install innosetup --version" not in text
+        assert "innosetup --version" not in text
+
+    def test_the_workflow_never_weakens_a_gate(self):
+        text = (ROOT / ".github" / "workflows" / "windows-build-installer.yml"
+                ).read_text(encoding="utf-8")
+        # No step may be allowed to fail.
+        assert "continue-on-error:" not in text
+        # A command that swallows a failure ("|| true") is only ever allowed
+        # in a step that already reports a failure.
+        for block in text.split("\n      - name:")[1:]:
+            if "|| true" in block:
+                assert "if: failure()" in block, block.splitlines()[0]
+        # The artifacts are published only after every gate passed.
+        upload = text.split("Upload the Windows artifacts")[-1]
+        assert "if: success()" in upload
+
+    def test_the_installer_script_receives_absolute_paths(self):
+        script = (ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8")
+        assert "{#ArenaExe}" in script
+        assert "{#RecoveryDoc}" in script
+        # No relative source path: the build script passes absolute ones.
+        assert 'Source: "..\\' not in script
+
+        builder = (ROOT / "packaging" / "build_installer.py").read_text(
+            encoding="utf-8")
+        assert "/DArenaExe=" in builder
+        assert "/DRecoveryDoc=" in builder
+        assert "/DAppVersion=" in builder
+        assert "/O" in builder
+
+    def test_the_frozen_harness_stops_the_whole_process_tree(self):
+        """A frozen one-file build runs the app in a CHILD process.
+
+        On Windows, terminating the parent alone leaves the server running:
+        it keeps the port and the session lock, and the next phase of the
+        verification cannot start. The harness therefore creates a process
+        group and stops the whole tree.
+        """
+        source = (ROOT / "packaging" / "frozen_recovery_e2e.py").read_text(
+            encoding="utf-8")
+        assert "CREATE_NEW_PROCESS_GROUP" in source
+        assert "CTRL_BREAK_EVENT" in source
+        assert "taskkill" in source
+        assert "_wait_port_free" in source
 
 
 # ---------------------------------------------------------------------------

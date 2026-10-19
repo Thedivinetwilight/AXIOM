@@ -19,8 +19,13 @@
 ; setup wizard writes), then this executable-adjacent file, then the bundled
 ; root .env.
 
+; The build script passes the three absolute paths below, so this script
+; never has to guess which directory a relative path belongs to.
 #ifndef ArenaExe
   #error "ArenaExe must be defined"
+#endif
+#ifndef RecoveryDoc
+  #error "RecoveryDoc must be defined"
 #endif
 #ifndef AppVersion
   #define AppVersion "3.2.4"
@@ -69,7 +74,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#ArenaExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\docs\PAPER_ACCOUNT_RECOVERY.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+Source: "{#RecoveryDoc}"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
 [Dirs]
 Name: "{app}\data"; Flags: uninsneveruninstall
