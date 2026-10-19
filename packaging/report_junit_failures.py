@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args.report)
     if not path.is_file():
         print(f"::error title=Pytest report::the report is missing: {path}")
-        return 1
+        return 0
     report(path, limit=args.limit)
     return 0
 

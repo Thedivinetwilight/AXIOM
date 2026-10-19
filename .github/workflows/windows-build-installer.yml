@@ -27,13 +27,17 @@ name: Windows build and installer
 # Any failure discards the artifact. No exceptions, no continue-on-error.
 #
 # Every gate reports its failure as an error annotation, so a failed run can
-# be diagnosed from the API without downloading the (large) run log.
+# be diagnosed from the API without downloading the (large) run log. The
+# gates are written as `if ! <command>; then ...` because the runner's
+# bash runs with `-e`: a failing command outside a condition would abort
+# the step before it could report anything.
 #
 # The Inno Setup compiler is RESOLVED, not assumed: the Windows runner image
 # already ships Inno Setup, and a pinned `choco install --version=...`
 # refuses to downgrade it, which used to kill this workflow before a single
 # test ran. packaging/prepare_innosetup.py detects the installed compiler
-# and verifies it, and installs one explicitly when there is none.
+# and proves it can build this project's installer script, and installs one
+# explicitly when there is none.
 
 on:
   workflow_dispatch:
@@ -73,7 +77,6 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          set -o pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
@@ -81,44 +84,40 @@ jobs:
       - name: Resolve and verify the Inno Setup compiler (hard gate)
         shell: bash
         run: |
-          set -o pipefail
-          python -u packaging/prepare_innosetup.py --install --github-env "$GITHUB_ENV" \
-            2>&1 | tee innosetup-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -u packaging/prepare_innosetup.py --install --github-env "$GITHUB_ENV" \
+               2>&1 | tee innosetup-output.txt; then
             while IFS= read -r line; do
               safe="${line//'%'/'%25'}"
               safe="${safe//$'\r'/'%0D'}"
               printf '::error title=Inno Setup::%s\n' "$safe"
             done < <(tail -n 25 innosetup-output.txt)
-            exit "$status"
+            exit 1
           fi
 
       - name: Full source suite on Windows (hard gate)
         shell: bash
         run: |
-          set -o pipefail
-          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml 2>&1 \
-            | tee pytest-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -m pytest -q --no-header -k "not slow" \
+               --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt; then
             python packaging/report_junit_failures.py pytest-results.xml
-            exit "$status"
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Pytest output::%s\n' "$safe"
+            done < <(tail -n 60 pytest-output.txt)
+            exit 1
           fi
 
       - name: Build the Windows executable
         shell: bash
         run: |
-          set -o pipefail
-          python build_exe.py 2>&1 | tee build-executable-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -u build_exe.py 2>&1 | tee build-executable-output.txt; then
             while IFS= read -r line; do
               safe="${line//'%'/'%25'}"
               safe="${safe//$'\r'/'%0D'}"
               printf '::error title=Executable build::%s\n' "$safe"
             done < <(tail -n 25 build-executable-output.txt)
-            exit "$status"
+            exit 1
           fi
           if [ ! -f dist/Arena.exe ]; then
             echo "::error title=Executable build::dist\\Arena.exe was not produced"
@@ -128,53 +127,45 @@ jobs:
       - name: Frozen gates on the real artifact (hard gate)
         shell: bash
         run: |
-          set -o pipefail
-          python -u build_exe.py --test 2>&1 | tee frozen-build-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -u build_exe.py --test 2>&1 | tee frozen-build-output.txt; then
             while IFS= read -r line; do
               safe="${line//'%'/'%25'}"
               safe="${safe//$'\r'/'%0D'}"
               printf '::error title=Frozen gate::%s\n' "$safe"
             done < <(grep -E "FAIL|ERROR|Traceback|RuntimeError|SMOKE TEST" frozen-build-output.txt | tail -n 25)
-            exit "$status"
+            exit 1
           fi
 
       - name: Build the installer (hard gate)
         shell: bash
         run: |
-          set -o pipefail
-          python -u packaging/build_installer.py --verify 2>&1 | tee installer-build-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -u packaging/build_installer.py --verify 2>&1 \
+               | tee installer-build-output.txt; then
             while IFS= read -r line; do
               safe="${line//'%'/'%25'}"
               safe="${safe//$'\r'/'%0D'}"
               printf '::error title=Installer build::%s\n' "$safe"
             done < <(tail -n 25 installer-build-output.txt)
-            exit "$status"
+            exit 1
           fi
           ls -l dist/installer
 
       - name: Install, exercise and uninstall (hard gate)
         shell: bash
         run: |
-          set -o pipefail
           installer="$(ls -1 dist/installer/*.exe | head -n 1)"
           if [ -z "$installer" ]; then
             echo "::error title=Installer test::no installer was produced"
             exit 1
           fi
-          python -u packaging/installer_e2e.py "$installer" build/installer-e2e \
-            2>&1 | tee installer-e2e-output.txt
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
+          if ! python -u packaging/installer_e2e.py "$installer" build/installer-e2e \
+               2>&1 | tee installer-e2e-output.txt; then
             while IFS= read -r line; do
               safe="${line//'%'/'%25'}"
               safe="${safe//$'\r'/'%0D'}"
               printf '::error title=Installer test::%s\n' "$safe"
             done < <(tail -n 30 installer-e2e-output.txt)
-            exit "$status"
+            exit 1
           fi
 
       - name: Upload failure diagnostics
@@ -184,6 +175,7 @@ jobs:
           name: windows-failure-diagnostics-${{ github.run_number }}
           path: |
             pytest-results.xml
+            pytest-output.txt
             innosetup-output.txt
             build-executable-output.txt
             frozen-build-output.txt
