@@ -1,0 +1,96 @@
+feature_id,area,feature,entry_point,status,verification_tier,evidence,limits_and_notes
+F-001,Startup,First-run detection and home creation,arena.py / GET /api/boot,PASS,software-contract,tests/test_v310_wizard_flow.py::test_a_fresh_home_is_detected_as_first_run,Isolated ARENA_HOME; no packaged-artifact evidence in this session
+F-002,Startup,"Saved paper account compatibility refusal (field-level message, exit 3)",arena.py preflight,FIXED,software-contract,tests/test_startup_paper_account.py (12 passed),Failing repro captured on base commit 4317e3a; fix verified byte-identical database
+F-003,Startup,Refused start leaves database and .env byte-identical,arena.py,FIXED,software-contract,tests/test_startup_paper_account.py::test_changed_timeframe_names_the_field_and_leaves_everything_alone; /tmp/repro_startup_v2.py,DB SHA-256 and size identical before/after; no traceback
+F-004,Startup,Non-destructive recovery (--new-paper-account),arena.py --new-paper-account,FIXED,software-contract,tests/test_startup_paper_account.py::test_new_paper_account_preserves_original_and_starts,Timestamped new DB; original SHA-256 re-verified; only DATABASE_URL rewritten
+F-005,Startup,Corrupt database refusal (exit 4),arena.py --no-browser,PASS,software-contract,tests/test_startup_paper_account.py::test_corrupt_database_refuses_without_modifying_it; live probe,Diagnostics reported UNREADABLE; file unchanged
+F-006,Startup,Relative DATABASE_URL anchored to ARENA_HOME,app/database/paths.py,PASS,software-contract,tests/test_database_paths.py (9 passed); tests/test_startup_paper_account.py::test_relative_database_url_is_anchored_to_the_home_not_the_cwd,Windows drive-form parsed but not executed on Windows
+F-007,Startup,Two launches cannot share one home,arena.py (instance guard),PASS,software-contract,tests/test_startup_paper_account.py::test_two_launches_never_share_one_home; tests/test_v310_instance_guard.py (5),Uses instance lock plus paper writer lock
+F-008,Startup,Structured diagnostics JSON,arena.py --diagnostics,PASS,software-contract,tests/test_startup_paper_account.py::test_reports_paths_mode_and_never_a_token; live probe,Exit 0 for informational states; token never printed
+F-009,Startup,Unloadable configuration exits 1 with structured JSON,arena.py --diagnostics,FIXED,software-contract,tests/test_startup_paper_account.py::test_invalid_configuration_still_prints_structured_diagnostics,Invalid DEFAULT_TIMEFRAME returns exit 1
+F-010,Wizard,Single-step paper setup (token generated once),POST /api/wizard/prepare-paper,PASS,software-contract,tests/test_v310_wizard_flow.py; tests/test_wizard_paper_safety.py,No process-environment mutation after fix
+F-011,Wizard,Validate-before-write on refused change,POST /api/wizard/prepare-paper,FIXED,software-contract,tests/test_wizard_paper_safety.py (2 passed),Pre-fix rollback left a stray .env; now restores exact bytes
+F-012,Wizard,Engine rebuild rollback and honest restore message,POST /api/wizard/prepare-paper,FIXED,software-contract,tests/test_wizard_paper_safety.py::test_unrestorable_engine_is_reported_honestly,Reports could NOT be restored instead of claiming success
+F-013,Wizard,Upstox instrument-key validation before network,POST /api/wizard/prepare-paper,PASS,software-contract,tests/test_wizard_upstox_validation.py (19 passed),Rejects malformed keys with 422 and persists nothing
+F-014,Wizard,Market-data credential probe (read-only),POST /api/wizard/validate-market-data,PASS,software-contract,tests/test_upstox_credential_probe.py (15),Mocked transport only; real Upstox unreachable here
+F-015,Wizard,Wizard never enables live / rejects non-paper installs,POST /api/wizard/prepare-paper,PASS,software-contract,tests/test_v310_wizard_flow.py::test_an_existing_live_configuration_is_never_touched,Blocklist plus broker allowlist
+F-016,Wizard,PAPER/LIVE switch is an opener only; activation needs explicit multi-step,wizard plus live rail,PASS,software-contract,tests/test_axiom_execution_gateway.py; tests/test_live_ops_v2_1.py,No wizard path writes live activation keys
+F-017,Paper trading,"Replay engine end-to-end (bars, strategy, risk, orders/fills/trades)",POST /api/paper/start-default,PASS,software-contract,tests/test_v310_wizard_flow.py::test_start_paper_with_one_action_produces_recorded_executions; live loopback run,Real HTTP against running app; 122 bars processed in probe
+F-018,Paper trading,Stop/pause/resume and status truthfulness,POST /paper/stop|pause|resume; GET /paper/status,PASS,software-contract,tests/test_v1_engine.py; live probe,Status reflects PAUSED/RUNNING honestly
+F-019,Paper trading,Restart restores the exact paper account,paper broker persistence,PASS,software-contract,tests/test_upstox_live.py::test_restart_restores_account_without_duplicate_orders; tests/test_startup_paper_account.py,No duplicate orders on recovery
+F-020,Paper trading,Paper account compatibility field comparison,app/paper_trading/compatibility.py,PASS,software-contract,tests/test_startup_paper_account.py,Compares capital/costs/timeframe/currency/calendar; read-only
+F-021,Paper trading,Replay determinism,tools/determinism_check.py,PASS,software-contract,tests/test_determinism_check.py,In-process and cross-process fingerprint match
+F-022,Paper trading,Order/fill/trade accounting and realized P&L,app/paper_trading,PASS,software-contract,tests/test_v3_0_1_execution_safety.py; tests/test_execution.py,Per-fill idempotent accounting
+F-023,Paper trading,Market-hours gating with session calendar,app/paper_trading/execution.py,PASS,software-contract,tests/test_v1_engine.py; tests/test_settings_parser.py,Continuous vs nse-session; daily plus session calendar refused by engine preflight
+F-024,Upstox market data,Feed V3 authorize probe classification,GET authorize (read-only),PASS,software-contract,tests/test_upstox_credential_probe.py (15),401/403 rejected; 429 http_429; 5xx http_5xx; malformed 200 unexpected_response
+F-025,Upstox market data,Authorize transient vs permanent error handling,app/data/upstox_stream.py,FIXED,software-contract,tests/test_upstox_live.py::test_authorize_http_429_is_transient_and_retried (22 total),429/5xx retried with backoff; 400/401 permanent; 25-failure cap to UNAVAILABLE
+F-026,Upstox market data,Malformed 200 or untrusted redirect scheme fails closed,app/data/upstox_stream.py,PASS,software-contract,tests/test_upstox_live.py::test_authorize_malformed_or_non_wss_body_fails_closed,No retry loop for a possible interception
+F-027,Upstox market data,WebSocket connect/subscribe/decode (protobuf),app/data/upstox_stream.py,PASS,software-contract,tests/test_upstox_live.py (real loopback WS server),Local loopback server only
+F-028,Upstox market data,Reconnect with bounded backoff and status recovery,app/data/upstox_stream.py,PASS,software-contract,tests/test_upstox_live.py::test_live_pipeline_over_real_sockets_reconnect_heartbeat_duplicate; tests/test_upstox_v063.py,Loopback WS; no real Upstox session
+F-029,Upstox market data,Stale-feed and idle ping detection,app/data/upstox_stream.py,PASS,software-contract,tests/test_upstox_live.py::test_stale_feed_detection,Stale threshold configurable (default 30s)
+F-030,Upstox market data,Real Upstox authorized feed,wss feed,BLOCKED,external,curl SSL_ERROR_SYSCALL to api.upstox.com (2026-10-19T13:33:38Z); no credentials,Not tested; sandbox token must never be treated as proof
+F-031,Upstox history,Historical candle chunking per documented windows,app/history/manager.py,PASS,software-contract,tests/test_v2_history.py::test_documented_chunk_limits,No network in tests
+F-032,Upstox history,Intraday endpoint wiring,app/history/manager.py,FIXED,software-contract,tests/test_v2_history_transport.py (6 passed),Pre-fix AttributeError proved; documented URL asserted
+F-033,Upstox history,Resume and dedup of interrupted downloads,app/history/manager.py,PASS,software-contract,tests/test_v2_history.py::test_interrupted_download_resumes_from_failure_point,Mock transport
+F-034,Upstox history,Real historical download,GET historical-candle,BLOCKED,external,TLS egress refused; no token,Not attempted
+F-035,Upstox OAuth,Official authorization-code login flow,app/data/upstox_auth.py run_login_flow,PARTIAL,software-contract,tests/test_upstox_login_env.py (5); tests/test_upstox_v062.py,Flow implemented and unit-tested; no real OAuth completed
+F-036,Upstox OAuth,Login reads the .env it writes (packaged build),app/data/upstox_auth.py,FIXED,software-contract,tests/test_upstox_login_env.py,Pre-fix 4 failed; now 5 passed; process env untouched
+F-037,Upstox OAuth,State parameter verification (CSRF),app/data/upstox_auth.py,PASS,software-contract,tests/test_upstox_v062.py; run_login_flow,No token requested on mismatch
+F-038,Upstox OAuth,Token refresh writes every configured token key,store_token_in_env,FIXED,software-contract,tests/test_upstox_v062.py; app/config/envfile.py atomic write,Updates both MARKET_DATA_ACCESS_TOKEN and UPSTOX_ACCESS_TOKEN when present
+F-039,Upstox OAuth,Real OAuth against Upstox,api.upstox.com login,BLOCKED,external,No client id/secret; TLS egress refused,Documented as unverified
+F-040,Upstox sandbox,Sandbox order routing to sandbox host,app/brokers/sandbox.py,PASS,software-contract,tests/test_v1_sandbox.py (34),Mocked transport; no real sandbox account
+F-041,Upstox sandbox,Sandbox host pinning (never a live host),app/config/settings.py,PASS,software-contract,tests/test_live_hardening_v2.py host pinning; tests/test_settings_parser.py,HTTPS plus host allowlist
+F-042,Upstox sandbox,Real sandbox account order,sandbox API,BLOCKED,external,No sandbox credentials; egress blocked,Not attempted
+F-043,Live rail,Four-switch live opt-in fail-closed,app/config/settings.py,PASS,software-contract,tests/test_live_config_check.py (44); tests/test_live_hardening_v2.py,Missing switches enumerated in one message
+F-044,Live rail,Session state machine OFF to ACTIVE,app/live/session.py,PASS,software-contract,tests/test_live_ops_v2_1.py; tests/test_axiom_markets_live.py,ARM and ACTIVATE separate
+F-045,Live rail,"Activation requires confirmation, readiness, emergency clear",app/live,PASS,software-contract,tests/test_axiom_execution_gateway.py; tests/test_live_ops_v2_1.py,Fail-closed on unreadable state
+F-046,Live rail,Execution gateway final-boundary revalidation,app/live/gateway.py,PASS,software-contract,tests/test_axiom_execution_gateway.py (85),Checks re-run before HTTP mutation; capability-bound
+F-047,Live rail,Emergency stop and clear (API and CLI),/api/live/emergency-stop; app live-halt,PASS,software-contract,tests/test_live_emergency_api.py; tests/test_live_ops_v2_1.py,Exit path still allowed; entries blocked
+F-048,Live rail,Guard chain / kill switches,GET /api/live/guard-chain,PASS,software-contract,tests/test_live_ops_v2_1.py,Read-only surface plus enforced checks
+F-049,Live rail,Rate limiting of live submissions,app/live/rate_limit.py,PASS,software-contract,tests/test_live_ops_v2_1.py; GET /api/live/rate-limit,Per-session limits
+F-050,Live rail,Reconciliation and submission journal durability,app/live,PASS,software-contract,tests/test_submission_journal_durability.py; tests/test_v3_0_1_execution_safety.py,Uncertain submissions never blindly retried
+F-051,Live rail,Single-engine lease and supervisor lifecycle,app/live/lock.py; supervisor.py,PASS,software-contract,tests/test_live_supervisor_lifecycle.py; tests/test_live_ops_v2_1.py,Lease ownership failure blocks entries
+F-052,Live rail,Canary reservation,app/live/ops.py,PASS,software-contract,tests/test_live_ops_v2_1.py,Reserved before uncertain broker result
+F-053,Live rail,Real live order on a production account,UPSTOX_LIVE,BLOCKED,external,No credentials; prohibited by mission,NOT attempted by design
+F-054,Execution,Direct broker mutation without gateway capability refused,app/brokers/upstox_live.py,PASS,software-contract,tests/test_live_hardening_v2.py; tests/test_axiom_execution_gateway.py,Caller-owned transport rejected
+F-055,Execution,Unsupported live order modification refused,app/brokers/upstox_live.py,PASS,software-contract,tests/test_live_hardening_v2.py,Explicit refusal path
+F-056,Risk,Position/daily-loss/trade-count limits enforced,app/risk,PASS,software-contract,tests/test_live_ops_v2_1.py; tests/test_v3_0_1_execution_safety.py,Zero limits refused in live mode
+F-057,Risk,Exits and risk reduction permitted while paused or stopped,app/live/gateway.py,PASS,software-contract,tests/test_axiom_execution_gateway.py,Long-only reduction direction enforced
+F-058,Backtesting,Backtest engine and cost model,python -m app backtest,PASS,software-contract,tests/test_backtesting_validation.py (11); tests/test_execution.py,No profitability claim
+F-059,Backtesting,Walk-forward / chronological validation,app/validation,PASS,software-contract,tests/test_backtesting_validation.py,Contract verified on controlled data; no external market data
+F-060,Research,Experiment and tournament parameter runs,python -m app research run,PASS,software-contract,tests/test_axiom_research_loop.py (22); tests/test_v2_datasets_research.py,Synthetic or local data
+F-061,Research,Strategy lifecycle promotion and degradation,python -m app lifecycle,PASS,software-contract,tests/test_axiom_research_loop.py,Admission gates; no profitability claim
+F-062,Research,Opportunity and evidence workflow,app/research,PASS,software-contract,tests/test_axiom_intel_system.py; tests/test_final_intelligence.py,Decision support only
+F-063,Research,"Agreement, counterfactual and missed-opportunity analytics",app/research,PASS,software-contract,tests/test_axiom_agreement_counterfactual.py,Recorded data only
+F-064,Universe,Instrument master sync and schema,python -m app market-universe,PASS,software-contract,tests/test_v2_universe.py,Public live file skipped (external TLS blocked)
+F-065,Universe,Universe screening and pins,python -m app universe,PASS,software-contract,tests/test_v2_universe.py; tests/test_axiom_research_loop.py,Deterministic local data
+F-066,Kronos,Forecast input validation and pipeline,app/models; app/engine forecast,PASS,software-contract,tests/test_kronos_runtime.py (105); worker (80); pipeline_store (35); artifacts (75),Controlled inputs only
+F-067,Kronos,Studio service composition and status honesty,/api/kronos/studio,PASS,software-contract,tests/test_kronos_end_to_end.py; tests/test_kronos_ui.py,Composition test uses a fake service
+F-068,Kronos,Genuine pretrained weights and real inference,model cache,BLOCKED,external,39 skips include absent checkout/weights/pandas/torch,Not substituted with random weights
+F-069,Kronos,GPU runtime,CUDA backend,BLOCKED,external,No CUDA/torch in environment,Unverified
+F-070,Market intel,Market event listener and impact assessment,app/market_events,PASS,software-contract,tests/test_market_events_3_0_4.py (20),No external live dependency in tests
+F-071,Market intel,Market status and session endpoints,/api/markets; /market/status,PASS,software-contract,tests/test_axiom_markets_live.py,Provider status mocked where network would be needed
+F-072,API,Authenticated routes (bearer and loopback),app/api/auth.py,PASS,software-contract,tests/test_dashboard_auth_flow.py; tests/test_final_security.py,Token redaction checks
+F-073,API,"Static frontend integrity (no inline JS, real parser)",app/static,PASS,software-contract,tests/test_v310_frontend_integrity.py; node --check in packaging gate,Node 22.22.3 available
+F-074,API,UI action matrix control to route contract,app/static; desktop,PASS,software-contract,tests/test_v310_ui_action_matrix.py; tests/test_axiom_gui_action_matrix.py,Selected contracts only
+F-075,Desktop,PySide6 desktop client imports and viewmodels,python -m desktop,PARTIAL,software-contract,tests/test_v2_desktop.py (12); tests/test_final_api_desktop.py (13),PySide6 not installed; no display server; GUI boot unverified
+F-076,Desktop,Frozen desktop executable,desktop bundle,UNVERIFIED,packaged-app,No PySide6 and no frozen build in this environment,README claims a desktop exe; not reproducible here
+F-077,Storage,Backup create/verify/restore,python -m app backup,PASS,software-contract,tests/test_v3_0_2_hardening.py; tests/test_axiom_updater.py,Manifest is unsigned (documented)
+F-078,Storage,Updater staging and digest verification,python -m app update,PASS,software-contract,tests/test_axiom_updater.py (20),Caller-supplied digest only
+F-079,Storage,Database schema migrations,app/database,PASS,software-contract,tests/test_v2_migrations.py,Migration-only versions
+F-080,Packaging,One-file executable build,build_exe.py,PASS,packaged-app (CI only),packaging/arena.spec; .github/workflows/build-executable.yml,Local build BLOCKED: missing libpython3.11 shared library and no egress
+F-081,Packaging,Frozen end-to-end gate against the real artifact,tests/test_v310_frozen_e2e.py,UNVERIFIED,packaged-app,2 skipped locally (no artifact),Must be quoted from the CI run after this commit
+F-082,Packaging,Windows and macOS executables,CI matrix,UNVERIFIED,packaged-app,No Windows/macOS machine; CI matrix is the authority,Not claimed
+F-083,Packaging,Windows portability source checks,tests/test_windows_portability.py,PASS,software-contract,tests/test_windows_portability.py (5),"AST/source checks, not a real Windows run"
+F-084,Operations,CLI surface (28 subcommands),python -m app,PASS,software-contract,tests/test_v1_cli_safety.py (14); tests/test_feature_console.py (48),Read-only commands exercised
+F-085,Operations,Console command runner (timeout kills process group),/console/run,FIXED,software-contract,tests/test_feature_console.py::test_timeout_kills_the_command_and_says_so,Was opening the operator DB; now pinned to a disposable home
+F-086,Operations,Self-monitoring snapshot,python -m app monitor,PASS,software-contract,tests/test_final_monitoring.py (21),Exit code 1 on alerts
+F-087,Operations,Reports and weekly summary,python -m app report,PASS,software-contract,tests/test_final_research.py; app/reporting,Local data
+F-088,Security,"Secret redaction at source (logs, UI, errors)",app/logging; reporting,PASS,software-contract,tests/test_final_security.py; targeted assertions in new tests,Verified with grep-based sweeps
+F-089,Security,Path traversal and authz hardening,app/api,PASS,software-contract,tests/test_v3_0_2_hardening.py (42),Includes static bypass scans
+F-090,Security,Out-of-band HTTP by a credential-holding process,architecture,NOT APPLICABLE,external,Documented boundary in AXIOM_PRODUCT_MANUAL.md,No control claimed
+F-091,Environment,Sandbox network reachability to Upstox,container egress,BLOCKED,external,curl SSL_ERROR_SYSCALL at 2026-10-19T13:33:38Z,See F-030
+F-092,Environment,Operator database preserved and never touched by tests,/tmp/dbwatch.py plugin,PASS,software-contract,full-suite DB watch (0 touches),SHA-256 unchanged (86ce6fdc...)
+F-093,Documentation,Current audit report reflects this commit,AXIOM_CURRENT_AUDIT_REPORT.md,UNVERIFIED,documentation,Updated in this commit,Commit SHA and CI run link necessarily post-date the file
+F-094,Documentation,Stale Upstox guide corrected,UPSTOX_SANDBOX_AND_MARKETDATA_GUIDE.md,PASS,documentation,Guide rewritten with current gating,Older claims marked superseded
+F-095,Feature inventory,Documented PySide6 desktop app,README section,PARTIAL,packaged-app,README section; tests/test_v2_desktop.py,Not reproducible here

@@ -1,20 +1,40 @@
 # AXIOM / Arena — Upstox Sandbox, Market Data, and Diagnostic Manual
 
-**Date:** 2026-10-02
-**Branch:** `arena/01a0ecfa-axiom`
-**Applies to:** Arena 3.0.5 backend + AXIOM desktop client
+> **SUPERSEDED IN PART — read this first (2026-10-19).** This document was
+> written against Arena 3.0.5. Its central claim in §1 — "there is no live order
+> path to enable" — is **no longer true** for the 3.2.4 source line. AXIOM now
+> ships a four-switch, fail-closed `UPSTOX_LIVE` rail
+> (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE` + `LIVE_CONFIRM`,
+> plus non-zero hard limits), with separate ARM and ACTIVATE steps, a final
+> execution-gateway boundary and an emergency stop. `BROKER=LIVE` is still
+> rejected, and none of that has been exercised against a real account: no
+> live/sandbox order, production OAuth flow or real Upstox session is claimed.
+> The credential-classification, host-pinning and OAuth guidance below remains
+> accurate and is still the operator reference. Current evidence lives in
+> [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) and
+> [`AXIOM_FINAL_FEATURE_TEST_MATRIX.csv`](AXIOM_FINAL_FEATURE_TEST_MATRIX.csv).
+> Android/Termux and older file/line citations are historical.
 
-Every code citation below was re-read from source this session. Where a claim
-comes from your local machine rather than this repository, it is labelled.
+**Date:** 2026-10-02 (annotated 2026-10-19)
+**Branch:** `arena/01a0ecfa-axiom` (original) · current work: `arena/107862ec-axiom`
+**Applies to:** Arena 3.0.5 backend + AXIOM desktop client (historical)
+
+Every code citation below was re-read from source in its own session. Where a
+claim comes from a local machine rather than this repository, it is labelled.
+Citations that no longer match current line numbers are historical; the
+behavioural rules they describe are still enforced.
 
 ---
 
-## 1. Direct answer: is AXIOM ready for live trading?
+## 1. Direct answer: is AXIOM ready for live trading? (historical section)
 
-**No — and it cannot be made ready by configuration.** There is no live order
-path in this codebase to enable.
+> **Superseded 2026-10-19.** The three "blocks" below describe Arena 3.0.5 and
+> were true then. In 3.2.4 a live path exists and is deliberately gated. The
+> answer to "is it proven ready?" is still **no**: no real order, credential or
+> Upstox session has been exercised.
 
-Three independent, verified blocks:
+At the time of writing there was no live order path to enable. The three
+blocks that existed in that release were:
 
 **a) `LIVE_TRADING=true` does not enable trading. It prevents startup.**
 

@@ -249,6 +249,22 @@ These are operational decisions, not code gaps:
   it; both authenticated).
 - `live-drill` is exercised by tests too, including the failure path: a broken step is
   reported with its evidence and its database is deliberately kept.
-- Full suite: see `README.md` for the current count · `tools/security_scan.py`: CLEAN.
+- Full suite: **1926 passed, 39 skipped** (2026-10-19, Linux/Python 3.11.2; see
+  [`AXIOM_FINAL_RUN_LOG.md`](AXIOM_FINAL_RUN_LOG.md)) · `tools/security_scan.py`: CLEAN.
 - No test contacts a network; the webhook is exercised with an httpx mock transport.
 - Real-money end-to-end execution remains **not attempted** (no live credentials here).
+
+### Startup and recovery (3.2.4)
+
+- A saved paper account whose capital/costs/timeframe/currency/calendar no longer
+  matches the configuration is refused **before** the database is opened
+  read-write: exit code 3 (configuration) or 4 (storage), field-level message,
+  database and `.env` byte-identical.
+- `python arena.py --diagnostics` prints JSON (`paper_account.status` =
+  `MATCH`/`MISMATCH`/`NO_ACCOUNT`/`UNREADABLE`, plus `health`) and never a token.
+- `python arena.py --new-paper-account` creates a timestamped sibling database,
+  re-verifies the original's SHA-256 and rewrites only `DATABASE_URL`; the old
+  file is never modified or deleted.
+- Upstox authorize treats 401/403 as permanent and 429/5xx as transient
+  (bounded backoff, 25-failure cap → `UNAVAILABLE`). A malformed 200 is refused
+  without retry. See `AXIOM_FINAL_KNOWN_ISSUES.md` for what remains external.

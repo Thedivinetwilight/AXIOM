@@ -272,11 +272,33 @@ class Settings:
                 "BROKER must be LOCAL_PAPER, UPSTOX_SANDBOX or UPSTOX_LIVE")
         if not self.database_url.startswith("sqlite:///"):
             raise ValueError("Only SQLite is supported")
+        # Validate the URL structure now, so a malformed value is reported as
+        # a configuration error instead of failing deep inside sqlite3.
+        from app.database.paths import DatabaseUrlError, sqlite_path_text
+
+        try:
+            sqlite_path_text(self.database_url)
+        except DatabaseUrlError as exc:
+            raise ValueError(str(exc)) from None
         from app.backtesting.costs import ExecutionConfig
 
         ExecutionConfig(**self.execution_kwargs())
         if self.market_calendar not in {"continuous", "nse-session"}:
             raise ValueError("Unknown market calendar")
+        # `make_calendar` implements exactly this rule; validating it here
+        # turns a startup traceback into a named configuration refusal.
+        from app.data.models import TIMEFRAMES
+
+        if self.default_timeframe not in TIMEFRAMES:
+            raise ValueError(
+                "DEFAULT_TIMEFRAME must be one of "
+                + ", ".join(sorted(TIMEFRAMES)))
+        # A daily default with a session calendar is deliberately NOT rejected
+        # here: `make_calendar()` cannot build that pair, but the engine
+        # preflight (`live_timeframe_error` / the engine command) reports it
+        # with a specific, actionable message. Rejecting it in the constructor
+        # would turn an existing configuration file into a generic failure.
+        self._validate_market_data_urls()
         if self.data_source not in {"replay", "binance", "generic", "upstox"}:
             raise ValueError("Unknown data source")
         if broker == "UPSTOX_SANDBOX":
@@ -385,6 +407,52 @@ class Settings:
                         "MARKET_DATA_SYMBOLS must be comma-separated Upstox instrument "
                         "keys, e.g. NSE_EQ|INE002A01018"
                     )
+
+    def _validate_market_data_urls(self) -> None:
+        """Keep the market-data bearer token on documented Upstox endpoints.
+
+        These URLs are configuration, and every request built from them carries
+        ``Authorization: Bearer <market-data token>``. An arbitrary host in
+        ``.env`` would therefore exfiltrate the credential. Loopback is
+        explicitly allowed as a local diagnostic/proxy seam (the token never
+        leaves the machine); everything else must be the documented host and
+        endpoint family.
+        """
+        from urllib.parse import urlparse
+
+        loopback = {"127.0.0.1", "::1", "localhost"}
+
+        def checked(name: str, url: str, *, hosts: set[str],
+                    path_prefix: str) -> None:
+            try:
+                parsed = urlparse(str(url))
+                port = parsed.port
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} is not a valid URL ({exc})") from None
+            host = (parsed.hostname or "").lower()
+            local = host in loopback and parsed.scheme in {"http", "https"}
+            if not local:
+                if (parsed.scheme != "https" or host not in hosts
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or port not in (None, 443)
+                        or parsed.query or parsed.fragment):
+                    raise ValueError(
+                        f"{name} must be an HTTPS URL on "
+                        f"{', '.join(sorted(hosts))} (or a loopback test URL); "
+                        f"got host {host or '(unset)'}")
+            if not (parsed.path or "").startswith(path_prefix):
+                raise ValueError(
+                    f"{name} path must start with {path_prefix!r}")
+
+        checked("MARKET_DATA_AUTHORIZE_URL", self.market_data_authorize_url,
+                hosts={"api.upstox.com"},
+                path_prefix="/v3/feed/market-data-feed/authorize")
+        checked("HISTORY_BASE_URL", self.history_base_url,
+                hosts={"api.upstox.com"}, path_prefix="/v3/historical-candle")
+        checked("INTRADAY_BASE_URL", self.intraday_base_url,
+                hosts={"api.upstox.com"},
+                path_prefix="/v3/historical-candle/intraday")
 
     def _validate_sandbox_host(self) -> None:
         """The sandbox broker must never be pointed at a live order host."""
@@ -541,6 +609,28 @@ class Settings:
         if runtime is not None and runtime.is_portable():
             if not (os.getenv("DATABASE_URL") or "").strip():
                 values["database_url"] = runtime.default_database_path()
+            else:
+                # An EXPLICIT relative URL (e.g. sqlite:///trading_bot.db) must
+                # also be anchored to ARENA_HOME, not to the working directory.
+                # A double-clicked Windows executable often starts in
+                # C:\Windows\System32, where the database can neither be found
+                # nor created; previously that looked like "my paper account
+                # vanished". The operator's literal URL is only rebased, never
+                # rewritten to a different filename.
+                from app.database.paths import (
+                    DatabaseUrlError,
+                    absolute_database_url,
+                    is_absolute_path_text,
+                    sqlite_path_text,
+                )
+
+                try:
+                    raw_path = sqlite_path_text(values["database_url"])
+                    if raw_path != ":memory:" and not is_absolute_path_text(raw_path):
+                        values["database_url"] = absolute_database_url(
+                            values["database_url"], home=runtime.arena_home())
+                except DatabaseUrlError:
+                    pass  # __post_init__ reports the named configuration error
             if not (os.getenv("DATA_DIR") or "").strip():
                 values["data_dir"] = runtime.default_data_dir()
 

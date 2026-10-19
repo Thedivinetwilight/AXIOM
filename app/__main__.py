@@ -1713,6 +1713,27 @@ def cmd_backup(args) -> int:
         database.close()
 
 
+def cmd_paper_recover(args) -> int:
+    """Create a NEW paper database; never modifies the existing one.
+
+    The supported recovery path for "saved paper account config differs" or a
+    damaged database. It is deliberately explicit: no automatic path ever
+    replaces an operator's paper history.
+    """
+    from app.maintenance.paper_recovery import (
+        PaperRecoveryError,
+        create_replacement_database,
+    )
+
+    try:
+        summary = create_replacement_database()
+    except PaperRecoveryError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(summary, indent=2, default=str, allow_nan=False))
+    return 0
+
+
 def cmd_upstox_login(args) -> int:
     """Official OAuth 2.0 authorization-code flow; token goes to .env only."""
     from app.data.upstox_auth import run_login_flow
@@ -1932,6 +1953,13 @@ def parser() -> argparse.ArgumentParser:
     bak.add_argument("--label", default="manual")
     bak.add_argument("--backup-dir", default="backups")
     bak.set_defaults(func=cmd_backup)
+
+    recover = sub.add_parser(
+        "paper-recover",
+        help=("create a NEW paper database and point the configuration at it; "
+              "the existing database is never modified"),
+    )
+    recover.set_defaults(func=cmd_paper_recover)
     return p
 
 

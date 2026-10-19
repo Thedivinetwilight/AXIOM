@@ -100,7 +100,7 @@ def _mock_protocol_authorization(broker, transport):
     repository.set_engine_state("live_engine_control", {
         "stop_requested": False, "generation": 1})
 
-    settings = Settings(**LIVE_KWARGS)
+    settings = Settings(**LIVE_KWARGS, database_url="sqlite:///:memory:")
     sessions = SimpleNamespace(current=lambda: SimpleNamespace(state="ACTIVE"))
 
     class AcceptCanary:
@@ -236,7 +236,7 @@ class TestFourSwitchGate:
             Settings(**kwargs)
 
     def test_all_four_switches_together_are_accepted(self):
-        settings = Settings(**LIVE_KWARGS)
+        settings = Settings(**LIVE_KWARGS, database_url="sqlite:///:memory:")
         assert settings.mode.upper() == "LIVE"
         assert settings.live_trading is True
         assert settings.broker.upper() == "UPSTOX_LIVE"
@@ -628,10 +628,15 @@ class TestCliGates:
         assert payload["ok"] is False and payload["performed"] is False
         assert "configuration rejected" in payload["reason"]
 
-    def test_preflight_classifies_a_good_credential(self, monkeypatch, capsys):
+    def test_preflight_classifies_a_good_credential(self, monkeypatch, capsys,
+                                                   tmp_path):
         from app import __main__ as cli
 
-        monkeypatch.setattr(cli, "_load_settings", lambda: Settings(**LIVE_KWARGS))
+        # live-preflight records a token verification row: it must land in a
+        # disposable database, never the operator's.
+        settings = Settings(**LIVE_KWARGS,
+                            database_url=f"sqlite:///{tmp_path}/live.db")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
         monkeypatch.setattr(
             UpstoxLiveBroker, "_request",
             lambda self, method, url, **kw: httpx.Response(
@@ -642,10 +647,13 @@ class TestCliGates:
         assert payload["order_host_is_documented_live"] is True
         assert payload["hard_risk_limits"]["max_position_value"] == 10_000.0
 
-    def test_preflight_rejects_a_bad_credential(self, monkeypatch, capsys):
+    def test_preflight_rejects_a_bad_credential(self, monkeypatch, capsys,
+                                                 tmp_path):
         from app import __main__ as cli
 
-        monkeypatch.setattr(cli, "_load_settings", lambda: Settings(**LIVE_KWARGS))
+        settings = Settings(**LIVE_KWARGS,
+                            database_url=f"sqlite:///{tmp_path}/live.db")
+        monkeypatch.setattr(cli, "_load_settings", lambda: settings)
         monkeypatch.setattr(
             UpstoxLiveBroker, "_request",
             lambda self, method, url, **kw: httpx.Response(

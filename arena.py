@@ -226,7 +226,292 @@ def _handle_existing_instance(existing, *, open_browser: bool) -> int:
     return 2
 
 
+#: Exit codes are part of the operator contract (documented in README.md).
+#: A refused start is not a crash: scripts and the packaged smoke tests can
+#: tell "configuration/data needs attention" apart from "unexpected bug".
+EXIT_UNEXPECTED = 1
+EXIT_CONFIG = 3
+EXIT_STORAGE = 4
+
+
+class StartupRefusal(RuntimeError):
+    """A startup condition the operator can fix; printed without a traceback."""
+
+    def __init__(self, message: str, code: int):
+        super().__init__(message)
+        self.code = int(code)
+
+
+def _recovery_command() -> str:
+    from app.maintenance.paper_recovery import recovery_command
+
+    return recovery_command()
+
+
+def _log_location() -> str:
+    from app import runtime
+
+    return str(runtime.arena_home() / "logs" / "arena.log")
+
+
+def _print_startup_refusal(reason: str) -> None:
+    """Explain a refused start in operator language, never a traceback."""
+    from app.runtime import ensure_utf8_output
+
+    ensure_utf8_output()
+    print()
+    print("  " + "-" * 66)
+    print("   Arena did not start")
+    print("  " + "-" * 66)
+    for line in str(reason).splitlines():
+        print(f"   {line}" if line else "")
+    print()
+    print("   Nothing was changed, no data was deleted, no order was placed.")
+    print("  " + "-" * 66, flush=True)
+
+
+def _check_paper_writer_lock(path) -> None:
+    """Refuse cleanly when another process owns this database's writer lock.
+
+    The lock itself is authoritative; this probe only gives its refusal a
+    readable message before uvicorn would otherwise print a traceback. The
+    probe releases its own claim immediately, and the real lock is still taken
+    by `Repository.acquire_writer`.
+    """
+    import os
+    from pathlib import Path
+
+    lock_path = Path(str(path) + ".paper.lock")
+    if not lock_path.exists():
+        return
+    try:
+        handle = open(lock_path, "rb")
+    except OSError as exc:
+        raise StartupRefusal(
+            f"Another Arena process may be using {path} (its writer-lock file "
+            f"is present but unreadable: {type(exc).__name__}). Close the other "
+            "instance and retry, or remove the stale lock only after confirming "
+            "no Arena process is running.",
+            EXIT_STORAGE,
+        ) from None
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, ImportError):
+            raise StartupRefusal(
+                f"Another paper process currently owns {path}. Close it and "
+                "retry. (Arena will not open a second writer on one paper "
+                "account.)",
+                EXIT_STORAGE,
+            ) from None
+    finally:
+        handle.close()
+
+
+def _preflight(settings) -> None:
+    """Everything that can be checked before the server claims the database.
+
+    All checks are READ-ONLY: a refused start must leave `.env` and the
+    database byte-for-byte unchanged.
+    """
+    import os
+    from pathlib import Path
+
+    from app import runtime
+    from app.database.paths import (
+        DatabaseUrlError,
+        is_memory_url,
+        resolve_sqlite_path,
+    )
+    from app.paper_trading import compatibility
+
+    env_file = runtime.env_file()
+    recovery = _recovery_command()
+
+    try:
+        compatibility.ensure_compatible(
+            settings, env_file=env_file, recovery_command=recovery,
+            home=runtime.arena_home() if runtime.is_portable() else None)
+    except compatibility.PaperAccountMismatch as exc:
+        raise StartupRefusal(
+            exc.guidance(env_file=env_file, recovery_command=recovery),
+            EXIT_CONFIG,
+        ) from None
+    except compatibility.PaperDatabaseUnreadable as exc:
+        raise StartupRefusal(
+            f"{exc}\n\n"
+            "The file was not modified. If it is damaged, keep a copy for "
+            "inspection and restore a verified backup "
+            "(`python -m app backup verify --path ...`).\n"
+            "To start a fresh paper account instead (the existing file is "
+            f"left untouched):\n    {recovery}",
+            EXIT_STORAGE,
+        ) from None
+    except ValueError as exc:
+        raise StartupRefusal(f"Configuration error: {exc}", EXIT_CONFIG) from None
+
+    try:
+        if is_memory_url(settings.database_url):
+            return
+        path = resolve_sqlite_path(
+            settings.database_url,
+            home=runtime.arena_home() if runtime.is_portable() else None)
+    except DatabaseUrlError as exc:
+        raise StartupRefusal(f"Configuration error: {exc}", EXIT_CONFIG) from None
+
+    parent = path.parent
+    if path.exists():
+        if not path.is_file():
+            raise StartupRefusal(
+                f"DATABASE_URL points at {path}, which is not a regular file.",
+                EXIT_STORAGE)
+        if not os.access(path, os.W_OK):
+            raise StartupRefusal(
+                f"The paper database at {path} is read-only for this user. "
+                "Arena needs write access to open it (SQLite WAL). Fix the "
+                "file/folder permissions, or point DATABASE_URL at a writable "
+                "location. The file was not modified.",
+                EXIT_STORAGE)
+        _check_paper_writer_lock(path)
+    else:
+        if parent.exists() and not parent.is_dir():
+            raise StartupRefusal(
+                f"The database folder {parent} is not a directory.",
+                EXIT_STORAGE)
+        probe = parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if not os.access(probe, os.W_OK):
+            raise StartupRefusal(
+                f"Arena cannot create its database at {path}: {probe} is not "
+                "writable for this user. Grant write access or set DATABASE_URL "
+                "to a writable location. Nothing was changed.",
+                EXIT_STORAGE)
+
+    # Outputs are part of readiness: a read-only home would make paper trading
+    # start and then fail on its first write. Checking now keeps that failure
+    # out of the request path.
+    home = runtime.arena_home()
+    if home.exists():
+        probe = home
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if not os.access(probe, os.W_OK):
+            raise StartupRefusal(
+                f"Arena's home directory {home} is not writable for this user. "
+                "Grant write access, or set ARENA_HOME to a writable folder.",
+                EXIT_STORAGE)
+
+
+def _diagnostics() -> int:
+    """`--diagnostics`: resolved paths, effective mode, account health.
+
+    Never prints a token or credential. Exit 0 when the installation looks
+    coherent, 1 when a problem needs attention (the JSON still explains it).
+    """
+    from app import build_info, runtime
+
+    described = runtime.describe()
+    # Keep the long-standing top-level keys (tests and support scripts read
+    # `arena_home` directly) and also group them for readability.
+    payload: dict = {**described, "runtime": described,
+                     "build": build_info.describe()}
+    problems: list[str] = []
+    try:
+        from app.config.settings import Settings
+
+        settings = Settings.from_env()
+    except Exception as exc:
+        payload["config_error"] = f"{type(exc).__name__}: {exc}"
+        payload["health"] = {"ok": False,
+                             "problems": ["configuration could not be loaded"]}
+        print(json.dumps(payload, indent=2, default=str))
+        return 1
+
+    from app.database.paths import DatabaseUrlError, is_memory_url, resolve_sqlite_path
+    from app.paper_trading.compatibility import inspect_paper_account
+
+    anchor = runtime.arena_home() if runtime.is_portable() else None
+    try:
+        if is_memory_url(settings.database_url):
+            database_path = ":memory:"
+        else:
+            database_path = str(resolve_sqlite_path(settings.database_url,
+                                                    home=anchor))
+    except DatabaseUrlError:
+        database_path = settings.database_url
+        problems.append("DATABASE_URL is not a supported SQLite URL")
+
+    view = inspect_paper_account(settings, home=anchor)
+    if view.status == "MISMATCH":
+        problems.append("saved paper account does not match the configuration")
+    elif view.status == "UNREADABLE":
+        problems.append("paper database could not be read")
+    static = runtime.static_dir()
+    if not static.is_dir():
+        problems.append("frontend static assets are missing")
+    # No .env yet is the normal first-run state, not a problem.
+
+    payload.update({
+        "mode": (settings.mode or "PAPER").upper(),
+        "live_trading": bool(settings.live_trading),
+        "broker": (settings.broker or "LOCAL_PAPER").upper(),
+        "data_source": settings.data_source,
+        "default_timeframe": settings.default_timeframe,
+        "database_url": settings.database_url,
+        "database_path": database_path,
+        "database_exists": (database_path not in (":memory:", "")
+                            and __import__("pathlib").Path(database_path).exists()),
+        "paper_account": view.to_dict(),
+        "api_token_configured": bool(settings.api_token),
+        "frontend_assets": {"directory": str(static), "present": static.is_dir()},
+        "health": {"ok": not problems, "problems": problems},
+    })
+    print(json.dumps(payload, indent=2, default=str))
+    # Diagnostics is informational: a successful inspection exits 0 even when
+    # `health.ok` is false (the JSON is the finding). Only an unloadable
+    # configuration is a command failure.
+    return 0
+
+
+def _new_paper_account() -> int:
+    """`--new-paper-account`: non-destructive recovery (see paper_recovery.py)."""
+    from app import runtime
+    from app.instance import InstanceGuard
+    from app.maintenance.paper_recovery import (
+        PaperRecoveryError,
+        create_replacement_database,
+    )
+
+    runtime.ensure_home()
+    guard = InstanceGuard(runtime.arena_home())
+    existing = guard.try_acquire()
+    if existing is not None:
+        return _handle_existing_instance(existing, open_browser=False)
+    try:
+        try:
+            summary = create_replacement_database()
+        except PaperRecoveryError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+            return EXIT_STORAGE
+        print(json.dumps(summary, indent=2, default=str))
+        return 0
+    finally:
+        guard.release()
+
+
 def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
+    import logging
+
     import uvicorn
 
     from app import build_info, runtime
@@ -243,7 +528,12 @@ def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
         return _handle_existing_instance(existing, open_browser=open_browser)
 
     try:
-        settings = Settings.from_env()
+        try:
+            settings = Settings.from_env()
+        except ValueError as exc:
+            raise StartupRefusal(f"Configuration error: {exc}", EXIT_CONFIG) from None
+        _preflight(settings)
+
         application = create_app(settings)
         application.state.instance_guard = guard
 
@@ -283,7 +573,26 @@ def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
             server.run()
         except KeyboardInterrupt:
             print("\n  Arena stopped.", flush=True)
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else EXIT_UNEXPECTED
+            if code == 0:
+                raise
+            raise StartupRefusal(
+                "Arena could not complete startup. The detailed cause is in "
+                f"{_log_location()} (search for the last ERROR entry). No order "
+                "was placed.",
+                EXIT_STORAGE,
+            ) from None
         return 0
+    except StartupRefusal as exc:
+        _print_startup_refusal(str(exc))
+        return exc.code
+    except Exception as exc:  # unexpected: log the traceback, explain on screen
+        logging.getLogger("arena.startup").exception("startup failed")
+        _print_startup_refusal(
+            f"Unexpected startup failure: {type(exc).__name__}: {exc}\n"
+            f"Details: {_log_location()}")
+        return EXIT_UNEXPECTED
     finally:
         guard.release()
 
@@ -323,13 +632,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="open the setup screen on this run")
     parser.add_argument("--diagnostics", action="store_true",
                         help="print where Arena keeps its files, then exit")
+    parser.add_argument("--new-paper-account", action="store_true",
+                        help=("create a NEW paper database and point the "
+                              "configuration at it; the existing database is "
+                              "left untouched"))
     args = parser.parse_args(argv)
 
     from app import runtime
 
     if args.diagnostics:
-        print(json.dumps(runtime.describe(), indent=2))
-        return 0
+        return _diagnostics()
+    if args.new_paper_account:
+        return _new_paper_account()
 
     # On Windows a frozen build must call this before any process is spawned,
     # or a child re-executing the bundle recurses instead of running.
@@ -362,7 +676,8 @@ def _should_hold_console(argv: list[str], *, frozen: bool, attached: bool) -> bo
     """
     if not (frozen and attached):
         return False
-    if argv and argv[0] in ("--cli", "--run", "--diagnostics"):
+    if argv and argv[0] in ("--cli", "--run", "--diagnostics",
+                            "--new-paper-account"):
         return False
     return True
 

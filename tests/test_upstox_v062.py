@@ -450,3 +450,41 @@ def test_health_reports_version_and_paper_only(tmp_path):
             "actionable_signals": 0, "orders_created": 0, "skipped": 0,
         }
         assert "access_token" not in json.dumps(status)
+
+
+def test_store_token_updates_every_configured_token_key(tmp_path):
+    """A refresh must not leave a stale duplicate in the same .env.
+
+    Regression for the "upstox-login says success but the engine keeps using
+    yesterday's token" failure: only the UPSTOX_ACCESS_TOKEN alias used to be
+    rewritten while MARKET_DATA_ACCESS_TOKEN (the documented primary that
+    Settings reads first) kept the expired value.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "MARKET_DATA_ACCESS_TOKEN=old-primary\n"
+        "UPSTOX_ACCESS_TOKEN=old-alias\n"
+        "API_TOKEN=local\n",
+        encoding="utf-8",
+    )
+    outcome = store_token_in_env("issued-token", env_path)
+    assert "issued-token" not in outcome
+
+    from app.config.envfile import read_values
+
+    values = read_values(env_path)
+    assert values["MARKET_DATA_ACCESS_TOKEN"] == "issued-token"
+    assert values["UPSTOX_ACCESS_TOKEN"] == "issued-token"
+    assert values["API_TOKEN"] == "local"
+    assert "old-primary" not in env_path.read_text(encoding="utf-8")
+
+
+def test_store_token_creates_the_alias_when_no_token_key_exists(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("API_TOKEN=local\n", encoding="utf-8")
+    store_token_in_env("issued-token", env_path)
+    from app.config.envfile import read_values
+
+    values = read_values(env_path)
+    assert values["UPSTOX_ACCESS_TOKEN"] == "issued-token"
+    assert "MARKET_DATA_ACCESS_TOKEN" not in values

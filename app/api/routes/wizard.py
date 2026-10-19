@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.auth import loopback_or_bearer
-from app.config.envfile import read_values, update_values
+from app.config.envfile import read_values, restore_snapshot, update_values
 
 router = APIRouter()
 
@@ -47,30 +47,6 @@ class PreparePaperRequest(BaseModel):
 class ValidateMarketDataRequest(BaseModel):
     token: str = Field(min_length=1, max_length=2000)
     symbols: str = Field(min_length=1, max_length=2000)
-
-
-def _reload_settings(request: Request):
-    """Re-read the .env into THIS process so the wizard needs no restart.
-
-    The file is authoritative: every key it defines overrides the inherited
-    environment. Secrets stay in-process — nothing here logs values.
-    """
-    from app import runtime
-    from app.config.settings import Settings
-
-    path = runtime.env_file()
-    try:
-        values = read_values(path)
-    except OSError as exc:
-        raise HTTPException(500, f"Configuration file unreadable: {type(exc).__name__}")
-    for key, value in values.items():
-        os.environ[key.upper()] = value
-    try:
-        settings = Settings.from_env()
-    except ValueError as exc:
-        raise HTTPException(422, f"Saved configuration rejected on reload: {exc}")
-    request.app.state.settings = settings
-    return settings
 
 
 def _assert_paper_possible(request: Request) -> None:
@@ -119,6 +95,53 @@ def _initialize_home(settings) -> dict:
         "database": settings.database_url,
         "assets": bundled.is_dir(),
     }
+
+
+def _proposed_settings(current, updates: dict):
+    """The Settings this wizard write would produce, WITHOUT touching disk.
+
+    Used to validate the whole change first. A refused change must leave both
+    `.env` and the running engine exactly as they were.
+    """
+    from dataclasses import replace
+
+    mapping = {
+        "BROKER": "broker",
+        "MODE": "mode",
+        "API_TOKEN": "api_token",
+        "DATA_SOURCE": "data_source",
+        "DEFAULT_SYMBOL": "default_symbol",
+        "DEFAULT_TIMEFRAME": "default_timeframe",
+        "MARKET_DATA_ACCESS_TOKEN": "market_data_access_token",
+        "MARKET_DATA_SYMBOLS": "market_data_symbols",
+    }
+    kwargs = {mapping[key]: value for key, value in updates.items()
+              if key in mapping}
+    return replace(current, **kwargs)
+
+
+def _refuse_incompatible_paper(candidate) -> None:
+    """Read-only check that this change fits the existing paper account."""
+    from app import runtime
+    from app.maintenance.paper_recovery import recovery_command
+    from app.paper_trading.compatibility import (
+        PaperAccountMismatch,
+        PaperDatabaseUnreadable,
+        ensure_compatible,
+    )
+
+    try:
+        ensure_compatible(candidate, env_file=runtime.env_file(),
+                          recovery_command=recovery_command())
+    except PaperAccountMismatch as exc:
+        raise HTTPException(
+            409,
+            exc.guidance(env_file=runtime.env_file(),
+                         recovery_command=recovery_command())
+            + "\n\nNothing was saved.",
+        ) from None
+    except PaperDatabaseUnreadable as exc:
+        raise HTTPException(409, f"{exc}\n\nNothing was saved.") from None
 
 
 @router.post("/api/wizard/prepare-paper", dependencies=[Depends(loopback_or_bearer)])
@@ -183,10 +206,50 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
     if updates["BROKER"] in LIVE_BROKERS:
         raise HTTPException(500, "Internal error: wizard attempted a live broker.")
 
-    summary = update_values(runtime.env_file(), updates)
-    settings = _reload_settings(request)
-    _rebuild_engine_for(request, settings)
-    init = _initialize_home(settings)
+    # Validate the whole change BEFORE writing anything. The previous order
+    # wrote .env and closed the old broker first, so a timeframe that did not
+    # match the saved paper account left a refused 409, a rewritten
+    # configuration and a closed broker behind.
+    previous = request.app.state.settings
+    try:
+        candidate = _proposed_settings(previous, updates)
+    except ValueError as exc:
+        raise HTTPException(
+            422, f"The proposed paper configuration is invalid: {exc}. "
+                 "Nothing was saved.") from None
+    _refuse_incompatible_paper(candidate)
+
+    env_path = runtime.env_file()
+    before_bytes = env_path.read_bytes() if env_path.exists() else None
+    summary = update_values(env_path, updates)
+    try:
+        _rebuild_engine_for(request, candidate)
+    except Exception as exc:
+        # Restore the exact pre-request bytes, then surface the refusal. The
+        # old broker is restored by `_rebuild_engine_for` itself when possible.
+        # Replaying only the touched keys could leave a stray blank line (or
+        # create a file that did not exist), which would make "nothing was
+        # saved" untrue.
+        try:
+            restore_snapshot(env_path, before_bytes)
+        except OSError:
+            pass  # the original failure is the one worth reporting
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            500,
+            "The configuration file was updated but the running engine could "
+            f"not be rebuilt ({type(exc).__name__}); it was rolled back. "
+            "Restart Arena and review the log.",
+        ) from exc
+
+    # Only after a successful rebuild: make the new settings authoritative for
+    # every route in THIS process. `os.environ` is deliberately not mutated:
+    # the .env file is the durable source, and mutating the process
+    # environment is how a test (or a second wizard call) used to leak one
+    # configuration into an unrelated process.
+    request.app.state.settings = candidate
+    init = _initialize_home(candidate)
 
     return {
         "ok": True,
@@ -239,17 +302,19 @@ def _validate_upstox_instrument_keys(raw_symbols: str) -> list[str]:
 
 
 def _rebuild_engine_for(request: Request, settings) -> None:
-    """Align the in-process paper engine with freshly saved settings.
+    """Align the in-process paper engine with a VALIDATED settings change.
 
     A fresh install needs no restart at all — the point of the wizard. The
-    broker's timeframe is fixed at construction, so when the saved
-    DEFAULT_TIMEFRAME changed we rebuild the broker on the spot:
+    broker's timeframe is fixed at construction, so a changed DEFAULT_TIMEFRAME
+    requires rebuilding it:
 
     * only when the engine is NOT running (never mid-stream);
+    * the compatibility check runs BEFORE the old broker is closed, so a
+      mismatch cannot leave the app with a closed broker and a rewritten .env;
     * the old broker is persisted and its writer released first;
-    * if persisted state belongs to a different account configuration the
-      rebuild refuses (the repository raises) and we surface that honestly
-      instead of guessing.
+    * if construction still fails (lock, I/O), the previous broker is reopened
+      so the running application remains usable and the caller can roll .env
+      back honestly.
     """
     broker = getattr(request.app.state, "broker", None)
     simulator = getattr(request.app.state, "simulator", None)
@@ -258,30 +323,57 @@ def _rebuild_engine_for(request: Request, settings) -> None:
     if simulator is not None and simulator.task and not simulator.task.done():
         raise HTTPException(
             409, "The paper engine is running; stop it before changing the timeframe.")
+
+    # Read-only refusal FIRST — the old broker is still open and untouched.
+    _refuse_incompatible_paper(settings)
+
+    repository = getattr(request.app.state, "repository", None) or broker.repository
+    old_config = broker.config
+    old_currency, old_timeframe = broker.currency, broker.timeframe
+    old_calendar = broker.calendar
+
+    from app.backtesting.costs import ExecutionConfig
+    from app.paper_trading.broker import PaperBroker
+    from app.paper_trading.execution import make_calendar
+    from app.paper_trading.simulator import PaperSimulator
+
+    broker.close()  # persist the OLD account, release the writer lock
+    broker.repository = None  # detach: lifespan must not re-persist it
     try:
-        broker.close()  # persist state, release the writer lock
-        broker.repository = None  # detach: lifespan must not re-persist it
-
-        from app.backtesting.costs import ExecutionConfig
-        from app.paper_trading.broker import PaperBroker
-        from app.paper_trading.execution import make_calendar
-        from app.paper_trading.simulator import PaperSimulator
-
         new_broker = PaperBroker(
             ExecutionConfig(**settings.execution_kwargs()),
             currency=settings.currency,
             timeframe=settings.default_timeframe,
-            repository=request.app.state.repository,
-            calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+            repository=repository,
+            calendar=make_calendar(settings.market_calendar,
+                                   settings.default_timeframe),
         )
-        request.app.state.broker = new_broker
-        request.app.state.simulator = PaperSimulator(new_broker)
-    except ValueError as exc:
+    except Exception as exc:
+        restored_note = "the previous paper engine could not be reopened"
+        try:
+            if repository is not None:
+                restored = PaperBroker(
+                    old_config,
+                    currency=old_currency,
+                    timeframe=old_timeframe,
+                    repository=repository,
+                    calendar=old_calendar,
+                )
+                request.app.state.broker = restored
+                request.app.state.simulator = PaperSimulator(restored)
+                restored_note = "the previous paper engine was restored"
+        except Exception as restore_exc:
+            restored_note = (
+                "the previous paper engine could NOT be restored "
+                f"({type(restore_exc).__name__}); restart Arena")
         raise HTTPException(
             409,
-            f"The existing paper account uses a different configuration ({exc}). "
-            "Restart Arena with a separate database to switch timeframes.",
-        )
+            f"The existing paper account cannot be opened with the proposed "
+            f"configuration ({type(exc).__name__}: {exc}). Nothing was saved; "
+            f"{restored_note}.",
+        ) from exc
+    request.app.state.broker = new_broker
+    request.app.state.simulator = PaperSimulator(new_broker)
 
 
 async def _probe_market_data(token: str):

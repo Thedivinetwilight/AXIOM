@@ -179,11 +179,19 @@ class TestPreparePaperValidatesInstrumentKeys:
         monkeypatch.setattr(wizard, "_rebuild_engine_for", lambda req, s: None)
         monkeypatch.setattr(wizard, "_initialize_home", lambda s: {"ok": True})
 
+        import tempfile
+
         from app.config.settings import Settings
+        # Never build settings against the ambient DATABASE_URL: a saved paper
+        # account with a different timeframe would make prepare_paper refuse
+        # before it reaches the validation under test.
+        scratch = tempfile.mkdtemp(prefix="axiom-wizard-test-")
+        settings = Settings(database_url=f"sqlite:///{scratch}/trading_bot.db",
+                            data_dir=scratch)
         req = SimpleNamespace(
             app=SimpleNamespace(
                 state=SimpleNamespace(
-                    settings=Settings(),
+                    settings=settings,
                     repository=SimpleNamespace(
                         get_engine_state=lambda k: None,
                         record_system_event=lambda **kw: None),

@@ -18,7 +18,10 @@ def stack(tmp_path):
     database = Database(f"sqlite:///{tmp_path}/history.db")
     repository = Repository(database)
     store = CandleStore(tmp_path / "store", parquet_enabled=False)
-    settings = Settings.from_env()
+    # Pin the settings to this test's database: the fixture must never read
+    # the operator's ambient DATABASE_URL.
+    settings = Settings(database_url=f"sqlite:///{tmp_path}/history.db",
+                        data_dir=str(tmp_path))
     yield database, repository, store, settings
     database.close()
 

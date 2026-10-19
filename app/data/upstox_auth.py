@@ -21,9 +21,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 import getpass
+import hmac
 import os
+import secrets
 import ssl
-import stat
 
 import certifi
 import httpx
@@ -181,10 +182,35 @@ async def verify_feed_credential(
         return CredentialCheck("rejected", 401, False, GUIDANCE_REJECTED, now)
     if response.status_code == 403:
         return CredentialCheck("forbidden", 403, False, GUIDANCE_FORBIDDEN, now)
+    if response.status_code == 429:
+        retry_after = (response.headers.get("Retry-After") or "").strip()
+        wait = f" Retry after {retry_after}." if retry_after.isdigit() else ""
+        return CredentialCheck(
+            "http_429", 429, False,
+            "Upstox rate-limited the authorize request (HTTP 429). This is not "
+            "a credential verdict; wait and retry." + wait,
+            now,
+        )
+    if 500 <= response.status_code <= 599:
+        return CredentialCheck(
+            f"http_{response.status_code}", response.status_code, False,
+            f"Upstox returned HTTP {response.status_code} from the authorize "
+            "endpoint (their service error). The credential was not judged; "
+            "retry later.",
+            now,
+        )
+    if response.status_code == 400:
+        return CredentialCheck(
+            "http_400", 400, False,
+            "Upstox rejected the authorize request as malformed (HTTP 400). "
+            "Check MARKET_DATA_AUTHORIZE_URL (it must be the documented "
+            "V3 feed authorize endpoint) and that the token is current.",
+            now,
+        )
     return CredentialCheck(
         f"http_{response.status_code}", response.status_code, False,
         f"Upstox authorize returned HTTP {response.status_code}; see the official "
-        "documentation before retrying.",
+        "documentation before retrying. This is not proof the credential is valid.",
         now,
     )
 
@@ -256,32 +282,37 @@ def exchange_code_for_token(
     return token
 
 
-def store_token_in_env(token: str, env_path: Path) -> str:
-    """Persist UPSTOX_ACCESS_TOKEN into the gitignored .env (chmod 600).
+#: Both names are read by Settings.from_env (the MARKET_DATA_* spelling is
+#: the documented primary, UPSTOX_ACCESS_TOKEN the V0.6.2 alias). A refresh
+#: must update EVERY token key already present: writing only the alias while
+#: the primary remained in .env meant `upstox-login` reported success but the
+#: engine kept using yesterday's expired token — the reported "not connecting
+#: to Upstox" failure.
+TOKEN_ENV_KEYS = ("MARKET_DATA_ACCESS_TOKEN", "UPSTOX_ACCESS_TOKEN")
 
-    Returns a human-readable outcome that never contains the token itself.
+
+def store_token_in_env(token: str, env_path: Path) -> str:
+    """Persist a refreshed access token into the gitignored .env (chmod 600).
+
+    Updates every token variable already configured so a stale duplicate can
+    never shadow the new credential. The write is atomic and preserves every
+    unrelated line/comment. Returns a human-readable outcome that never
+    contains the token itself.
     """
-    lines = []
-    if env_path.exists():
-        # utf-8 both ways, always. The operator's .env is hand-editable and can
-        # contain any comment they like; a locale-encoded read raises
-        # UnicodeDecodeError on Windows for a single non-ASCII character, and
-        # a locale-encoded write would corrupt what it did not fail on. This is
-        # the daily token refresh, so a code-page accident here costs a
-        # trading day.
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("UPSTOX_ACCESS_TOKEN="):
-                continue
-            lines.append(line)
-    lines.append(f"UPSTOX_ACCESS_TOKEN={token}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    # POSIX honours this; Windows chmod can only toggle the read-only bit, so
-    # the file keeps its inherited ACLs (owner-only under %LOCALAPPDATA%).
-    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    from app.config.envfile import read_values, update_values
+
+    env_path = Path(env_path)
+    existing = read_values(env_path) if env_path.exists() else {}
+    keys = [key for key in TOKEN_ENV_KEYS if key in existing] or [
+        "UPSTOX_ACCESS_TOKEN"]
+    update_values(env_path, {key: token for key in keys})
+    # update_values writes atomically and sets owner-only modes on POSIX.
+    # Windows chmod can only toggle the read-only bit, so the file keeps its
+    # inherited ACLs (owner-only under %LOCALAPPDATA%).
     if os.name == "nt":
-        return (f"UPSTOX_ACCESS_TOKEN written to {env_path} "
+        return (f"{', '.join(keys)} written to {env_path} "
                 "(file permissions: inherited Windows ACLs)")
-    return f"UPSTOX_ACCESS_TOKEN written to {env_path} (file permissions 600)"
+    return f"{', '.join(keys)} written to {env_path} (file permissions 600)"
 
 
 def run_login_flow(env_path: Path | None = None, *, transport=None, input=None, capture=None) -> str:
@@ -292,28 +323,69 @@ def run_login_flow(env_path: Path | None = None, *, transport=None, input=None, 
     memory or written to the gitignored .env — never stdout/logs.
     """
     env_path = env_path or Path.cwd() / ".env"
-    client_id = os.getenv("UPSTOX_CLIENT_ID", "")
-    client_secret = os.getenv("UPSTOX_CLIENT_SECRET", "")
-    redirect_uri = os.getenv("UPSTOX_REDIRECT_URI", "")
+    # The setup screen writes these three values to the SAME .env the token is
+    # stored in. Reading only the process environment meant a correctly
+    # configured .env produced "Set UPSTOX_CLIENT_ID ... first" — one of the
+    # paths behind "not connecting to Upstox". The file is read here, and an
+    # exported variable still wins, so a shell override keeps working.
+    file_values: dict[str, str] = {}
+    if env_path.exists():
+        # This used to import python-dotenv and silently `pass` when the
+        # optional dependency was missing from a packaged build, which turned
+        # a perfectly good .env into "Set UPSTOX_CLIENT_ID ... first". Read
+        # the file with Arena's own parser; an exported variable still wins.
+        # Nothing is written into os.environ: the values are passed to the
+        # exchange explicitly, so a long-lived process cannot inherit them.
+        from app.config.envfile import read_values
+
+        try:
+            file_values = read_values(env_path)
+        except OSError as exc:
+            raise UpstoxOAuthError(
+                f"Could not read {env_path} ({type(exc).__name__}); fix the file "
+                "or export UPSTOX_CLIENT_ID, UPSTOX_CLIENT_SECRET and "
+                "UPSTOX_REDIRECT_URI in the environment."
+            ) from None
+
+    def _setting(name: str) -> str:
+        return os.getenv(name, "") or file_values.get(name, "")
+
+    client_id = _setting("UPSTOX_CLIENT_ID")
+    client_secret = _setting("UPSTOX_CLIENT_SECRET")
+    redirect_uri = _setting("UPSTOX_REDIRECT_URI")
     if not client_id or not client_secret or not redirect_uri:
         raise UpstoxOAuthError(
-            "Set UPSTOX_CLIENT_ID, UPSTOX_CLIENT_SECRET and UPSTOX_REDIRECT_URI in the environment first"
+            "Set UPSTOX_CLIENT_ID, UPSTOX_CLIENT_SECRET and UPSTOX_REDIRECT_URI first "
+            f"(environment or {env_path})"
         )
+    # OAuth 2.0 state: a value we generate and verify when the redirect URL is
+    # returned. It binds the authorization response to this login attempt.
+    state = secrets.token_urlsafe(18)
     print("Open this URL in a browser and log in on Upstox:")
-    print(build_login_url(client_id, redirect_uri))  # public API key only, no secrets
+    print(build_login_url(client_id, redirect_uri, state))  # public API key only
     if capture is not None:
-        code, _state = capture()
+        code, returned_state = capture()
     else:
         pasted = (input or getpass.getpass)(
-            "Paste the full redirect URL (or just the code; input hidden): "
+            "Paste the full redirect URL (recommended — it verifies the "
+            "request) or just the code (input hidden): "
         ).strip()
         if "=" in pasted:
             query = parse_qs(urlsplit(pasted).query)
             code = query.get("code", [""])[0]
+            returned_state = query.get("state", [None])[0]
         else:
             code = pasted
+            returned_state = None
         if not code:
             raise UpstoxOAuthError("No authorization code provided")
+    if returned_state is not None and not hmac.compare_digest(
+            str(returned_state), state):
+        # Never exchange a code that did not come back from our own request.
+        raise UpstoxOAuthError(
+            "OAuth state did not match this login attempt; the authorization "
+            "response was rejected and no token was requested. Start again."
+        )
     token = exchange_code_for_token(
         code, client_id, client_secret, redirect_uri, transport=transport
     )

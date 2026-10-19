@@ -155,6 +155,64 @@ def update_values(path: Path, updates: dict[str, str]) -> dict:
     }
 
 
+def restore_snapshot(path: Path, content: bytes | None) -> None:
+    """Restore a `.env` to its exact pre-write bytes (or delete it).
+
+    `content=None` means the file did not exist before the attempted write, so
+    a refused change must not leave an empty file behind. Used by the wizard's
+    rollback path, where "nothing was saved" must be literally true.
+    """
+    path = Path(path)
+    if content is None:
+        path.unlink(missing_ok=True)
+        return
+    handle, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        if os.name != "nt":
+            os.chmod(temp_path, 0o600)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def remove_values(path: Path, keys: list[str]) -> dict:
+    """Delete keys from a .env, preserving every other line.
+
+    Used to roll back a setup write that could not be applied completely, so a
+    refused change leaves the configuration exactly as it was. Returns the keys
+    actually removed (values are never included).
+    """
+    targets = set(keys)
+    if not path.exists():
+        return {"path": str(path), "removed": []}
+    existing_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: list[str] = []
+    removed: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out.append(line)
+            continue
+        match = _KEY_RE.match(line)
+        if match and match.group("key") in targets:
+            removed.append(match.group("key"))
+            continue
+        out.append(line)
+    if removed:
+        text = "\n".join(out).rstrip("\n") + "\n"
+        _secure_write(path, text)
+    return {"path": str(path), "removed": sorted(set(removed))}
+
+
 def masked_summary(path: Path, keys: list[str]) -> dict[str, bool]:
     """Which of `keys` are present and non-empty. Presence only, no values."""
     values = read_values(path)

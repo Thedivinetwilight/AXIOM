@@ -1,6 +1,6 @@
-# AXIOM-MONEY-PRINTER — Product Manual (3.2.0 code line)
+# AXIOM-MONEY-PRINTER — Product Manual (3.2.4 code line)
 
-**Display name:** AXIOM · **Codename:** MONEY-PRINTER (brand only; no profit promise) · **Configured version:** 3.2.0
+**Display name:** AXIOM · **Codename:** MONEY-PRINTER (brand only; no profit promise) · **Configured version:** 3.2.4
 
 > **Evidence boundary.** This manual describes product surfaces and intended behavior; it is not a certification that every feature is production-ready or present in a released binary. The authoritative current-code evidence, exact test results, CI/artifact state, and known limits are in [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md). The repository's master prompt is a requirements document, not implementation or verification evidence. Older final reports and run logs are historical snapshots only.
 
@@ -24,6 +24,27 @@ The API/static frontend and desktop client expose dashboard, markets, research, 
 
 Unavailable or unverified services should be reported as unavailable/unknown rather than as ready. In particular, Kronos `configured` means the orchestration service was composed; `available` means the service is running and reports a ready runtime. Neither status proves real-weight integrity or forecast quality.
 
+## 2a. Startup, diagnostics, and recovery
+
+Arena resolves `DATABASE_URL` against `ARENA_HOME` (never the process working
+directory), refuses to start when the saved paper account's capital, costs,
+timeframe, currency or calendar differ from the configuration, and never opens
+the database read-write before that check. The refusal is a named, field-level
+message with exit code 3 (configuration) or 4 (storage); the database and
+`.env` are left byte-identical. Nothing is deleted, migrated or initialized on
+a refused start.
+
+`python arena.py --diagnostics` always prints a JSON report (home, env file,
+mode, broker, database path, `paper_account.status`, `health`) and exits 0 for
+informational states; it exits 1 only when the configuration cannot be loaded
+at all. It never prints a token.
+
+`python arena.py --new-paper-account` creates a timestamped sibling database,
+re-verifies the original's SHA-256, and rewrites only `DATABASE_URL`. The
+wizard performs the same compatibility check *before* writing `.env`; if the
+engine cannot be rebuilt, the exact previous bytes are restored and the old
+broker is reopened when possible.
+
 ## 3. Live execution and safety boundary
 
 The first-party live path is composed as:
@@ -35,6 +56,24 @@ The gateway validates the immutable execution intent and rechecks live authoriza
 Tests use a deterministic in-process mock exchange and test-side HTTPX request patching; the production live broker refuses caller-owned transports. **No real-money order, production OAuth flow, or production-account access is evidence in this repository audit.** The Python boundary is an application architecture control, not a sandbox against arbitrary in-process code that already holds a bearer token and can issue its own HTTP request. No statement in this manual should be read as claiming otherwise.
 
 Live mode remains opt-in and fail-closed. The required settings/confirmation phrase are not a substitute for current readiness, account reconciliation, broker-side controls, operator procedures, or external approval. Do not enable live mode for development, tests, packaging, or frozen E2E runs.
+
+## 3a. Upstox connectivity behaviour
+
+The credential probe, the WebSocket authorize step and the historical downloader
+share one classification policy: 401/403 are permanent credential verdicts;
+429 and 5xx are transient, retried with bounded backoff, and never reported as
+"invalid credential"; a malformed 200 or a redirect to a non-`wss://` scheme is
+refused without retry. The feed stops with `UNAVAILABLE` after 25 consecutive
+failures rather than reconnecting forever, and `connection_state()` exposes
+`CONNECTED` / `AUTH_FAILED` / `UNREACHABLE` / `RATE_LIMITED` / `STALE_DATA` /
+`RECONNECTING` / `UNAVAILABLE`.
+
+OAuth login reads the same `.env` it writes the token into, verifies the OAuth
+`state` value, and rewrites every token key already present. It never asks for a
+broker password, PIN, TOTP seed or OTP. Real Upstox connectivity, a production
+OAuth flow and any live/sandbox order remain **unverified** in this environment
+(no credentials; TLS egress blocked). A sandbox token is never evidence of live
+connectivity.
 
 ## 4. Forecast, model, and cache boundaries
 
@@ -50,7 +89,7 @@ The updater uses a caller-supplied SHA-256 expectation. A successful result mean
 
 ## 6. Testing and releases
 
-See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the current HEAD, clean-tree/commit identity, full and focused test results, skipped tests, packaging checks, CI state, and external blockers. Historical reports such as `ARENA_FINAL_STATUS.md`, `ARENA_FINAL_RUN_LOG.md`, and `AXIOM_3.2.0_BUILD_AND_VERIFICATION_REPORT.md` document earlier snapshots and must not be used as current evidence.
+See [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the current HEAD, clean-tree/commit identity, full and focused test results, skipped tests, packaging checks, CI state, and external blockers, and [`AXIOM_FINAL_FEATURE_TEST_MATRIX.csv`](AXIOM_FINAL_FEATURE_TEST_MATRIX.csv) for the per-feature status inventory (PASS/FIXED/PARTIAL/BLOCKED/UNVERIFIED). Historical reports such as `ARENA_FINAL_STATUS.md`, `ARENA_FINAL_RUN_LOG.md`, and `AXIOM_3.2.0_BUILD_AND_VERIFICATION_REPORT.md` document earlier snapshots and must not be used as current evidence.
 
 A source test pass is not the same as a cross-platform release-artifact pass. Do not infer a successful Windows/macOS frozen build, a published release, real broker connectivity, or real Kronos model verification unless the current audit report contains the matching commit-specific artifact/CI evidence.
 

@@ -1,6 +1,42 @@
 # Arena Trading Bot — USER MANUAL
 
-> **Historical manual snapshot:** this manual identifies Arena 3.0.4 as current. That release identity is stale relative to the AXIOM 3.2.0 source line; use [`AXIOM_PRODUCT_MANUAL.md`](AXIOM_PRODUCT_MANUAL.md) for a qualified product overview and [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for evidence.
+> **Historical manual snapshot:** this manual identifies Arena 3.0.4 as current. That release identity is stale relative to the AXIOM 3.2.4 source line; use [`AXIOM_PRODUCT_MANUAL.md`](AXIOM_PRODUCT_MANUAL.md) for a qualified product overview and [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for evidence. The "Startup refusals" section below is current.
+
+## Startup refusals (3.2.4)
+
+Arena refuses to start, with a named message instead of a traceback, when the
+saved paper account does not match the configuration. Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | started / diagnostics printed |
+| 1 | unexpected error, or the configuration cannot be loaded at all |
+| 3 | configuration refusal (paper account mismatch, invalid timeframe/URL) |
+| 4 | storage refusal (unreadable/corrupt DB, read-only file, bad folder, lock) |
+
+Typical message:
+
+```text
+Saved paper account configuration does not match the current configuration:
+  DEFAULT_TIMEFRAME: saved '1D', configured '5m'
+...
+To keep this account: set DEFAULT_TIMEFRAME back to the saved value in .env.
+To start a fresh paper account (the existing database is left untouched):
+    python arena.py --new-paper-account
+Nothing was changed, no data was deleted, no order was placed.
+```
+
+Useful commands:
+
+```bash
+python arena.py --diagnostics        # JSON report; never prints a token
+python arena.py --new-paper-account  # new timestamped DB; original SHA-256 re-verified
+```
+
+A refused start leaves the database and `.env` byte-identical. Nothing is
+migrated, reset or deleted. Do not delete the database to "fix" a refusal —
+that discards the paper account's history; use `--new-paper-account` instead.
+
 
 
 **Release: Arena 3.0.4 (current build in this repository)**

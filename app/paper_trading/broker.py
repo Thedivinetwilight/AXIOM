@@ -76,16 +76,24 @@ class PaperBroker(BrokerInterface):
             try:
                 state = repository.load_broker() if restore else None
                 if state:
-                    if state.get(
-                        "calendar", calendar_signature(self.calendar)
-                    ) != calendar_signature(self.calendar):
-                        raise ValueError("Saved paper calendar differs; use a new database")
-                    if (
-                        state["config"] != asdict(self.config)
-                        or state["currency"] != currency
-                        or state["timeframe"] != timeframe
-                    ):
-                        raise ValueError("Saved paper account config differs; use a new database")
+                    # One comparison, shared with the launcher's preflight and
+                    # diagnostics: the refusal names the exact field(s) that
+                    # differ instead of an opaque "config differs".
+                    from app.paper_trading.compatibility import (
+                        compare_saved_paper_state,
+                    )
+
+                    mismatch = compare_saved_paper_state(
+                        state,
+                        config=self.config,
+                        currency=currency,
+                        timeframe=timeframe,
+                        calendar=self.calendar,
+                        path=str(getattr(getattr(repository, "db", None),
+                                         "path", "") or ""),
+                    )
+                    if mismatch is not None:
+                        raise mismatch
                     self.portfolio = Portfolio.restore(state["portfolio"])
                     self.orders = {o["id"]: Order(**o) for o in state["orders"]}
                     self.fills = [Fill(**f) for f in state["fills"]]

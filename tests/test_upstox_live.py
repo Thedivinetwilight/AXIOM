@@ -30,7 +30,9 @@ from app.data.upstox_stream import (
     AUTHORIZE_URL,
     INSTRUMENT_KEY,
     UpstoxAuthError,
+    UpstoxFeedUnavailable,
     UpstoxStream,
+    UpstoxTransientError,
     from_symbol,
     to_symbol,
 )
@@ -636,3 +638,94 @@ def test_upstox_start_fails_closed_without_credentials(tmp_path):
         assert response.status_code == 422
         assert "access token" in response.json()["detail"]
         assert AUTHORIZE_URL.startswith("https://api.upstox.com/v3/")
+
+
+# ------------------------------------------------- transient vs permanent auth
+
+def test_authorize_http_429_is_transient_and_retried():
+    """An Upstox rate limit is not a credential verdict.
+
+    Before the classification fix every non-200 authorize was AUTH_FAILED, so
+    one 429 at 09:15 stopped the feed for the whole session.
+    """
+    calls = []
+
+    def handler(request):
+        calls.append(request.headers["Authorization"])
+        return httpx.Response(429, headers={"Retry-After": "1"},
+                              json={"status": "error"})
+
+    provider = UpstoxStream(TOKEN, [KEY],
+                            http_transport=httpx.MockTransport(handler),
+                            max_backoff=0.001, max_consecutive_failures=2)
+
+    async def scenario():
+        with pytest.raises(UpstoxFeedUnavailable):
+            await anext(provider.stream([SYMBOL], "1m"))
+
+    asyncio.run(scenario())
+    assert provider.status == "UNAVAILABLE"
+    assert provider.last_error_kind == "RATE_LIMITED"
+    assert provider.reconnects == 2 and len(calls) == 2
+    assert all(call == f"Bearer {TOKEN}" for call in calls)
+
+
+def test_authorize_http_500_is_transient_not_auth_failure():
+    def handler(request):
+        return httpx.Response(503, json={"status": "error"})
+
+    provider = UpstoxStream(TOKEN, [KEY],
+                            http_transport=httpx.MockTransport(handler),
+                            max_backoff=0.001, max_consecutive_failures=1)
+
+    async def scenario():
+        with pytest.raises(UpstoxFeedUnavailable) as excinfo:
+            await anext(provider.stream([SYMBOL], "1m"))
+        assert "consecutive attempts" in str(excinfo.value)
+        assert TOKEN not in str(excinfo.value)
+
+    asyncio.run(scenario())
+    assert provider.status == "UNAVAILABLE"
+    assert provider.last_error_kind == "UPSTOX_UNAVAILABLE"
+
+
+def test_authorize_http_400_is_permanent_and_not_retried():
+    def handler(request):
+        return httpx.Response(400, json={"status": "error"})
+
+    provider = UpstoxStream(TOKEN, [KEY],
+                            http_transport=httpx.MockTransport(handler),
+                            max_backoff=0.001, max_consecutive_failures=1)
+
+    async def scenario():
+        with pytest.raises(UpstoxAuthError) as excinfo:
+            await anext(provider.stream([SYMBOL], "1m"))
+        assert "HTTP 400" in str(excinfo.value)
+
+    asyncio.run(scenario())
+    assert provider.status == "AUTH_FAILED" and provider.reconnects == 0
+
+
+def test_a_successful_authorize_clears_the_previous_failure_kind():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"status": "error"})
+        return httpx.Response(200, json={"data": {
+            "authorized_redirect_uri": "wss://api.upstox.com/v3/feed/market-data-feed"}})
+
+    provider = UpstoxStream(TOKEN, [KEY],
+                            http_transport=httpx.MockTransport(handler),
+                            max_backoff=0.001, max_consecutive_failures=5)
+
+    async def scenario():
+        with pytest.raises(UpstoxTransientError):
+            await provider._authorize()
+        assert provider.last_error_kind == "UPSTOX_UNAVAILABLE"
+        uri = await provider._authorize()
+        assert uri.startswith("wss://")
+        assert provider.last_error_kind is None and provider.last_error_detail == ""
+
+    asyncio.run(scenario())

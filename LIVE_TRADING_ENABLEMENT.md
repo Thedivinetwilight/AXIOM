@@ -1,3 +1,16 @@
+# Live Trading Enablement (V2.1 live rail)
+
+> **SUPERSEDED IN PART (2026-10-19).** This document predates the 3.2.4
+> `UPSTOX_LIVE` rail and still states that live trading is "not implemented"
+> and that `BROKER=LIVE` is the only gate. `BROKER=LIVE` is still rejected, but
+> real-money routing now exists behind four switches plus ARM/ACTIVATE, a final
+> execution-gateway boundary and an emergency stop. Treat this file as
+> historical design rationale; the current behaviour is documented in
+> [`AXIOM_PRODUCT_MANUAL.md`](AXIOM_PRODUCT_MANUAL.md) §3,
+> [`LIVE_OPERATIONS.md`](LIVE_OPERATIONS.md) and
+> [`AXIOM_FINAL_FEATURE_TEST_MATRIX.csv`](AXIOM_FINAL_FEATURE_TEST_MATRIX.csv).
+> No real order has ever been placed by this project's tests.
+
 # Enabling Live Trading — Repository Analysis & Runbook
 
 > **Historical runbook snapshot:** its repository branch, audit commit and test counts predate the current branch state. It is not current proof of live readiness; see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).

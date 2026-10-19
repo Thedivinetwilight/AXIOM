@@ -201,7 +201,20 @@ class TestEveryFeatureIsReachable:
 
 
 class TestRunningCommands:
-    def test_read_only_command_runs_and_is_captured(self, tmp_path):
+    @pytest.fixture()
+    def isolated_cli(self, tmp_path, monkeypatch):
+        """Run the real CLI against a disposable home.
+
+        Without this the child process resolves ARENA_HOME/cwd to the
+        repository and opens the operator's real trading_bot.db.
+        """
+        home = tmp_path / "ArenaHome"
+        home.mkdir()
+        monkeypatch.setenv("ARENA_HOME", str(home))
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{home / 'trading_bot.db'}")
+        return home
+
+    def test_read_only_command_runs_and_is_captured(self, isolated_cli):
         result = run_command(
             "app", "live-status", [],
             timeout=120, cwd=ROOT,
@@ -211,7 +224,7 @@ class TestRunningCommands:
         assert result.stdout.strip().startswith("{")
         assert result.duration_ms >= 0
 
-    def test_failure_is_reported_not_raised(self):
+    def test_failure_is_reported_not_raised(self, isolated_cli):
         """A command that exits non-zero must come back as DATA (so the GUI can
         show the output), never as an exception."""
         result = run_command("app", "upstox-login", [], timeout=120, cwd=ROOT)
@@ -219,14 +232,14 @@ class TestRunningCommands:
         assert result.ok is False
         assert result.stderr or result.stdout
 
-    def test_output_is_captured_from_stderr_too(self):
+    def test_output_is_captured_from_stderr_too(self, isolated_cli):
         result = run_command("app", "research", ["run", "--periods", "2,abc"],
                              timeout=120, cwd=ROOT)
         combined = result.stdout + result.stderr
         assert "comma-separated integers" in combined
         assert result.exit_code == 2
 
-    def test_timeout_kills_the_command_and_says_so(self):
+    def test_timeout_kills_the_command_and_says_so(self, isolated_cli):
         """A genuinely long-running command must be stopped and labelled rather
         than hanging the server. `run.py --mode api` serves until killed, so it
         is the honest case to test: with a 3s budget the runner must kill the

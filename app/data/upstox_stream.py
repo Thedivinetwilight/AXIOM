@@ -85,7 +85,30 @@ MARKET_OPEN_STATUS = "NORMAL_OPEN"
 
 
 class UpstoxAuthError(RuntimeError):
-    """Authorize failure. Messages never include the token or response bodies."""
+    """Permanent authorize failure (401/403). Messages never include secrets."""
+
+
+class UpstoxTransientError(RuntimeError):
+    """A retryable authorize failure: HTTP 429/5xx or a malformed 200 body.
+
+    The previous adapter classified EVERY non-200 authorize response as
+    `UpstoxAuthError`, which the stream treats as permanent. One transient
+    Upstox 500 or 429 at startup therefore stopped the feed for the whole
+    session — indistinguishable to the operator from "cannot connect".
+    """
+
+    def __init__(self, message: str, *, kind: str = "UPSTOX_UNAVAILABLE"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class UpstoxFeedUnavailable(RuntimeError):
+    """Retries were exhausted; the feed stopped and reports UNAVAILABLE.
+
+    Bounded retries are deliberate: an endless reconnect loop hides a permanent
+    outage from the operator and can hammer the provider. The simulator turns
+    this into an ERROR state (fail closed) and the paper engine stops.
+    """
 
 
 def to_symbol(instrument_key: str) -> str:
@@ -250,6 +273,7 @@ class UpstoxStream(WebSocketProvider):
         http_transport=None,
         ws_url_schemes=("wss",),
         require_market_status: bool = True,
+        max_consecutive_failures: int = 25,
     ):
         if not isinstance(access_token, str) or not access_token.strip():
             raise ValueError("An Upstox access token is required (MARKET_DATA_ACCESS_TOKEN)")
@@ -312,6 +336,13 @@ class UpstoxStream(WebSocketProvider):
         self.authenticated = False
         self.subscribed = False
         self.reconnects = 0
+        # Truthful, non-secret failure classification for the UI/logs. A token
+        # merely existing never means "connected"; these values are derived
+        # from what the provider actually did.
+        self.last_error_kind: str | None = None
+        self.last_error_detail: str = ""
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = max(1, int(max_consecutive_failures))
         self.market_status: str | None = None
         self.segment_statuses: dict[str, str] = {}
         self.market_open: bool | None = None
@@ -357,21 +388,65 @@ class UpstoxStream(WebSocketProvider):
             from app.data.upstox_auth import GUIDANCE_FORBIDDEN, GUIDANCE_REJECTED
 
             guidance = GUIDANCE_REJECTED if response.status_code == 401 else GUIDANCE_FORBIDDEN
+            self.last_error_kind = "AUTH_FAILED"
+            self.last_error_detail = f"HTTP {response.status_code}"
             raise UpstoxAuthError(
                 f"Upstox {'rejected' if response.status_code == 401 else 'refused'} "
                 f"the credential (HTTP {response.status_code}). {guidance}"
             )
+        if response.status_code == 429:
+            # A rate limit is NOT a credential verdict. Fail closed for this
+            # attempt, but let the stream retry with backoff instead of
+            # ending the whole session.
+            self.last_error_kind = "RATE_LIMITED"
+            self.last_error_detail = "HTTP 429 from the authorize endpoint"
+            logger.warning("UPSTOX_AUTHORIZE_RATE_LIMITED")
+            raise UpstoxTransientError(
+                "Upstox rate-limited the market-data authorization (HTTP 429); "
+                "this is retryable and not a credential failure.",
+                kind="RATE_LIMITED",
+            )
+        if 500 <= response.status_code <= 599:
+            self.last_error_kind = "UPSTOX_UNAVAILABLE"
+            self.last_error_detail = f"HTTP {response.status_code} from authorize"
+            logger.warning("UPSTOX_AUTHORIZE_SERVER_ERROR",
+                           extra={"http_status": response.status_code})
+            raise UpstoxTransientError(
+                f"Upstox authorize endpoint returned HTTP {response.status_code} "
+                "(their service error); retrying with backoff.",
+                kind="UPSTOX_UNAVAILABLE",
+            )
         if response.status_code != 200:
             logger.error("UPSTOX_AUTH_FAILURE", extra={"http_status": response.status_code})
-            raise UpstoxAuthError(f"Upstox authorize failed with HTTP {response.status_code}")
+            self.last_error_kind = "AUTHORIZE_REJECTED"
+            self.last_error_detail = f"HTTP {response.status_code} from authorize"
+            raise UpstoxAuthError(
+                f"Upstox authorize failed with HTTP {response.status_code}; "
+                "the request or configuration was rejected (not retried)."
+            )
         try:
             uri = response.json()["data"]["authorized_redirect_uri"]
         except (KeyError, TypeError, ValueError):
-            raise UpstoxAuthError("Upstox authorize response missing authorized_redirect_uri")
+            self.last_error_kind = "MALFORMED_RESPONSE"
+            self.last_error_detail = "authorize response missing authorized_redirect_uri"
+            # A malformed 200 is not a network blip: it is what an intercepting
+            # proxy or a wrong endpoint returns. Retrying cannot fix it and
+            # would hide a possible MITM, so fail closed as an auth error.
+            raise UpstoxAuthError(
+                "Upstox authorize response was malformed (missing "
+                "authorized_redirect_uri); refusing to connect."
+            )
         if not isinstance(uri, str) or not any(
             uri.startswith(f"{scheme}://") for scheme in self._schemes
         ):
-            raise UpstoxAuthError("Upstox authorize returned an unexpected endpoint scheme")
+            self.last_error_kind = "UNTRUSTED_ENDPOINT"
+            self.last_error_detail = "authorize returned an unexpected URI scheme"
+            raise UpstoxAuthError(
+                "Upstox authorize returned an unexpected endpoint scheme; "
+                "refusing to connect."
+            )
+        self.last_error_kind = None
+        self.last_error_detail = ""
         logger.info("UPSTOX_AUTH_SUCCESS")
         return uri
 
@@ -504,6 +579,33 @@ class UpstoxStream(WebSocketProvider):
         )
         self.feed_latency["max_ms"] = max(self.feed_latency["max_ms"], round(elapsed_ms, 3))
 
+    def connection_state(self) -> str:
+        """One truthful UI state derived from observed provider behaviour.
+
+        A configured token is never reported as CONNECTED. The states mirror
+        the operations runbook: CONNECTED, AUTH_FAILED, UNREACHABLE,
+        RATE_LIMITED, STALE_DATA, RECONNECTING, DISCONNECTED, UNAVAILABLE.
+        """
+        if self.status == "AUTH_FAILED":
+            return "AUTH_FAILED"
+        if self.status == "UNAVAILABLE":
+            return "UNAVAILABLE"
+        if self.status == "STALE":
+            return "STALE_DATA"
+        if self.status == "CONNECTED":
+            try:
+                stale = self._builder.stale()
+            except Exception:
+                stale = False
+            return "STALE_DATA" if stale else "CONNECTED"
+        if self.status in {"CONNECTING", "RECONNECTING"}:
+            if self.last_error_kind == "RATE_LIMITED":
+                return "RATE_LIMITED"
+            if self.last_error_kind == "UNREACHABLE":
+                return "UNREACHABLE"
+            return "CONNECTING" if self.status == "CONNECTING" else "RECONNECTING"
+        return "DISCONNECTED"
+
     def metrics(self) -> dict:
         """Health/monitoring fields for /market/status. Never includes secrets."""
         counters = self._builder.metrics()
@@ -513,6 +615,10 @@ class UpstoxStream(WebSocketProvider):
             "feed_mode": self.mode,
             "timeframe": self.timeframe,
             "connection_status": self.status,
+            "connection_state": self.connection_state(),
+            "last_error_kind": self.last_error_kind,
+            "last_error_detail": self.last_error_detail,
+            "consecutive_failures": self.consecutive_failures,
             "authenticated": self.authenticated,
             "subscribed": self.subscribed,
             "last_message_time": self.last_message,
@@ -589,6 +695,12 @@ class UpstoxStream(WebSocketProvider):
                             extra={"connect_latency_ms": elapsed_ms, "reconnect": attempts > 0},
                         )
                         await socket.send(self.subscription())
+                        # A successful authorize + socket + subscription is
+                        # proof the credential and endpoint worked NOW; prior
+                        # transient failures no longer count toward the cap.
+                        self.consecutive_failures = 0
+                        self.last_error_kind = None
+                        self.last_error_detail = ""
                         logger.info(
                             "UPSTOX_SUBSCRIBE",
                             extra={"keys": len(self._keys), "mode": self.mode},
@@ -610,6 +722,14 @@ class UpstoxStream(WebSocketProvider):
                                     logger.warning("feed_stale")
                                 continue
                             self.last_message = datetime.now(timezone.utc).isoformat()
+                            if self.status != "CONNECTED":
+                                # Data is flowing again: report recovery rather
+                                # than leaving a stale STALE label on screen.
+                                self.status = "CONNECTED"
+                                self.last_error_kind = None
+                                self.last_error_detail = ""
+                                logger.info("SYSTEM_RECOVERY",
+                                            extra={"state": "feed_data_resumed"})
                             if isinstance(message, str):
                                 self._decoder.malformed += 1
                                 logger.warning("UPSTOX_DECODE_ERROR", extra={"reason": "text_frame"})
@@ -646,25 +766,45 @@ class UpstoxStream(WebSocketProvider):
                     # hammering the provider. Simulator cancels and stops safely.
                     self.status = "AUTH_FAILED"
                     raise
-                except (OSError, TimeoutError, ConnectionClosed, InvalidStatus, httpx.HTTPError) as exc:
+                except (UpstoxTransientError, OSError, TimeoutError,
+                        ConnectionClosed, InvalidStatus, httpx.HTTPError) as exc:
                     attempts += 1
                     self.reconnects += 1
+                    self.consecutive_failures += 1
                     self.status = "RECONNECTING"
                     self.authenticated = self.subscribed = False
+                    if isinstance(exc, UpstoxTransientError):
+                        self.last_error_kind = exc.kind
+                        self.last_error_detail = str(exc)
+                    else:
+                        self.last_error_kind = "UNREACHABLE"
+                        self.last_error_detail = type(exc).__name__
                     logger.warning(
                         "UPSTOX_RECONNECT",
-                        extra={"error": type(exc).__name__, "attempt": attempts},
+                        extra={"error": type(exc).__name__,
+                               "kind": self.last_error_kind,
+                               "attempt": attempts,
+                               "consecutive": self.consecutive_failures},
                     )
+                    if self.consecutive_failures >= self.max_consecutive_failures:
+                        self.status = "UNAVAILABLE"
+                        raise UpstoxFeedUnavailable(
+                            "Upstox market data remained unavailable after "
+                            f"{self.consecutive_failures} consecutive attempts; "
+                            "the feed stopped fail-closed. Check the network and "
+                            "the credential, then restart.")
                     if not self.closed:
-                        await asyncio.sleep(
-                            min(self.max_backoff, 2 ** min(attempts, 6)) + random()
-                        )
+                        # Bounded exponential backoff with jitter. The cap is
+                        # the documented max_backoff (60s by default), so a
+                        # reconnect storm cannot hammer the provider.
+                        base = min(self.max_backoff, 2 ** min(attempts, 6))
+                        await asyncio.sleep(base + random() * 0.5)
                 finally:
                     self._socket = None
         finally:
-            # Keep a terminal auth failure visible in status; everything else
-            # ends disconnected (matching the established stream lifecycle).
-            if self.status != "AUTH_FAILED":
+            # Keep terminal states visible; everything else ends disconnected
+            # (matching the established stream lifecycle).
+            if self.status not in {"AUTH_FAILED", "UNAVAILABLE"}:
                 self.status = "DISCONNECTED"
 
     def _candles_allowed(self) -> bool:

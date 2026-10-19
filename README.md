@@ -1,18 +1,46 @@
-# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0 code line)
+# AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.4 code line)
 
-> **Current source line:** 3.2.0. `AXIOM_PRODUCT_MANUAL.md` is a qualified
-> product overview, not a release-readiness certificate. Use
-> [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the
-> commit-specific test, CI, package, artifact, and external-verification state.
+> **Current source line:** 3.2.4 (`pyproject.toml`). `AXIOM_PRODUCT_MANUAL.md`
+> is a qualified product overview, not a release-readiness certificate.
+> [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) is the
+> evidence index for the current commit, together with
+> [`AXIOM_FINAL_EXHAUSTIVE_VERIFICATION_REPORT.md`](AXIOM_FINAL_EXHAUSTIVE_VERIFICATION_REPORT.md),
+> [`AXIOM_FINAL_FEATURE_TEST_MATRIX.csv`](AXIOM_FINAL_FEATURE_TEST_MATRIX.csv),
+> [`AXIOM_FINAL_RUN_LOG.md`](AXIOM_FINAL_RUN_LOG.md) and
+> [`AXIOM_FINAL_KNOWN_ISSUES.md`](AXIOM_FINAL_KNOWN_ISSUES.md).
 > The master prompt is a requirements document, not evidence that a requirement
-> is implemented or verified. Everything below this banner is retained 3.1.0-
-> and-earlier release history; its release claims and test counts are historical.
+> is implemented or verified. Everything from the "Arena 3.1.0" heading
+> downward is retained release history; its counts and release claims describe
+> those earlier snapshots.
+
+**Current verification snapshot (2026-10-19, source tree only):**
+**1926 passed, 39 skipped** in 160.40 s on Linux/Python 3.11.2 — see the run
+log for the exact environment, the failed pre-fix reproductions and the
+39 documented skips. No real broker order, production OAuth flow or real
+Upstox session was exercised. The one-file executable is built and gated by
+GitHub Actions, not by this container (no shared `libpython3.11`).
+
+**Fail-closed defaults are unchanged:**
+
+```text
+MODE=PAPER
+LIVE_TRADING=false
+BROKER=LOCAL_PAPER
+REAL MONEY = DISABLED (default)
+```
+
+If Arena refuses to start because a saved paper account no longer matches the
+configuration, the message names the field and the launcher exits 3 without
+touching the database. `python arena.py --new-paper-account` starts a new
+account beside the old file; `python arena.py --diagnostics` prints a JSON
+report including `paper_account.status` (`MATCH`/`MISMATCH`/`NO_ACCOUNT`/
+`UNREADABLE`). See `USER_MANUAL.md` §"Startup refusals".
 
 ---
 
 # Arena — Quantitative Research & Trading Platform (3.1.0)
 
-> **New here?** [Download `Arena.exe`](../../releases) and double-click it.
+> **New here (3.1.0 snapshot)?** [Download `Arena.exe`](../../releases) and double-click it.
 > A first-run wizard opens automatically: one click picks **OFFLINE REPLAY**
 > paper trading, Arena generates its own local credential, initializes its
 > database and starts paper trading. **No commands, no configuration files.**
@@ -105,7 +133,7 @@ metrics must match every time (opaque uuid identities are relabelled rather than
 compared, so only decisions are measured). Exit code 0/1; a failure names the
 first differing location, or — when only the cross-process runs diverge — points
 at string-hash ordering, the classic silent cause.
-Verification status: **1180 tests passed / 37 skipped**;
+Verification status at that release snapshot: **1180 tests passed / 37 skipped** (historical; current counts are in the banner above);
 desktop **GUI boot NOT VERIFIED** in the build sandbox (no display server —
 source and API contracts verified); authenticated Upstox sandbox/feed flows
 **NOT ATTEMPTED** in this environment (no credentials). See

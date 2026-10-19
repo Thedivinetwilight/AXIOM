@@ -87,7 +87,12 @@ class HistoricalDataManager:
                      from_date: date | None, to_date: date, *,
                      intraday: bool = False) -> list[dict]:
         if intraday:
-            url = f"{self.settings.intraday_base}/{instrument_key}/{unit}/{interval}"
+            # Settings defines `intraday_base_url`; the old `intraday_base`
+            # attribute does not exist, so every intraday sync raised
+            # AttributeError before making a request (a silent connectivity
+            # failure for the intraday-history path).
+            url = (f"{self.settings.intraday_base_url}/"
+                   f"{instrument_key}/{unit}/{interval}")
         else:
             url = (f"{self.settings.history_base_url}/{instrument_key}/{unit}/"
                    f"{interval}/{to_date.isoformat()}"

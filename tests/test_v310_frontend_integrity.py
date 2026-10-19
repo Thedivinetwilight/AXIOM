@@ -87,8 +87,14 @@ def assert_js_parses(js: str, label: str) -> None:
 
 
 @pytest.fixture()
-def client():
-    app = create_app(Settings())
+def client(tmp_path):
+    # Never open the repository's default database: merely starting and
+    # stopping the app persists a pristine paper state, which made a second
+    # test run see an "existing account" (and leaked a 600 KB file into the
+    # checkout). Every app fixture uses a disposable database.
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'frontend.db'}",
+                        data_dir=str(tmp_path / "data"))
+    app = create_app(settings, data_dir=tmp_path / "data")
     with TestClient(app) as test_client:
         yield test_client
 
