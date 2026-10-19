@@ -1237,6 +1237,17 @@ Arena.exe --diagnostics
 
 Full explanation, including the path-normalization rules: **[docs/PAPER_ACCOUNT_RECOVERY.md](docs/PAPER_ACCOUNT_RECOVERY.md)**.
 
+**How this is verified on Windows.** The refusal, the recovery and the
+preserved database are not only unit-tested: the
+[Windows build and installer workflow](.github/workflows/windows-build-installer.yml)
+builds the real `Arena.exe`, drives that executable through the failure
+(exit code 3, account untouched), recovers into a separate empty account,
+restarts, then builds the Inno Setup package, **installs it silently**,
+drives the **installed** executable through the same refusal and recovery,
+uninstalls it again and proves the original database, the recovery
+database and the recovery selection all survived. Every one of those steps
+is a hard gate: the artifacts are published only when all of them passed.
+
 ## 15. Test and audit workflow
 
 ```bash
