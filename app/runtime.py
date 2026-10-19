@@ -185,12 +185,22 @@ def path_identity(path: str | Path) -> str:
 def is_absolute_database_path(raw: str) -> bool:
     """True when the file part of a SQLite URL is an absolute path.
 
+    SQLite's own convention decides this, not the operating system: a URL
+    with FOUR slashes (``sqlite:////path``) names an absolute path and one
+    with three (``sqlite:///path``) a relative one. The two questions are
+    not the same - on Windows a leading slash alone is drive-relative
+    (``C:\\custom``), so asking the operating system would make an
+    operator's explicit setting look relative and silently re-anchor it
+    into the Arena home.
+
     A Windows drive letter (``C:/...``) counts as absolute even when the
     code runs on POSIX, so a Windows-style URL is never silently re-anchored
     to the Arena home by a non-Windows build.
     """
     if raw in ("", ":memory:"):
         return False
+    if raw.startswith("/") or raw.startswith("\\"):
+        return True
     if len(raw) >= 3 and raw[1] == ":" and raw[2] in "/\\" and raw[0].isalpha():
         return True
     return Path(raw).expanduser().is_absolute()

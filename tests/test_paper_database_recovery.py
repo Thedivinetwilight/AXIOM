@@ -579,6 +579,23 @@ class TestDatabasePathNormalization:
         assert runtime.resolve_portable_database_url(
             "sqlite:///C:/Users/me/trading.db") == "sqlite:///C:/Users/me/trading.db"
 
+    def test_a_four_slash_url_is_never_re_anchored(self, monkeypatch, tmp_path):
+        """SQLite's own convention: four slashes mean an absolute path.
+
+        On Windows a leading slash alone is DRIVE-RELATIVE, so asking the
+        operating system would make an operator's explicit setting look
+        relative and silently re-anchor it into the Arena home. The URL
+        decides, not the platform: this is the rule SQLite itself uses.
+        """
+        monkeypatch.setenv("ARENA_HOME", str(tmp_path / "home"))
+        assert runtime.is_absolute_database_path("/custom/mine.db") is True
+        assert runtime.resolve_portable_database_url(
+            "sqlite:////custom/mine.db") == "sqlite:////custom/mine.db"
+        # Three slashes stay relative and are anchored to the home.
+        assert runtime.is_absolute_database_path("custom/mine.db") is False
+        assert runtime.resolve_portable_database_url(
+            "sqlite:///custom/mine.db").endswith("/home/custom/mine.db")
+
     def test_the_same_file_has_one_identity(self, tmp_path):
         """Windows path case must not create two different databases."""
         assert runtime.path_identity(tmp_path / "a.db") == runtime.path_identity(
