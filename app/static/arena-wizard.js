@@ -262,32 +262,77 @@
   }
 
   // ----------------------------------------------------------- prepare ----
+  function verifyActiveToken(token) {
+    if (typeof token !== "string" || !token) {
+      return Promise.reject(new Error("Arena did not provide an active API credential."));
+    }
+    Arena.setToken(token);
+    if (Arena.getToken() !== token) {
+      Arena.setToken("");
+      return Promise.reject(new Error(
+        "This browser could not store the Arena session credential. Enable session storage and retry."));
+    }
+    // This protected request uses Arena's normal Authorization header path.
+    // A successful response proves the stored browser credential matches the
+    // server before the wizard lets the operator proceed.
+    return Arena.get("/api/system/info").then(function () {
+      return true;
+    }).catch(function () {
+      Arena.setToken("");
+      throw new Error(
+        "Arena could not authenticate this browser session. Retry setup; paper trading has not started.");
+    });
+  }
+
+  function handoffActiveToken(preparedResponse) {
+    if (preparedResponse && preparedResponse.token_once) {
+      return verifyActiveToken(preparedResponse.token_once);
+    }
+    // The server retained an existing API_TOKEN. Reveal it only through the
+    // established loopback-or-bearer endpoint; never embed it in a URL or HTML.
+    return Arena.post("/api/credentials/reveal", {}).then(function (data) {
+      return verifyActiveToken(data && data.token);
+    }).catch(function (error) {
+      Arena.setToken("");
+      if (error && error.status === 401) {
+        throw new Error(
+          "Arena could not authorize this browser for credential handoff. Open the local Arena page and retry.");
+      }
+      if (error && error.message && error.message.indexOf("could not authenticate this browser session") !== -1) {
+        throw error;
+      }
+      throw new Error(
+        "Arena could not hand the active API credential to this browser. Retry setup; no credential value was exposed.");
+    });
+  }
+
   function preparePaper(payload) {
     step = 2;
     render();  // viewCredential() renders the "preparing…" panel
     var host = root.querySelector(".card-body");
 
     Arena.post("/api/wizard/prepare-paper", payload).then(function (d) {
-      prepared = d;
-      if (d.token_once) Arena.setToken(d.token_once);  // loopback hand-off; never in a URL or log
-      host.innerHTML = "";
-      host.appendChild(Arena.el("h3", { style: "margin-top:0" }, [document.createTextNode("Paper environment ready")]));
-      host.appendChild(Arena.el("div", { "class": "banner ok" }, [
-        Arena.el("b", {}, [document.createTextNode("Local credential created automatically.")]),
-        document.createTextNode("Arena generated a secure API token and stored it in your local configuration. " +
-          "You never need to copy or paste it to use Arena.")
-      ]));
+      return handoffActiveToken(d).then(function () {
+        prepared = d;
+        host.innerHTML = "";
+        host.appendChild(Arena.el("h3", { style: "margin-top:0" }, [document.createTextNode("Paper environment ready")]));
+        host.appendChild(Arena.el("div", { "class": "banner ok" }, [
+          Arena.el("b", {}, [document.createTextNode("Local credential created automatically.")]),
+          document.createTextNode("Arena generated a secure API token and stored it in your local configuration. " +
+            "You never need to copy or paste it to use Arena.")
+        ]));
 
-      var adv = Arena.el("details", { style: "margin:10px 0" }, [
-        Arena.el("summary", { style: "cursor:pointer;color:#7d89a3;font-size:13px" }, [document.createTextNode("Advanced: reveal API token (not needed for normal use)")]),
-        Arena.el("div", { "class": "tokenbox", id: "token-reveal", style: "margin-top:8px" }, [document.createTextNode(d.token_once || "(existing token kept — regenerate it from Settings → Security)")])
-      ]);
-      host.appendChild(adv);
+        var adv = Arena.el("details", { style: "margin:10px 0" }, [
+          Arena.el("summary", { style: "cursor:pointer;color:#7d89a3;font-size:13px" }, [document.createTextNode("Advanced: reveal API token (not needed for normal use)")]),
+          Arena.el("div", { "class": "tokenbox", id: "token-reveal", style: "margin-top:8px" }, [document.createTextNode(d.token_once || "(existing token kept — regenerate it from Settings → Security)")])
+        ]);
+        host.appendChild(adv);
 
-      host.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-top:14px" }, [
-        Arena.el("button", { "class": "btn primary", id: "w-to-preflight", onclick: function () { step = 3; render(); } },
-          [document.createTextNode("Continue → preflight checks")])
-      ]));
+        host.appendChild(Arena.el("div", { "class": "btn-row", style: "margin-top:14px" }, [
+          Arena.el("button", { "class": "btn primary", id: "w-to-preflight", onclick: function () { step = 3; render(); } },
+            [document.createTextNode("Continue → preflight checks")])
+        ]));
+      });
     }).catch(function (e) {
       host.innerHTML = "";
       host.appendChild(Arena.el("h3", { style: "margin-top:0" }, [document.createTextNode("Setup could not complete")]));
@@ -338,7 +383,18 @@
       actions.appendChild(Arena.el("button", { "class": "btn ghost", onclick: function () { render(); } }, [document.createTextNode("Re-run checks")]));
     }).catch(function (e) {
       list.innerHTML = "";
-      bannerInto(list, "err", "Preflight could not run", e.message);
+      var authFailure = e && (e.status === 401 || e.status === 503);
+      bannerInto(list, "err",
+        authFailure ? "Authentication could not be verified" : "Preflight could not run",
+        authFailure
+          ? "Arena rejected this browser session. Retry credential handoff from the local Arena page; paper trading has not started."
+          : e.message);
+      actions.innerHTML = "";
+      var blockedStart = Arena.el("button", { "class": "btn success big", id: "w-start-engine", disabled: "disabled" },
+        [document.createTextNode("START PAPER TRADING")]);
+      blockedStart.disabled = true;
+      blockedStart.title = "Authentication and preflight must succeed before paper can start";
+      actions.appendChild(blockedStart);
     });
     return box;
   }
@@ -354,6 +410,14 @@
       .catch(function (e) {
         Arena.setBusy(btn, false);
         var host = root.querySelector(".card-body");
+        if (e && (e.status === 401 || e.status === 503)) {
+          Arena.setToken("");
+          btn.disabled = true;
+          btn.title = "Authentication must be restored before paper can start";
+          bannerInto(host, "err", "Authentication could not be verified",
+            "Arena rejected this browser session. Retry credential handoff and preflight; paper trading did not start.");
+          return;
+        }
         bannerInto(host, "err", "Paper engine could not start", e.message,
           e.data && e.data.detail ? JSON.stringify(e.data.detail, null, 2) : "");
       });

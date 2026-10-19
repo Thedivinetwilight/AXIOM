@@ -210,6 +210,8 @@ const sessionStorageStub = {
   setItem(k, v) { this._m.set(k, String(v)); },
   removeItem(k) { this._m.delete(k); }
 };
+const seededSessionToken = process.env.ARENA_BROWSER_STUB_SESSION_TOKEN || "";
+if (seededSessionToken) sessionStorageStub.setItem("arena_token", seededSessionToken);
 
 global.document = documentNode;
 global.window = global;
@@ -271,8 +273,34 @@ async function drive() {
   replay.click();  // triggers prepare-paper over real HTTP
   const toPreflight = await waitFor(() => documentNode.getElementById("w-to-preflight"), 30000);
   step("prepare-paper completed and credential screen rendered", !!toPreflight,
-       toPreflight ? "local credential auto-generated" : "timed out waiting for preflight continue");
+       toPreflight ? "credential handoff completed" : "timed out waiting for preflight continue");
   if (!toPreflight) return finish();
+
+  const activeSessionToken = sessionStorageStub.getItem("arena_token") || "";
+  step("wizard replaced any stale browser token with the active server token",
+       !!activeSessionToken && (!seededSessionToken || activeSessionToken !== seededSessionToken),
+       activeSessionToken ? "session token stored; value withheld" : "no session token stored");
+  let protectedApiStatus = 0;
+  try {
+    await Arena.get("/api/system/info");
+    protectedApiStatus = 200;
+  } catch (error) {
+    protectedApiStatus = error && error.status || 0;
+  }
+  step("browser session authenticates a protected API request",
+       protectedApiStatus === 200, "HTTP " + protectedApiStatus);
+
+  if (process.env.ARENA_BROWSER_STUB_FORCE_AUTH_FAILURE === "1") {
+    // Negative-path regression: simulate a token becoming invalid after the
+    // initial handoff and prove the authenticated preflight blocks START.
+    Arena.setToken("arena-browser-stub-invalidated-token");
+    toPreflight.click();
+    const blockedStart = await waitFor(() => documentNode.getElementById("w-start-engine"), 30000);
+    step("preflight rejects an invalid bearer and keeps START disabled",
+         !!blockedStart && blockedStart.disabled,
+         blockedStart ? "START remains disabled after HTTP 401" : "no START control rendered");
+    return finish();
+  }
 
   toPreflight.click();
   const startEngine = await waitFor(() => documentNode.getElementById("w-start-engine"), 30000);
