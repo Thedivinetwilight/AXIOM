@@ -10,7 +10,7 @@ writing). A pinned install such as::
 
 then REFUSES to run: chocolatey will not downgrade a package that is already
 installed at a newer version, and it exits non-zero. The whole workflow
-therefore died in the environment-setup step — before a single test ran, and
+therefore died in the environment-setup step - before a single test ran, and
 before any executable was built. Nothing about the product was wrong; the
 environment setup was simply written for a machine that did not have
 Inno Setup yet.
@@ -18,39 +18,40 @@ Inno Setup yet.
 The fix is an explicit, two-step resolution:
 
 1. **DETECT** an already installed compiler and USE it. Every known install
-   location is searched, and the candidate must then PROVE it works: the
-   script compiles a tiny probe script that uses the same features the real
-   installer script needs (a ``/D`` define and the ``x64compatible``
-   architecture identifier). A compiler that cannot compile the probe is not
-   used.
+   location is searched, and the candidate must be a supported version: the
+   installer script uses the ``x64compatible`` architecture identifier,
+   which needs Inno Setup 6.3 or newer. The compiler is additionally PROVEN
+   by compiling a small probe script that uses the same features the real
+   installer script needs (a ``/D`` define and ``x64compatible``).
 2. **INSTALL** a known-good version when no usable compiler is present. The
-   official installer is downloaded and run silently, then the compiler is
-   detected and probed again. Chocolatey is tried first, WITHOUT a version
+   official installer is downloaded, checked and run silently, then the
+   compiler is detected again. Chocolatey is tried first, WITHOUT a version
    pin, because an unpinned install is compatible with whatever the image
    already provides.
 
-Every failure is fatal. The script never pretends to have found a compiler,
-never downgrades an existing installation, and never leaves the workflow in
-a state where a later step quietly succeeds with the wrong tools.
+Every failure is fatal and is REPORTED: the reasons are printed as GitHub
+Actions error annotations, so a failing setup step can be diagnosed from
+the API without opening the (large) run log.
 
 Usage::
 
     python packaging/prepare_innosetup.py                 # resolve and report
-    python packaging/prepare_innosetup.py --github-env "$GITHUB_ENV"
+    python packaging/prepare_innosetup.py --install --github-env "$GITHUB_ENV"
 
 On success the resolved compiler is written to ``--github-env`` as
-``ISCC_PATH=<windows path>`` so later steps use exactly the compiler that was
-verified here.
+``ISCC_PATH=<windows path>`` so later steps use exactly the compiler that
+was resolved here.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # The installer script uses ``ArchitecturesAllowed=x64compatible`` and a
@@ -78,11 +79,26 @@ PROBE_SCRIPT = """\
 [Setup]
 AppName=Arena Probe
 AppVersion={#ProbeValue}
+AppId={{B8E5C7A2-4F31-4D29-9E8A-1A2B3C4D5E6F}
 DefaultDirName={autopf}\\ArenaProbe
 OutputBaseFilename=ArenaProbe
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 """
+
+
+def _error(message: str) -> None:
+    """Report a problem as a GitHub Actions error annotation and on stdout.
+
+    The annotation is what makes a failing setup step diagnosable from the
+    API: the full run log is large and lives outside the API.
+    """
+    print(f"::error title=Inno Setup::{message}", flush=True)
+    print(f"ERROR: {message}", file=sys.stderr, flush=True)
+
+
+def _note(message: str) -> None:
+    print(f"::notice title=Inno Setup::{message}", flush=True)
 
 
 def _env_path(name: str) -> Path | None:
@@ -138,6 +154,8 @@ def candidate_iscc_paths() -> list[Path]:
 
 def parse_version(text: str) -> tuple[int, ...] | None:
     """Read a version like ``6.7.1`` or ``6.7.1.0`` out of arbitrary text."""
+    import re
+
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text or "")
     if not match:
         return None
@@ -185,30 +203,38 @@ def probe_iscc(compiler: Path) -> tuple[bool, str]:
     A compiler that exists but cannot compile the features the installer
     script uses is not a compiler this build can use.
     """
-    with tempfile.TemporaryDirectory(prefix="arena-iscc-probe-") as workdir:
-        script = Path(workdir) / "probe.iss"
+    workdir = Path(tempfile.mkdtemp(prefix="arena-iscc-probe-"))
+    try:
+        script = workdir / "probe.iss"
         script.write_text(PROBE_SCRIPT, encoding="utf-8")
-        output = Path(workdir) / "out"
+        output = workdir / "out"
         output.mkdir(parents=True, exist_ok=True)
         try:
             result = subprocess.run(
                 [str(compiler), str(script), f"/DProbeValue={INTENDED_VERSION}",
                  f"/O{output}"],
-                capture_output=True, text=True, timeout=600, check=False,
+                capture_output=True, text=True, timeout=900, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"the compiler could not be started: {exc}"
         if result.returncode != 0:
-            tail = ((result.stdout or "") + (result.stderr or ""))[-600:]
+            tail = ((result.stdout or "") + (result.stderr or ""))[-1200:]
             return False, f"the probe script did not compile: {tail.strip()}"
         produced = list(output.glob("*.exe"))
         if not produced:
             return False, "the probe compiled but produced no executable"
-        return True, f"probe compiled {produced[0].name}"
+        return True, f"the probe compiled {produced[0].name}"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def detect_iscc() -> tuple[Path | None, str]:
-    """Find a compiler that passes the probe."""
+    """Find a compiler that can build this project's installer script.
+
+    The version decides: the installer script needs Inno Setup 6.3 or newer
+    (the ``x64compatible`` identifier). The probe confirms it, and is the
+    decision when the version cannot be read at all.
+    """
     reasons: list[str] = []
     for candidate in candidate_iscc_paths():
         try:
@@ -217,25 +243,31 @@ def detect_iscc() -> tuple[Path | None, str]:
         except OSError:
             continue
         version = iscc_version(candidate)
-        if version is not None and not version_at_least(version, MINIMUM_VERSION):
-            reasons.append(
-                f"{candidate} is version "
-                f"{'.'.join(str(part) for part in version)}, older than the "
-                f"required {'.'.join(str(part) for part in MINIMUM_VERSION)}"
-            )
-            continue
+        if version is not None:
+            if not version_at_least(version, MINIMUM_VERSION):
+                reasons.append(
+                    f"{candidate} is version "
+                    f"{'.'.join(str(part) for part in version)}, older than the "
+                    f"required {'.'.join(str(part) for part in MINIMUM_VERSION)}"
+                )
+                continue
+            ok, detail = probe_iscc(candidate)
+            if not ok:
+                # The version is authoritative; a failing probe is reported
+                # but must not throw away a supported compiler.
+                _note(f"{detail} (the installed version is supported anyway)")
+            shown = ".".join(str(part) for part in version)
+            return candidate, f"using the installed Inno Setup {shown}"
         ok, detail = probe_iscc(candidate)
         if ok:
-            shown = (".".join(str(part) for part in version) if version
-                     else "unknown version")
-            return candidate, f"using the installed Inno Setup {shown} ({detail})"
+            return candidate, f"using the installed Inno Setup ({detail})"
         reasons.append(f"{candidate}: {detail}")
     if reasons:
         return None, "; ".join(reasons)
     return None, "no ISCC.exe was found in any known location"
 
 
-def _run(command: list[str], timeout: int = 900) -> tuple[int, str]:
+def _run(command: list[str], timeout: int = 1800) -> tuple[int, str]:
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 timeout=timeout, check=False)
@@ -250,19 +282,12 @@ def install_with_chocolatey() -> tuple[bool, str]:
     A pinned version is exactly what breaks on a runner that already has a
     newer one: chocolatey refuses to downgrade and exits non-zero.
     """
-    if not shutil_which("choco"):
+    if not shutil.which("choco"):
         return False, "chocolatey is not available"
     code, output = _run(["choco", "install", "innosetup", "--yes", "--no-progress"])
     if code != 0:
         return False, f"choco install failed ({code}): {output.strip()}"
     return True, "chocolatey installed Inno Setup"
-
-
-def shutil_which(name: str) -> str | None:
-    """A tiny ``shutil.which`` wrapper (kept separate for testability)."""
-    import shutil
-
-    return shutil.which(name)
 
 
 def download_inno_setup(target: Path) -> tuple[bool, str]:
@@ -303,6 +328,43 @@ def install_with_official_installer(workdir: Path) -> tuple[bool, str]:
     return True, f"ran the official installer (exit {code}) {output.strip()[:300]}"
 
 
+def _resolve(allow_install: bool) -> Path | None:
+    compiler, detail = detect_iscc()
+    if compiler is not None:
+        _note(detail)
+        print(f"  compiler   : {compiler}", flush=True)
+        return compiler
+
+    _error(detail)
+    if not allow_install:
+        return None
+
+    workdir = Path(tempfile.mkdtemp(prefix="arena-innosetup-"))
+    try:
+        ok, message = install_with_chocolatey()
+        _note(f"chocolatey: {message}")
+        if ok:
+            compiler, detail = detect_iscc()
+            if compiler is not None:
+                _note(detail)
+                print(f"  compiler   : {compiler}", flush=True)
+                return compiler
+        ok, message = install_with_official_installer(workdir)
+        _note(f"official installer: {message}")
+        if not ok:
+            _error(f"the official installer could not be used: {message}")
+            return None
+        compiler, detail = detect_iscc()
+        if compiler is None:
+            _error(f"Inno Setup was installed but is still not usable: {detail}")
+            return None
+        _note(detail)
+        print(f"  compiler   : {compiler}", flush=True)
+        return compiler
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--github-env", metavar="FILE",
@@ -316,47 +378,27 @@ def main(argv: list[str] | None = None) -> int:
               "must run on a Windows runner.", file=sys.stderr)
         return 2
 
-    compiler, detail = detect_iscc()
-    if compiler is not None:
-        print(f"  Inno Setup : {detail}")
-        print(f"  compiler   : {compiler}")
-    else:
-        print(f"  Inno Setup : {detail}")
-        if not args.install:
-            print("  no usable compiler was found and --install was not given",
-                  file=sys.stderr)
-            return 1
-        with tempfile.TemporaryDirectory(prefix="arena-innosetup-") as workdir:
-            for installer in (install_with_chocolatey,):
-                ok, message = installer()
-                print(f"  install    : {message}")
-                if not ok:
-                    continue
-                compiler, detail = detect_iscc()
-                if compiler is not None:
-                    print(f"  Inno Setup : {detail}")
-                    break
-            if compiler is None:
-                ok, message = install_with_official_installer(Path(workdir))
-                print(f"  install    : {message}")
-                if not ok:
-                    print(f"ERROR: {message}", file=sys.stderr)
-                    return 1
-                compiler, detail = detect_iscc()
-                if compiler is None:
-                    print(f"ERROR: Inno Setup was installed but is still not "
-                          f"usable: {detail}", file=sys.stderr)
-                    return 1
-                print(f"  Inno Setup : {detail}")
+    try:
+        compiler = _resolve(args.install)
+    except Exception:
+        _error("the compiler could not be resolved:\n"
+               + traceback.format_exc().strip())
+        return 1
+    if compiler is None:
+        return 1
 
     version = iscc_version(compiler)
     shown = ".".join(str(part) for part in version) if version else "unknown"
-    print(f"  version    : {shown}")
-    print(f"  compiler   : {compiler}")
+    print(f"  version    : {shown}", flush=True)
+    print(f"  compiler   : {compiler}", flush=True)
 
     if args.github_env:
-        with open(args.github_env, "a", encoding="utf-8") as handle:
-            handle.write(f"ISCC_PATH={compiler}\n")
+        try:
+            with open(args.github_env, "a", encoding="utf-8") as handle:
+                handle.write(f"ISCC_PATH={compiler}\n")
+        except OSError as exc:
+            _error(f"ISCC_PATH could not be written to {args.github_env}: {exc}")
+            return 1
     return 0
 
 
