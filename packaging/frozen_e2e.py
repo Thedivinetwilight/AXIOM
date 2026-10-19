@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -173,7 +174,10 @@ class FrozenE2E:
         self.home = self.workdir / "home"
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
-        self.token: str | None = None
+        # Start with a configured server token and a deliberately stale browser
+        # session so the real packaged wizard exercises the incident path.
+        self.token: str | None = secrets.token_urlsafe(32)
+        self.stale_browser_token = "arena-frozen-e2e-stale-session-token"
         self.output_log = self.workdir / "arena-process.log"
         self.browser_capture = self.workdir / "browser-launches.txt"
         self.browser_stub = self.workdir / "browser_capture.py"
@@ -216,6 +220,7 @@ class FrozenE2E:
         env["ARENA_HOME"] = str(self.home)
         env["ARENA_PORT"] = str(self.port)
         env["ARENA_BROWSER_CAPTURE_FILE"] = str(self.browser_capture)
+        env["ARENA_BROWSER_STUB_SESSION_TOKEN"] = self.stale_browser_token
         browser_python = Path(sys.executable).resolve().as_posix()
         browser_script = self.browser_stub.resolve().as_posix()
         env["BROWSER"] = f'"{browser_python}" "{browser_script}" %s'
@@ -240,7 +245,7 @@ class FrozenE2E:
         return ""
 
     def start(self, *, cwd: Path | None = None,
-              open_browser: bool = True) -> subprocess.Popen:
+              open_browser: bool = True, force_setup: bool = False) -> subprocess.Popen:
         # Launched from a directory that is neither the repo nor the home:
         # exactly the situation of a double-clicked executable. The standard
         # launch path opens the real first-run/application URL; BROWSER points
@@ -252,6 +257,8 @@ class FrozenE2E:
         argv = [str(self.artifact)]
         if not open_browser:
             argv.append("--no-browser")
+        if force_setup:
+            argv.append("--setup")
         process = subprocess.Popen(
             argv,
             cwd=str(launch_dir), env=self._env(),
@@ -289,7 +296,13 @@ class FrozenE2E:
                 "artifact": str(self.artifact), "results": self.results}
 
     def _phase_first_launch(self) -> None:
-        self.process = self.start()
+        self.home.mkdir(parents=True, exist_ok=True)
+        # A recovery/new-account scenario retains the installation token. Seed
+        # it before launch, then force the setup wizard so the browser performs
+        # the existing-token handoff instead of the fresh-token path.
+        (self.home / ".env").write_text("API_TOKEN=" + str(self.token) + "\n",
+                                         encoding="utf-8")
+        self.process = self.start(force_setup=True)
         healthy = _wait_health(self.base, timeout=120)
         if not self.check("executable starts and /health answers in a fresh home",
                           healthy):
@@ -300,7 +313,7 @@ class FrozenE2E:
         from app import __version__
 
         gui_url = self._wait_browser_route("/setup")
-        self.check("default startup opens the first-run GUI",
+        self.check("existing-token setup launch opens the wizard GUI",
                    bool(gui_url), gui_url or "no browser launch was captured")
         self.check("/health reports status ok and the current version",
                    status == 200 and health.get("status") == "ok"
@@ -408,7 +421,8 @@ class FrozenE2E:
             ["node", str(STUB), self.base,
              str(ROOT / "app" / "static" / "arena-core.js"),
              str(ROOT / "app" / "static" / "arena-wizard.js")],
-            capture_output=True, text=True, timeout=300, cwd=str(self.workdir))
+            capture_output=True, text=True, timeout=300, cwd=str(self.workdir),
+            env=self._env())
         report = None
         try:
             report = json.loads(stub.stdout)
@@ -421,8 +435,52 @@ class FrozenE2E:
         for step_report in report["steps"]:
             self.check("wizard flow: " + step_report["name"],
                        step_report["ok"], step_report.get("detail", ""))
-        # the driver's prepare-paper generated the session token; read it back
-        # from the .env it wrote (file existence is verified later)
+
+        # A separate browser session starts with a stale token, successfully
+        # refreshes it through the loopback handoff, then simulates rotation
+        # before preflight. The protected preflight must reject it and keep
+        # START disabled; it must not start a second engine or trust presence.
+        negative_env = self._env()
+        negative_env["ARENA_BROWSER_STUB_FORCE_AUTH_FAILURE"] = "1"
+        negative = subprocess.run(
+            ["node", str(STUB), self.base,
+             str(ROOT / "app" / "static" / "arena-core.js"),
+             str(ROOT / "app" / "static" / "arena-wizard.js")],
+            capture_output=True, text=True, timeout=300, cwd=str(self.workdir),
+            env=negative_env)
+        negative_report = None
+        try:
+            negative_report = json.loads(negative.stdout)
+        except ValueError:
+            pass
+        blocked = next((item for item in (negative_report or {}).get("steps", [])
+                        if item.get("name") ==
+                        "preflight rejects an invalid bearer and keeps START disabled"), None)
+        self.check("frozen preflight blocks START after bearer rejection",
+                   bool(blocked and blocked.get("ok") and negative.returncode == 0),
+                   "invalid bearer remains blocked" if blocked and blocked.get("ok")
+                   else (negative.stderr[-300:] or "negative-path browser harness failed"))
+
+        # Exercise the actual packaged protected endpoint independently of the
+        # disabled UI path. The credential is deliberately synthetic and must
+        # appear in neither the rejection body nor the process log.
+        invalid_bearer = "arena-frozen-e2e-invalid-paper-start-token"
+        start_status, start_body = _post(
+            self.base, "/api/paper/start-default", {"source": "replay"},
+            token=invalid_bearer)
+        self.check("protected paper-start rejects invalid bearer",
+                   start_status == 401, f"HTTP {start_status}")
+        self.check("invalid bearer is absent from rejection body",
+                   invalid_bearer not in json.dumps(start_body))
+        try:
+            process_log = self.output_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            process_log = ""
+        self.check("invalid bearer is absent from frozen process logs",
+                   invalid_bearer not in process_log)
+
+        # Read the active API token from the isolated test home for checks; it
+        # is never emitted to logs or included in the browser report.
         env_path = self.home / ".env"
         if env_path.exists():
             from app.config.envfile import read_values

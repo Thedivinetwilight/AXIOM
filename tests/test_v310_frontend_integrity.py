@@ -125,6 +125,27 @@ class TestWizardShell:
                    for chunk in extract_inline_scripts(response.text))
 
 
+class TestWizardAuthenticationHandoff:
+    source = (ROOT / "app" / "static" / "arena-wizard.js").read_text(encoding="utf-8")
+
+    def test_existing_token_is_revealed_and_overwrites_stale_session_token(self):
+        assert 'Arena.post("/api/credentials/reveal", {})' in self.source
+        assert "Arena.setToken(token)" in self.source
+        assert "Arena.getToken() !== token" in self.source
+        assert 'Arena.get("/api/system/info")' in self.source
+
+    def test_authentication_failure_blocks_the_start_action(self):
+        assert 'authFailure ? "Authentication could not be verified"' in self.source
+        assert 'id: "w-start-engine", disabled: "disabled"' in self.source
+        assert "blockedStart.disabled = true" in self.source
+        assert "btn.disabled = true" in self.source
+        assert '"Authentication could not be verified"' in self.source
+
+    def test_token_handoff_errors_do_not_include_credential_values(self):
+        assert "no credential value was exposed" in self.source
+        assert "token=" not in self.source
+
+
 class TestServedAssetsParse:
     @pytest.mark.parametrize("name", [
         "arena-core.js", "arena-wizard.js", "arena-app.js",

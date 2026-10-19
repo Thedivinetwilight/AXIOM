@@ -130,6 +130,91 @@ class TestFirstRunWizard:
             assert again["token_generated"] is False
             assert again["token_once"] is None
 
+    def test_existing_token_handoff_authenticates_preflight_and_start(self, fresh_home, monkeypatch):
+        token = "preconfigured-local-api-token"
+        fresh_home.mkdir(parents=True, exist_ok=True)
+        (fresh_home / ".env").write_text("API_TOKEN=" + token + "\n", encoding="utf-8")
+        monkeypatch.setenv("API_TOKEN", token)
+        called = []
+
+        async def engine_start(body, request):
+            called.append(True)
+            return {"state": "STARTING"}
+
+        from app.api.routes import paper
+
+        monkeypatch.setattr(paper, "do_start", engine_start)
+        with TestClient(create_app(Settings.from_env())) as client:
+            prepared = client.post("/api/wizard/prepare-paper",
+                                   json={"data_source": "replay"})
+            assert prepared.status_code == 200, prepared.text
+            assert prepared.json()["token_generated"] is False
+            assert prepared.json()["token_once"] is None
+
+            # The reveal response is the established loopback handoff; after
+            # the browser stores this value, the real auth dependency accepts it.
+            revealed = client.post("/api/credentials/reveal")
+            assert revealed.status_code == 200
+            assert revealed.headers["cache-control"] == "no-store"
+            assert revealed.json()["token"] == token
+
+            assert client.get("/api/wizard/preflight").status_code == 401
+            assert client.get("/api/wizard/preflight",
+                              headers={"Authorization": "Bearer stale-token"}).status_code == 401
+            preflight = client.get(
+                "/api/wizard/preflight",
+                headers={"Authorization": "Bearer " + revealed.json()["token"]},
+            )
+            assert preflight.status_code == 200, preflight.text
+            checks = {check["name"]: check for check in preflight.json()["checks"]}
+            assert checks["UI / API"]["ok"] is True
+            assert "Authenticated browser request accepted" in checks["UI / API"]["detail"]
+
+            missing = client.post("/api/paper/start-default", json={"source": "replay"})
+            incorrect = client.post(
+                "/api/paper/start-default", json={"source": "replay"},
+                headers={"Authorization": "Bearer stale-token"})
+            assert missing.status_code == 401
+            assert incorrect.status_code == 401
+            assert called == [], "unauthenticated requests must not reach paper startup"
+
+            started = client.post(
+                "/api/paper/start-default", json={"source": "replay"},
+                headers={"Authorization": "Bearer " + revealed.json()["token"]})
+            assert started.status_code == 200, started.text
+            assert called == [True]
+
+    def test_credential_reveal_requires_bearer_for_remote_clients(self, fresh_home):
+        token = "remote-reveal-protection-token"
+        app = create_app(Settings(api_token=token,
+                                  database_url=f"sqlite:///{fresh_home / 'remote.db'}"))
+        with TestClient(app, client=("192.0.2.25", 50123)) as client:
+            assert client.post("/api/credentials/reveal").status_code == 401
+            response = client.post(
+                "/api/credentials/reveal",
+                headers={"Authorization": "Bearer " + token},
+            )
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            assert response.json()["token"] == token
+
+    def test_token_rotation_across_restart_rejects_old_and_accepts_new(self, fresh_home):
+        old_token, new_token = "old-local-token", "new-local-token"
+        database_url = f"sqlite:///{fresh_home / 'rotation.db'}"
+        with TestClient(create_app(Settings(api_token=old_token,
+                                            database_url=database_url))) as client:
+            assert client.get("/api/system/info",
+                              headers={"Authorization": "Bearer " + old_token}).status_code == 200
+
+        with TestClient(create_app(Settings(api_token=new_token,
+                                            database_url=database_url))) as client:
+            assert client.get("/api/system/info",
+                              headers={"Authorization": "Bearer " + old_token}).status_code == 401
+            assert client.get("/api/system/info",
+                              headers={"Authorization": "Bearer " + new_token}).status_code == 200
+            assert client.get("/api/wizard/preflight",
+                              headers={"Authorization": "Bearer " + new_token}).status_code == 200
+
     def test_start_paper_with_one_action_produces_recorded_executions(self, fresh_home):
         with TestClient(create_app(Settings.from_env())) as client:
             token = client.post("/api/wizard/prepare-paper",
@@ -177,12 +262,23 @@ class TestFirstRunWizard:
             boot = client.get("/api/boot").json()
             assert boot["first_run"] is False, "a recovered install is not first-run"
 
-    def test_reveal_endpoint_is_loopback_only_and_returns_the_active_token(self, fresh_home):
+    def test_reveal_endpoint_is_loopback_only_and_returns_the_active_token(self, fresh_home, caplog):
         with TestClient(create_app(Settings.from_env())) as client:
             token = client.post("/api/wizard/prepare-paper",
                                 json={"data_source": "replay"}).json()["token_once"]
-            revealed = client.post("/api/credentials/reveal").json()["token"]
-            assert revealed == token
+            with caplog.at_level("DEBUG"):
+                response = client.post("/api/credentials/reveal")
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-store"
+            assert response.json()["token"] == token
+
+            for path in ("/api/boot", "/setup", "/setup/status", "/health", "/"):
+                assert token not in client.get(path).text
+            assert token not in client.get(
+                "/api/system/info", headers={"Authorization": "Bearer " + token}).text
+            from app import runtime
+            assert token not in repr(runtime.describe())
+            assert token not in caplog.text
 
 
 class TestWizardRefusals:

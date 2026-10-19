@@ -28,7 +28,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.api.auth import loopback_or_bearer
+from app.api.auth import authenticate, loopback_or_bearer
 from app.config.envfile import read_values, update_values
 
 router = APIRouter()
@@ -318,9 +318,9 @@ async def validate_market_data(payload: ValidateMarketDataRequest, request: Requ
     }
 
 
-@router.get("/api/wizard/preflight", dependencies=[Depends(loopback_or_bearer)])
+@router.get("/api/wizard/preflight", dependencies=[Depends(authenticate)])
 async def preflight(request: Request) -> dict:
-    """Honest readiness checks. Nothing here is allowed to fake a READY."""
+    """Authenticated readiness checks for the same browser that starts paper."""
     from app import runtime
 
     checks: list[dict] = []
@@ -385,13 +385,9 @@ async def preflight(request: Request) -> dict:
     except Exception as exc:
         add("RISK", False, f"risk configuration invalid: {exc}")
 
-    # UI/API
-    try:
-        has_token = bool((getattr(settings, "api_token", "") or "").strip())
-        add("UI / API", True,
-            "API token active" if has_token else "no API token (protected endpoints disabled)")
-    except Exception:
-        add("UI / API", False, "could not read API state")
+    # UI/API: reaching this point proves the browser's bearer passed the same
+    # authenticate dependency used by the protected paper-start endpoint.
+    add("UI / API", True, "Authenticated browser request accepted by protected API")
 
     # STORAGE (warn-only: frozen builds write outside the bundle)
     home = runtime.arena_home()

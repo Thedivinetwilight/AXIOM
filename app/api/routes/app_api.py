@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app import build_info
@@ -151,13 +151,14 @@ async def live_readiness(request: Request) -> dict:
 
 
 @router.post("/api/credentials/reveal", dependencies=[Depends(loopback_or_bearer)])
-async def reveal_token(request: Request) -> dict:
+async def reveal_token(request: Request, response: Response) -> dict:
     """Loopback-only one-shot reveal of the LOCAL api token.
 
     Same trust boundary as /setup/generate-token (loopback clients already
     receive fresh tokens there). The value is returned in the JSON body only —
     never in a URL, never in a log line.
     """
+    response.headers["Cache-Control"] = "no-store"
     settings = getattr(request.app.state, "settings", None)
     token = (getattr(settings, "api_token", "") or "").strip()
     if not token:
