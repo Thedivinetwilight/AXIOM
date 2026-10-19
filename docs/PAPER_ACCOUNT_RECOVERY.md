@@ -192,3 +192,23 @@ cover, against the real code and the real executable:
 * the selection survives a later launch and can be cleared without deleting
   a database;
 * a refused configuration change is rolled back.
+
+## 10. How the installed Windows build is verified
+
+The unit tests cannot prove what a double-clicked `Arena.exe` does, so the
+Windows build and installer workflow exercises the real thing on every
+change to the application, the packaging or this document:
+
+1. the full source suite runs on a Windows runner;
+2. `Arena.exe` is built, and that executable is driven through this whole
+   incident: it must refuse with exit code 3, name the differing field and
+   the database, keep the saved account, recover into a separate empty
+   account and start again;
+3. the Inno Setup package is built, **installed silently**, and the
+   **installed** executable is driven through the same refusal and
+   recovery;
+4. the package is uninstalled again, and the original database, the
+   recovery database and the recovery selection must all still be there.
+
+Each of those steps is a hard gate. If any of them fails, nothing is
+published: the Windows artifacts are uploaded only when every gate passed.
