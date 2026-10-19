@@ -1,95 +1,108 @@
 # AXIOM Current Audit Report
 
-**Audit date:** 2026-10-06 (Asia/Calcutta)
+**Audit date:** 2026-10-19 (Asia/Calcutta)
 **Repository:** `Thedivinetwilight/AXIOM`
-**Session branch:** `arena/01a102dd-axiom`
-**Scope:** source, tests, operator/product documentation, updater/backup boundaries, and executable-build workflow. This report is the current evidence index for the commit that contains it; the full commit SHA and commit-matched CI/build records are authoritative in Git/GitHub.
+**Session branch:** `arena/107862ec-axiom`
+**Base commit:** `4317e3a9f130db3f7fd03db53e00bdf66ac79e9f`
+**Verified code commit:** `002da1198312a2def2d31a6368729ff91da59d78`
+**Scope:** source, tests, operator/product documentation, startup and recovery,
+Upstox market data/history/OAuth, the live execution boundary, and the
+executable-build workflow. This report is the current evidence index for the
+commit that contains it; the commit SHA and commit-matched CI records are
+authoritative in Git/GitHub.
 
-> **Verdict:** The source-level audit and implementation pass is complete, and the local full test suite passes. The live execution boundary is fail-closed within AXIOM's first-party broker path. This is **not** a claim of production readiness, legal approval, profitability, a live Upstox session, genuine Kronos weights, or a signed/published release. Cross-platform frozen-build evidence is valid only when the GitHub `Build executable` run and each build record name the exact current commit.
+> **Verdict.** The source-level audit and repair pass is complete and the full
+> suite passes (**1926 passed, 39 skipped, 0 failed, 160.40 s**). The startup
+> refusal path and Upstox authentication/history defects found in this campaign
+> are fixed with captured reproductions and regression tests. This is **not** a
+> claim of production readiness, legal approval, profitability, a real Upstox
+> session, genuine Kronos weights, a signed release, or a locally built
+> executable. Cross-platform frozen-build evidence is valid only when the
+> GitHub `Build executable` run and each build record name the exact commit.
 
 ## 1. Executive findings
 
 | Area | Current finding | Evidence / limits |
 |---|---|---|
-| Live order authorization | First-party live mutations are routed through `LiveExecutionGateway`; final live HTTP mutation authorization requires an active submit dispatch bound to the exact gateway, broker, immutable intent, and capability. | Gateway, broker, lease/supervisor, adversarial and mock-exchange tests pass. This is an in-process application boundary, not control over arbitrary HTTP calls made outside AXIOM by another process or code that already has broker credentials. |
-| Failure behavior | Unknown, malformed, stale, or unreadable state blocks new risk. Existing Phase 4 lease, supervisor, readiness, emergency-stop, reconciliation, freshness, and recovery protections remain in the code and tests. Risk-reduction/cancel behavior remains separately authorized rather than being implicitly disabled with entries. | `tests/test_axiom_execution_gateway.py`, `tests/test_live_supervisor_lifecycle.py`, `tests/test_live_ops_v2_1.py`, `tests/test_submission_journal_durability.py`, and live hardening tests. No production account was used. |
-| Fill accounting / restart | Realized P&L is credited per unique fill delta, atomically and idempotently across recovery; historical cumulative ledger P&L is not re-added as a new fill. | `test_realized_fill_accounting_is_atomic_idempotent_and_cutover_aware` and `test_recovered_sell_fills_credit_each_delta_once_across_restart` in `tests/test_v3_0_1_execution_safety.py`, plus submission-journal/restart tests. |
-| Kronos / forecast inputs | Market bars and forecast requests receive strict validation across market-data, pipeline, runtime/backend, and worker/IPC boundaries. Configured cache paths and service-composition status are propagated and reported distinctly. | Kronos contract/runtime/worker tests pass. The HTTP service-composition test uses a **fake** forecast service. No real weights, publisher signature, forecast-quality result, GPU performance, or production inference is claimed. |
-| SQLite backup / restore | Snapshot consistency, archive structure/member hashes, path confinement, staged active-database restore, atomic-replace failure behavior, and a writable descriptor for cross-platform archive `fsync` have regression tests. | `TestBackupRestore` in `tests/test_axiom_intel_system.py`. Archive hashes are not signatures; an unsigned manifest does not establish who created the archive. |
-| Updater | Confined staging, verification, install staging, and a writable descriptor for the rollback-copy `fsync` are tested. A successful checksum status means the bytes match the caller-supplied SHA-256 only. | `test_checksum_match_is_not_reported_as_publisher_authenticity`, path-confinement tests, and the writable-descriptor regression in `tests/test_axiom_updater.py`. No publisher-signature or release-authenticity check is claimed. |
-| Research / GUI / API | Deterministic fixture contracts, selected GUI action-to-route contracts, and selected API workflows are tested. Recorded-data counterfactuals do not fabricate model scenarios. | These tests do not establish out-of-sample edge, profitability, exhaustive visual correctness, or every external service integration. |
-| Release build | The workflow defines Ubuntu source tests, per-platform packaging/full-suite gates, frozen executable E2E, exact build identity, and per-artifact checksum/build-info records. | A local frozen binary was not built: PyInstaller is not installed in the sandbox. Do not attribute an artifact from an older run to this commit. Verify the GitHub run's `head_sha` and all uploaded build-info `commit` values against the final branch commit. A branch push uploads Actions artifacts; tag-gated release attachment is separate. |
+| Startup refusal | A saved paper account that no longer matches the configuration is refused **before** the database is opened read-write, with a field-level message and exit 3 (config) / 4 (storage). Database and `.env` are byte-identical afterwards. | `tests/test_startup_paper_account.py` (12), live disposable-home reproduction. Previously: 12-frame traceback with no field name. |
+| Recovery | `arena.py --new-paper-account` creates a timestamped sibling database, re-verifies the original SHA-256 and rewrites only `DATABASE_URL`. | Same file; live run reports `verified_original_unchanged: true`. |
+| Diagnostics | `arena.py --diagnostics` always prints JSON (`paper_account.status`, `health`, paths, mode, broker), exits 0 for informational states, 1 only for an unloadable configuration, and never prints a token. | Same file; live probes with corrupt DB and invalid timeframe. |
+| Wizard | Validate-before-write; a failed engine rebuild restores the exact previous `.env` bytes and reopens the previous broker when possible. No `os.environ` mutation. | `tests/test_wizard_paper_safety.py` (2, both failed pre-fix), `tests/test_v310_wizard_flow.py`. |
+| Upstox market data | 429/5xx are transient with bounded backoff and a 25-failure cap; 401/403/400 permanent; malformed 200 / untrusted scheme fail closed without retry. Protobuf decoding, reconnect, heartbeat, stale detection tested against a real loopback WebSocket server. | `tests/test_upstox_live.py` (22), `tests/test_upstox_credential_probe.py` (15), `tests/test_upstox_v063.py`. No real Upstox session. |
+| Upstox history | Chunking/resume/dedup and documented URL shapes tested; the intraday `AttributeError` that killed every intraday sync is fixed. | `tests/test_v2_history.py` (9), `tests/test_v2_history_transport.py` (6). Real downloads blocked by egress. |
+| Upstox OAuth | Login reads the same `.env` it writes the token into, verifies OAuth `state`, and refreshes every configured token key atomically; no process-environment mutation. | `tests/test_upstox_login_env.py` (5), `tests/test_upstox_v062.py` (16). No real OAuth completed. |
+| Live order authorization | First-party live mutations route through `LiveExecutionGateway`; final authorization requires an active dispatch bound to the exact gateway, broker, immutable intent and capability. | `tests/test_axiom_execution_gateway.py` (85), `test_live_hardening_v2.py` (47), `test_live_ops_v2_1.py` (202). In-process boundary only. |
+| Failure behavior | Unknown, stale, unreadable or malformed state blocks new risk; exits/risk reduction have separate authorization. | `test_live_supervisor_lifecycle.py`, `test_submission_journal_durability.py`, `test_v3_0_1_execution_safety.py`. |
+| Kronos / forecast | Input validation and pipeline contracts pass with controlled inputs; status distinguishes configured/available/ready. | `test_kronos_runtime.py` (105), `worker` (80), `artifacts` (75), `pipeline_store` (35). No real weights, no GPU. |
+| Storage / updater | Backup manifests, restore staging, updater path confinement and caller-supplied digest checks pass. | `test_v3_0_2_hardening.py` (42), `test_axiom_updater.py` (20). Unsigned manifest/checksum limits documented. |
+| Packaged application | Not produced in this environment; the frozen gate is CI-only. | `build_exe.py --test` exits 1: `libpython3.11.so.1.0` not found; no egress for a standalone interpreter. |
+| Operator data | The operator's `trading_bot.db` was never opened by the final suite. | Per-test fingerprint plugin: 0 touches; SHA-256 `86ce6fdc…28cc89`. |
 
-## 2. Live execution boundary
-
-### Implemented controls
-
-- The registered gateway capability is minted once for a gateway and cannot be overwritten by a second registration. Possession of a structurally valid intent and the registered capability is not enough to mutate the broker directly.
-- `UpstoxLiveBroker` refuses caller-owned HTTP transports. Protocol tests patch `httpx.request` at the **test boundary** and direct requests into a deterministic in-process exchange; that transport reference is never installed on the production live broker.
-- At the mutating HTTP boundary, authorization requires the active `LiveExecutionGateway.submit` context to match the concrete gateway, broker, intent object, and capability. The context is set only around the final broker operation and is reset in `finally`.
-- The final authorizer constrains supported method/endpoint/purpose combinations and re-runs current controls after local journal work and durable authorization/audit work, immediately before the broker request. Entry checks revalidate the configuration hash/epoch, ACTIVE session and live-engine control generation, owned live lease, readiness/supervisor and reconciliation evidence, emergency-stop state, exact confirmation phrase, broker/account identity, entry guard chain, freshness/token conditions, account exposure/working-order limits, and canary reservation. Reads/checks that fail, are stale, or have malformed values refuse entries.
-- Exit, risk-reduction, and cancellation paths do not inherit permission from an entry epoch; they remain subject to explicit session/lease, intent, current-position, stop-semantics, broker-identity, endpoint, and final-boundary checks. Live modification remains refused.
-- Regression coverage includes capability re-registration, a valid direct broker submit with capability but no active gateway dispatch (refused before HTTP), direct mutating method/base-class requests (refused before HTTP), caller-owned transport rejection, revalidation after a stop flips at the HTTP boundary, stale lease/reconciliation/token/control state, and entries blocked while allowed risk-reduction behavior remains available where the checks permit it.
-
-### Boundary limit
-
-These controls govern AXIOM's first-party broker path. They cannot prevent arbitrary out-of-band HTTP requests, a separate process using credentials, or hostile in-process code that already holds a bearer token. No claim that they do is made here. No real-money order, production OAuth flow, or production-account access occurred in this audit or test run.
-
-## 3. Kronos, market data, and cache evidence
-
-- Observed bars are validated for numeric/non-boolean OHLCV values, finite values, valid high/low/open/close relationships, positive/valid volume policy, instrument identity, timezone-aware timestamps, ordering/duplicates, timeframe consistency, and closed-candle/session rules. Input errors are rejected rather than repaired or replaced with fabricated candles.
-- Forecast input checks cover requested instrument/timeframe/horizon/configuration and the handoff into backend/runtime and worker IPC. IPC status/config parsing is strict about malformed or unknown configuration fields.
-- Explicit configured cache directories are propagated into the runtime/worker and exposed in status; the tests use temporary local directories.
-- Service status distinguishes disabled, configured-but-uncomposed, running, ready, and error/unavailable states. The API integration test proving HTTP composition uses a fake service with a stub runtime. It does not prove that the app produced a real model forecast or that current user-facing production data wiring is complete.
-- Cache SHA-256/file-manifest checks detect changes relative to local metadata. They do **not** prove publisher origin or cryptographic signature. Genuine pretrained weights, remote artifact authenticity, forecast quality, real credentials, and GPU behavior remain unverified. The 39 skips in the full suite include tests that deliberately require a real Kronos checkout/weights or optional numerical dependencies; no random-weight substitute was used.
-
-## 4. Recovery, accounting, and persistence
-
-- Per-fill realized-P&L tests exercise cutover handling, unique fill IDs, atomic persistence, duplicate replay refusal, and recovery after a simulated crash between broker reconciliation and engine accounting.
-- Submission-journal transitions reject invalid state changes; uncertain submissions remain conservative and cannot be blindly retried as fresh orders. Duplicate intent state is tested across gateway restart.
-- Lease acquisition/release, malformed or unreadable owner/heartbeat state, supervisor lifecycle, and stop/drain behavior have explicit failure-path coverage. Unknown ownership is not interpreted as permission to trade.
-- SQLite tests cover online snapshot consistency, archive/member integrity checks, manifest/database binding, active restore staging until the next open, a failed atomic replacement that leaves the active database intact, and use of an update-capable descriptor for archive `fsync`. The initial commit-matched Windows run exposed `OSError [Errno 9]` because the archive was fsynced through a read-only descriptor; it was changed to `r+b` and the regression `test_archive_fsync_uses_a_writable_descriptor` was added. API backup/restore path traversal is refused.
-- Updater path confinement, staged state, and checksum behavior are tested. The second Windows run also exposed `OSError [Errno 9]` from fsyncing the install rollback copy through a read-only descriptor; the code now opens that copy as `r+b`, with regression `test_rollback_backup_fsync_uses_a_writable_descriptor`. The verifier's digest is caller-supplied; no detached signature, trusted publisher key, or authenticity chain is implemented or asserted here. The updater does not execute the downloaded file.
-
-## 5. Research, GUI, API, and provenance
-
-- Deterministic research-loop admission/quotas, evidence provenance/expiry, market identity, model-state truthfulness, counterfactual arithmetic on recorded data, and selected UI-to-API action contracts are covered by tests.
-- These are software-contract results on controlled/local inputs. They are not evidence of statistical significance, independent out-of-sample performance, real external data correctness, regulatory suitability, or profitability. The GUI matrix covers selected contracts; no blanket claim of pixel-level, every-platform visual verification is made.
-- Historical reports and old operator guides are retained. Their banners identify them as snapshots; their old test totals/version statements are not current evidence. `README.md`, `AXIOM_PRODUCT_MANUAL.md`, and this report point to the current evidence boundary.
-
-## 6. Verification run
-
-Run on the current source tree with dependencies from `requirements.txt` in Python 3.11:
+## 2. Verification run
 
 ```text
-.venv/bin/python -m pytest -q -rs
-1846 passed, 39 skipped, 1 warning in 151.27s
+$ PYTHONPATH=/tmp .venv/bin/python -m pytest -q -p dbwatch --junitxml=/tmp/full4.xml
+1926 passed, 39 skipped, 1 warning in 160.40s (0:02:40)
 ```
 
-The one warning is Starlette's deprecation notice for `anyio.abc.BlockingPortal`. Skip reasons were reported by `-rs` and are limited to optional `pandas`/`numpy`/`torch` dependencies; absent Kronos source or genuine weights; a public instrument-file probe unavailable over TLS; and the two frozen-E2E cases requiring a built executable. CI is configured to build the executable and run the frozen gate rather than skip it. These skips are **not** counted as passes for real weights, external data, or a local frozen binary.
+- Collection: **1965 tests**, 79 modules.
+- One warning: Starlette's deprecation notice for `anyio.abc.BlockingPortal`.
+- The 39 skips are: optional `pandas` (5), `numpy` (1), `torch`/CUDA (1);
+  absent Kronos checkout or genuine weights (26); the public Upstox instrument
+  file (1, TLS); the two frozen-E2E cases (2, no artifact). They are **not**
+  counted as passes.
+- `README.md` and the run log carry the same numbers; the earlier `1180 tests`
+  statement in the retained 3.1.0 history is explicitly labelled historical.
 
-The focused gateway/mock-exchange/Kronos/API/backup/updater set passed after the cross-platform fixes (**513 passed, 14 skipped, 1 warning** in 49.04s). Core Ruff checks (`E4,E7,E9,F,I`) passed on the touched gateway, broker, workstation, market-provider, and regression-test files. A broader Ruff pass still reports 46 `BLE001`, `TRY004`, and `S110` diagnostics in the fail-closed gateway/API exception/type-handling code; they were not silently suppressed or represented as a clean broad-lint run. `git diff --check` passed before final staging.
+## 3. Repair summary (details in the final verification report)
 
-## 7. Commit-matched CI and artifact verification
+| ID | Defect | Status |
+|---|---|---|
+| D-1 | Refused startup printed a traceback with no field-level diagnosis | FIXED |
+| D-2 | A refused start could open/mutate the database read-write | FIXED |
+| D-3 | No non-destructive recovery from a saved-account mismatch | FIXED |
+| D-4 | Diagnostics exited non-zero on first run and had no account status | FIXED |
+| D-5 | Wizard wrote `.env` before validation; rollback was lossy | FIXED |
+| D-6 | OAuth login ignored a valid `.env` without python-dotenv; stale token key | FIXED |
+| D-7 | Intraday history raised `AttributeError` before any request | FIXED |
+| D-8 | One 429/5xx at authorize stopped the feed for the session | FIXED |
 
-The [GitHub Actions **Build executable** workflow](https://github.com/Thedivinetwilight/AXIOM/actions/workflows/build-executable.yml) (`.github/workflows/build-executable.yml`) is configured to run on this branch and gates:
+Every repair has: captured failing reproduction → root cause → regression test
+that failed first → narrow change → focused rerun → full-suite rerun. The first
+post-repair full run exposed six regressions introduced by this session's own
+edits; all were fixed in code, none by relaxing an assertion.
 
-1. the full source suite on Ubuntu;
+## 4. Commit-matched CI and artifact verification
+
+The [GitHub Actions **Build executable** workflow](https://github.com/Thedivinetwilight/AXIOM/actions/workflows/build-executable.yml)
+is configured to gate:
+
+1. the full source suite on Ubuntu (runs on every push touching app/tests);
 2. packaging/frontend/wizard/instance/mode-isolation/UI tests on each build OS;
 3. the full suite on each build OS;
-4. a PyInstaller build and frozen end-to-end run against the actual executable on Windows, Linux, and macOS;
-5. a build-identity assertion that `app/BUILD_META.json` contains the workflow's `github.sha`;
-6. upload of the binary, SHA-256 sums, and JSON build record including commit, platform, byte size, and artifact digest.
+4. a PyInstaller build and frozen end-to-end run against the actual executable;
+5. a build-identity assertion that `app/BUILD_META.json` contains `github.sha`;
+6. upload of the binary, SHA-256 sums and a JSON build record.
 
-For final verification, match the workflow run's `head_sha` and every artifact JSON `commit` to the exact branch `HEAD`; a successful earlier run on another SHA does not count. Branch builds produce Actions artifacts, not an attached GitHub release; the workflow attaches to a release only for a tag. Artifact SHA-256 values establish byte equality with the recorded digest, not who published the artifact or whether it is signed. The final commit-specific CI result and artifact names are reported in the completion message after GitHub finishes the matching run.
+For the verified commit, the push-triggered run is
+[#39262011293](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39262011293).
+Only the Ubuntu source-suite job runs on a push; the three-OS packaging matrix
+requires `workflow_dispatch` or a tag. Its result and any artifact records are
+quoted in the completion message, because they post-date this commit. A green
+push run is **not** packaged-artifact evidence.
 
-## 8. Explicitly unverified / not claimed
+## 5. Explicitly unverified / not claimed
 
-- Production Upstox credentials, OAuth, real account data, a real-money order, broker approval, production IP registration, or live-account readiness.
-- Real Kronos weights, publisher signature/origin, measured forecast quality, or production GPU/model runtime.
-- Statistical edge, profitable strategy, independent OOS validation, or legal/regulatory compliance.
-- Control of arbitrary out-of-band HTTP calls or hostile code already holding credentials.
-- A local Windows/macOS/Linux frozen artifact before the commit-matched GitHub matrix completes; PyInstaller was absent locally.
-- Signed updater/release authenticity. Caller-provided checksum matching is the only updater digest claim.
+- Production Upstox credentials, OAuth completion, real account data, a
+  real-money order, broker approval, static-IP registration or live readiness.
+- A local one-file executable and any Windows/macOS build.
+- Real Kronos weights, publisher origin, forecast quality or GPU runtime.
+- Statistical edge, profitability, independent out-of-sample validation, or
+  legal/regulatory compliance.
+- Control of arbitrary out-of-band HTTP calls by another process holding
+  credentials.
 
-**Bottom line:** source-level safety and regression gates pass; default testing is paper/mock/sandbox only. Live mode remains fail-closed and unverified for production. Treat this report as a software audit, not authorization to trade.
+**Bottom line:** the software contracts and the startup/recovery path pass on
+this commit; defaults remain paper-only; no real order, credential or external
+Upstox operation was exercised. Treat this as a software audit, not
+authorisation to trade.
