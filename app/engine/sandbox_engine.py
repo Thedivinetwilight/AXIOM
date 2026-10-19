@@ -67,12 +67,16 @@ def _gross_expected_for_decision(decision: dict | None):
     return decision.get("gross_expected_pnl")
 
 
+class _AllocationPlanError(ValueError):
+    """An injected allocator cannot authorize sizing without a valid plan."""
+
+
 class SandboxEngine:
     """Orchestrates data → strategies → risk → sandbox orders → reconciliation."""
 
     def __init__(self, *, provider, strategy, broker, repository,
                  risk_limits: HardRiskLimits, journal, timeframe: str = "1m",
-                 evaluate_every: int = 30, sizing_fraction: float = 0.25,
+                 evaluate_every: int = 30, sizing_fraction: float | None = None,
                  regime_engine=None, shadow_engine=None,
                  event_engine=None, pause_gate=None, monitor=None,
                  maintenance_scheduler=None, strategy_source=None,
@@ -103,7 +107,6 @@ class SandboxEngine:
         self.journal = journal
         self.timeframe = timeframe
         self.evaluate_every = max(1, int(evaluate_every))
-        self.sizing_fraction = float(sizing_fraction)
         self.state = "STOPPED"
         self._live_emergency_handled = False
         self._live_drain_cancellation_attempted = False
@@ -177,6 +180,9 @@ class SandboxEngine:
         from app.config.settings import Settings as _Settings
         _s = (settings if settings is not None else
               (_Settings.from_env() if repository is not None else None))
+        self.sizing_fraction = float(
+            sizing_fraction if sizing_fraction is not None
+            else getattr(_s, "position_size", 0.25))
         # Cost rates are per-side values, matching ExecutionConfig. The legacy
         # cost_rate override remains a combined per-side commission/slippage
         # rate for sizing; absent an override, use the actual configured
@@ -205,6 +211,7 @@ class SandboxEngine:
         self.entry_timing = entry_timing or (EntryTimingEngine.from_settings(_s) if _s else EntryTimingEngine())
         self.alpha_decay = alpha_decay or (AlphaDecayTracker.from_settings(_s) if _s else AlphaDecayTracker())
         self.hot_path = hot_path_monitor or (HotPathMonitor.from_settings(_s) if _s else HotPathMonitor())
+        self.hot_path_monitor = self.hot_path
         self.cold_queue = cold_queue or ColdPathQueue()
         try:
             from app.research.mae_mfe import MAEMFEAnalyzer
@@ -1042,6 +1049,20 @@ class SandboxEngine:
         return cancelled
 
     def process_candle(self, candle, *, risk_reducing_only: bool = False) -> None:
+        """Measure one full candle hot-path pass without changing its outcome."""
+        started = time.perf_counter()
+        try:
+            return self._process_candle(
+                candle, risk_reducing_only=risk_reducing_only)
+        finally:
+            try:
+                self.hot_path.record((time.perf_counter() - started) * 1000.0)
+            except Exception as exc:
+                # Metrics are observational only and cannot alter order handling.
+                logger.warning("HOT_PATH_METRIC_FAILED",
+                               extra={"error_type": type(exc).__name__})
+
+    def _process_candle(self, candle, *, risk_reducing_only: bool = False) -> None:
         metrics = self.provider.metrics()
         if not metrics.get("market_open", False):
             self._seen_closed = True
@@ -1302,68 +1323,114 @@ class SandboxEngine:
                                 "symbol": candle.symbol})
             logger.info("ENTRY_ORDER_STILL_WORKING")
             return
-        quantity, allocated, est_fees, sizing_note = self._size_entry(candle)
+        try:
+            quantity, allocated, est_fees, sizing_note = self._size_entry(candle)
+        except _AllocationPlanError as exc:
+            self._reject_entry_gate_failure("capital_allocation", candle, exc)
+            return
         if quantity < 1:
             self.repository.record_system_event("SIZING_SKIPPED", {
                 "reason": sizing_note, "symbol": candle.symbol,
                 "ts": candle.timestamp.isoformat()})
             return
-        # --- 3.0.5: volatility-aware sizing (before hard risk, never exceeds hard cap) ---
+        # --- 3.0.5: volatility-aware sizing (before hard risk; may only reduce) ---
         try:
-            # Estimate volatility from history (simple close-to-close std)
+            # Estimate close-to-close volatility using the configured number of
+            # returns. Insufficient history remains unknown rather than receiving
+            # a fabricated positive volatility estimate.
             vol = None
             atr = None
-            if len(self._history) >= 5:
-                closes = [float(c.close) for c in self._history[-20:]]
-                rets = [(closes[i]/closes[i-1]-1) for i in range(1, len(closes)) if closes[i-1] > 0]
-                if len(rets) >= 3:
+            lookback = max(1, int(getattr(self.volatility_sizer, "lookback", 20)))
+            if len(self._history) >= lookback + 1:
+                closes = [float(item.close)
+                          for item in self._history[-(lookback + 1):]]
+                rets = [closes[index] / closes[index - 1] - 1.0
+                        for index in range(1, len(closes))
+                        if closes[index - 1] > 0]
+                if len(rets) >= 2:
                     import statistics
-                    try:
-                        vol = statistics.pstdev(rets) if len(rets) > 1 else 0.01
-                    except Exception:
-                        vol = 0.015
-                # ATR proxy: avg true range / price
+                    vol = statistics.pstdev(rets)
+
+            # ATR proxy: mean true range over the latest ten bars, using each
+            # bar's actual immediately preceding close.
+            recent = self._history[-10:]
+            if len(recent) >= 2:
                 try:
-                    trs = [max(float(c.high)-float(c.low), abs(float(c.high)-closes[i-1]), abs(float(c.low)-closes[i-1])) for i, c in enumerate(self._history[-10:]) if i>0]
-                    atr = (sum(trs)/len(trs)) if trs else None
+                    true_ranges = [
+                        max(float(bar.high) - float(bar.low),
+                            abs(float(bar.high) - float(previous.close)),
+                            abs(float(bar.low) - float(previous.close)))
+                        for previous, bar in zip(recent, recent[1:])
+                    ]
+                    atr = sum(true_ranges) / len(true_ranges)
                 except Exception:
                     atr = None
-            # Liquidity snapshot for sizing
+
+            # Liquidity and exposure are optional sizing evidence. On read
+            # failure, leave them unknown; do not substitute favorable values.
             liq_score = None
             try:
-                # Try to get bid/ask from provider metrics or last candle
                 bid = getattr(candle, "bid", None)
                 ask = getattr(candle, "ask", None)
-                # Use current time for liquidity to avoid historical stale rejection
-                snap = self.liquidity_intel.assess(candle.symbol, bid=bid, ask=ask, last_price=candle.close, volume=float(getattr(candle, "volume", 0) or 0), volatility=vol, timestamp=time.time())
+                snap = self.liquidity_intel.assess(
+                    candle.symbol, bid=bid, ask=ask,
+                    last_price=float(candle.close),
+                    volume=float(getattr(candle, "volume", 0) or 0),
+                    volatility=vol, timestamp=time.time())
                 liq_score = snap.liquidity_score
             except Exception:
-                liq_score = 0.7
-            # Exposure
+                liq_score = None
+
             exp_ratio = None
             try:
-                exp = self.broker.ledger.equity()
-                gross = sum(abs(float(p.get("quantity",0))*float(p.get("price",0))) for p in getattr(self.broker.ledger, "positions", []) or [])
-                exp_ratio = gross/exp if exp>0 else 0
+                equity = self.broker.ledger.equity()
+                gross = sum(
+                    abs(float(position.get("quantity", 0))
+                        * float(position.get("price", 0)))
+                    for position in getattr(self.broker.ledger, "positions", []) or [])
+                if equity > 0:
+                    exp_ratio = gross / equity
             except Exception:
-                exp_ratio = 0
-            # Hard cap quantity for sizing: do not pre-cap here; let HardRiskLimits be the
-            # authoritative gate (test expects oversized 1000 to be rejected, not silently capped to 50)
-            hard_cap_q = None
-            sizing_ctx = SizingContext(base_quantity=float(quantity), price=float(candle.close), volatility=vol, atr=atr, regime=self.regime, confidence=float(self.last_router_decision.get("confidence",0.5)) if self.last_router_decision else 0.5, expected_edge=None, stop_distance=self.stop_loss or 0.05, liquidity_score=liq_score, exposure_ratio=exp_ratio, hard_cap_quantity=hard_cap_q)
-            adj_qty, sizing_detail = self.volatility_sizer.adjust(sizing_ctx)
-            if adj_qty < quantity:
-                self.repository.record_system_event("VOLATILITY_SIZING", {"original": quantity, "adjusted": adj_qty, "detail": sizing_detail, "symbol": candle.symbol})
-            quantity = int(adj_qty)
+                exp_ratio = None
+
+            decision = self.last_router_decision
+            confidence = None
+            if isinstance(decision, dict) and decision.get("confidence") is not None:
+                try:
+                    candidate_confidence = float(decision["confidence"])
+                    if math.isfinite(candidate_confidence):
+                        confidence = candidate_confidence
+                except (OverflowError, TypeError, ValueError):
+                    confidence = None
+            stop_distance = (self.stop_loss if math.isfinite(self.stop_loss)
+                             and self.stop_loss > 0 else None)
+            sizing_ctx = SizingContext(
+                base_quantity=float(quantity), price=float(candle.close),
+                volatility=vol, atr=atr, regime=self.regime,
+                confidence=confidence, expected_edge=None,
+                stop_distance=stop_distance, liquidity_score=liq_score,
+                exposure_ratio=exp_ratio, hard_cap_quantity=None)
+            adjusted_quantity, sizing_detail = self.volatility_sizer.adjust(
+                sizing_ctx)
+            adjusted_quantity = float(adjusted_quantity)
+            if not math.isfinite(adjusted_quantity) or adjusted_quantity < 0:
+                raise ValueError("volatility sizer returned an invalid quantity")
+            # The sizer's contract is reduction-only. It must never expand the
+            # allocation-derived sizing budget, even if its heuristic scalar is >1.
+            adjusted_quantity = min(float(quantity), adjusted_quantity)
+            if adjusted_quantity < quantity:
+                self.repository.record_system_event("VOLATILITY_SIZING", {
+                    "original": quantity, "adjusted": adjusted_quantity,
+                    "detail": sizing_detail, "symbol": candle.symbol})
+            quantity = int(adjusted_quantity)
             if quantity < 1:
-                self.repository.record_system_event("VOLATILITY_SIZING_SKIP", {"reason": sizing_detail, "symbol": candle.symbol})
+                self.repository.record_system_event("VOLATILITY_SIZING_SKIP", {
+                    "reason": sizing_detail, "symbol": candle.symbol})
                 return
-            # Recompute fees for adjusted quantity
             est_fees = round(quantity * candle.close * self.cost_rate, 4)
         except Exception as exc:
-            # Sizing must never block on error; fall back to original quantity
-            import logging as _lg
-            _lg.getLogger("bot.engine").debug("volatility_sizing_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("volatility_sizing", candle, exc)
+            return
 
         # --- 3.0.5: cross-market context (lightweight, no second data system) ---
         cross_ctx = None
@@ -1406,8 +1473,17 @@ class SandboxEngine:
             # Store for later use in quality/net edge
             self._last_liquidity = liq_snap
             should_reject, should_reduce, liq_reason = self.liquidity_intel.should_reduce_or_reject(liq_snap)
-            if should_reject:
-                self.repository.record_system_event("LIQUIDITY_REJECT", {"symbol": candle.symbol, "spread_bps": liq_snap.spread_bps, "liquidity_score": liq_snap.liquidity_score, "reason": liq_reason})
+            if should_reject or should_reduce:
+                # The liquidity contract gives no supported reduction amount.
+                # Refuse this entry rather than guessing a factor or silently
+                # ignoring the recommendation; protective exits remain separate.
+                self.repository.record_system_event("LIQUIDITY_REJECT", {
+                    "symbol": candle.symbol,
+                    "spread_bps": liq_snap.spread_bps,
+                    "liquidity_score": liq_snap.liquidity_score,
+                    "reason": liq_reason,
+                    "reduction_requested": bool(should_reduce),
+                    "action_taken": "REJECT"})
                 return
         except Exception as exc:
             liq_snap = None
@@ -1453,66 +1529,122 @@ class SandboxEngine:
 
         # --- 3.0.5: trade quality scorer (ranking/context, not overriding hard risk) ---
         try:
-            # Gather supporting features
-            strat_conf = float(self.last_router_decision.get("confidence", 0.5)) if self.last_router_decision else 0.5
-            recent_oos = None
-            try:
-                # Try to get recent OOS from allocator or repository
-                if self.allocator and hasattr(self.allocator, "repository"):
-                    # placeholder
-                    recent_oos = 0.001
-            except Exception:
-                recent_oos = None
-            # Use cross_ctx for market alignment
-            trend_align = None
-            if cross_ctx and cross_ctx.market_direction:
-                # crude alignment: if market up and signal BUY, align positive
-                trend_align = 0.5 if cross_ctx.market_direction == "up" else -0.3 if cross_ctx.market_direction == "down" else 0
-            # Event context
-            event_ctx = None
-            if self.last_events:
-                # Take first event's arena_response if any
+            decision = (self.last_router_decision
+                        if isinstance(self.last_router_decision, dict) else None)
+            strat_conf = None
+            if decision is not None and decision.get("confidence") is not None:
                 try:
-                    event_ctx = {"arena_response": "MONITOR"}
-                except Exception:
-                    event_ctx = None
-            # Portfolio correlation
+                    candidate_confidence = float(decision["confidence"])
+                    if math.isfinite(candidate_confidence):
+                        strat_conf = candidate_confidence
+                except (OverflowError, TypeError, ValueError):
+                    strat_conf = None
+
+            # Cross-market context is optional evidence. Do not use the cache's
+            # default "normal" regime when neither broad-market nor VIX data is
+            # available (and never use a stale cache entry as current evidence).
+            market_context = None
+            vol_regime = None
+            getter = getattr(self.cross_market, "get", None)
+            if cross_ctx is not None and callable(getter):
+                sources = {}
+                for source_name in ("NIFTY", "INDIA_VIX"):
+                    try:
+                        entry = getter(source_name)
+                        if (entry and isinstance(entry[1], dict)
+                                and not entry[1].get("_stale")):
+                            sources[source_name] = entry[1]
+                    except Exception:
+                        continue
+                nifty_data = sources.get("NIFTY")
+                if isinstance(nifty_data, dict):
+                    market_return = nifty_data.get("return")
+                    if market_return is None:
+                        market_return = nifty_data.get("change_pct")
+                    try:
+                        valid_market_return = (
+                            not isinstance(market_return, bool)
+                            and math.isfinite(float(market_return)))
+                    except (OverflowError, TypeError, ValueError):
+                        valid_market_return = False
+                    if (valid_market_return
+                            and cross_ctx.market_direction in {"up", "down", "flat"}):
+                        market_context = {
+                            "market_direction": cross_ctx.market_direction}
+
+                vix_data = sources.get("INDIA_VIX", {})
+                vix_value = next((vix_data.get(name) for name in
+                                  ("close", "value", "vix")
+                                  if vix_data.get(name) is not None), None)
+                broad_volatility = (nifty_data.get("volatility")
+                                    if isinstance(nifty_data, dict) else None)
+                volatility_evidence = False
+                for raw_value in (vix_value, broad_volatility):
+                    if raw_value is None or isinstance(raw_value, bool):
+                        continue
+                    try:
+                        value = float(raw_value)
+                    except (OverflowError, TypeError, ValueError):
+                        continue
+                    if math.isfinite(value) and value >= 0:
+                        volatility_evidence = True
+                        break
+                if (volatility_evidence
+                        and cross_ctx.volatility_context is not None):
+                    vol_regime = cross_ctx.volatility_context
+
+            # Decision triggers are technical engine records, not market-event
+            # ArenaResponse objects. Do not manufacture MONITOR/event evidence.
+            event_ctx = None
+            trend_align = None
             corr = None
-            try:
-                if self.correlation_monitor:
-                    # Simple: if many positions, correlation high
-                    corr = 0.6 if len(getattr(self.broker.ledger, "positions", []) or []) > 1 else 0.2
-            except Exception:
-                corr = None
-            # Alpha decay factor
             decay_factor = None
-            try:
-                if self.alpha_decay:
-                    decay_factor = self.alpha_decay.decay_factor(self.strategy.name, 0)
-            except Exception:
-                decay_factor = 1.0
-            # Stop distance
-            stop_dist = self.stop_loss or 0.05
-            # Signal age
-            sig_age = 0
-            # Volatility regime
-            vol_regime = cross_ctx.volatility_context if cross_ctx else None
-            # Liquidity score
-            liq_sc = liq_snap.liquidity_score if 'liq_snap' in locals() and liq_snap else 0.6
-            # Expected net edge
-            exp_edge = net_res.net_expected if 'net_res' in locals() and net_res else 0.001
-            # Reward/risk
-            rr = (self.take_profit / self.stop_loss) if self.stop_loss and self.take_profit else 2.0
-            q_res = self.quality_scorer.score(strategy_confidence=strat_conf, expected_net_edge=exp_edge, regime_compatibility=0.6, volatility=vol if 'vol' in locals() else None, volatility_regime=vol_regime, liquidity_score=liq_sc, spread_bps=spread_bps if 'spread_bps' in locals() else 10, trend_alignment=trend_align, market_context={"market_direction": cross_ctx.market_direction if cross_ctx else None}, event_context=event_ctx, recent_oos_expectancy=recent_oos, reward_risk=rr, stop_distance=stop_dist, signal_age=sig_age, alpha_decay_factor=decay_factor, portfolio_correlation=corr)
+            sig_age = None
+            recent_oos = None
+            stop_dist = (self.stop_loss if math.isfinite(self.stop_loss)
+                         and self.stop_loss > 0 else None)
+            rr = None
+            if (self.stop_loss > 0 and self.take_profit > 0
+                    and math.isfinite(self.stop_loss)
+                    and math.isfinite(self.take_profit)):
+                rr = self.take_profit / self.stop_loss
+            liq_sc = (liq_snap.liquidity_score
+                      if "liq_snap" in locals() and liq_snap is not None else None)
+            exp_edge = (net_res.net_expected
+                        if "net_res" in locals() and net_res is not None else None)
+            quality_spread_bps = (
+                liq_snap.spread_bps
+                if "liq_snap" in locals() and liq_snap is not None else None)
+            q_res = self.quality_scorer.score(
+                strategy_confidence=strat_conf,
+                expected_net_edge=exp_edge,
+                regime_compatibility=None,
+                volatility=vol if "vol" in locals() else None,
+                volatility_regime=vol_regime,
+                liquidity_score=liq_sc,
+                spread_bps=quality_spread_bps,
+                trend_alignment=trend_align,
+                market_context=market_context,
+                event_context=event_ctx,
+                recent_oos_expectancy=recent_oos,
+                reward_risk=rr,
+                stop_distance=stop_dist,
+                signal_age=sig_age,
+                alpha_decay_factor=decay_factor,
+                portfolio_correlation=corr)
             if not self.quality_scorer.passes(q_res):
-                self.repository.record_system_event("QUALITY_REJECT", {"symbol": candle.symbol, "quality_score": q_res.quality_score, "confidence": q_res.confidence, "reasons": q_res.reasons, "penalties": q_res.penalties})
+                self.repository.record_system_event("QUALITY_REJECT", {
+                    "symbol": candle.symbol,
+                    "quality_score": q_res.quality_score,
+                    "confidence": q_res.confidence,
+                    "reasons": q_res.reasons,
+                    "penalties": q_res.penalties})
                 return
-            # Store for attribution
             self._last_quality = q_res
             self._last_net_edge = net_res
         except Exception as exc:
-            import logging as _lg4
-            _lg4.getLogger("bot.engine").debug("quality_scorer_failed", extra={"error": type(exc).__name__})
+            self._reject_entry_gate_failure("quality_scorer", candle, exc)
+            return
 
         # --- 3.0.5: optimal entry timing (TRADE_NOW / WAIT / NO_TRADE) ---
         try:
@@ -1601,19 +1733,49 @@ class SandboxEngine:
         return quantity, budget, est_fees, note
 
     def _allocator_allowance(self) -> float | None:
-        """CapitalAllocator participation: the recorded allocation plan caps
-        what this strategy may deploy (portfolio limits bind BEFORE risk gate)."""
-        if self.allocator is not None:
-            plan = self.repository.get_engine_state("capital_allocation") or {}
-            allocations = plan.get("allocations") if isinstance(plan, dict) else None
-            if allocations and self.strategy.name in allocations:
-                return float(allocations[self.strategy.name])
-            return None  # no plan yet: sizing falls back to the engine fraction
-        plan = self.repository.get_engine_state("capital_allocation") or {}
-        allocations = plan.get("allocations") if isinstance(plan, dict) else None
-        if allocations and self.strategy.name in allocations:
-            return float(allocations[self.strategy.name])
-        return None
+        """Return the strategy cap, requiring a plan when an allocator is injected.
+
+        The application's current default does not inject an allocator, so its
+        existing sizing-fraction policy remains in force when no plan exists.
+        An explicitly injected allocator, however, cannot authorize an entry
+        until it has persisted a finite, non-negative allowance for this strategy.
+        """
+        try:
+            plan = self.repository.get_engine_state("capital_allocation")
+        except Exception as exc:
+            if self.allocator is not None:
+                raise _AllocationPlanError("allocation plan could not be read") from exc
+            return None
+
+        if not plan:
+            if self.allocator is not None:
+                raise _AllocationPlanError("required allocation plan is missing")
+            return None
+        if not isinstance(plan, dict):
+            if self.allocator is not None:
+                raise _AllocationPlanError("allocation plan is invalid")
+            return None
+
+        allocations = plan.get("allocations")
+        if not isinstance(allocations, dict):
+            if self.allocator is not None:
+                raise _AllocationPlanError("allocation mapping is missing or invalid")
+            return None
+        if self.strategy.name not in allocations:
+            if self.allocator is not None:
+                raise _AllocationPlanError("strategy allowance is missing")
+            return None
+
+        raw_allowance = allocations[self.strategy.name]
+        if isinstance(raw_allowance, bool):
+            raise _AllocationPlanError("strategy allowance is not numeric")
+        try:
+            allowance = float(raw_allowance)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise _AllocationPlanError("strategy allowance is not numeric") from exc
+        if not math.isfinite(allowance) or allowance < 0:
+            raise _AllocationPlanError("strategy allowance is invalid")
+        return allowance
 
     def _submit(self, side: str, quantity: float, price: float, candle,
                 reason: str = "STRATEGY_ENTRY", triggers=None,
@@ -1806,7 +1968,7 @@ class SandboxEngine:
                     symbol=(fill.get("symbol")
                             or (_order.symbol if _order is not None else None)
                             or "UNKNOWN"),
-                    entry=fill["price"], exit=fill["price"],
+                    entry=fill.get("entry_price"), exit=fill.get("price"),
                     quantity=fill["quantity"], pnl=realized_delta,
                     fees=self.broker.ledger.fees, slippage=0.0,
                     duration_bars=self.processed, outcome="closed",

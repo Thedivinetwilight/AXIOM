@@ -423,6 +423,8 @@ class TestRestartRecovery:
         sell_fills = [fill for fill in sell_fills if fill["side"] == "SELL"]
         assert [fill["realized_pnl"] for fill in sell_fills] == pytest.approx(
             [100.0, 200.0])
+        assert [fill["entry_price"] for fill in sell_fills] == pytest.approx(
+            [100.0, 100.0])
         assert engine.daily.realized_pnl == 0.0
 
         # Recovery replays the two distinct child-fill deltas, credits each once,
@@ -433,6 +435,9 @@ class TestRestartRecovery:
         assert broker2.ledger.realized_pnl == pytest.approx(300.0)
         assert engine2.daily.realized_pnl == pytest.approx(300.0)
         assert len(engine2._recovery_report["replayed_fills"]) == 2
+        assert [fill["entry_price"]
+                for fill in engine2._recovery_report["replayed_fills"]] == pytest.approx(
+                    [100.0, 100.0])
 
         # A later exit after restart adds only its own P&L delta.
         submit_fill(broker2, state2, "SELL", 10, 130.0, "exit-after-restart")
@@ -998,6 +1003,8 @@ class TestExecutionGraphEndToEnd:
         payload = json.loads(payload) if isinstance(payload, str) else payload
         assert payload["strategy"] == "momentum"
         assert payload["symbol"] == "RELIANCE"
+        assert payload["entry"] == pytest.approx(entry_avg)
+        assert payload["exit"] == pytest.approx(exit_avg)
         assert payload["quantity"] == post["quantity"]
         assert payload["pnl"] == pytest.approx(expected, rel=1e-6)
 

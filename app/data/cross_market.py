@@ -9,6 +9,7 @@ Do NOT create trading signal from cross-market alone.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Any
@@ -82,106 +83,130 @@ class CrossMarketCache:
 
     def context_for(self, candidate_symbol: str | None = None, sector: str | None = None) -> MarketContext:
         now = time.time()
-        # Build context from cached data
-        # Broad market
-        broad = self.get("NIFTY")
+
+        def fresh_entry(key: str):
+            entry = self.get(key)
+            if entry is None or entry[1].get("_stale"):
+                return None
+            return entry
+
+        # Only current, explicitly supplied measurements contribute context.
+        broad = fresh_entry("NIFTY")
         market_dir = None
         vol_ctx = None
         if broad:
-            _, d = broad
-            # direction from recent return
-            ret = d.get("return") or d.get("change_pct") or 0
-            try:
-                r = float(ret)
-                if r > 0.005:
-                    market_dir = "up"
-                elif r < -0.005:
-                    market_dir = "down"
-                else:
-                    market_dir = "flat"
-            except Exception:
-                market_dir = "flat"
-            # vol from vix
-        vix = self.get("INDIA_VIX")
+            _, data = broad
+            raw_return = data.get("return")
+            if raw_return is None:
+                raw_return = data.get("change_pct")
+            if raw_return is not None and not isinstance(raw_return, bool):
+                try:
+                    market_return = float(raw_return)
+                    if math.isfinite(market_return):
+                        if market_return > 0.005:
+                            market_dir = "up"
+                        elif market_return < -0.005:
+                            market_dir = "down"
+                        else:
+                            market_dir = "flat"
+                except (OverflowError, TypeError, ValueError):
+                    market_dir = None
+
+        vix = fresh_entry("INDIA_VIX")
         vix_level = None
         if vix:
-            _, d = vix
-            try:
-                vix_level = float(d.get("close") or d.get("value") or d.get("vix") or 0)
-                if vix_level > 25:
-                    vol_ctx = "high"
-                elif vix_level > 20:
-                    vol_ctx = "normal"
-                elif vix_level > 0:
-                    vol_ctx = "low"
-            except Exception as exc:
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug("ignored", extra={"error": type(exc).__name__})
-        if not vol_ctx:
-            # fallback to broad vol
-            if broad:
-                _, d = broad
-                vol = d.get("volatility")
+            _, data = vix
+            raw_vix = next((data.get(name) for name in ("close", "value", "vix")
+                            if data.get(name) is not None), None)
+            if raw_vix is not None and not isinstance(raw_vix, bool):
                 try:
-                    if vol is not None:
-                        v = float(vol)
-                        if v > 0.025:
+                    value = float(raw_vix)
+                    if math.isfinite(value) and value > 0:
+                        vix_level = value
+                        if value > 25:
                             vol_ctx = "high"
-                        elif v > 0.015:
+                        elif value > 20:
                             vol_ctx = "normal"
                         else:
                             vol_ctx = "low"
-                except Exception:
-                    vol_ctx = "normal"
-            else:
-                vol_ctx = "normal"
+                except (OverflowError, TypeError, ValueError):
+                    vix_level = None
+                    vol_ctx = None
+
+        if vol_ctx is None and broad:
+            _, data = broad
+            raw_volatility = data.get("volatility")
+            if raw_volatility is not None and not isinstance(raw_volatility, bool):
+                try:
+                    volatility = float(raw_volatility)
+                    if math.isfinite(volatility) and volatility >= 0:
+                        if volatility > 0.025:
+                            vol_ctx = "high"
+                        elif volatility > 0.015:
+                            vol_ctx = "normal"
+                        else:
+                            vol_ctx = "low"
+                except (OverflowError, TypeError, ValueError):
+                    vol_ctx = None
 
         # Sector
         sector_dir = None
         if sector:
             sec_key = sector.upper()
             # try sector index
-            sec = self.get(sec_key) or self.get("BANKNIFTY")
+            sec = fresh_entry(sec_key) or fresh_entry("BANKNIFTY")
             if sec:
-                _, d = sec
-                ret = d.get("return") or 0
-                try:
-                    r = float(ret)
-                    sector_dir = "up" if r > 0.005 else "down" if r < -0.005 else "flat"
-                except Exception:
-                    sector_dir = "flat"
+                _, data = sec
+                raw_return = data.get("return")
+                if raw_return is None:
+                    raw_return = data.get("change_pct")
+                if raw_return is not None and not isinstance(raw_return, bool):
+                    try:
+                        sector_return = float(raw_return)
+                        if math.isfinite(sector_return):
+                            sector_dir = (
+                                "up" if sector_return > 0.005
+                                else "down" if sector_return < -0.005
+                                else "flat")
+                    except (OverflowError, TypeError, ValueError):
+                        sector_dir = None
 
         # Commodity
         commodity = None
-        crude = self.get("CRUDE")
-        gold = self.get("GOLD")
+        crude = fresh_entry("CRUDE")
+        gold = fresh_entry("GOLD")
         if crude or gold:
             parts = []
-            if crude:
-                _, d = crude
+            for name, entry in (("crude", crude), ("gold", gold)):
+                if not entry:
+                    continue
+                _, data = entry
+                raw_return = data.get("return")
+                if raw_return is None or isinstance(raw_return, bool):
+                    continue
                 try:
-                    parts.append(f"crude:{float(d.get('return') or 0):+.2%}")
-                except Exception as exc:
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug("ignored", extra={"error": type(exc).__name__})
-            if gold:
-                _, d = gold
-                try:
-                    parts.append(f"gold:{float(d.get('return') or 0):+.2%}")
-                except Exception as exc:
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug("ignored", extra={"error": type(exc).__name__})
+                    value = float(raw_return)
+                    if math.isfinite(value):
+                        parts.append(f"{name}:{value:+.2%}")
+                except (OverflowError, TypeError, ValueError):
+                    continue
             commodity = ",".join(parts) if parts else None
 
         # Currency
-        usdinr = self.get("USDINR")
+        usdinr = fresh_entry("USDINR")
         curr = None
         if usdinr:
-            _, d = usdinr
-            try:
-                curr = f"USDINR {float(d.get('close') or d.get('value') or 0):.2f}"
-            except Exception:
-                curr = None
+            _, data = usdinr
+            raw_value = data.get("close")
+            if raw_value is None:
+                raw_value = data.get("value")
+            if raw_value is not None and not isinstance(raw_value, bool):
+                try:
+                    value = float(raw_value)
+                    if math.isfinite(value) and value > 0:
+                        curr = f"USDINR {value:.2f}"
+                except (OverflowError, TypeError, ValueError):
+                    curr = None
 
         # Breadth (if available)
         breadth = None

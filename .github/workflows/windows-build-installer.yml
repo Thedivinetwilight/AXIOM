@@ -163,8 +163,26 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -u packaging/installer_e2e.py release/AXIOM-Setup.exe \
-            build/installer-e2e 2>&1 | tee installer-e2e-output.txt
+          python -u - <<'PY' 2>&1 | tee installer-e2e-output.txt
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          workdir = Path(os.environ["RUNNER_TEMP"]) / (
+              "axiom-installer-e2e-"
+              f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          result = subprocess.run([
+              sys.executable, "-u", "packaging/installer_e2e.py",
+              "release/AXIOM-Setup.exe", str(workdir),
+          ], check=False)
+          recovery_log = workdir / "recovery-test" / "frozen-recovery.log"
+          if recovery_log.is_file():
+              shutil.copy2(recovery_log, "installer-e2e-recovery.log")
+          raise SystemExit(result.returncode)
+          PY
 
       - name: Upload installer-test diagnostics on failure
         if: failure() && steps.installer-e2e.outcome == 'failure'
@@ -173,7 +191,7 @@ jobs:
           name: installer-e2e-diagnostics-${{ github.run_number }}
           path: |
             installer-e2e-output.txt
-            build/installer-e2e/recovery-test/frozen-recovery.log
+            installer-e2e-recovery.log
           if-no-files-found: warn
           retention-days: 3
 

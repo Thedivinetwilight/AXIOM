@@ -840,6 +840,10 @@ class UpstoxSandboxBroker:
                             incremental = average
                     elif average <= 0 and prev_avg > 0:
                         incremental = prev_avg
+                    entry_price = (
+                        float(self.ledger.position_avg_price)
+                        if state.side == "SELL" and self.ledger.position_quantity > 0
+                        else None)
                     realized_before = self.ledger.realized_pnl
                     self.ledger.apply_fill(state.side, delta, incremental)
                     realized_delta = self.ledger.realized_pnl - realized_before
@@ -855,6 +859,7 @@ class UpstoxSandboxBroker:
                          "fill_id": reconciled_fill_id(
                              state.our_id, upstox_order_id, filled),
                          "price": incremental,
+                         "entry_price": entry_price,
                          "realized_pnl": realized_delta,
                          "observed_at": observed_at}
                     )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +25,29 @@ def _run_recovery_e2e(executable: Path, workdir: Path) -> dict:
     return module.run_frozen_recovery_e2e(executable, workdir)
 
 
+def _prepare_workdir(path: str | Path) -> Path:
+    """Atomically create a new disposable directory without deleting caller data."""
+    supplied = Path(path).expanduser()
+    if supplied.is_symlink():
+        raise ValueError("workdir cannot be a symlink")
+    workdir = supplied.resolve(strict=False)
+
+    if (workdir == Path(workdir.anchor)
+            or workdir == ROOT
+            or workdir in ROOT.parents
+            or ROOT in workdir.parents):
+        raise ValueError("workdir must be a new path outside repository roots")
+    if workdir.exists():
+        raise FileExistsError("workdir already exists; choose a fresh disposable path")
+    if not workdir.parent.exists() or not workdir.parent.is_dir():
+        raise ValueError("workdir parent must already exist")
+
+    # mkdir(exist_ok=False) is the atomic guard against a path appearing after
+    # the checks above. No pre-existing directory is ever recursively removed.
+    workdir.mkdir(parents=False, exist_ok=False)
+    return workdir
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 2:
@@ -36,15 +58,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     installer = Path(args[0]).resolve()
-    workdir = Path(args[1]).resolve()
     if not installer.is_file():
         print(f"ERROR: installer not found: {installer}")
         return 2
-    if workdir.exists():
-        shutil.rmtree(workdir, ignore_errors=True)
+    try:
+        workdir = _prepare_workdir(args[1])
+    except FileExistsError:
+        print("ERROR: installer E2E workdir already exists; choose a fresh disposable path")
+        return 2
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: unsafe installer E2E workdir ({type(exc).__name__})")
+        return 2
+
     install_dir = workdir / "installed-app"
     test_dir = workdir / "recovery-test"
-    install_dir.mkdir(parents=True, exist_ok=True)
+    install_dir.mkdir()
 
     installed = subprocess.run(
         [

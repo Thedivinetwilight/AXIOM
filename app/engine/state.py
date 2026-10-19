@@ -542,6 +542,10 @@ def recover_ledger_state(ledger, repository, *, live: bool = False) -> dict:
     increments.sort(key=lambda inc: (inc["ts"], inc["rid"]))
     replayed_fills = []
     for inc in increments:
+        entry_price = (
+            float(ledger.position_avg_price)
+            if inc["side"] == "SELL" and ledger.position_quantity > 0
+            else None)
         realized_before = ledger.realized_pnl
         ledger.apply_fill(inc["side"], inc["delta"], inc["price"], 0.0)
         realized_delta = ledger.realized_pnl - realized_before
@@ -555,7 +559,8 @@ def recover_ledger_state(ledger, repository, *, live: bool = False) -> dict:
                     inc["order_id"], inc["child_id"], inc["cumulative_filled"]),
                 "order_id": inc["order_id"], "child_order_id": inc["child_id"],
                 "side": "SELL", "quantity": inc["delta"],
-                "price": inc["price"], "realized_pnl": realized_delta,
+                "price": inc["price"], "entry_price": entry_price,
+                "realized_pnl": realized_delta,
                 "observed_at": (raw.get("_axiom_observed_at")
                                 if isinstance(raw, dict) else None),
             })

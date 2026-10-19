@@ -33,12 +33,17 @@ class LiquiditySnapshot:
 
 
 class LiquidityIntelligence:
-    def __init__(self, max_spread_bps: float = 50.0, min_depth: float = 1000.0, cache_ttl: float = 5.0, max_cache: int = 500):
+    def __init__(self, max_spread_bps: float = 50.0,
+                 min_depth: float = 1000.0, cache_ttl: float = 5.0,
+                 max_cache: int = 500, min_liquidity_score: float = 0.2):
         self.max_spread_bps = float(max_spread_bps)
         self.min_depth = float(min_depth)
         self.cache_ttl = float(cache_ttl)
         self.max_cache = int(max_cache)
-        self._cache: dict[str, tuple[float, LiquiditySnapshot]] = {}
+        self.min_liquidity_score = float(min_liquidity_score)
+        if not math.isfinite(self.min_liquidity_score) or not 0 <= self.min_liquidity_score <= 1:
+            raise ValueError("min_liquidity_score must be finite and between 0 and 1")
+        self._cache: dict[str, tuple[float, tuple, LiquiditySnapshot]] = {}
         self._order = []  # lru
 
     @classmethod
@@ -47,6 +52,8 @@ class LiquidityIntelligence:
             max_spread_bps=float(getattr(settings, "max_spread_bps", 50.0)),
             min_depth=1000.0,
             cache_ttl=5.0,
+            min_liquidity_score=float(
+                getattr(settings, "min_liquidity_score", 0.2)),
         )
 
     def _is_stale(self, ts: float | None, now: float) -> bool:
@@ -92,15 +99,20 @@ class LiquidityIntelligence:
         timestamp: float | None = None,
     ) -> LiquiditySnapshot:
         now = time.time()
-        # Check cache if fresh and same inputs? Use symbol as key, but we recompute each time if timestamp differs
-        # Simple: if cached and age < ttl and inputs not stale, return cached
+        # Cache only when market inputs are unchanged. A fresh timestamp alone
+        # must not let a prior bid/ask or depth snapshot mask a changed quote.
+        input_signature = (bid, ask, bid_qty, ask_qty, last_price, volume,
+                           volatility)
         cached = self._cache.get(symbol)
         if cached:
-            ts, snap = cached
-            if now - ts < self.cache_ttl:
-                # if caller provides no new timestamp, use cache
-                if timestamp is None or abs((timestamp or 0) - snap.timestamp) < 1:
-                    return snap
+            cached_at, cached_inputs, snap = cached
+            same_timestamp_window = (
+                timestamp is None
+                or abs(float(timestamp) - snap.timestamp) < 1.0)
+            if (now - cached_at < self.cache_ttl
+                    and input_signature == cached_inputs
+                    and same_timestamp_window):
+                return snap
 
         # Validate inputs
         reasons = []
@@ -213,8 +225,8 @@ class LiquidityIntelligence:
             execution_quality=eq, stale=stale, reasons=reasons,
         )
 
-        # Cache
-        self._cache[symbol] = (now, snap)
+        # Cache the exact market inputs with the resulting assessment.
+        self._cache[symbol] = (now, input_signature, snap)
         self._order.append(symbol)
         if len(self._order) > self.max_cache:
             oldest = self._order.pop(0)
@@ -228,8 +240,11 @@ class LiquidityIntelligence:
             return True, False, "stale_quote"
         if snap.spread_bps is not None and snap.spread_bps > self.max_spread_bps:
             return True, False, f"spread {snap.spread_bps:.1f}bps > {self.max_spread_bps}"
-        if snap.liquidity_score is not None and snap.liquidity_score < 0.2:
-            return True, False, f"liquidity {snap.liquidity_score:.2f} < 0.2"
+        if (snap.liquidity_score is not None
+                and snap.liquidity_score < self.min_liquidity_score):
+            return (True, False,
+                    f"liquidity {snap.liquidity_score:.2f} < minimum "
+                    f"{self.min_liquidity_score:.2f}")
         if snap.execution_quality == "poor":
             return False, True, "poor execution quality"
         if snap.liquidity_score is not None and snap.liquidity_score < 0.4:

@@ -12,16 +12,22 @@ a running Arena backend via ARENA_BACKEND_URL and ARENA_API_TOKEN).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     smoke_mode = "--smoke" in argv
-    unsupported = [arg for arg in argv if arg != "--smoke"]
-    if unsupported:
-        print("unsupported desktop argument(s): " + " ".join(unsupported))
+    kronos_smoke_mode = "--kronos-smoke" in argv
+    unsupported = [arg for arg in argv
+                   if arg not in {"--smoke", "--kronos-smoke"}]
+    if unsupported or (smoke_mode and kronos_smoke_mode):
+        print("unsupported desktop argument(s): " + " ".join(unsupported)
+              if unsupported else "--smoke and --kronos-smoke are separate modes")
         return 2
     try:
         from PySide6.QtCore import QPoint, QRect, Qt, QTimer
@@ -133,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
 
         def __init__(self):
             super().__init__()
+            self._kronos_smoke_mode = kronos_smoke_mode
+            self._kronos_smoke_deadline = 0.0
+            self._kronos_smoke_done = False
+            self._kronos_smoke_report = None
+            self._kronos_smoke_process = None
+            self._kronos_smoke_exit_code = 0
             try:
                 from app import __version__ as _v
             except Exception:
@@ -300,19 +312,89 @@ def main(argv: list[str] | None = None) -> int:
             self.setCentralWidget(central)
             self._show_page("Command Center")
             if not smoke_mode:
-                # Normal startup integrates the optional Kronos stack and polls
-                # the Arena API. The packaged --smoke path deliberately avoids
-                # all external services and state changes.
+                # Normal startup integrates the optional Kronos stack. The
+                # --kronos-smoke mode uses its real bootstrap/process manager
+                # but avoids Arena API polling and all order/account state.
                 self.forecast.bootstrap()
                 if self.forecast.series_labels():
                     self.forecast_selector.clear()
                     self.forecast_selector.addItems(self.forecast.series_labels())
-                self._refresh()
-                from PySide6.QtCore import QTimer
+                if kronos_smoke_mode:
+                    self._kronos_smoke_deadline = time.monotonic() + 120.0
+                    QTimer.singleShot(100, self._poll_kronos_smoke)
+                else:
+                    self._refresh()
+                    self.timer = QTimer(self)
+                    self.timer.timeout.connect(self._refresh)
+                    self.timer.start(5000)
 
-                self.timer = QTimer(self)
-                self.timer.timeout.connect(self._refresh)
-                self.timer.start(5000)
+        def _poll_kronos_smoke(self):
+            if self._kronos_smoke_done:
+                return
+            service = self.forecast.service
+            manager = getattr(service, "manager", None)
+            if manager is None:
+                self._finish_kronos_smoke(
+                    False, state="UNAVAILABLE", backend=None, command=None)
+                return
+
+            try:
+                command = manager.child_command()
+            except Exception:
+                self._finish_kronos_smoke(
+                    False, state="ERROR", backend=None, command=None)
+                return
+            process = getattr(manager, "_process", None)
+            if process is not None:
+                self._kronos_smoke_process = process
+
+            if getattr(sys, "frozen", False):
+                sibling = str(Path(sys.executable).with_name("AXIOM-Kronos.exe"))
+                if command != [sibling] or not Path(sibling).is_file():
+                    self._finish_kronos_smoke(
+                        False, state="SIBLING_MISSING", backend=None,
+                        command=command)
+                    return
+
+            status = self.forecast.status()
+            state = status.get("state")
+            backend = status.get("backend")
+            if state == "READY":
+                ok = backend == "stub" and manager.alive
+                self._finish_kronos_smoke(
+                    ok, state=state, backend=backend, command=command,
+                    child_pid=status.get("pid"))
+                return
+            if state in {"ERROR", "OFFLINE", "DATA_ERROR", "DISABLED"}:
+                self._finish_kronos_smoke(
+                    False, state=state, backend=backend, command=command)
+                return
+            if time.monotonic() >= self._kronos_smoke_deadline:
+                self._finish_kronos_smoke(
+                    False, state="TIMEOUT", backend=backend, command=command)
+                return
+            QTimer.singleShot(100, self._poll_kronos_smoke)
+
+        def _finish_kronos_smoke(self, ok, *, state, backend, command,
+                                 child_pid=None):
+            if self._kronos_smoke_done:
+                return
+            self._kronos_smoke_done = True
+            self._kronos_smoke_exit_code = 0 if ok else 1
+            self._kronos_smoke_report = {
+                "ok": bool(ok),
+                "state": state,
+                "backend": backend,
+                "transport": ("frozen sibling process"
+                              if getattr(sys, "frozen", False)
+                              else "source process"),
+                "command": command,
+                "child_pid": child_pid,
+                "forecast_inference": "NOT RUN",
+                "weights": "not loaded; explicit stub backend",
+                "shutdown": "pending verification",
+            }
+            self.close()
 
         def closeEvent(self, event):
             # Clean Kronos worker shutdown; the Arena client needs none.
@@ -508,7 +590,30 @@ def main(argv: list[str] | None = None) -> int:
         # Used by the Windows frozen-product gate: instantiate the real window,
         # exercise initialization/close cleanup, and exit without a user action.
         QTimer.singleShot(0, window.close)
-    return app.exec()
+    result = app.exec()
+    if kronos_smoke_mode:
+        report = window._kronos_smoke_report or {
+            "ok": False, "state": "NO_RESULT", "backend": None,
+            "transport": "frozen sibling process" if getattr(
+                sys, "frozen", False) else "source process",
+            "command": None, "forecast_inference": "NOT RUN",
+            "weights": "not loaded; explicit stub backend",
+        }
+        process = window._kronos_smoke_process
+        if process is None:
+            report["shutdown"] = "worker process was not started"
+            clean_shutdown = False
+        else:
+            return_code = process.poll()
+            clean_shutdown = return_code == 0
+            report["shutdown"] = (
+                "clean (exit 0)" if clean_shutdown
+                else f"unclean (exit {return_code})")
+        report["ok"] = bool(report.get("ok") and clean_shutdown and result == 0)
+        print("AXIOM_KRONOS_SMOKE " + json.dumps(report, sort_keys=True),
+              flush=True)
+        return 0 if report["ok"] else 1
+    return result
 
 
 if __name__ == "__main__":

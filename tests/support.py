@@ -9,18 +9,18 @@ from types import SimpleNamespace
 
 
 class PassingNetEdgeGate:
-    """Explicit test-only pass for integrations that are not testing edge."""
+    """Test-only downstream isolation; never supplies expected-return evidence."""
 
     def evaluate(self, **_kwargs):
         return SimpleNamespace(
             passes=True,
-            gross_expected=1.0,
-            fees=0.0,
-            spread_cost=0.0,
-            slippage=0.0,
-            market_impact=0.0,
-            net_expected=1.0,
+            gross_expected=None,
+            fees=None,
+            spread_cost=None,
+            slippage=None,
+            market_impact=None,
+            net_expected=None,
             threshold=0.0,
-            threshold_amount=0.0,
-            reason="test-only edge-gate stub; not forecast evidence",
+            threshold_amount=None,
+            reason="test-only downstream isolation; no forecast evidence",
         )

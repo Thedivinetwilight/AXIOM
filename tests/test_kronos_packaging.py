@@ -104,6 +104,20 @@ class TestExecutableTargets:
         assert "smoke_mode = \"--smoke\" in argv" in source
         assert "QTimer.singleShot(0, window.close)" in source
 
+    def test_frozen_gui_has_a_distinct_sibling_kronos_lifecycle_smoke(self):
+        source = (ROOT / "desktop" / "app.py").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github" / "workflows" /
+                    "kronos-windows-pair.yml").read_text(encoding="utf-8")
+
+        assert '"--kronos-smoke" in argv' in source
+        assert "self.forecast.bootstrap()" in source
+        assert "manager.child_command()" in source
+        assert "self.forecast.shutdown()" in source
+        assert '"forecast_inference": "NOT RUN"' in source
+        assert "AXIOM_KRONOS_BACKEND: stub" in workflow
+        assert '"--kronos-smoke"' in workflow
+        assert "AXIOM-Kronos.exe" in workflow
+
     def test_package_target_resolves_to_its_main_script(self):
         from tools.build_windows_executables import _entry_point
 

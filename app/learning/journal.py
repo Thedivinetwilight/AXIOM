@@ -34,7 +34,8 @@ class LearningJournal:
         self.repository.record_signal(record)
         return regime
 
-    def record_outcome(self, *, strategy: str, symbol: str, entry: float, exit: float,
+    def record_outcome(self, *, strategy: str, symbol: str,
+                       entry: float | None, exit: float | None,
                        quantity: float, pnl: float, fees: float, slippage: float,
                        duration_bars: int, outcome: str, regime: str,
                        params_version: str | None = None) -> str:
@@ -46,8 +47,8 @@ class LearningJournal:
             "strategy": strategy,
             "params_version": params_version or self.params_version,
             "symbol": symbol,
-            "entry": float(entry),
-            "exit": float(exit),
+            "entry": float(entry) if entry is not None else None,
+            "exit": float(exit) if exit is not None else None,
             "quantity": float(quantity),
             "pnl": float(pnl),
             "fees": float(fees),

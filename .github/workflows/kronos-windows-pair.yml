@@ -108,6 +108,62 @@ jobs:
           print("PASS: frozen AXIOM GUI initialized and closed (offscreen)")
           PY
 
+      - name: Smoke-test frozen GUI to sibling Kronos lifecycle
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ARENA_BACKEND_URL: http://127.0.0.1:1
+          ARENA_API_TOKEN: ""
+          MODE: PAPER
+          LIVE_TRADING: "false"
+          BROKER: LOCAL_PAPER
+          AXIOM_KRONOS_ENABLED: "true"
+          AXIOM_KRONOS_BACKEND: stub
+          AXIOM_KRONOS_ALLOW_DOWNLOAD: "false"
+          AXIOM_KRONOS_MODE: process
+          AXIOM_MARKET_DATA_SOURCE: http
+          AXIOM_MARKET_DATA_URL: http://127.0.0.1:1/{instrument}/{timeframe}
+          AXIOM_MARKET_DATA_TIMEFRAME: 1m
+          AXIOM_FORECAST_SERIES: ""
+          AXIOM_MODEL_CACHE: "${{ runner.temp }}/axiom-kronos-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          executable = Path("dist/AXIOM.exe").resolve()
+          result = subprocess.run(
+              [str(executable), "--kronos-smoke"], timeout=160,
+              capture_output=True, text=True, check=False)
+          if result.stdout:
+              print(result.stdout, end="")
+          if result.returncode:
+              if result.stderr:
+                  print(result.stderr, end="")
+              raise SystemExit(
+                  f"frozen GUI/Kronos smoke exited {result.returncode}")
+          lines = [line.partition(" ")[2] for line in result.stdout.splitlines()
+                   if line.startswith("AXIOM_KRONOS_SMOKE ")]
+          if len(lines) != 1:
+              raise SystemExit("GUI did not emit exactly one Kronos lifecycle report")
+          report = json.loads(lines[0])
+          sibling = Path(report["command"][0]).resolve()
+          if (report.get("ok") is not True
+                  or report.get("state") != "READY"
+                  or report.get("backend") != "stub"
+                  or report.get("transport") != "frozen sibling process"
+                  or report.get("shutdown") != "clean (exit 0)"
+                  or sibling.parent != executable.parent
+                  or sibling.name.lower() != "axiom-kronos.exe"
+                  or report.get("forecast_inference") != "NOT RUN"):
+              raise SystemExit("frozen GUI/Kronos lifecycle evidence is incomplete: "
+                               + json.dumps(report, sort_keys=True))
+          print("PASS: frozen AXIOM GUI loaded/statused/shut down its sibling "
+                "AXIOM-Kronos.exe using the explicit stub backend; no forecast "
+                "inference or model weights were used")
+          PY
+
       - name: Smoke-test the actual AXIOM-Kronos process and JSON-lines IPC
         shell: bash
         run: python tools/kronos_executable_e2e.py dist/AXIOM-Kronos.exe
@@ -133,7 +189,7 @@ jobs:
           output = Path("dist/AXIOM-Windows-pair.build-info.json")
           output.write_text(json.dumps({
               "platform": "Windows x64",
-              "verification": "GUI smoke + labelled-stub worker/IPC smoke",
+              "verification": "GUI smoke + frozen GUI-to-sibling Kronos stub load/status/shutdown + labelled-stub worker IPC smoke",
               "real_pretrained_inference": "NOT VERIFIED; weights are not bundled",
               "executables": records,
           }, indent=2) + "\n", encoding="utf-8")
