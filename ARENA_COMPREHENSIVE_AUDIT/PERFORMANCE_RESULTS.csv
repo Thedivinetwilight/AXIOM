@@ -1,0 +1,9 @@
+category,name,status,evidence,latency_ms,details
+PERF,Data validation 100 candles x100,PASS,avg=0.23ms,0.23,
+PERF,SMA(20) 500 closes x100,PASS,avg=0.21ms,0.21,
+PERF,Strategy eval x100,PASS,avg=0.01ms,0.01,
+PERF,Full backtest 500 bars,PASS,178.59ms for 1600 bars,178.59,
+PERF,Portfolio apply_fill x2000,PASS,avg per fill 4.5us total=9.04ms,0.0,
+PERF,API /health 50 requests,PASS,p50=2.51ms p95=2.98ms mean=2.55ms max=4.07ms,2.51,
+PERF,API /paper/status auth 30 req,PASS,p50=2.48ms p95=2.86ms mean=2.90ms,2.48,
+PERF,Memory usage after tests,PASS,80.9 MB RSS,,
