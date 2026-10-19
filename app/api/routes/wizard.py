@@ -22,6 +22,7 @@ Security model is unchanged, never weakened:
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 
@@ -105,6 +106,57 @@ def _assert_paper_possible(request: Request) -> None:
             )
 
 
+def _snapshot_configuration(path, updates: dict[str, str]) -> dict:
+    """Remember the configuration file and the process environment it feeds.
+
+    Used to roll a REFUSED configuration change back completely: the file on
+    disk AND the values this process inherited from it.
+    """
+    try:
+        text = path.read_text(encoding="utf-8") if path.exists() else None
+    except OSError:
+        text = None
+    # Every key the file defines can reach the process environment through
+    # _reload_settings, so every one of them is remembered.
+    keys = set(updates)
+    if text is not None:
+        try:
+            keys.update(read_values(path))
+        except OSError as exc:
+            # The snapshot still holds the file text, so the rollback itself
+            # is possible; only the environment list is incomplete.
+            logging.getLogger("bot.api").warning(
+                "configuration snapshot incomplete: %s", type(exc).__name__)
+    environment = {key: os.environ.get(key) for key in keys if key in os.environ}
+    return {"path": path, "text": text, "existed": path.exists(), "environment": environment}
+
+
+def _restore_configuration(snapshot: dict) -> None:
+    """Undo a configuration change that the saved account refused.
+
+    Restores the file byte-for-byte and the process environment. Nothing
+    else is touched: no database, no account, no order.
+    """
+    path = snapshot["path"]
+    try:
+        if snapshot["text"] is None:
+            if snapshot["existed"]:
+                path.unlink(missing_ok=True)
+        else:
+            path.write_text(snapshot["text"], encoding="utf-8")
+    except OSError as exc:
+        # The refusal is still reported to the operator; the file is restored
+        # on the next successful write. It is logged, never swallowed: a
+        # half-applied configuration must be visible, not silent.
+        logging.getLogger("bot.api").error(
+            "configuration rollback failed: %s", type(exc).__name__)
+    for key, value in snapshot["environment"].items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _initialize_home(settings) -> dict:
     """Directories + database schema, idempotent. Reports what it did."""
     from app import runtime
@@ -183,9 +235,20 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
     if updates["BROKER"] in LIVE_BROKERS:
         raise HTTPException(500, "Internal error: wizard attempted a live broker.")
 
-    summary = update_values(runtime.env_file(), updates)
-    settings = _reload_settings(request)
-    _rebuild_engine_for(request, settings)
+    # A configuration change that the saved paper account cannot accept must
+    # NOT be left behind on disk. Writing the new timeframe first and only
+    # then discovering the account is incompatible would leave the install in
+    # a state where EVERY later launch refuses to start. So the previous file
+    # is snapshotted and restored if the rebuild is refused.
+    env_path = runtime.env_file()
+    snapshot = _snapshot_configuration(env_path, updates)
+    summary = update_values(env_path, updates)
+    try:
+        settings = _reload_settings(request)
+        _rebuild_engine_for(request, settings)
+    except Exception:
+        _restore_configuration(snapshot)
+        raise
     init = _initialize_home(settings)
 
     return {
@@ -280,7 +343,11 @@ def _rebuild_engine_for(request: Request, settings) -> None:
         raise HTTPException(
             409,
             f"The existing paper account uses a different configuration ({exc}). "
-            "Restart Arena with a separate database to switch timeframes.",
+            "Nothing was changed: the saved account, its orders and its fills "
+            "stay exactly as they are. To continue on a separate empty paper "
+            "account, run the launcher with "
+            "--recover-paper-account --confirm-new-empty-paper-account, or "
+            "switch the configured timeframe back to the saved one.",
         )
 
 

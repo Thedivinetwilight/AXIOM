@@ -80,7 +80,15 @@ recorded data, daily/weekly/monthly reports with attribution, and a
 LIVE (real-money) trading is **OFF by default** and gated behind a
 four-switch opt-in (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE`
 + `LIVE_CONFIRM`) **and** explicit non-zero hard risk limits; see
-[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The bare alias
+[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The workstation
+carries a **PAPER/LIVE switch**: moving it to LIVE opens one integrated flow
+(broker OAuth connect → state the hard limits → review the readiness contract
+→ type the exact confirmation phrase) and the supervised live engine starts
+only if every required check passes; moving it back to PAPER performs the
+safe drain (stop new entries, show the open book, invalidate the live
+authorization, return to paper). The switch never places an order by itself
+and a restart can never come up live. See
+[LIVE_TRADING_SWITCH.md](LIVE_TRADING_SWITCH.md). The bare alias
 `BROKER=LIVE` still raises, and the sandbox broker refuses live order hosts.
 **V2.1 (L-ops)** adds the rails around a live session — token-freshness and
 canary entry guards, a stuck-order/reconcile watchdog with a WARNING→CRITICAL
@@ -1198,6 +1206,55 @@ Regime detection can consume candle/indicator histories without altering account
 10. Unbounded cumulative paper history/checkpoints and full saved research payloads will grow. Long-running/high-frequency deployments need event-store retention and incremental checkpoint design before scaling.
 11. Device-specific Termux, Windows and production VPS service operation were not tested here. External Binance/generic live connectivity requires network access and provider-compatible configuration; transport behavior is tested with mocks, not a claim of verified live market availability.
 12. `.env` is ignored, runtime DBs/cache/logs are not shipped as credentials or working accounts. A new archive extraction starts without a paper database. Saved **example result artifacts** are provided separately in `results/`.
+
+### 14.1 If Arena refuses to start: "Saved paper account is incompatible"
+
+A saved paper account is bound to the execution assumptions it was created
+under (timeframe, currency, cost model, calendar). If the configuration moves
+away from them, Arena **refuses** to restore it — that is a refusal, not a
+crash, and the account is left exactly as it was.
+
+```
+Saved paper account is incompatible with the current configuration.
+Differing fields: timeframe. Database: C:\Users\<you>\AppData\Local\Arena\trading_bot.db.
+The saved paper account was not restored or changed.
+```
+
+The launcher exits with code **3** and prints the exact recovery command.
+To continue on a separate, empty paper account while the original database,
+its orders, its fills and its research data stay untouched:
+
+```bash
+# Windows (installed)
+Arena.exe --recover-paper-account --confirm-new-empty-paper-account
+# Source checkout
+python arena.py --recover-paper-account --confirm-new-empty-paper-account
+```
+
+To go back to the original account later (nothing is deleted):
+
+```bash
+Arena.exe --clear-paper-database-recovery
+```
+
+To see which database file is in play and where the setting came from:
+
+```bash
+Arena.exe --diagnostics
+```
+
+Full explanation, including the path-normalization rules: **[docs/PAPER_ACCOUNT_RECOVERY.md](docs/PAPER_ACCOUNT_RECOVERY.md)**.
+
+**How this is verified on Windows.** The refusal, the recovery and the
+preserved database are not only unit-tested: the
+[Windows build and installer workflow](.github/workflows/windows-build-installer.yml)
+builds the real `Arena.exe`, drives that executable through the failure
+(exit code 3, account untouched), recovers into a separate empty account,
+restarts, then builds the Inno Setup package, **installs it silently**,
+drives the **installed** executable through the same refusal and recovery,
+uninstalls it again and proves the original database, the recovery
+database and the recovery selection all survived. Every one of those steps
+is a hard gate: the artifacts are published only when all of them passed.
 
 ## 15. Test and audit workflow
 

@@ -148,7 +148,7 @@ class TestWizardAuthenticationHandoff:
 
 class TestServedAssetsParse:
     @pytest.mark.parametrize("name", [
-        "arena-core.js", "arena-wizard.js", "arena-app.js",
+        "arena-core.js", "arena-wizard.js", "arena-live.js", "arena-app.js",
     ])
     def test_each_served_asset_is_valid_javascript(self, client, name):
         response = client.get(f"/static/{name}")

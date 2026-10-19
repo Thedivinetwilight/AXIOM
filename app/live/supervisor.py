@@ -152,12 +152,18 @@ class LiveEngineSupervisor:
             and reconciliation.get("ok") is True)
         return ready, lease, runtime
 
-    def start(self, *, timeout: float | None = None) -> dict:
+    def start(self, *, timeout: float | None = None,
+              env_overrides: dict | None = None) -> dict:
         """Start the engine and wait for lease + reconciliation readiness.
 
         This is called only after the operator submits the exact ARM phrase.
         The session is still not ACTIVE while this method runs, so a correct
         child cannot submit entries. The caller must separately ARM/ACTIVATE.
+
+        ``env_overrides`` are extra environment values for the child
+        process. The live-activation flow uses it to give the child exactly
+        the live configuration the operator confirmed, without touching the
+        installation's own environment. The child inherits the rest.
         """
         if (str(getattr(self.settings, "broker", "")).upper() != "UPSTOX_LIVE"
                 or str(getattr(self.settings, "mode", "")).upper() != "LIVE"
@@ -204,6 +210,12 @@ class LiveEngineSupervisor:
                 raise LiveSupervisorError(
                     "could not audit live-engine start; refusing to spawn") from exc
 
+            child_env = os.environ.copy()
+            for key, value in (env_overrides or {}).items():
+                if value is None:
+                    child_env.pop(str(key), None)
+                else:
+                    child_env[str(key)] = str(value)
             kwargs = {
                 "cwd": str(self.cwd),
                 "stdin": subprocess.DEVNULL,
@@ -212,7 +224,7 @@ class LiveEngineSupervisor:
                 # deadlock on a full pipe or leak a token into API output.
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
-                "env": os.environ.copy(),
+                "env": child_env,
             }
             if os.name == "nt":  # pragma: no cover - Windows CI
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

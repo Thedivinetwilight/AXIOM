@@ -137,7 +137,23 @@ def smoke_test(artifact: Path) -> bool:
         print("\n  FAILED CHECKS:")
         for entry in failed:
             print(f"    - {entry['name']}: {entry['detail']}")
-    return result["ok"]
+
+    # The paper-account startup failure is a real incident on an installed
+    # Windows build, so the ARTIFACT itself is driven through it: refuse with
+    # exit code 3, keep the saved account, recover into a separate empty
+    # account, start again.
+    recovery_spec = importlib.util.spec_from_file_location(
+        "arena_frozen_recovery_e2e", ROOT / "packaging" / "frozen_recovery_e2e.py")
+    recovery_module = importlib.util.module_from_spec(recovery_spec)
+    recovery_spec.loader.exec_module(recovery_module)
+    recovery = recovery_module.run_frozen_recovery_e2e(
+        artifact, ROOT / "build" / "recovery-e2e-workdir")
+    recovery_failed = [r for r in recovery["results"] if not r["ok"]]
+    if recovery_failed:
+        print("\n  FAILED PAPER-RECOVERY CHECKS:")
+        for entry in recovery_failed:
+            print(f"    - {entry['name']}: {entry['detail']}")
+    return result["ok"] and recovery["ok"]
 
 
 def main() -> int:

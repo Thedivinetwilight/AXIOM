@@ -6,6 +6,16 @@
 Companion to [LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). That document is
 about *turning live trading on*; this one is about *staying alive once it is on*.
 
+> **The workstation now has a PAPER/LIVE switch.** The operator moves the
+> switch in the top bar, connects the broker account, states the hard limits,
+> reviews the readiness contract and confirms with the exact phrase; the
+> supervised live engine starts only if every required check passes. The full
+> workflow, the readiness meanings, the safe switch-off and the credential
+> handling are documented in
+> [`LIVE_TRADING_SWITCH.md`](LIVE_TRADING_SWITCH.md). The command-line
+> procedures below remain valid and are the manual equivalent of the same
+> rails.
+
 **Scope:** every rail here gates **new entries only**. Exits, protective stops and
 risk-reducing actions are never blocked by an operational guard — a guard that traps the
 account in a losing position is worse than the risk it prevents. This is asserted by tests.

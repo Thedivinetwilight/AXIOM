@@ -1,0 +1,200 @@
+name: Windows build and installer
+
+# The installed-Windows path is a separate gate from the ordinary source
+# suite. A packaged Arena is a different runtime: one-file extraction, its
+# own per-user data directory, a console that closes when the process exits.
+#
+# This workflow is the ONLY place where the real Windows artifacts are
+# produced and exercised:
+#
+#   1. source suite          the full suite on Windows (hard gate);
+#   2. executable            build_exe.py produces dist\Arena.exe;
+#   3. frozen gates          build_exe.py --test starts the ACTUAL artifact
+#                            and drives it through the wizard flow, the
+#                            restart recovery and the duplicate launch;
+#   4. paper recovery        the ACTUAL artifact is driven through the
+#                            reported startup failure: it must refuse with
+#                            exit code 3, keep the saved account, recover
+#                            into a separate empty account and start again
+#                            (hard gate);
+#   5. installer             the Inno Setup package is built and then
+#                            INSTALLED silently, the installed executable is
+#                            driven through the same recovery, and the
+#                            uninstaller is run to prove the user's data
+#                            survives (hard gate);
+#   6. artifacts             uploaded ONLY after every gate above passed.
+#
+# Any failure discards the artifact. No exceptions, no continue-on-error.
+#
+# Every gate reports its failure as an error annotation, so a failed run can
+# be diagnosed from the API without downloading the (large) run log. The
+# gates are written as `if ! <command>; then ...` because the runner's
+# bash runs with `-e`: a failing command outside a condition would abort
+# the step before it could report anything.
+#
+# The Inno Setup compiler is RESOLVED, not assumed: the Windows runner image
+# already ships Inno Setup, and a pinned `choco install --version=...`
+# refuses to downgrade it, which used to kill this workflow before a single
+# test ran. packaging/prepare_innosetup.py detects the installed compiler
+# and proves it can build this project's installer script, and installs one
+# explicitly when there is none.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "app/**"
+      - "arena.py"
+      - "run.py"
+      - "build_exe.py"
+      - "packaging/**"
+      - "docs/**"
+      - "tests/test_paper_database_recovery.py"
+      - "tests/test_windows_portability.py"
+      - "tests/test_packaging_single_exe.py"
+      - ".github/workflows/windows-build-installer.yml"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows executable and installer
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Resolve and verify the Inno Setup compiler (hard gate)
+        shell: bash
+        run: |
+          if ! python -u packaging/prepare_innosetup.py --install --github-env "$GITHUB_ENV" \
+               2>&1 | tee innosetup-output.txt; then
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Inno Setup::%s\n' "$safe"
+            done < <(tail -n 25 innosetup-output.txt)
+            exit 1
+          fi
+
+      - name: Full source suite on Windows (hard gate)
+        shell: bash
+        run: |
+          if ! python -m pytest -q --no-header -k "not slow" \
+               --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt; then
+            python packaging/report_junit_failures.py pytest-results.xml
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Pytest output::%s\n' "$safe"
+            done < <(tail -n 60 pytest-output.txt)
+            exit 1
+          fi
+
+      - name: Build the Windows executable
+        shell: bash
+        run: |
+          if ! python -u build_exe.py 2>&1 | tee build-executable-output.txt; then
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Executable build::%s\n' "$safe"
+            done < <(tail -n 25 build-executable-output.txt)
+            exit 1
+          fi
+          if [ ! -f dist/Arena.exe ]; then
+            echo "::error title=Executable build::dist\\Arena.exe was not produced"
+            exit 1
+          fi
+
+      - name: Frozen gates on the real artifact (hard gate)
+        shell: bash
+        run: |
+          if ! python -u build_exe.py --test 2>&1 | tee frozen-build-output.txt; then
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Frozen gate::%s\n' "$safe"
+            done < <(grep -E "FAIL|ERROR|Traceback|RuntimeError|SMOKE TEST" frozen-build-output.txt | tail -n 25)
+            exit 1
+          fi
+
+      - name: Build the installer (hard gate)
+        shell: bash
+        run: |
+          if ! python -u packaging/build_installer.py --verify 2>&1 \
+               | tee installer-build-output.txt; then
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Installer build::%s\n' "$safe"
+            done < <(tail -n 25 installer-build-output.txt)
+            exit 1
+          fi
+          ls -l dist/installer
+
+      - name: Install, exercise and uninstall (hard gate)
+        shell: bash
+        run: |
+          installer="$(ls -1 dist/installer/*.exe | head -n 1)"
+          if [ -z "$installer" ]; then
+            echo "::error title=Installer test::no installer was produced"
+            exit 1
+          fi
+          if ! python -u packaging/installer_e2e.py "$installer" build/installer-e2e \
+               2>&1 | tee installer-e2e-output.txt; then
+            while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              printf '::error title=Installer test::%s\n' "$safe"
+            done < <(tail -n 30 installer-e2e-output.txt)
+            exit 1
+          fi
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-failure-diagnostics-${{ github.run_number }}
+          path: |
+            pytest-results.xml
+            pytest-output.txt
+            innosetup-output.txt
+            build-executable-output.txt
+            frozen-build-output.txt
+            installer-build-output.txt
+            installer-e2e-output.txt
+            build/recovery-e2e-workdir/**
+            build/installer-e2e/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload the Windows artifacts
+        # Only after every gate above passed: a failed run must not publish
+        # an artifact that was never verified.
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-windows-x64
+          path: |
+            dist/Arena.exe
+            dist/installer/*.exe
+          if-no-files-found: error
+          retention-days: 90

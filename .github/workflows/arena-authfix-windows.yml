@@ -1,0 +1,97 @@
+name: Arena auth-fix Windows build
+
+# Temporary, branch-scoped packaged verification and downloadable test build.
+# This does not create or publish a GitHub release; the test artifact is
+# uploaded to the Actions run and retained for seven days.
+on:
+  push:
+    branches:
+      - arena/1794e7c1-axiom
+    paths:
+      - ".github/workflows/arena-authfix-windows.yml"
+      - "app/**"
+      - "packaging/**"
+      - "build_exe.py"
+      - "arena.py"
+      - "run.py"
+      - "requirements.txt"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build-test:
+    name: Windows x64 build and frozen verification
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install application and packaging dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Run focused authentication and PAPER safety tests
+        run: >-
+          python -m pytest -q
+          tests/test_dashboard_auth_flow.py
+          tests/test_v310_wizard_flow.py
+          tests/test_v310_frontend_integrity.py
+          tests/test_v310_mode_isolation.py
+          tests/test_v310_instance_guard.py
+
+      - name: Run complete source suite on Windows
+        run: python -m pytest -q --no-header -k "not slow"
+
+      - name: Build and test the actual Windows executable
+        run: python build_exe.py --test
+
+      - name: Run frozen executable regression gates
+        run: python -m pytest -q --no-header tests/test_v310_frozen_e2e.py
+
+      - name: Verify artifact identity and write build record
+        shell: pwsh
+        run: |
+          $binary = Resolve-Path "dist/Arena.exe"
+          $size = (Get-Item $binary).Length
+          if ($size -lt 1000000) { throw "Arena.exe is unexpectedly small ($size bytes)" }
+          $meta = Get-Content "app/BUILD_META.json" -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:GITHUB_SHA) {
+            throw "Build identity mismatch: expected $env:GITHUB_SHA, found $($meta.commit)"
+          }
+          $sha = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          $record = [ordered]@{
+            artifact = "Arena.exe"
+            version = $meta.version
+            commit = $meta.commit
+            built_at = $meta.built_at
+            platform = $meta.platform
+            size_bytes = $size
+            sha256 = $sha
+          }
+          $record | ConvertTo-Json -Depth 4 | Set-Content "dist/Arena.exe.build-info.json" -Encoding utf8
+          Write-Host "Arena.exe size: $size bytes"
+          Write-Host "Arena.exe SHA-256: $sha"
+          Write-Host "Arena.exe source commit: $($meta.commit)"
+
+      - name: Upload verified Windows test executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-windows-x64-authfix
+          path: |
+            dist/Arena.exe
+            dist/Arena.exe.build-info.json
+          if-no-files-found: error
+          retention-days: 7

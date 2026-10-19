@@ -372,3 +372,38 @@ body.axiom-focus .main { padding: 12px 16px; }
 /* Workspace customization (spec §61): maximize + collapse */
 .card.maximized { grid-column: 1 / -1; }
 .card-body.collapsed { display: none; }
+
+/* ==============================================================
+   PAPER / LIVE switch + live activation wizard (real money)
+   ============================================================== */
+.mode-switch {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden;
+  background: var(--panel-2);
+}
+.mode-switch .mode-seg {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  font-family: var(--sans); font-size: 12px; font-weight: 700; letter-spacing: .08em;
+  padding: 7px 14px; cursor: pointer; transition: background .12s, color .12s;
+  min-height: 34px;
+}
+.mode-switch .mode-seg:hover { color: var(--text); background: var(--panel-3); }
+.mode-switch .mode-seg:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.mode-switch .mode-seg.paper.active { background: rgba(16,185,129,.16); color: var(--paper-2); }
+.mode-switch .mode-seg.live.active  { background: rgba(244,63,94,.18); color: var(--live-2); }
+.mode-switch .mode-seg.live { color: var(--live-2); }
+#live-switch-state { display: inline-flex; align-items: center; }
+
+.dialog.wide { max-width: 860px; }
+.dialog .dialog-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 4px;
+}
+.dialog .dialog-head h3 { margin: 0 0 4px; font-size: 16px; }
+.dialog .dialog-head > div { flex: 1; }
+.dialog .dialog-body { max-height: min(64vh, 620px); overflow: auto; padding: 4px 2px; }
+.dialog .dialog-foot {
+  border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px;
+  display: flex; align-items: center;
+}
+.dialog .dialog-foot .btn-row { width: 100%; }
