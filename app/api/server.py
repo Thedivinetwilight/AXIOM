@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from threading import Lock
 
@@ -29,7 +30,8 @@ from app.config.settings import ROOT, Settings
 from app.database.database import Database
 from app.database.repository import Repository
 from app.paper_trading.broker import PaperBroker
-from app.paper_trading.execution import make_calendar
+from app.paper_trading.compatibility import inspect_paper_account
+from app.paper_trading.execution import calendar_signature, make_calendar
 from app.paper_trading.simulator import PaperSimulator
 
 logger = logging.getLogger("bot.api")
@@ -40,6 +42,24 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
+        # Inspect the saved paper account BEFORE the database is opened. A
+        # configuration mismatch must fail closed without migrating the
+        # schema, rewriting the account, or touching a single row: the
+        # inspection is read-only (SQLite mode=ro).
+        current_calendar = calendar_signature(
+            make_calendar(settings.market_calendar, settings.default_timeframe)
+        )
+        mismatch = inspect_paper_account(
+            settings.database_url,
+            asdict(ExecutionConfig(**settings.execution_kwargs())),
+            currency=settings.currency,
+            timeframe=settings.default_timeframe,
+            calendar_signature=current_calendar,
+        )
+        if mismatch is not None:
+            logger.error("paper account startup refused: %s", mismatch)
+            raise mismatch
+
         database = Database(settings.database_url)
         repository = Repository(database)
         forecast_service = None

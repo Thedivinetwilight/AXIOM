@@ -75,6 +75,7 @@ _pin_ca_bundle()
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8042
+logger = logging.getLogger("arena.startup")
 
 
 def _free_port(preferred: int, host: str, tries: int = 25) -> int:
@@ -171,6 +172,9 @@ def _configure_file_logging() -> None:
         root = logging.getLogger()
         if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
             root.addHandler(handler)
+        # Startup paths are safe diagnostics (paths and field names only) and
+        # must survive a frozen console closing after a mismatch.
+        logging.getLogger("arena.startup").setLevel(logging.INFO)
         if root.level == logging.NOTSET:
             root.setLevel(logging.INFO)
     except (OSError, ValueError):
@@ -226,6 +230,56 @@ def _handle_existing_instance(existing, *, open_browser: bool) -> int:
     return 2
 
 
+def _paper_account_mismatch(settings):
+    """The read-only compatibility verdict for the saved paper account.
+
+    Returns the mismatch error, ``None`` when the saved account can be
+    restored, and raises ``PaperDatabaseInspectionError`` when the database
+    could not be inspected at all (which is a refusal, not a pass).
+    """
+    from dataclasses import asdict
+
+    from app.backtesting.costs import ExecutionConfig
+    from app.paper_trading.compatibility import inspect_paper_account
+    from app.paper_trading.execution import calendar_signature, make_calendar
+
+    return inspect_paper_account(
+        settings.database_url,
+        asdict(ExecutionConfig(**settings.execution_kwargs())),
+        currency=settings.currency,
+        timeframe=settings.default_timeframe,
+        calendar_signature=calendar_signature(
+            make_calendar(settings.market_calendar, settings.default_timeframe)
+        ),
+    )
+
+
+def _recovery_command() -> str:
+    """The exact command that recovers this installation, ready to copy."""
+    from app import runtime
+
+    if runtime.is_frozen():
+        return f'"{sys.executable}" --recover-paper-account --confirm-new-empty-paper-account'
+    return (
+        f'"{sys.executable}" "{Path(__file__).resolve()}" --recover-paper-account '
+        "--confirm-new-empty-paper-account"
+    )
+
+
+def _paper_account_mismatch_message(mismatch) -> str:
+    """A message a user can act on, with no secret and no account value."""
+    return (
+        f"{mismatch}\n\n"
+        "To continue, explicitly create a separate empty PAPER account; the "
+        "existing database, orders, fills and research data remain untouched "
+        "and can be opened again at any time.\n"
+        f"Run: {_recovery_command()}\n"
+        "Recovery stays MODE=PAPER, LIVE_TRADING=false, BROKER=LOCAL_PAPER and "
+        "places no orders.\n"
+        "Details: ARENA_HOME/logs/arena.log"
+    )
+
+
 def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
     import uvicorn
 
@@ -235,6 +289,7 @@ def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
     from app.instance import InstanceGuard
 
     runtime.ensure_home()
+    runtime.ensure_utf8_output()
     _configure_file_logging()
 
     guard = InstanceGuard(runtime.arena_home())
@@ -243,7 +298,80 @@ def _serve(host: str, port: int, open_browser: bool, force_setup: bool) -> int:
         return _handle_existing_instance(existing, open_browser=open_browser)
 
     try:
-        settings = Settings.from_env()
+        database_url_in_process = "DATABASE_URL" in os.environ
+        database_url_process_empty = not bool(
+            (os.environ.get("DATABASE_URL") or "").strip()
+        )
+        try:
+            settings = Settings.from_env()
+        except ValueError as exc:
+            # A configuration that Arena refuses (an invalid setting, or a
+            # paper-database recovery selection that no longer resolves) must
+            # be READABLE, not a stack trace: a double-clicked .exe has no
+            # console to scroll.
+            message = "Arena did not start: " + str(exc)
+            logger.error("%s", message)
+            print("\n" + message, flush=True)
+            if runtime.is_frozen() and not (sys.stdin and sys.stdin.isatty()):
+                _show_fatal_dialog(message)
+            return 3
+        env_candidates = runtime.env_candidates()
+        database_path = runtime.database_file_path(settings.database_url)
+        try:
+            active_override = runtime.read_paper_database_override()
+        except ValueError:
+            # Settings.from_env already fails closed for a bad pointer; this is
+            # only defensive in case an alternate Settings implementation is used.
+            active_override = None
+        logger.info(
+            "startup_paths %s",
+            json.dumps({
+                "arena_home": str(runtime.arena_home()),
+                "database_path": str(database_path or ":memory:"),
+                "database_url_source": (
+                    "persistent paper recovery selection"
+                    if active_override is not None
+                    else runtime.database_url_source(
+                        process_value_present=database_url_in_process,
+                        process_value_empty=database_url_process_empty,
+                    )
+                ),
+                "dotenv_files_loaded": [str(p) for p in env_candidates if p.is_file()],
+                "dotenv_precedence": (
+                    "process environment first; then env_candidates order; "
+                    "load_dotenv override=False"
+                ),
+                "paper_database_override": active_override is not None,
+                "mode": settings.mode.upper(),
+                "live_trading": bool(settings.live_trading),
+                "broker": settings.broker.upper(),
+            }, sort_keys=True),
+        )
+
+        # Diagnose a mismatch BEFORE FastAPI/Database startup. This is a
+        # read-only check: no SQLite schema migration and no account write
+        # happens before the operator explicitly selects a separate recovery
+        # database. A raw traceback here would be an exit code and a stack
+        # trace, which is exactly what a double-clicked .exe cannot show.
+        from app.paper_trading.compatibility import PaperDatabaseInspectionError
+
+        try:
+            mismatch = _paper_account_mismatch(settings)
+        except PaperDatabaseInspectionError as exc:
+            message = "Arena startup refused: " + str(exc)
+            logger.error("%s", message)
+            print("\n" + message, flush=True)
+            if runtime.is_frozen() and not (sys.stdin and sys.stdin.isatty()):
+                _show_fatal_dialog(message)
+            return 3
+        if mismatch is not None:
+            message = _paper_account_mismatch_message(mismatch)
+            logger.error("%s", message)
+            print("\n" + message, flush=True)
+            if runtime.is_frozen() and not (sys.stdin and sys.stdin.isatty()):
+                _show_fatal_dialog(message)
+            return 3
+
         application = create_app(settings)
         application.state.instance_guard = guard
 
@@ -322,14 +450,105 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--setup", action="store_true",
                         help="open the setup screen on this run")
     parser.add_argument("--diagnostics", action="store_true",
-                        help="print where Arena keeps its files, then exit")
+                        help="print resolved paths and dotenv precedence, then exit")
+    recovery_group = parser.add_mutually_exclusive_group()
+    recovery_group.add_argument(
+        "--recover-paper-account", action="store_true",
+        help="create and select a separate empty PAPER database after a strict mismatch")
+    recovery_group.add_argument(
+        "--clear-paper-database-recovery", action="store_true",
+        help="remove only the saved recovery selection; never delete either database")
+    parser.add_argument(
+        "--confirm-new-empty-paper-account", action="store_true",
+        help="confirm that recovery creates a separate empty account (no data is copied)")
     args = parser.parse_args(argv)
 
     from app import runtime
 
-    if args.diagnostics:
-        print(json.dumps(runtime.describe(), indent=2))
+    if args.diagnostics and (args.recover_paper_account
+                             or args.clear_paper_database_recovery):
+        parser.error("--diagnostics cannot be combined with a recovery action")
+    if args.confirm_new_empty_paper_account and not args.recover_paper_account:
+        parser.error("--confirm-new-empty-paper-account requires --recover-paper-account")
+
+    if args.clear_paper_database_recovery:
+        removed = runtime.clear_paper_database_override()
+        if removed:
+            print(
+                "Cleared the persistent paper-database selection only. "
+                "No database, order, fill, or research record was deleted."
+            )
+        else:
+            print("No separate paper-database selection exists; nothing was changed.")
         return 0
+
+    if args.diagnostics:
+        report = runtime.describe()
+        database_url_in_process = "DATABASE_URL" in os.environ
+        database_url_process_empty = not bool(
+            (os.environ.get("DATABASE_URL") or "").strip()
+        )
+        try:
+            from app.config.settings import Settings
+
+            settings = Settings.from_env()
+            path = runtime.database_file_path(settings.database_url)
+            report["database_path"] = str(path or ":memory:")
+            report["database_url_source"] = (
+                "persistent paper recovery selection"
+                if report.get("paper_database_override_active")
+                else runtime.database_url_source(
+                    process_value_present=database_url_in_process,
+                    process_value_empty=database_url_process_empty,
+                )
+            )
+            report["database_selection"] = (
+                "persistent separate PAPER recovery database"
+                if report.get("paper_database_override_active")
+                else "configured DATABASE_URL or frozen default"
+            )
+            report["execution_safety"] = {
+                "mode": settings.mode.upper(),
+                "live_trading": bool(settings.live_trading),
+                "broker": settings.broker.upper(),
+            }
+        except Exception as exc:
+            # Never print .env values or exception text in the path report.
+            report["configuration_error_type"] = type(exc).__name__
+        print(json.dumps(report, indent=2))
+        return 0
+
+    if args.recover_paper_account:
+        runtime.ensure_utf8_output()
+        if not args.confirm_new_empty_paper_account:
+            parser.error(
+                "recovery requires --confirm-new-empty-paper-account; it creates "
+                "a separate empty account and does not copy old paper state"
+            )
+        from app.config.settings import Settings
+        from app.paper_trading.recovery import (
+            PaperRecoveryError,
+            create_separate_paper_database,
+        )
+
+        try:
+            settings = Settings.from_env(apply_paper_database_override=False)
+            recovered = create_separate_paper_database(settings)
+        except (PaperRecoveryError, ValueError) as exc:
+            message = "Paper recovery refused: " + str(exc)
+            print(message, flush=True)
+            if runtime.is_frozen() and not (sys.stdin and sys.stdin.isatty()):
+                _show_fatal_dialog(message)
+            return 3
+        print(
+            "Separate PAPER database selected.\n"
+            f"Original database (preserved): {recovered.previous_database}\n"
+            f"New empty database: {recovered.selected_database}\n"
+            "Differing fields: " + ", ".join(recovered.differing_fields) + "\n"
+            "No orders or fills were copied or placed. The selection persists "
+            "across launches; execution remains PAPER / LOCAL_PAPER.\n",
+            flush=True,
+        )
 
     # On Windows a frozen build must call this before any process is spawned,
     # or a child re-executing the bundle recurses instead of running.
@@ -394,7 +613,13 @@ def _show_fatal_dialog(reason: str) -> None:
     which needs no extra bundled dependency (tkinter is deliberately excluded
     from the build). On any other platform the durable log in
     ``<home>/logs/arena.log`` already carries the reason.
+
+    Headless automation (the packaged recovery test on a build machine) can
+    suppress the modal dialog explicitly and still receives the same exit
+    code, stdout and log.
     """
+    if os.environ.get("ARENA_SUPPRESS_FATAL_DIALOG") == "1":
+        return
     if os.name != "nt" or not sys.stdin or sys.stdin.isatty():
         return
     try:

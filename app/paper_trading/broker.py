@@ -11,6 +11,10 @@ from app.backtesting.portfolio import Portfolio
 from app.data.models import parse_timestamp
 from app.data.validator import validate
 from app.paper_trading.execution import ContinuousCalendar, execution_price, calendar_signature
+from app.paper_trading.compatibility import (
+    PaperAccountCompatibilityError,
+    differing_paper_fields,
+)
 
 logger = logging.getLogger("bot.broker")
 
@@ -75,17 +79,26 @@ class PaperBroker(BrokerInterface):
             repository.acquire_writer()
             try:
                 state = repository.load_broker() if restore else None
-                if state:
-                    if state.get(
-                        "calendar", calendar_signature(self.calendar)
-                    ) != calendar_signature(self.calendar):
-                        raise ValueError("Saved paper calendar differs; use a new database")
-                    if (
-                        state["config"] != asdict(self.config)
-                        or state["currency"] != currency
-                        or state["timeframe"] != timeframe
-                    ):
-                        raise ValueError("Saved paper account config differs; use a new database")
+                if state is not None:
+                    # One shared, field-granular compatibility rule. A saved
+                    # account carries the execution assumptions it was created
+                    # under; restoring it under different assumptions is
+                    # unsafe, so this refuses with the differing field NAMES
+                    # and the database path — and never changes the account.
+                    current_calendar = calendar_signature(self.calendar)
+                    fields = differing_paper_fields(
+                        state,
+                        asdict(self.config),
+                        currency=currency,
+                        timeframe=timeframe,
+                        calendar_signature=current_calendar,
+                    )
+                    if fields:
+                        database = getattr(repository, "db", None)
+                        database_path = getattr(database, "resolved_path", None)
+                        if database_path is None:
+                            database_path = getattr(database, "path", None)
+                        raise PaperAccountCompatibilityError(fields, database_path)
                     self.portfolio = Portfolio.restore(state["portfolio"])
                     self.orders = {o["id"]: Order(**o) for o in state["orders"]}
                     self.fills = [Fill(**f) for f in state["fills"]]

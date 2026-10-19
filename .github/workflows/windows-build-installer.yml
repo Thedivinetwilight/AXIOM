@@ -1,0 +1,140 @@
+name: Windows build and installer
+
+# The installed-Windows path is a separate gate from the ordinary source
+# suite. A packaged Arena is a different runtime: one-file extraction, its
+# own per-user data directory, a console that closes when the process exits.
+#
+# This workflow is the ONLY place where the real Windows artifacts are
+# produced and exercised:
+#
+#   1. source suite          the full suite on Windows (hard gate);
+#   2. executable            build_exe.py produces dist\Arena.exe;
+#   3. frozen gates          build_exe.py --test starts the ACTUAL artifact
+#                            and drives it through the wizard flow, the
+#                            restart recovery and the duplicate launch;
+#   4. paper recovery        the ACTUAL artifact is driven through the
+#                            reported startup failure: it must refuse with
+#                            exit code 3, keep the saved account, recover
+#                            into a separate empty account and start again
+#                            (hard gate);
+#   5. installer             the Inno Setup package is built and then
+#                            INSTALLED silently, the installed executable is
+#                            driven through the same recovery, and the
+#                            uninstaller is run to prove the user's data
+#                            survives (hard gate).
+#
+# Any failure discards the artifact. No exceptions, no continue-on-error.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "app/**"
+      - "arena.py"
+      - "run.py"
+      - "build_exe.py"
+      - "packaging/**"
+      - "docs/**"
+      - "tests/test_paper_database_recovery.py"
+      - "tests/test_windows_portability.py"
+      - "tests/test_packaging_single_exe.py"
+      - ".github/workflows/windows-build-installer.yml"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows executable and installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install Inno Setup 6
+        run: |
+          choco install innosetup --version=6.2.2 -y --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Full source suite on Windows (hard gate)
+        id: fullsuite
+        shell: pwsh
+        run: |
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report Windows suite failures
+        if: failure() && steps.fullsuite.outcome == 'failure'
+        shell: pwsh
+        run: |
+          if (Test-Path pytest-results.xml) {
+            python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pytest-results.xml").getroot()
+          for case in root.iter("testcase"):
+              failure = case.find("failure")
+              if failure is None:
+                  failure = case.find("error")
+              if failure is not None:
+                  name = (case.get("classname", "") + "::" +
+                          case.get("name", "unknown"))
+                  message = " ".join((failure.get("message") or
+                                      failure.text or "").split())[:350]
+                  message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Pytest failure::{name} - {message}")
+          PY
+          }
+
+      - name: Build the Windows executable
+        shell: pwsh
+        run: |
+          python build_exe.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path dist\Arena.exe)) { throw "dist\Arena.exe was not produced" }
+
+      - name: Frozen gates on the real artifact (hard gate)
+        shell: pwsh
+        run: |
+          python build_exe.py --test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          python packaging\build_installer.py --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist\installer
+
+      - name: Install, exercise and uninstall (hard gate)
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem dist\installer\*.exe | Select-Object -First 1).FullName
+          if (-not $installer) { throw "no installer was produced" }
+          python packaging\installer_e2e.py $installer build\installer-e2e
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-windows-x64
+          path: |
+            dist/Arena.exe
+            dist/installer/*.exe
+          if-no-files-found: error

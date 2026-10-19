@@ -1199,6 +1199,44 @@ Regime detection can consume candle/indicator histories without altering account
 11. Device-specific Termux, Windows and production VPS service operation were not tested here. External Binance/generic live connectivity requires network access and provider-compatible configuration; transport behavior is tested with mocks, not a claim of verified live market availability.
 12. `.env` is ignored, runtime DBs/cache/logs are not shipped as credentials or working accounts. A new archive extraction starts without a paper database. Saved **example result artifacts** are provided separately in `results/`.
 
+### 14.1 If Arena refuses to start: "Saved paper account is incompatible"
+
+A saved paper account is bound to the execution assumptions it was created
+under (timeframe, currency, cost model, calendar). If the configuration moves
+away from them, Arena **refuses** to restore it — that is a refusal, not a
+crash, and the account is left exactly as it was.
+
+```
+Saved paper account is incompatible with the current configuration.
+Differing fields: timeframe. Database: C:\Users\<you>\AppData\Local\Arena\trading_bot.db.
+The saved paper account was not restored or changed.
+```
+
+The launcher exits with code **3** and prints the exact recovery command.
+To continue on a separate, empty paper account while the original database,
+its orders, its fills and its research data stay untouched:
+
+```bash
+# Windows (installed)
+Arena.exe --recover-paper-account --confirm-new-empty-paper-account
+# Source checkout
+python arena.py --recover-paper-account --confirm-new-empty-paper-account
+```
+
+To go back to the original account later (nothing is deleted):
+
+```bash
+Arena.exe --clear-paper-database-recovery
+```
+
+To see which database file is in play and where the setting came from:
+
+```bash
+Arena.exe --diagnostics
+```
+
+Full explanation, including the path-normalization rules: **[docs/PAPER_ACCOUNT_RECOVERY.md](docs/PAPER_ACCOUNT_RECOVERY.md)**.
+
 ## 15. Test and audit workflow
 
 ```bash
