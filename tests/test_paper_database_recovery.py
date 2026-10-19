@@ -976,6 +976,29 @@ class TestWindowsCompilerResolution:
         assert "taskkill" in source
         assert "_wait_port_free" in source
 
+    def test_a_windows_path_is_recognised_in_a_json_log(self):
+        """The harness must find a path in a log whatever spelling it has.
+
+        A Windows path is written with backslashes and a JSON log escapes
+        them, so a literal comparison never matches on Windows - the check
+        would report a database that was in fact opened.
+        """
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "arena_frozen_recovery_e2e",
+            ROOT / "packaging" / "frozen_recovery_e2e.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        path = Path("D:/a/AXIOM/AXIOM/build/home/paper-recovery/paper-2026-abc.db")
+        escaped = (r'"database_path": "D:\\a\\AXIOM\\AXIOM\\build\\home'
+                   r'\\paper-recovery\\paper-2026-abc.db"')
+        assert module._mentions_path(escaped, path)
+        assert module._mentions_path("D:\\a\\AXIOM\\paper-2026-abc.db", path)
+        assert module._mentions_path("/home/user/AXIOM/paper-2026-abc.db", path)
+        assert not module._mentions_path("some other database", path)
+
 
 # ---------------------------------------------------------------------------
 # 7. the configuration write that CREATED the incompatibility

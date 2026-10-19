@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -59,6 +60,23 @@ def _port_is_free(port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def _mentions_path(text: str, path: Path) -> bool:
+    """Whether a log mentions this path, in any of the spellings a log uses.
+
+    A Windows path is written with backslashes and a JSON log escapes them,
+    so the comparison is done on a normalised form: forward slashes, no
+    repeated separators, lower case. The file name alone is also accepted,
+    because the recovery database has a unique name.
+    """
+    def normalise(value: str) -> str:
+        value = value.replace("\\", "/")
+        value = re.sub(r"/+", "/", value)
+        return value.lower()
+
+    haystack = normalise(text)
+    return normalise(str(path)) in haystack or path.name.lower() in haystack
 
 
 def _get(base: str, path: str, timeout: float = 10.0):
@@ -419,9 +437,16 @@ class FrozenRecoveryE2E:
         except OSError:
             pass
         if self.selected is not None:
-            self.check("the recovered database is the one in use",
-                       str(self.selected) in log or str(self.selected) in durable,
-                       str(self.selected))
+            used = _mentions_path(log, self.selected) or _mentions_path(durable,
+                                                                        self.selected)
+            detail = str(self.selected)
+            if not used:
+                # Say what the runtime actually reported, so a failure names
+                # the file that was opened instead of the one expected.
+                for line in durable.splitlines():
+                    if "startup_paths" in line:
+                        detail = line[-400:]
+            self.check("the recovered database is the one in use", used, detail)
         self.check("the original account is still readable after the restart",
                    bool(_read_paper_state(self.database)))
 
