@@ -159,3 +159,30 @@ def masked_summary(path: Path, keys: list[str]) -> dict[str, bool]:
     """Which of `keys` are present and non-empty. Presence only, no values."""
     values = read_values(path)
     return {key: bool((values.get(key) or "").strip()) for key in keys}
+
+
+def remove_values(path: Path, keys: list[str]) -> list[str]:
+    """Remove `keys` from a .env file, preserving everything else.
+
+    Used to take a single opt-in back out of a configuration file without
+    leaving an empty line behind that would still be read as "set". The file
+    is rewritten atomically with the same owner-only permissions.
+    """
+    wanted = {str(key).strip().upper() for key in keys}
+    if not wanted or not path.exists():
+        return []
+    removed: list[str] = []
+    kept: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            match = _KEY_RE.match(line)
+            if match and match.group("key").upper() in wanted:
+                removed.append(match.group("key"))
+                continue
+        kept.append(line)
+    if not removed:
+        return []
+    text = "\n".join(kept).rstrip("\n") + "\n"
+    _secure_write(path, text)
+    return sorted(set(removed))

@@ -39,6 +39,18 @@ async def start(body: PaperStartRequest, request: Request):
 async def do_start(body: PaperStartRequest, request: Request):
     """The one paper-start implementation, shared by /paper/start and the
     wizard's one-click /api/paper/start-default. One code path, no drift."""
+    settings = request.app.state.settings
+    if (str(getattr(settings, "mode", "PAPER")).upper() == "LIVE"
+            or str(getattr(settings, "broker", "LOCAL_PAPER")).upper() == "UPSTOX_LIVE"):
+        # The installation is in live mode: the paper engine would read the
+        # live configuration (data source, timeframe, instruments) and would
+        # not be the paper engine at all. Refuse with a clear reason instead
+        # of failing later with a confusing data error.
+        raise ValueError(
+            "This installation is configured for LIVE trading; the paper "
+            "engine is not available. Return to PAPER from the live switch "
+            "first."
+        )
     if body.timeframe != request.app.state.broker.timeframe:
         raise ValueError(
             "Paper timeframe must match DEFAULT_TIMEFRAME; restart with separate DB to change"

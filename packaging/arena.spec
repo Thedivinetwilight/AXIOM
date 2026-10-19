@@ -103,6 +103,7 @@ for pattern in (
     ("app/static/arena.css", "app/static"),
     ("app/static/arena-core.js", "app/static"),
     ("app/static/arena-wizard.js", "app/static"),
+    ("app/static/arena-live.js", "app/static"),
     ("app/static/arena-app.js", "app/static"),
     ("app/BUILD_META.json", "app"),
 ):

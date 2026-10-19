@@ -477,7 +477,19 @@ class Settings:
         return {name: getattr(self, name) for name in names}
 
     @classmethod
-    def from_env(cls, *, apply_paper_database_override: bool = True):
+    def from_env(cls, *, apply_paper_database_override: bool = True,
+                 env_overrides: dict | None = None):
+        """Build the configuration.
+
+        ``env_overrides`` maps raw environment-style keys (``MAX_DAILY_LOSS``)
+        to raw values and TAKES PRECEDENCE over the ambient process
+        environment. The live-activation flow needs this: the .env file on
+        disk is the single source of truth for the live configuration, but the
+        running process already holds the values it loaded at start-up, and
+        those would otherwise shadow the file. With overrides, the caller can
+        ask "what configuration would this .env produce?" without mutating
+        the process environment.
+        """
         # Load configuration from every applicable .env, most specific first.
         # When Arena runs from source with no ARENA_HOME this is exactly the
         # repository's .env as before; a packaged executable instead reads the
@@ -509,12 +521,28 @@ class Settings:
             "market_data_symbols": "UPSTOX_INSTRUMENT_KEYS",
             "data_source": "MARKET_DATA_SOURCE",
         }
+        # Explicit overrides (from the live-activation flow) win over the
+        # ambient environment. Aliases are resolved to the field they feed so
+        # an override of UPSTOX_ACCESS_TOKEN still configures
+        # market_data_access_token.
+        alias_to_field = {alias.upper(): field for field, alias in aliases.items()}
+        field_env_names = {f.name.upper() for f in fields(cls)}
+        overrides: dict[str, str] = {}
+        for raw_key, raw_value in (env_overrides or {}).items():
+            key = str(raw_key).strip().upper()
+            text = "" if raw_value is None else str(raw_value)
+            if key in field_env_names:
+                overrides[key.lower()] = text
+            elif key in alias_to_field:
+                overrides[alias_to_field[key]] = text
         for f in fields(cls):
             name = f.name
             annotation = hints.get(name, f.type)
-            raw = os.getenv(name.upper())
-            if raw is None and name in aliases:
-                raw = os.getenv(aliases[name])
+            raw = overrides.get(name)
+            if raw is None:
+                raw = os.getenv(name.upper())
+                if raw is None and name in aliases:
+                    raw = os.getenv(aliases[name])
             if raw is not None:
                 values[name] = coerce_env_value(name, annotation, raw)
             else:

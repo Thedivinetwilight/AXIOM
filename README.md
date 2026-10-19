@@ -80,7 +80,15 @@ recorded data, daily/weekly/monthly reports with attribution, and a
 LIVE (real-money) trading is **OFF by default** and gated behind a
 four-switch opt-in (`MODE=LIVE` + `LIVE_TRADING=true` + `BROKER=UPSTOX_LIVE`
 + `LIVE_CONFIRM`) **and** explicit non-zero hard risk limits; see
-[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The bare alias
+[LIVE_TRADING_ENABLEMENT.md](LIVE_TRADING_ENABLEMENT.md). The workstation
+carries a **PAPER/LIVE switch**: moving it to LIVE opens one integrated flow
+(broker OAuth connect → state the hard limits → review the readiness contract
+→ type the exact confirmation phrase) and the supervised live engine starts
+only if every required check passes; moving it back to PAPER performs the
+safe drain (stop new entries, show the open book, invalidate the live
+authorization, return to paper). The switch never places an order by itself
+and a restart can never come up live. See
+[LIVE_TRADING_SWITCH.md](LIVE_TRADING_SWITCH.md). The bare alias
 `BROKER=LIVE` still raises, and the sandbox broker refuses live order hosts.
 **V2.1 (L-ops)** adds the rails around a live session — token-freshness and
 canary entry guards, a stuck-order/reconcile watchdog with a WARNING→CRITICAL

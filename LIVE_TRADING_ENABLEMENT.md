@@ -29,7 +29,33 @@ active by default: the shipped defaults remain `MODE=PAPER`, `LIVE_TRADING=false
 Not done (deliberately, needs your decisions): static-IP enforcement in code,
 canary/notional ramp, stuck-order paging, automation of token refresh. See §6–§7.
 
-### How to enable live now (operator quickstart)
+### How to enable live now — the workstation switch (recommended)
+
+The workstation can now enable live trading from the interface, in one
+integrated flow, without hand-editing a file:
+
+1. move the **PAPER/LIVE switch** in the top bar (or on the Trading view) to
+   LIVE — nothing happens yet, a wizard opens;
+2. **connect** the broker account through the broker's official OAuth page
+   (Arena never asks for the broker website password, PIN, TOTP seed or a
+   one-time code);
+3. **state the hard risk limits** — each one must be finite and non-zero;
+4. **review the readiness contract** — every check is listed; a required
+   check that is BLOCKED or UNKNOWN stops the activation;
+5. **confirm with the exact configured phrase** — only then are the four
+   switches written, the supervised live engine started, and the session
+   ARMED and ACTIVATED.
+
+Moving the switch back to PAPER performs the safe drain: it shows the open
+positions, the working orders and the reconciliation status, stops new
+entries, invalidates the live authorization and returns the installation to
+paper. The live configuration lives in its own file (`<ARENA_HOME>/live.env`),
+never in the installation's main `.env`, and the paper database is never
+reused for live orders.
+
+The complete runbook is [`LIVE_TRADING_SWITCH.md`](LIVE_TRADING_SWITCH.md).
+
+### How to enable live now (operator quickstart, file-based)
 
 ```ini
 # .env — every line below is required; any omission aborts startup by name

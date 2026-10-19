@@ -125,6 +125,7 @@
     var topbar = Arena.el("div", { "class": "topbar", id: "topbar" }, [
       Arena.modeBadge(state.boot),
       Arena.el("span", { id: "live-chip" }, [Arena.stateBadge("OFFLINE")]),
+      Arena.el("span", { id: "live-switch-host", style: "display:inline-flex;align-items:center;gap:8px" }),
       Arena.el("span", { id: "market-chip" }, [document.createTextNode("market: —")]),
       Arena.el("span", { id: "conn-badge" }, [Arena.stateBadge("CONNECTING")]),
       Arena.el("span", { "class": "spacer" }),
@@ -180,6 +181,22 @@
     connectStream();
     refreshMarketChip();
     refreshLiveChip();
+    mountLiveSwitch();
+  }
+
+  // The PAPER/LIVE switch lives in the topbar, next to the mode badge, so
+  // the effective trading mode is visible from every screen. It is a
+  // navigation control, not a toggle: clicking LIVE opens the activation
+  // wizard, and moving away from LIVE opens the safe drain flow.
+  function mountLiveSwitch() {
+    var host = document.getElementById("live-switch-host");
+    if (!host) return;
+    if (window.ArenaLive && typeof window.ArenaLive.mountSwitch === "function") {
+      window.ArenaLive.mountSwitch(host);
+      return;
+    }
+    host.appendChild(Arena.el("span", { "class": "faint", style: "font-size:11px" },
+      [document.createTextNode("switch unavailable")]));
   }
 
   function show(view) {
@@ -1312,15 +1329,17 @@
   function loadLiveReadiness(host) {
     host.innerHTML = "";
     host.appendChild(document.createTextNode("Loading readiness…"));
-    Arena.get("/api/live/readiness").then(function (d) {
+    Arena.get("/api/live/readiness-center").then(function (d) {
       host.innerHTML = "";
-      host.appendChild(Arena.el("div", { "class": "banner " + (d.enabled ? "err" : "info") }, [
-        Arena.el("b", {}, [document.createTextNode(d.enabled
+      var verdict = d.verdict || "BLOCKED";
+      var enabled = verdict === "READY" || verdict === "READY_WITH_WARNINGS";
+      host.appendChild(Arena.el("div", { "class": "banner " + (enabled ? "err" : "info") }, [
+        Arena.el("b", {}, [document.createTextNode(enabled
           ? "LIVE ROUTING IS ENABLED in this configuration"
           : "Live trading is LOCKED — exactly as intended for research.")]),
-        document.createTextNode(d.enabled
+        document.createTextNode(enabled
           ? "Real money can move. Verify every guard below before doing anything."
-          : "Activation requires the documented multi-switch opt-in set by hand outside this application; nothing in this UI can flip those switches.")
+          : "Activation requires the documented multi-switch opt-in and an explicit, confirmed activation; nothing in this UI can flip those switches by itself.")
       ]));
       var list = Arena.el("div", { "class": "checklist", style: "margin-top:10px" });
       (d.checks || []).forEach(function (c) {
@@ -2491,6 +2510,7 @@
     root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Trading")]));
     root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
       "Paper execution, the live-trading state machine and the order ledger. Live never auto-activates: OFF → CONFIGURED → READY → ARMED → ACTIVE, each transition explicit.")]));
+    root.appendChild(liveSwitchCard());
 
     var liveHost = Arena.el("div", { id: "live-panel" }, [document.createTextNode("Loading…")]);
     root.appendChild(card("Live trading session", liveHost));
@@ -2515,9 +2535,57 @@
     startStatusPolling();
   }
 
+  // The PAPER/LIVE control on the Trading screen. It never changes the mode
+  // by itself: LIVE opens the activation wizard, PAPER opens the safe
+  // drain flow. The truth about the current mode is always shown next to it.
+  function liveSwitchCard() {
+    var host = Arena.el("div", { id: "live-switch-card" }, [document.createTextNode("Loading…")]);
+    renderLiveSwitchCard(host);
+    return card("PAPER / LIVE switch", host);
+  }
+
+  function renderLiveSwitchCard(host) {
+    if (!host) return;
+    var position = (window.ArenaLive && window.ArenaLive.position) ? window.ArenaLive.position() : "PAPER";
+    host.innerHTML = "";
+    var head = Arena.el("div", { "class": "btn-row", style: "align-items:center;flex-wrap:wrap" }, [
+      Arena.el("span", { "class": "mode-switch", id: "live-switch-card-toggle" }, [
+        Arena.el("span", { "class": "mode-seg paper" + (position === "PAPER" ? " active" : ""),
+          id: "card-mode-paper" }, [document.createTextNode("PAPER")]),
+        Arena.el("span", { "class": "mode-seg live" + (position !== "PAPER" ? " active" : ""),
+          id: "card-mode-live" }, [document.createTextNode("LIVE")])
+      ]),
+      Arena.el("span", { "class": "faint", id: "live-switch-card-note" }, [document.createTextNode(
+        position === "LIVE_ACTIVE" ? "A supervised live engine is running with real money."
+          : (position === "LIVE_CONFIGURED" ? "The live configuration is installed; no live engine is authorized."
+            : "Live trading is not enabled. Orders are simulated."))])
+    ]);
+    host.appendChild(head);
+    var row = Arena.el("div", { "class": "btn-row", style: "margin-top:12px;flex-wrap:wrap" });
+    var liveBtn = Arena.el("button", { "class": "btn live", id: "card-open-wizard" },
+      [document.createTextNode("ACTIVATE LIVE TRADING")]);
+    liveBtn.addEventListener("click", function () {
+      if (window.ArenaLive) window.ArenaLive.openWizard(0);
+    });
+    row.appendChild(liveBtn);
+    var paperBtn = Arena.el("button", { "class": "btn ghost", id: "card-open-switch-off" },
+      [document.createTextNode("RETURN TO PAPER")]);
+    paperBtn.addEventListener("click", function () {
+      if (window.ArenaLive) window.ArenaLive.openSwitchOff();
+    });
+    row.appendChild(paperBtn);
+    host.appendChild(row);
+    host.appendChild(Arena.el("p", { "class": "hint faint", style: "font-size:11.5px;margin-top:8px" }, [
+      document.createTextNode(
+        "Activating live trading is a four-step workflow: connect the broker account, state the hard risk " +
+        "limits, review the readiness contract, then confirm with the exact phrase. Nothing is enabled by " +
+        "clicking the switch, and no restart or background task can enable it.")]));
+  }
+
   function renderLivePanel(host) {
     if (!host) return;
-    Promise.all([Arena.get("/api/live/session"), Arena.get("/api/live/rate-limit"), Arena.get("/api/live/history")])
+    Promise.all([Arena.get("/api/live/session"), Arena.get("/api/live/rate-limit"),
+      Arena.get("/api/live/session/history")])
       .then(function (results) {
         var d = results[0], rl = results[1], hist = results[2];
         host.innerHTML = "";

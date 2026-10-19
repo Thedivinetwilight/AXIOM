@@ -22,6 +22,7 @@ from app.api.routes import (
 )
 from app.api.routes import console as console_routes
 from app.api.routes import frontend as frontend_routes
+from app.api.routes import live_activation as live_activation_routes
 from app.api.routes import setup as setup_routes
 from app.api.routes import wizard as wizard_routes
 from app.api.routes import workstation as workstation_routes
@@ -35,6 +36,29 @@ from app.paper_trading.execution import calendar_signature, make_calendar
 from app.paper_trading.simulator import PaperSimulator
 
 logger = logging.getLogger("bot.api")
+
+
+def _reset_live_switches_on_startup(app) -> None:
+    """A restart never comes up live-enabled.
+
+    The live *configuration* (limits, instruments, credential) is kept so
+    the operator does not have to type it again, but the four live switches
+    are removed: after a restart the installation is in PAPER and a fresh,
+    explicit activation is required. The switch-off flow in
+    ``app.live.activation`` does the same thing, so both paths leave the
+    same state.
+    """
+    from app.live.activation import (LIVE_SWITCH_VALUES, LiveActivationService)
+
+    service = LiveActivationService(app.state.workstation, app=app)
+    values = service.read_env()
+    if not any(key in values for key in LIVE_SWITCH_VALUES):
+        return
+    from app.config.envfile import remove_values
+
+    removed = remove_values(service.env_path, list(LIVE_SWITCH_VALUES))
+    logger.info("live switches cleared on startup (%s); a fresh activation is "
+                "required", ",".join(removed) or "none")
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -97,6 +121,16 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 logger.error("live-session startup recovery failed: %s",
                              type(exc).__name__)
                 raise
+            # The live configuration survives a restart, but the four live
+            # switches never do: a restart always comes up in PAPER and the
+            # operator has to authorize a new live cycle explicitly. This is
+            # the same rule the live-session recovery above applies to the
+            # session state, applied to the configuration itself.
+            try:
+                _reset_live_switches_on_startup(app)
+            except Exception as exc:
+                logger.error("live-switch startup reset failed: %s",
+                             type(exc).__name__)
             # Paper execution feeds the intelligence layer with OBSERVED bars.
             app.state.simulator.workstation = app.state.workstation
 
@@ -219,6 +253,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # AXIOM-MONEY-PRINTER workstation: markets/universes, opportunities,
     # evidence, live session state machine, Kronos studio, tasks, backups.
     app.include_router(workstation_routes.router)
+    # The PAPER/LIVE switch: the operator-facing live activation workflow.
+    # It reuses the live session state machine, the readiness contract, the
+    # supervisor and the gateway; it only sequences them.
+    app.include_router(live_activation_routes.router)
     app.state.sandbox_engine = None  # set by the sandbox engine embedding
     app.state.sandbox_broker = None
     return app

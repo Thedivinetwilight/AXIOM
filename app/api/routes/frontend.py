@@ -34,6 +34,7 @@ ALLOWED_STATIC = {
     "arena.css": "text/css; charset=utf-8",
     "arena-core.js": "text/javascript; charset=utf-8",
     "arena-wizard.js": "text/javascript; charset=utf-8",
+    "arena-live.js": "text/javascript; charset=utf-8",
     "arena-app.js": "text/javascript; charset=utf-8",
 }
 
@@ -58,15 +59,16 @@ _VERSIONED_SHELL = """<!doctype html>
   <div style="color:#7d89a3;font-family:sans-serif;padding:40px 0">Loading Arena…</div>
 </div>
 <script src="/static/arena-core.js?v={build}"></script>
-<script src="/static/{app}.js?v={build}"></script>
+{extra}<script src="/static/{app}.js?v={build}"></script>
 </body>
 </html>
 """
 
 
-def _shell(title: str, app: str, root: str) -> str:
+def _shell(title: str, app: str, root: str, extra: str = "") -> str:
     return _VERSIONED_SHELL.format(
-        title=title, app=app, root=root, build=build_info.build_id())
+        title=title, app=app, root=root, extra=extra,
+        build=build_info.build_id())
 
 
 @router.get("/static/{name}", include_in_schema=False)
@@ -91,7 +93,10 @@ async def static_asset(name: str) -> Response:
             dependencies=[Depends(loopback_or_bearer)])
 async def app_page() -> HTMLResponse:
     """The main application shell (command center and all panels)."""
-    return HTMLResponse(_shell("AXIOM — Command Center", "arena-app", "app-root"))
+    return HTMLResponse(_shell(
+        "AXIOM — Command Center", "arena-app", "app-root",
+        extra='<script src="/static/arena-live.js?v={build}"></script>\n'.format(
+            build=build_info.build_id())))
 
 
 @router.get("/api/boot")
