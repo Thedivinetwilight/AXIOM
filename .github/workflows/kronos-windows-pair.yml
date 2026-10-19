@@ -28,6 +28,10 @@ jobs:
     name: Isolated GUI and Kronos executables, Windows E2E
     runs-on: windows-latest
     timeout-minutes: 180
+    env:
+      MODE: PAPER
+      LIVE_TRADING: "false"
+      BROKER: LOCAL_PAPER
     steps:
       - uses: actions/checkout@v4
 

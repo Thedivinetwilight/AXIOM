@@ -22,6 +22,10 @@ jobs:
     name: Windows executable, installer, and recovery E2E
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      MODE: PAPER
+      LIVE_TRADING: "false"
+      BROKER: LOCAL_PAPER
     steps:
       - uses: actions/checkout@v4
         with:
