@@ -328,12 +328,46 @@ branch: arena/c292d276-axiom
 pushed: https://github.com/Thedivinetwilight/AXIOM/commit/e983633e1ca5e3987866746c93e5a4ef275ebf89
 ```
 
-**CI runs for this commit** (both triggered by the push):
+**CI runs for this commit** (both triggered by the push; `headSha` of both
+runs is `e983633e1ca5e3987866746c93e5a4ef275ebf89`):
 
 | Workflow | Run | URL | Conclusion |
 |---|---|---|---|
-| Windows build and installer (paper recovery) | `39236556767` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556767 | see below |
-| Build executable | `39236556708` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556708 | see below |
+| Windows build and installer (paper recovery) | `39236556767` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556767 | **success** |
+| Build executable (full source suite) | `39236556708` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556708 | **success** |
+
+**Every step of the Windows run `39236556767` (job “Windows executable and
+installer”):**
+
+| # | Step | Conclusion |
+|---|---|---|
+| 1–4 | set up job, checkout, setup-python, install dependencies | success |
+| 5 | Resolve and verify the Inno Setup compiler (hard gate) | success |
+| 6 | **Full source suite on Windows (hard gate)** | success |
+| 7 | Build the Windows executable | success |
+| 8 | **Frozen gates on the real artifact (hard gate)** | success |
+| 9 | **Build the installer (hard gate)** | success |
+| 10 | **Install, exercise and uninstall (hard gate)** | success |
+| 11 | Upload failure diagnostics | **skipped** (it only runs when a gate fails) |
+| 12 | Upload the Windows artifacts | success — artifact `Arena-windows-x64`, 41,006,522 bytes |
+
+**Every step of the source-suite run `39236556708`:**
+
+| # | Step | Conclusion |
+|---|---|---|
+| 1–5 | set up job, checkout, setup-python, dependencies, **JavaScript runtime for the frontend integrity checks** | success |
+| 6 | **Run the complete test suite** | success |
+| 7 | Report failures as annotations | **skipped** (no failure to report) |
+| — | “Build on ${{ matrix.os }}” (the release matrix) | **skipped by design** — that job is conditioned on `workflow_dispatch` or a tag push (`if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')`); the Windows artifact is produced by the workflow above. It is reported as skipped, not as a pass. |
+
+**Build/artifact evidence**
+
+* Windows artifact: `Arena-windows-x64`, 41,006,522 bytes, uploaded only
+  after every hard gate above passed.
+* The Linux frozen artifact was **not** rebuilt in this run: the matrix job is
+  tag/dispatch-gated, and the Windows workflow is the gate that produced the
+  packaged artifact. The Linux frozen recovery harness from the previous
+  incident (23/23 PASS) is unchanged by this feature.
 
 **Local verification (this environment)**
 
@@ -347,7 +381,12 @@ pushed: https://github.com/Thedivinetwilight/AXIOM/commit/e983633e1ca5e398786674
 | JavaScript syntax | `node --check` on `arena-live.js`, `arena-app.js`, `arena-core.js`, `arena-wizard.js` | all OK |
 | Lint (advisory; ruff is **not** a CI gate in this repository and the baseline already reports 639 findings in `app/`) | `ruff check` on the new modules | the new production modules report only the repo-wide `except Exception` pattern; the new test files are clean except the repo-wide `datetime.timezone.utc` style |
 
-**The CI conclusions are reported verbatim once the runs finish; a skipped
-step is never reported as a pass.** The historical run `39215830937`
-(success) belongs to the parent commit `14a5602` and is **not** evidence for
-this commit.
+**Both runs concluded `success`.** A skipped step is reported as skipped, never
+as a pass. The historical run `39215830937` (success) belongs to the parent
+commit `14a5602` and is **not** evidence for this commit — the evidence for
+this commit is `39236556767` and `39236556708` above.
+
+**Branch head:** `0f6ca060f4df7ff0312010b06bc7032863bbe73a` — a
+documentation-only commit (this report) on top of the code commit `e983633`.
+It changes no code, and because both workflows filter on code paths it did
+not re-trigger them.
