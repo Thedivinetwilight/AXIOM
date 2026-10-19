@@ -6,9 +6,9 @@ handling and a supervised live engine that starts only after an explicit
 final confirmation.
 
 **Repository:** `Thedivinetwilight/AXIOM` · **Branch:** `arena/c292d276-axiom`
-**Base commit:** `4317e3a` (`fix/axiom-v3.2.4-release`) · **Work:** uncommitted
-in the working tree at the time of writing — the exact commit SHA and the CI
-run are recorded in §10.
+**Commit:** `e983633e1ca5e3987866746c93e5a4ef275ebf89` (`e983633`), on top of
+`14a5602` (the previous incident's commit, which is the parent of this one)
+**CI runs:** see §10.
 
 > **No real account, no real credential, no real order was used at any point.**
 > Every test runs against a disposable Arena home, a throwaway SQLite
@@ -247,10 +247,13 @@ cannot be exercised in this environment · **UNVERIFIED** = not exercised.
 
 ```
 $ /home/user/.venv/bin/python -m pytest tests/ -q
-2033 passed, 39 skipped        (before the three new files were added)
+2046 passed, 39 skipped, 1 warning in 177.49s (0:02:57)
 ```
 
-The final numbers of the complete run are in §10. The new files contribute:
+(1936 passed / 39 skipped before this feature; the delta is the 109 new
+live-switch tests plus the tests added by the earlier incidents.)
+
+The new files contribute:
 
 | File | Tests |
 |---|---|
@@ -315,5 +318,36 @@ node --check app/static/arena-live.js app/static/arena-app.js \
 
 ## 10. Build, commit and CI evidence
 
-*(filled in after the commit; the exact SHA, the CI run URL and the artifact
-sizes are recorded here)*
+**Commit**
+
+```
+e983633e1ca5e3987866746c93e5a4ef275ebf89
+Live trading: PAPER/LIVE switch, activation wizard and safe switch-off
+parent: 14a5602 (Document the Windows verification of the installed recovery path)
+branch: arena/c292d276-axiom
+pushed: https://github.com/Thedivinetwilight/AXIOM/commit/e983633e1ca5e3987866746c93e5a4ef275ebf89
+```
+
+**CI runs for this commit** (both triggered by the push):
+
+| Workflow | Run | URL | Conclusion |
+|---|---|---|---|
+| Windows build and installer (paper recovery) | `39236556767` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556767 | see below |
+| Build executable | `39236556708` | https://github.com/Thedivinetwilight/AXIOM/actions/runs/39236556708 | see below |
+
+**Local verification (this environment)**
+
+| Gate | Command | Result |
+|---|---|---|
+| Complete suite | `/home/user/.venv/bin/python -m pytest tests/ -q` | **2046 passed, 39 skipped** (177.49 s) |
+| Live-switch backend | `pytest tests/test_live_switch_activation.py -q` | 73 passed |
+| Live-switch frontend | `pytest tests/test_live_switch_frontend.py -q` | 23 passed |
+| Live-switch readiness | `pytest tests/test_live_switch_readiness.py -q` | 10 passed |
+| Live-switch end-to-end | `pytest tests/test_live_switch_end_to_end.py -q` | 3 passed |
+| JavaScript syntax | `node --check` on `arena-live.js`, `arena-app.js`, `arena-core.js`, `arena-wizard.js` | all OK |
+| Lint (advisory; ruff is **not** a CI gate in this repository and the baseline already reports 639 findings in `app/`) | `ruff check` on the new modules | the new production modules report only the repo-wide `except Exception` pattern; the new test files are clean except the repo-wide `datetime.timezone.utc` style |
+
+**The CI conclusions are reported verbatim once the runs finish; a skipped
+step is never reported as a pass.** The historical run `39215830937`
+(success) belongs to the parent commit `14a5602` and is **not** evidence for
+this commit.
