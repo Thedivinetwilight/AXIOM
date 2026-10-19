@@ -116,3 +116,144 @@ This addendum records selected follow-up work after the 2026-10-06 snapshot. It 
 - Genuine pretrained weights remain **0/3 verified**; real weight-backed inference and forecast quality remain unverified. The Windows stub smoke does not change this.
 - No GPU inference, genuine external market-data execution, or persistent trading process was tested.
 - No live order was placed or modified, and no paper-trading process was launched. No existing user/account database was touched; the installer recovery E2E uses an isolated CI work directory and generated test databases only. The packaged GUI smoke was explicitly configured as `MODE=PAPER`, `LIVE_TRADING=false`, `BROKER=LOCAL_PAPER`. No credentials were added to source, CI, or artifacts.
+
+## 10. Verified-fixes audit update (2026-10-19, commit-matched)
+
+This addendum checks the live source and regression tests after the 2026-10-06 snapshot. Code fixes and local full-suite evidence are at `0c7da26a9b1872689580054937ee940842a88005`; the explicit job-level safe-CI-environment adjustment is at `99eafb06ec3c8c40bde4853d8faddabedad2f6b9`. No application source changed between those SHAs. The three listed GitHub Actions runs all report that exact workflow SHA. A later report-only commit does not change the code or workflow evidence.
+
+**Safety boundary:** Every local test command and every relevant CI job used `MODE=PAPER`, `LIVE_TRADING=false`, `BROKER=LOCAL_PAPER`. No live or external broker was contacted and no real or broker-sandbox order was sent or modified; tests use local mocks and generated paper-only test state. No credentials or existing user/paper-account database were used. A safe test environment is not itself evidence of a sustained paper run or paper-readiness.
+
+### Component separation
+
+- **Arena GUI and installer:** the standalone `Arena.exe` and `AXIOM-Setup.exe` build/install/recovery evidence is from the installer workflow. It is distinct from the desktop pair below.
+- **Desktop executable pair:** `AXIOM.exe` and sibling `AXIOM-Kronos.exe` are separate processes and a separate build/artifact. The GUI-to-sibling and worker IPC checks use an explicitly configured stub backend.
+- **Strategy / risk / execution:** engine, sizing, allocation, liquidity, edge and reconciliation fixes are assessed on their source paths and local-paper test doubles. These do not authorize or demonstrate live execution.
+- **Optional read-only Kronos forecasting:** Kronos is not the strategy order executor. The Windows smoke establishes packaging/process/JSON-lines behavior with a stub; it does not establish model inference, forecast quality, or real weights.
+
+### Findings — strategy, risk, and execution
+
+- **Status: Confirmed defect. Finding:** exceptions in the quality scorer or volatility sizer no longer silently pass an entry. They reject the entry and emit a gate-failure audit record; protective exits remain on their separate path. **Evidence:** `app/engine/sandbox_engine.py`; `test_quality_scorer_failures_block_entries`, `test_volatility_sizing_failure_blocks_entries`, and `test_quality_gate_failure_does_not_trap_protective_stop` in `tests/test_engine_fail_closed_audit.py`. **Changed paths:** `app/engine/sandbox_engine.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Confirmed defect. Finding:** configured position sizing and volatility lookback are honored; ATR uses each bar's immediately preceding close; invalid sizer output rejects, and a valid sizer cannot expand the allocation-derived quantity. **Evidence:** `test_sandbox_engine_uses_configured_position_size`, `test_configured_volatility_lookback_is_used_by_engine`, `test_atr_uses_each_recent_candle_previous_close`, and `test_volatility_sizer_cannot_expand_past_sizing_budget` in `tests/test_engine_fail_closed_audit.py`. **Changed paths:** `app/engine/sandbox_engine.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Confirmed defect. Finding:** when an allocator is explicitly injected, a missing, malformed, non-finite, or negative required plan blocks the entry and is audited; the read-failure branch is coded to fail closed as well. Without an injected allocator, the prior sizing-fraction policy remains in force. **Evidence:** `test_required_allocator_missing_or_invalid_plan_blocks_entries` and `test_no_configured_allocator_keeps_ordinary_sizing_policy`; implementation in `SandboxEngine._allocator_allowance`. **Changed paths:** `app/engine/sandbox_engine.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Verification gap. Finding:** `app/__main__.py` constructs the default `SandboxEngine` without an allocator. Whether product policy requires allocator injection in that composition is not established, so the injected-allocator fix must not be read as proof that the default app enforces an allocation plan. **Evidence:** `app/__main__.py:619-637` and the no-allocator regression above. **Changed path reviewed:** `app/__main__.py`.
+- **Status: Confirmed defect. Finding:** confidence is not treated as expected P&L; the engine accepts only an explicit quote-currency `gross_expected_pnl` field for the proposal and the net-edge gate rejects missing evidence. No proposal-sized producer was found, so the real path remains fail-closed rather than manufacturing a return. **Evidence:** `_gross_expected_for_decision` in `app/engine/sandbox_engine.py`; `test_engine_net_edge_rejects_confidence_without_proposal_sized_pnl`; net-edge tests in `tests/test_performance_hardening_3_0_5.py`. **Changed paths:** `app/engine/sandbox_engine.py`, `app/risk/net_edge.py`, `tests/test_engine_fail_closed_audit.py`. Related net-edge unit coverage also exists in `tests/test_performance_hardening_3_0_5.py`.
+- **Status: Confirmed defect. Finding:** missing, invalid, or stale cross-market inputs no longer become invented flat/neutral/normal context; quality features remain `None` unless supported by current explicit measurements. **Evidence:** `test_cross_market_cache_does_not_invent_neutral_or_stale_context` and `test_cross_market_quality_context_requires_explicit_current_evidence` in `tests/test_engine_fail_closed_audit.py`. **Changed paths:** `app/data/cross_market.py`, `app/engine/sandbox_engine.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Confirmed defect. Finding:** the engine no longer ignores an unsupported liquidity `should_reduce` recommendation or guesses a reduction factor; it rejects and records the requested reduction before the hard-risk check. The configured minimum liquidity score is applied. **Evidence:** `test_liquidity_reduction_recommendation_is_enforced_before_hard_risk` and `test_min_liquidity_setting_controls_reject_floor`. **Changed paths:** `app/data/liquidity.py`, `app/engine/sandbox_engine.py`, `app/config/settings.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Verification gap. Finding:** `app/data/liquidity.py` still assigns `0.3` when depth/volume is unknown or liquidity calculation fails, and uses `0.5` for an unavailable spread component. The meaning and provenance of those fallback scores need policy review; they are not evidence that the market was observed to be moderately liquid. **Evidence:** `app/data/liquidity.py:175-205`. This limitation is not presented as a verified fix.
+- **Status: Confirmed defect. Finding:** SELL reconciliation and recovery retain the pre-SELL entry basis, report the actual exit fill separately, and preserve missing journal prices as `None`; realized SELL fill deltas are replayed once in the tested recovery scenario. **Evidence:** `app/engine/sandbox_engine.py`, `app/learning/journal.py`, focused SELL-price regressions (2/2), and `test_recovered_sell_fills_credit_each_delta_once_across_restart` in `tests/test_v3_0_1_execution_safety.py`. The broader tests also cover atomic/idempotent fill accounting. **Changed paths:** `app/engine/sandbox_engine.py`, `app/engine/state.py`, `app/learning/journal.py`, `app/paper_trading/broker.py`, `app/paper_trading/recovery.py`, `tests/test_v3_0_1_execution_safety.py`.
+- **Status: Verification gap. Finding:** the crash-replayed `SELL` fill to `TRADE_OUTCOME` journal path has not been proven to append exactly once across a crash at every write boundary. Current engine attribution supplies aggregate ledger fees, `slippage=0.0`, and `duration_bars=self.processed`; per-trade fee/slippage and duration attribution are not established. **Evidence:** `app/engine/sandbox_engine.py:1957-1976` and `app/learning/journal.py:37-60`. The fill-ledger idempotency test does not close this journal-attribution gap.
+- **Status: Confirmed defect. Finding:** the hot-path monitor now records the duration of the full `process_candle` pass in a `finally` block, while metric failures remain observational and do not change order handling. **Evidence:** `test_hot_path_setting_records_candle_latency_and_is_dashboard_visible`. **Changed paths:** `app/engine/sandbox_engine.py`, `app/config/settings.py`, `tests/test_engine_fail_closed_audit.py`.
+- **Status: Confirmed defect. Finding:** `packaging/installer_e2e.py` no longer recursively deletes a caller-supplied work directory. It rejects repository/ancestor, symlink, missing-parent, and pre-existing paths and atomically creates only a fresh disposable child. **Evidence:** `tests/test_installer_e2e_safety.py`; the script was inspected before the Windows workflow exercised it with a fresh CI work directory. It was not run locally against caller data. **Changed paths:** `packaging/installer_e2e.py`, `tests/test_installer_e2e_safety.py`, `.github/workflows/windows-build-installer.yml`.
+
+### Findings — remaining research and runtime wiring gaps
+
+- **Status: Verification gap. Finding:** entry-timing decisions are evaluated and `WAIT`/`NO_TRADE` events are recorded, but outcome attribution/learning from those decisions was not verified. **Evidence:** `app/engine/sandbox_engine.py:1649-1660`.
+- **Status: Verification gap. Finding:** `MAEMFEAnalyzer` is constructed, but a production call site/consumer that records completed-trade excursions was not verified. **Evidence:** construction in `app/engine/sandbox_engine.py` and implementation in `app/research/mae_mfe.py`; tests of the helper do not establish wiring.
+- **Status: Verification gap. Finding:** `CorrelationMonitor` is constructed but an engine call site applying it to current portfolio evidence was not verified. Quality features are deliberately `None` absent evidence. **Evidence:** `app/engine/sandbox_engine.py` and `test_quality_features_do_not_claim_unavailable_positive_evidence`.
+- **Status: Verification gap. Finding:** `max_volatility_factor` is accepted by settings/sizer construction, but an exercised behavior proving that it affects engine sizing was not established. **Evidence:** `app/config/settings.py`, `app/learning/volatility_sizing.py`, and `tests/test_risk_numeric_guards.py`.
+- **Status: Verification gap. Finding:** replay-data provenance still needs review to distinguish synthetic test fixtures from observations labelled `MARKET_OBSERVED`; no replay fixture or result is promoted here as observed market evidence. **Evidence:** market-origin checks in `axiom/market/validation.py` and replay/research call sites; no provenance-complete end-to-end replay was run for this audit.
+
+### Windows GUI, installer, and optional Kronos verification
+
+All three runs below completed successfully at `head_sha=99eafb06ec3c8c40bde4853d8faddabedad2f6b9`:
+
+- [Build executable run 39198575540](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39198575540): the Ubuntu full source-suite hard gate passed. The multi-OS packaging matrix was **skipped**, as configured for ordinary pushes; it runs only on manual dispatch or a version tag.
+- [AXIOM Windows executable pair run 39198575460](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39198575460): selected risk/numeric/desktop/Kronos tests passed; separate GUI and worker build environments were created; `AXIOM.exe` smoke, frozen GUI-to-sibling lifecycle smoke, actual `AXIOM-Kronos.exe` JSON-lines IPC smoke, hash/size recording, and pair artifact upload passed. The Kronos backend was a stub with downloads disabled. This is process/packaging evidence, not visual UI QA or model inference.
+- [Windows build/installer run 39198575469](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39198575469): the Windows non-slow suite, actual frozen `Arena.exe` smoke, installer build, packaged install/recovery/restart/uninstall E2E, artifact uploads, and artifact summary all passed. This is separate from the desktop-pair workflow and artifacts.
+
+Actions artifacts are recorded here as **archive digests**, not as individual executable checksums or publisher signatures:
+
+| Artifact (ID) | Run | Size | Archive digest | Expires (UTC) |
+|---|---:|---:|---|---|
+| `AXIOM-Windows-executable-pair` (`12163555517`; `AXIOM.exe` + `AXIOM-Kronos.exe`) | 39198575460 | 223,175,702 bytes | `sha256:eddd5c391fb6f29135918128ade8ff9ff108af6c09b2ecfa1c0df1535ffa8beb` | 2026-11-02 04:22:22 |
+| `AXIOM-Arena-Windows-x64` (`12162987171`; `Arena.exe`) | 39198575469 | 19,739,383 bytes | `sha256:17932129f3643b78453d01f95af9e56486f44e2fe001f8e81803d431526f8d5a` | 2027-01-17 04:15:39 |
+| `AXIOM-Setup-Windows-x64` (`12163521024`; `AXIOM-Setup.exe`) | 39198575469 | 21,193,807 bytes | `sha256:64e6613eeb35f2f303e9c36cf48ed0645b339c32f19e536db7c4e26db14bafce` | 2027-01-17 04:15:39 |
+
+The artifact names and contents remain separate: the pair is not the Arena installer, and the Arena executable is not `AXIOM.exe`. The digests above are GitHub Actions artifact archive digests; they must not be substituted for the executable checksums inside each build record. No claim of signing or publisher authenticity is made.
+
+### Local verification and explicit safe CI environment
+
+- Focused engine/risk/SELL/journal/installer/Kronos regressions: **415 passed, 1 warning**. The focused SELL-price checks separately passed **2/2**.
+- Full local non-slow suite, run as `MODE=PAPER LIVE_TRADING=false BROKER=LOCAL_PAPER .venv/bin/python -m pytest -q -k "not slow"`: **2,027 passed, 39 skipped, 1 warning in 149.63s**. Skips are not passes for optional dependencies, genuine model weights, real external services, or a frozen binary.
+- `compileall` passed after the source edits. After the workflow environment edit, `git diff --check` and PyYAML parsing of `.github/workflows/build-executable.yml`, `.github/workflows/kronos-windows-pair.yml`, and `.github/workflows/windows-build-installer.yml` passed.
+- Job-level CI environment now explicitly sets `MODE: PAPER`, `LIVE_TRADING: "false"`, `BROKER: LOCAL_PAPER` in the full-suite and build jobs of `build-executable.yml`, the pair job in `kronos-windows-pair.yml`, and the installer job in `windows-build-installer.yml`. The three commit-matched runs above passed under that configuration.
+- `mypy`, `pyright`, `ruff`, and `actionlint` were not available/configured for this pass; no clean type-check or broad-lint claim is made.
+
+### Changed-path inventory
+
+Exact branch delta from base `4317e3a9f130db3f7fd03db53e00bdf66ac79e9f` through the code/workflow verification SHA `99eafb06ec3c8c40bde4853d8faddabedad2f6b9` (63 paths):
+
+```text
+.github/workflows/build-executable.yml
+.github/workflows/kronos-windows-pair.yml
+.github/workflows/windows-build-installer.yml
+.gitignore
+AXIOM_CURRENT_AUDIT_REPORT.md
+AXIOM_KRONOS.env.example
+KRONOS_INTEGRATION.md
+README.md
+USER_MANUAL.md
+app/__main__.py
+app/api/server.py
+app/brokers/sandbox.py
+app/config/settings.py
+app/data/cross_market.py
+app/data/liquidity.py
+app/data/upstox_auth.py
+app/data/upstox_diagnostic.py
+app/database/database.py
+app/engine/sandbox_engine.py
+app/engine/state.py
+app/learning/journal.py
+app/paper_trading/broker.py
+app/paper_trading/compatibility.py
+app/paper_trading/recovery.py
+app/risk/limits.py
+app/risk/net_edge.py
+app/runtime.py
+arena.py
+axiom/kronos/model_cache.py
+axiom/research/walkforward.py
+axiom/worker/manager.py
+build_exe.py
+desktop/app.py
+desktop/run_kronos_windows.bat
+docs/PAPER_ACCOUNT_RECOVERY.md
+packaging/arena.spec
+packaging/build_installer.py
+packaging/frozen_e2e.py
+packaging/frozen_recovery_e2e.py
+packaging/installer.iss
+packaging/installer_e2e.py
+tests/support.py
+tests/test_engine_fail_closed_audit.py
+tests/test_final_engine_events.py
+tests/test_installer_e2e_safety.py
+tests/test_kronos_packaging.py
+tests/test_kronos_research.py
+tests/test_kronos_ui.py
+tests/test_live_config_check.py
+tests/test_paper_database_recovery.py
+tests/test_risk_numeric_guards.py
+tests/test_upstox_credential_probe.py
+tests/test_upstox_v063.py
+tests/test_v1_engine.py
+tests/test_v1_sandbox.py
+tests/test_v2_api_cli.py
+tests/test_v2_engine_integration.py
+tests/test_v310_frozen_e2e.py
+tests/test_v3_0_1_execution_safety.py
+tests/test_v3_0_2_hardening.py
+tools/build_windows_executables.py
+tools/kronos_executable_e2e.py
+tools/live_config_check.py
+```
+
+### Final status and limitations
+
+- Genuine Kronos inference remains unverified: artifact verification is **0/3 REAL_INFERENCE_VERIFIED**. No model weights were downloaded/committed, no signed publisher origin was verified, and no real forecast or forecast-quality result was produced.
+- No sustained paper process or paper-account validation was run. Safe CI/local tests, stub IPC, and installer recovery do not establish paper-readiness, trading readiness, profitability, or regulatory suitability.
+- No pixel-level visual QA was run. Frozen smoke checks establish only the exact automated launch/lifecycle behavior described above.
+- **No findings in this addendum are labelled `Unconfirmed suspicion`;** the open items are explicitly recorded as `Verification gap` rather than upgraded to defects without evidence.
+
+**Bottom line:** the reviewed defects listed as `Confirmed defect` have source-backed regression coverage, and all current-SHA required Windows and source-suite workflows passed with the explicit safe test environment. The open integration/data-attribution gaps and absence of sustained paper/model evidence remain material. **This report does not claim paper-readiness or authorize live trading.**
