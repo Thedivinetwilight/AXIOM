@@ -63,27 +63,71 @@ MINIMUM_VERSION = (6, 3, 0)
 # afterwards, so a newer "latest" release is acceptable too.
 INTENDED_VERSION = "6.4.3"
 
-# Official Inno Setup downloads. The version-specific URL is tried first,
-# then the "latest 6.x" URL.
+# Official Inno Setup downloads. The project publishes the installers as
+# GitHub release assets, which is where they are fetched from: the
+# version-specific asset first, then the current 6.x release.
 DOWNLOAD_URLS = (
-    f"https://jrsoftware.org/download.php/is-{INTENDED_VERSION}.exe",
-    "https://jrsoftware.org/download.php/is.exe",
+    "https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/"
+    "innosetup-6.4.3.exe",
+    "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/"
+    "innosetup-6.7.3.exe",
 )
 
+# The GitHub API is used to find the newest 6.x installer when neither
+# pinned asset could be fetched.
+RELEASES_API = "https://api.github.com/repos/jrsoftware/issrc/releases?per_page=30"
+
 PROBE_SCRIPT = """\
-; Probe script: proves this compiler understands the two features the real
-; installer script relies on - a /D define and x64compatible.
-#ifndef ProbeValue
-  #error "ProbeValue must be defined"
+; Probe script: proves this compiler understands everything the real
+; installer script relies on - a /D define, the x64compatible architecture
+; identifier, lzma2 compression and the same section layout.
+#ifndef AppVersion
+  #error "AppVersion must be defined"
+#endif
+#ifndef ProbeFile
+  #error "ProbeFile must be defined"
 #endif
 [Setup]
-AppName=Arena Probe
-AppVersion={#ProbeValue}
 AppId={{B8E5C7A2-4F31-4D29-9E8A-1A2B3C4D5E6F}
+AppName=Arena Probe
+AppVersion={#AppVersion}
+AppVerName=Arena Probe {#AppVersion}
+AppPublisher=Thedivinetwilight
 DefaultDirName={autopf}\\ArenaProbe
+DefaultGroupName=Arena Probe
 OutputBaseFilename=ArenaProbe
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+UninstallDisplayIcon={app}\\probe.txt
+UninstallDisplayName=Arena Probe {#AppVersion}
+VersionInfoVersion={#AppVersion}.0
+VersionInfoCompany=Thedivinetwilight
+VersionInfoDescription=Arena Inno Setup probe
+VersionInfoProductName=Arena Probe
+VersionInfoProductVersion={#AppVersion}
+CloseApplications=no
+RestartApplications=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons"; Flags: unchecked
+
+[Files]
+Source: "{#ProbeFile}"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\\Arena Probe"; Filename: "{app}\\probe.txt"
+
+[Run]
+Filename: "{app}\\probe.txt"; Description: "Run the probe"; Flags: postinstall skipifsilent nowait
 """
 
 
@@ -177,13 +221,19 @@ def iscc_version(compiler: Path) -> tuple[int, ...] | None:
 
     The version resource is the authoritative source and does not run the
     compiler, so it cannot pop a dialog on a build machine.
+
+    Some Inno Setup builds leave the PRODUCT version unset (it reads
+    0.0.0) and only fill in the FILE version, so both are read. A version
+    that is still 0.0.0 means "unknown", not "ancient": the probe decides
+    in that case.
     """
     if os.name != "nt":
         return None
     escaped = str(compiler).replace("'", "''")
     command = (
-        "$v = (Get-Item -LiteralPath '" + escaped + "').VersionInfo.ProductVersion; "
-        "if ($v) { Write-Output $v }"
+        "$i = Get-Item -LiteralPath '" + escaped + "'; "
+        "Write-Output $i.VersionInfo.ProductVersion; "
+        "Write-Output $i.VersionInfo.FileVersion"
     )
     try:
         result = subprocess.run(
@@ -194,7 +244,11 @@ def iscc_version(compiler: Path) -> tuple[int, ...] | None:
         return None
     if result.returncode != 0:
         return None
-    return parse_version(result.stdout)
+    for line in (result.stdout or "").splitlines():
+        version = parse_version(line)
+        if version and version > (0, 0, 0):
+            return version
+    return None
 
 
 def probe_iscc(compiler: Path) -> tuple[bool, str]:
@@ -207,12 +261,14 @@ def probe_iscc(compiler: Path) -> tuple[bool, str]:
     try:
         script = workdir / "probe.iss"
         script.write_text(PROBE_SCRIPT, encoding="utf-8")
+        payload = workdir / "probe.txt"
+        payload.write_text("Arena Inno Setup probe\n", encoding="utf-8")
         output = workdir / "out"
         output.mkdir(parents=True, exist_ok=True)
         try:
             result = subprocess.run(
-                [str(compiler), str(script), f"/DProbeValue={INTENDED_VERSION}",
-                 f"/O{output}"],
+                [str(compiler), str(script), f"/DAppVersion={INTENDED_VERSION}",
+                 f"/DProbeFile={payload}", f"/O{output}"],
                 capture_output=True, text=True, timeout=900, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -290,14 +346,46 @@ def install_with_chocolatey() -> tuple[bool, str]:
     return True, "chocolatey installed Inno Setup"
 
 
+def latest_release_url() -> str:
+    """The newest Inno Setup 6 installer asset, from the GitHub releases API."""
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
+        RELEASES_API, headers={"Accept": "application/vnd.github+json",
+                                "User-Agent": "arena-windows-build"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        releases = json.loads(response.read().decode("utf-8"))
+    for release in releases:
+        tag = str(release.get("tag_name") or "")
+        if not tag.startswith("is-6"):
+            continue
+        for asset in release.get("assets", []):
+            name = str(asset.get("name") or "")
+            if name.startswith("innosetup-") and name.endswith(".exe"):
+                return str(asset.get("browser_download_url") or "")
+    return ""
+
+
 def download_inno_setup(target: Path) -> tuple[bool, str]:
     """Download the official installer and check it before running it."""
     import urllib.request
 
+    urls = list(DOWNLOAD_URLS)
+    try:
+        newest = latest_release_url()
+    except Exception as exc:  # the API is only a convenience
+        newest = ""
+        print(f"  note: the releases API could not be read: {exc}", flush=True)
+    if newest and newest not in urls:
+        urls.append(newest)
+
     last_error = ""
-    for url in DOWNLOAD_URLS:
+    for url in urls:
         try:
-            with urllib.request.urlopen(url, timeout=300) as response:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "arena-windows-build"})
+            with urllib.request.urlopen(request, timeout=300) as response:
                 payload = response.read()
         except Exception as exc:  # network/redirect/IO problems
             last_error = f"{url}: {type(exc).__name__}: {exc}"

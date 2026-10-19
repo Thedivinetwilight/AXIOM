@@ -889,9 +889,10 @@ class TestWindowsCompilerResolution:
         probe = module.PROBE_SCRIPT
         # A /D define and the x64compatible identifier are both needed by
         # packaging/installer.iss, so the probe must use them.
-        assert "ProbeValue" in probe
+        assert "AppVersion must be defined" in probe
         assert "x64compatible" in probe
         assert "#error" in probe
+        assert "Compression=lzma2" in probe
 
     def test_the_candidate_paths_include_every_known_install_location(self):
         import importlib.util
