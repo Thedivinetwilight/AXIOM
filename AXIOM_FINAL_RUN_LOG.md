@@ -215,9 +215,17 @@ remain skipped locally and are reported as such.
 
 The authoritative artifact gate is the GitHub workflow
 `.github/workflows/build-executable.yml`, which builds and runs `frozen_e2e` on
-Ubuntu, Windows and macOS. It is dispatched on this branch after the commit; the run
-link and per-OS artifact records are quoted in the completion message because they
-necessarily post-date the commit that contains this log.
+Ubuntu, Windows and macOS. The push-triggered run for the verified commit
+[#39262011293](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39262011293)
+completed **successfully**, but a push runs only the Ubuntu source-suite job.
+
+A `gh workflow run build-executable.yml --ref arena/107862ec-axiom` dispatch was
+attempted for the three-OS matrix and rejected by GitHub with
+`HTTP 403: Resource not accessible by integration` (the session token has no
+`actions:write`), so the packaging matrix and frozen gate were **not** run.
+
+Consequently no per-OS artifact record exists for this commit. This is an
+environment/permission limit, not a green packaging result.
 
 ## 9. Repository state checks
 

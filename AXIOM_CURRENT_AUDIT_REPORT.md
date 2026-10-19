@@ -86,10 +86,12 @@ is configured to gate:
 
 For the verified commit, the push-triggered run is
 [#39262011293](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39262011293).
-Only the Ubuntu source-suite job runs on a push; the three-OS packaging matrix
-requires `workflow_dispatch` or a tag. Its result and any artifact records are
-quoted in the completion message, because they post-date this commit. A green
-push run is **not** packaged-artifact evidence.
+Only the Ubuntu source-suite job runs on a push; it completed **successfully**
+for the verified commit. The three-OS packaging matrix requires
+`workflow_dispatch` or a tag, and the dispatch was rejected by GitHub with
+`HTTP 403: Resource not accessible by integration` (no `actions:write` on the
+session token). No per-OS artifact was produced, and a green push run is
+**not** packaged-artifact evidence.
 
 ## 5. Explicitly unverified / not claimed
 

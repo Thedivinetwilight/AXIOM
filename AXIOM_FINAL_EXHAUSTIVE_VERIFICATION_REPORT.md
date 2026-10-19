@@ -251,9 +251,12 @@ suite, packaging tests, full suite per OS, `build_exe.py --test` (frozen E2E on
 the actual artifact), build-identity assertion against `github.sha`, and
 artifact upload. A push-triggered run for the verified commit is
 [#39262011293](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39262011293);
-only the Ubuntu source-suite job runs on a push. The three-OS packaging matrix
-requires `workflow_dispatch` or a tag, and is **not** claimed as executed. The
-final run status is in the completion message.
+only the Ubuntu source-suite job runs on a push, and it **completed
+successfully** ([run summary](https://github.com/Thedivinetwilight/AXIOM/actions/runs/39262011293)).
+The three-OS packaging matrix requires `workflow_dispatch` or a tag; the
+dispatch was attempted and rejected (`HTTP 403: Resource not accessible by
+integration` — no `actions:write` on the session token), so it was **not**
+executed. No artifact record exists for this commit and none is claimed.
 
 ## 8. Repository and data safety
 
