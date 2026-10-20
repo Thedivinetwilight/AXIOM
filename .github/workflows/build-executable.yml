@@ -23,6 +23,12 @@ name: Build executable
 #                     duplicate-launch handling, external-database placement
 #                     and secret redaction.
 #
+#   5. uninstaller     on Windows, the standalone Arena-Uninstall.exe is built
+#                     and driven through packaging/uninstaller_e2e.py against
+#                     the ACTUAL binary (scan, cancel, confirmation, quarantine,
+#                     preservation, restore, locked files, plan/apply) before
+#                     it is uploaded (hard gate, Windows only).
+#
 # Any failure discards the artifact. No exceptions, no continue-on-error.
 
 on:
@@ -38,6 +44,13 @@ on:
     paths:
       - "packaging/**"
       - "build_exe.py"
+      # The standalone Deep Uninstaller is built and verified in this workflow.
+      - "uninstaller/**"
+      - "arena_uninstall.py"
+      - "build_uninstaller.py"
+      - "tests/test_arena_uninstaller_*.py"
+      - "tests/uninstaller_fixtures.py"
+      - "docs/ARENA_UNINSTALLER.md"
       - "arena.py"
       - "run.py"
       - "requirements.txt"
@@ -239,6 +252,16 @@ jobs:
         run: |
           python -m pytest -q --no-header tests/test_v310_frozen_e2e.py
 
+      - name: Build and verify the standalone uninstaller (hard gate, Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -o pipefail
+          python build_uninstaller.py --test 2>&1 | tee uninstaller-build-output.txt
+          ARENA_UNINSTALL_EXE=dist/Arena-Uninstall.exe \
+            python -m pytest -q --no-header tests/test_arena_uninstaller_exe.py \
+            2>&1 | tee uninstaller-exe-output.txt
+
       - name: Name the release asset per platform
         shell: bash
         run: |
@@ -285,6 +308,44 @@ jobs:
           print(f"sha256 {digest}")
           print(f"built from commit {record['commit']} at {record['built_at']}")
           PY
+
+      - name: Record the uninstaller artifact (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cp dist/Arena-Uninstall.exe release/Arena-Uninstall.exe
+          python - <<'PY'
+          import hashlib, json, pathlib
+          target = pathlib.Path("release") / "Arena-Uninstall.exe"
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          size_bytes = target.stat().st_size
+          pathlib.Path("SHA256SUMS-uninstaller-windows-x64.txt").write_text(
+              f"{digest}  {target.name}\n", encoding="utf-8")
+          record = {
+              "artifact": target.name,
+              "commit": "${{ github.sha }}",
+              "platform": "windows",
+              "size_bytes": size_bytes,
+              "sha256": digest,
+          }
+          record_path = pathlib.Path("release") / f"{target.name}.build-info.json"
+          record_path.write_text(json.dumps(record, indent=2) + "\n",
+                                 encoding="utf-8")
+          print(f"::notice title=Arena-Uninstall.exe SHA-256::{digest}")
+          print(f"::notice title=Arena-Uninstall.exe size (bytes)::{size_bytes}")
+          PY
+
+      - name: Upload the uninstaller artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-Uninstall-windows-x64
+          path: |
+            release/Arena-Uninstall.exe
+            release/Arena-Uninstall.exe.build-info.json
+            SHA256SUMS-uninstaller-windows-x64.txt
+          if-no-files-found: error
+          retention-days: 30
 
       - uses: actions/upload-artifact@v4
         with:
@@ -339,6 +400,18 @@ jobs:
           fail_on_unmatched_files: true
           allowUpdates: true
           prerelease: true
+
+      - name: Attach the uninstaller to the release (Windows only)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          allowUpdates: true
+          prerelease: true
+          files: |
+            release/Arena-Uninstall.exe
+            SHA256SUMS-uninstaller-windows-x64.txt
+            release/Arena-Uninstall.exe.build-info.json
+          fail_on_unmatched_files: true
 
       - name: Summarise the build
         if: always()

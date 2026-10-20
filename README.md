@@ -391,6 +391,27 @@ Use an installed newer Python if `py -3.11` is unavailable. If PowerShell activa
 
 `requirements.txt` uses compatible version ranges. `requirements-lock.txt` records the tested Linux environment's relevant packages for repeatability; it is not a promise of wheel availability on every platform. SQLite tables initialize automatically at first use.
 
+### Removing Arena (Windows)
+
+`Arena-Uninstall.exe` is a **standalone** removal and cleanup tool: it runs
+without Arena being installed, does not import the application, and ships as
+its own artifact from the executable-build workflow (and from tagged releases).
+
+```bat
+Arena-Uninstall.exe --mode deep --scan-only --json inventory.json   :: review only, changes nothing
+Arena-Uninstall.exe --apply inventory.json --confirm-delete DELETE  :: quarantine exactly what was reviewed
+```
+
+*Standard uninstall* removes the registration, the installer's shortcuts and
+the disposable parts of the install tree; *Deep clean* also scans every local
+fixed drive for duplicate executables, setup packages, extracted folders,
+caches and leftovers — including portable copies that were never installed.
+Trading history, logs, configuration, credentials, source repositories,
+development folders and research are preserved by default and each needs its
+own explicit `--include-…` option. Everything selected is quarantined with a
+manifest and can be restored; permanent deletions and failures are reported.
+Full guide: [`docs/ARENA_UNINSTALLER.md`](docs/ARENA_UNINSTALLER.md).
+
 ### Offline/lightweight core
 
 Once the project is present, these do not require third-party packages:

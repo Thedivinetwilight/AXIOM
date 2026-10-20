@@ -39,7 +39,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # source checkout by a user. tools/ and tests/ are excluded deliberately: they
 # never run on the operator's machine, and a scan that covers them would be
 # noise rather than a guard.
-SHIPPED_ROOTS = ("app", "run.py", "arena.py")
+# `uninstaller/` and its entry script run on the operator's Windows machine
+# too (as Arena-Uninstall.exe), so the same encoding rule applies to them.
+SHIPPED_ROOTS = ("app", "run.py", "arena.py", "uninstaller", "arena_uninstall.py")
 
 TEXT_MODE_MARKERS = ("w", "wt", "a", "at", "r", "rt", "r+", "w+", "x")
 BINARY_MODE_MARKERS = ("b", "rb", "wb", "ab", "r+b", "w+b", "xb")

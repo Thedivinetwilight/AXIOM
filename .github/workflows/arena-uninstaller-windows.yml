@@ -1,0 +1,152 @@
+name: Arena uninstaller (Windows)
+
+# Builds and verifies the standalone Arena-Uninstall.exe.
+#
+# This workflow is the dedicated gate for the Deep Uninstaller: it runs the
+# uninstaller suite on Windows, builds the actual executable, and then runs
+# packaging/uninstaller_e2e.py against THAT binary — scan, review, cancel,
+# wrong confirmation, confirmed quarantine, protected-data preservation,
+# restore, locked files, plan/apply and the tool's own copy.
+#
+# The artifact is uploaded only after every gate passed, and it is downloadable
+# from the run page without installing Arena (that is the point of the tool).
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "uninstaller/**"
+      - "arena_uninstall.py"
+      - "build_uninstaller.py"
+      - "packaging/uninstaller.spec"
+      - "packaging/uninstaller_e2e.py"
+      - "tests/test_arena_uninstaller_*.py"
+      - "tests/uninstaller_fixtures.py"
+      - "docs/ARENA_UNINSTALLER.md"
+      - ".github/workflows/arena-uninstaller-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-uninstaller:
+    name: Windows x64 uninstaller build and verification
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Uninstaller test suite on Windows (hard gate)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header \
+            tests/test_arena_uninstaller_detection.py \
+            tests/test_arena_uninstaller_safety.py \
+            tests/test_arena_uninstaller_cli.py \
+            tests/test_arena_uninstaller_exe.py \
+            2>&1 | tee uninstaller-tests.txt
+
+      - name: Build the uninstaller and verify it end-to-end (hard gate)
+        shell: bash
+        run: |
+          set -o pipefail
+          python build_uninstaller.py --test 2>&1 | tee uninstaller-build.txt
+
+      - name: Run the packaged-binary e2e through pytest
+        shell: bash
+        env:
+          ARENA_UNINSTALL_EXE: dist/Arena-Uninstall.exe
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header tests/test_arena_uninstaller_exe.py \
+            2>&1 | tee uninstaller-exe-tests.txt
+
+      - name: Verify the artifact identity, metadata and checksum
+        shell: pwsh
+        run: |
+          $binary = Resolve-Path "dist/Arena-Uninstall.exe"
+          $size = (Get-Item $binary).Length
+          if ($size -lt 200000) { throw "Arena-Uninstall.exe is unexpectedly small ($size bytes)" }
+          $info = (Get-Item $binary).VersionInfo
+          Write-Host "ProductName : $($info.ProductName)"
+          Write-Host "CompanyName : $($info.CompanyName)"
+          Write-Host "FileVersion : $($info.FileVersion)"
+          if ($info.ProductName -ne "AXIOM Arena Uninstall") {
+            throw "unexpected ProductName: $($info.ProductName)"
+          }
+          if ($info.CompanyName -ne "Thedivinetwilight") {
+            throw "unexpected CompanyName: $($info.CompanyName)"
+          }
+          $sha = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item $binary "release/Arena-Uninstall.exe"
+          $record = [ordered]@{
+            artifact  = "Arena-Uninstall.exe"
+            version   = $info.FileVersion
+            commit    = $env:GITHUB_SHA
+            platform  = "windows"
+            size_bytes = $size
+            sha256    = $sha
+          }
+          $record | ConvertTo-Json -Depth 4 | Set-Content "release/Arena-Uninstall.exe.build-info.json" -Encoding utf8
+          "$sha  Arena-Uninstall.exe" | Set-Content "SHA256SUMS-uninstaller-windows-x64.txt" -Encoding ascii
+          Write-Host "::notice title=Arena-Uninstall.exe SHA-256::$sha"
+          Write-Host "Arena-Uninstall.exe  $size bytes"
+          Write-Host "sha256 $sha"
+
+      - name: Prove the uninstaller runs without any Arena installation
+        shell: pwsh
+        run: |
+          # Copy just the executable into an empty directory and run it there:
+          # no checkout, no app package, no data directory.
+          $sandbox = Join-Path $env:RUNNER_TEMP "uninstaller-standalone"
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          Copy-Item "dist/Arena-Uninstall.exe" $sandbox
+          Push-Location $sandbox
+          $out = & ".\Arena-Uninstall.exe" --version 2>&1
+          $code = $LASTEXITCODE
+          $cats = & ".\Arena-Uninstall.exe" --list-categories 2>&1
+          Pop-Location
+          if ($code -ne 0) { throw "standalone run failed ($code): $out" }
+          if (($out -join "`n") -notmatch "Arena-Uninstall") { throw "no version banner" }
+          if (($cats -join "`n") -notmatch "trading-history") { throw "category list missing" }
+          Write-Host ($out -join "`n")
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uninstaller-failure-diagnostics-${{ github.run_number }}
+          path: |
+            uninstaller-tests.txt
+            uninstaller-build.txt
+            uninstaller-exe-tests.txt
+            build/uninstaller-e2e/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload the verified uninstaller
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arena-Uninstall-windows-x64
+          path: |
+            release/Arena-Uninstall.exe
+            release/Arena-Uninstall.exe.build-info.json
+            SHA256SUMS-uninstaller-windows-x64.txt
+          if-no-files-found: error
+          retention-days: 30
