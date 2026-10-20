@@ -35,6 +35,11 @@ from uninstaller.scanner import scan_drives
 from uninstaller.winapi import KnownPaths
 
 
+#: ``os.geteuid`` does not exist on Windows, so this must not be evaluated
+#: inside a decorator argument during collection.
+IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def inventory_for(world, mode="deep"):
     platform = fake_platform(world)
     return platform, build_inventory(
@@ -105,7 +110,7 @@ def test_reparse_point_detection_covers_symlinks(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission model")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
+@pytest.mark.skipif(IS_ROOT, reason="root ignores permissions")
 def test_unreadable_directory_is_reported_and_scan_continues(tmp_path):
     world = make_world(tmp_path)
     locked = world.root / "locked-area" / "AXIOM"

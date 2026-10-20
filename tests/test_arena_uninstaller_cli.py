@@ -20,6 +20,10 @@ from uninstaller.cli import main
 from uninstaller.constants import CONFIRMATION_PHRASE
 from uninstaller.winapi import KnownPaths
 
+#: ``os.geteuid`` does not exist on Windows, so this must not be evaluated
+#: inside a decorator argument during collection.
+IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = ROOT / "arena_uninstall.py"
 
@@ -369,7 +373,7 @@ def test_selected_registration_is_removed(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission model")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
+@pytest.mark.skipif(IS_ROOT, reason="root ignores permissions")
 def test_elevation_is_offered_only_when_the_scan_was_refused(tmp_path,
                                                              monkeypatch):
     from tests.uninstaller_fixtures import make_fake_install
@@ -396,7 +400,7 @@ def test_elevation_is_offered_only_when_the_scan_was_refused(tmp_path,
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission model")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
+@pytest.mark.skipif(IS_ROOT, reason="root ignores permissions")
 def test_no_elevation_flag_never_relaunches(tmp_path, monkeypatch):
     from tests.uninstaller_fixtures import make_fake_install
 

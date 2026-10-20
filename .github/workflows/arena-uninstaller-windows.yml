@@ -126,6 +126,32 @@ jobs:
           if (($cats -join "`n") -notmatch "trading-history") { throw "category list missing" }
           Write-Host ($out -join "`n")
 
+      - name: Report failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Annotations are readable through the GitHub API even when the raw
+          # log archive is not, so every gate reports its failure here.
+          for file in uninstaller-tests.txt uninstaller-build.txt uninstaller-exe-tests.txt; do
+            [ -f "$file" ] || continue
+            grep -E "^(FAILED|ERROR)|^E   |AssertionError|Traceback|Error:" "$file" \
+              | head -40 \
+              | while IFS= read -r line; do
+                  safe="${line//'%'/'%25'}"
+                  safe="${safe//$'\r'/'%0D'}"
+                  safe="${safe//$'\n'/'%0A'}"
+                  printf '::error title=Uninstaller gate (%s)::%s\n' "$file" "$safe"
+                done
+          done
+          if [ -f uninstaller-tests.txt ]; then
+            tail -n 40 uninstaller-tests.txt | while IFS= read -r line; do
+              safe="${line//'%'/'%25'}"
+              safe="${safe//$'\r'/'%0D'}"
+              safe="${safe//$'\n'/'%0A'}"
+              printf '::error title=Uninstaller tests tail::%s\n' "$safe"
+            done
+          fi
+
       - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
