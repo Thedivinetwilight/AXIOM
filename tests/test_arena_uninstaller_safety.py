@@ -548,3 +548,21 @@ def test_source_checkout_removed_only_with_explicit_include(tmp_path):
                                    world.tool_home, RunOptions())
     assert not repo.exists()
     assert any(r.path == str(repo) for r in report.results)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MoveFileExW is Windows-only")
+def test_defer_delete_renames_and_schedules_the_running_image(tmp_path):
+    from uninstaller.winapi import Platform
+
+    platform = Platform(registry=None, environ={})
+    target = tmp_path / "Arena-Uninstall.exe"
+    target.write_bytes(b"MZ" + b"\0" * 64)
+    ok, detail = platform.defer_delete(target)
+    renamed = tmp_path / "Arena-Uninstall.exe.arena-uninstall-pending"
+    assert detail
+    if ok:
+        assert "scheduled" in detail
+        assert not target.exists()
+        assert renamed.exists()
+    else:  # a non-administrator cannot write the pending-rename list
+        assert "failed" in detail

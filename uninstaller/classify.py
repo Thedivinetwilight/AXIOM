@@ -380,6 +380,12 @@ def classify_tree_root(root: Path, *, known_install: bool,
                 reasons + ["tree: Arena source checkout markers "
                            "(arena.py/app + .git|pyproject.toml|tests/)"])
 
+    if root.name.lower().startswith("_mei"):
+        # A PyInstaller one-file extraction directory: Arena's own temporary
+        # unpack, left behind when a launch was killed.
+        return (CATEGORY_CACHE, CONFIDENCE_CONFIRMED,
+                reasons + ["tree: PyInstaller extraction directory "
+                           "(_MEIxxxx) left behind"])
     if _is_models_cache(root):
         return (CATEGORY_CACHE, CONFIDENCE_CONFIRMED,
                 reasons + ["tree: Kronos model cache (models/kronos)"])

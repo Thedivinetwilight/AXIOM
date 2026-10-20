@@ -410,3 +410,18 @@ def test_merged_env_removes_case_variants(tmp_path):
         assert merged[variants[0]] == expected
     # The real machine's value is replaced, not shadowed.
     assert env["PROGRAMFILES"] != merged["ProgramFiles"]
+
+
+def test_pyinstaller_extraction_directory_is_a_cache(tmp_path):
+    from uninstaller.classify import classify_tree_root
+
+    root = tmp_path / "_MEI123456"
+    root.mkdir()
+    build_pe(root / "Arena.exe")
+    evidence = Evidence()
+    evidence.metadata = "ProductName='AXIOM Arena'"
+    category, confidence, reasons = classify_tree_root(
+        root, known_install=False, evidence=evidence)
+    assert category == "cache"
+    assert confidence == CONFIDENCE_CONFIRMED
+    assert any("_MEI" in reason for reason in reasons)

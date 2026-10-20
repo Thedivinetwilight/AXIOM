@@ -105,6 +105,7 @@ jobs:
           $record | ConvertTo-Json -Depth 4 | Set-Content "release/Arena-Uninstall.exe.build-info.json" -Encoding utf8
           "$sha  Arena-Uninstall.exe" | Set-Content "SHA256SUMS-uninstaller-windows-x64.txt" -Encoding ascii
           Write-Host "::notice title=Arena-Uninstall.exe SHA-256::$sha"
+          Write-Host "::notice title=Arena-Uninstall.exe size (bytes)::$size"
           Write-Host "Arena-Uninstall.exe  $size bytes"
           Write-Host "sha256 $sha"
 
