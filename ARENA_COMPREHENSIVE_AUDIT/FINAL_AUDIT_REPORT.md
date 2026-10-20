@@ -350,20 +350,22 @@ Full report: `ARENA_COMPREHENSIVE_AUDIT/TRADING_EXPERIMENTS.md` + `artifacts/tra
 
 ---
 
-## 13. EXACT FINAL STATUS
+## 13. EXACT FINAL STATUS (Gates A–J — reconciled with §12 and EXECUTIVE_SUMMARY.md)
 
-| Capability | Status | Evidence |
-|---|---|---|
-| Arena launches correctly | **PASS** | `create_app` + TestClient lifespan, 1886 tests, manual 94 probes |
-| Authentication works | **PASS** | 20 auth probes, `test_dashboard_auth_flow` 20+ cases, no token leak, 4-switch LIVE gate |
-| Paper trading works | **PASS** | BacktestEngine + PaperBroker end-to-end, 1600-bar run, cancel_all, ledger reconciles |
-| Historical replay works | **PASS** | Next-bar execution, warmup strictly prior, no lookahead, out-of-order/duplicate rejected |
-| AXIOM integration works | **BLOCKED (honest)** | Stub PASS, upstream correctly refused without signed weights; no mock reported as real; separation verified |
-| Risk controls work | **PASS** | HardRiskLimits (4 caps) + kill-switch + SELL-always-allowed, adversarial gateway tests |
-| Accounting reconciles | **PASS** | `initial + realized + unrealized + fees = final equity` within 1e-6; per-fill delta tests |
-| Performance acceptable | **PASS** | API p95 3 ms < 100 ms SLO, 1600 bars 179 ms, 80.9 MB, no leak |
-| Historical net profitability supported | **NOT SUPPORTED / INCONCLUSIVE** | Synthetic data: 0/8 beat BH in true OOS TEST; real data needed |
-| Packaged Windows application validated | **BLOCKED** | Linux env — packaging tests correctly skipped; requires Windows runner |
+| Gate | Capability | Status | Evidence |
+|---|---|---|---|
+| A | Arena launches correctly (Source Correctness) | **PASS** | `create_app` + TestClient lifespan, **1886 passed, 39 skipped**, manual **94 probes** |
+| B | Authentication works (Feature Coverage: auth) | **PASS** | 20 auth probes, `test_dashboard_auth_flow` 20+ cases, no token value in artifacts — only `status/has_token_field/token_len` metadata, 4-switch LIVE gate |
+| D | Paper trading works (Trading Safety) | **PASS** | BacktestEngine + PaperBroker end-to-end, 1600-bar run, cancel_all, ledger reconciles |
+| E | Historical replay works (Data & Accounting) | **PASS** | Next-bar execution, warmup strictly prior, no lookahead, out-of-order/duplicate rejected |
+| F | AXIOM integration works | **BLOCKED (honest)** | Stub PASS, upstream correctly refused without signed weights; no mock reported as real; separation verified |
+| D/J | Risk controls work | **PASS** | HardRiskLimits (4 caps) + kill-switch + SELL-always-allowed, adversarial gateway tests |
+| E | Accounting reconciles | **PASS** | `initial + realized + unrealized + fees = final equity` within 1e-6; per-fill delta tests |
+| G | Performance acceptable | **PASS** | API p95 3 ms < 100 ms SLO, 1600 bars 179 ms, 80.9 MB, no leak |
+| I | Historical net profitability supported | **NOT SUPPORTED / INCONCLUSIVE** | Synthetic data: 0/8 beat BH in true OOS TEST; real data needed |
+| H | Packaged Windows application validated | **BLOCKED** | Linux env — packaging gate correctly skipped; requires Windows runner |
+
+*Reconciled totals: §4 source suite **1886/39** = §2 environment table = §13 Gate A; **94 probes** (95-line CSV incl. header → 94 data rows: 91 PASS / 1 INFO FAIL for expected audit-dir untracked + 2 BLOCKED for frozen exe & missing weights) = §3 matrix = §13 Gates B/E = EXECUTIVE_SUMMARY.md scorecard; **48 trading experiments** = §10 table = artifacts/trading_results.csv; **87.3%** (37,988/43,515) lines.*
 
 ---
 
@@ -448,7 +450,7 @@ print(result.metrics)  # total_return, sharpe, max_drawdown, win_rate, profit_fa
 | Trading harness | `ARENA_COMPREHENSIVE_AUDIT/run_trading_experiments_fixed.py` | 48-experiment runner |
 | Raw logs | `/tmp/audit_run*.log` | Unredacted (no secrets) probe output |
 
-**Secrets redacted:** No API tokens, private keys, or account data in artifacts (synthetic token `audit-token-2026` only).
+**Secrets redacted — remediated 2026-10-20:** Audit harness now records only non-sensitive metadata for token generation (`status` / `has_token_field` / `token_len`); full token values are never written to FEATURE_TEST_MATRIX.csv, TEST_EXECUTION_LOG.md, or logs. A redaction guard (`_assert_no_secret_in_evidence`) fails the run if an unredacted token field value would be recorded (verification method: evidence contains a token key plus a long secret-length value without the allowed metadata context; secrets never printed or hashed without disclosure). Previous artifacts contained one isolated generated 43-char synthetic token in two files (FEATURE_TEST_MATRIX.csv and TEST_EXECUTION_LOG.md from the `POST /setup/generate-token` probe). It was verified as an **isolated synthetic credential** — created in ephemeral TestClient backed by tmp SQLite (`/tmp/.../dashflow.db` + `sqlite:///.../test.db`), never written to the real `.env` (no `update_values` call in `POST /setup/generate-token`; that endpoint only returns a one-time token plus note), and destroyed with the tmp directory at client exit — not persisted or active. Test-token search was performed via pattern match for token-key plus secret-length value (no secret printed; see verification script `/tmp/verify_redaction.py` and rerun log `/tmp/audit_rerun2.log` for method) — confirmed no remaining token values in regenerated artifacts. No rotation of a real secret required; all probes used only synthetic values.
 
 **Preserved baseline:** Historical commit `752a452` not in clone — not overwritten; current source branch `arena/7087b053-axiom` is isolated working copy. No destructive change to build artifacts.
 

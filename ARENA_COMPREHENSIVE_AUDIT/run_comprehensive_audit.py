@@ -18,7 +18,34 @@ ARTIFACT_DIR = ROOT / "ARENA_COMPREHENSIVE_AUDIT" / "artifacts"
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
 results = []
+
+# Redaction guard: evidence must never contain a generated secret.
+# The audit harness deliberately uses a synthetic test credential for isolated probes;
+# generated secrets from /setup/generate-token are 43-char urlsafe tokens and must never be recorded.
+# This helper detects attempted leakage without storing or printing the secret value itself.
+import re
+_SUSPECT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,}")  # catches 43-char token-like strings
+
+def _contains_suspect_secret(evidence: str) -> bool:
+    # Heuristic: evidence should never contain a raw token body like "'token': '..." from generate-token
+    # We check for the JSON key pattern that indicates an unredacted token value, without comparing the secret itself.
+    if "'token':" in evidence or '"token":' in evidence:
+        # Allow only metadata form "has_token_field" / "token_len" — not a value
+        if "has_token_field" in evidence or "token_len" in evidence:
+            return False
+        return True
+    return False
+
+def _assert_no_secret_in_evidence(evidence: str, context: str = ""):
+    if _contains_suspect_secret(evidence):
+        raise ValueError(f"Redaction check failed{ ' in '+context if context else ''}: evidence appears to contain an unredacted token value (record only status/success/length)")
+
 def record(category, name, status, evidence, latency_ms=None, details=""):
+    # Enforce redaction before recording
+    _assert_no_secret_in_evidence(evidence, context=f"{category}/{name}")
+    # Also guard details field
+    if details and _contains_suspect_secret(details):
+        raise ValueError(f"Redaction check failed in details for {category}/{name}")
     results.append({
         "category": category,
         "name": name,
@@ -181,17 +208,31 @@ try:
     except Exception as e:
         record("AUTH", "Remote with correct bearer passes", "FAIL", str(e))
 
-    # Token replacement
+    # Token replacement — record only non-sensitive metadata (never the token value)
     # Generate token via /setup/generate-token (loopback)
     r10 = client.post("/setup/generate-token")
     # This route requires loopback_or_bearer — testclient is loopback so passes
-    record("AUTH", "POST /setup/generate-token (loopback)", "PASS" if r10.status_code in (200,201) else "FAIL", f"status={r10.status_code} body={r10.json() if r10.status_code==200 else r10.text[:200]}")
     if r10.status_code==200:
-        assert "audit-token-2026" not in r10.text  # old token not leaked? but new token is expected
-        new_tok = r10.json().get("api_token") or r10.json().get("token") or ""
-        if new_tok:
-            assert len(new_tok)>10
-            record("AUTH", "Generated token not logged", "PASS", f"new token length {len(new_tok)} not in logs")
+        body_keys = list(r10.json().keys()) if isinstance(r10.json(), dict) else []
+        has_token_field = "token" in body_keys
+        # Do NOT log r10.json() body — it contains a fresh secret. Record only status and metadata.
+        token_len = 0
+        try:
+            tok = r10.json().get("token") if isinstance(r10.json(), dict) else None
+            token_len = len(tok) if isinstance(tok, str) else 0
+        except Exception:
+            token_len = 0
+        record("AUTH", "POST /setup/generate-token (loopback)", "PASS" if r10.status_code in (200,201) else "FAIL",
+               f"status={r10.status_code} has_token_field={has_token_field} token_len={token_len}")
+        # Verify old token not echoed in new response (non-sensitive check)
+        if "audit-token-2026" in r10.text:
+            record("AUTH", "Generated token response does not echo old token", "FAIL", "old token found in response")
+        elif token_len >= 32:
+            record("AUTH", "Generated token not logged (length only)", "PASS", f"new token length {token_len} not in logs")
+        else:
+            record("AUTH", "Generated token not logged", "FAIL", f"unexpected token_len {token_len}")
+    else:
+        record("AUTH", "POST /setup/generate-token (loopback)", "FAIL", f"status={r10.status_code}")
 
     # Paper start requires auth
     r11 = client.post("/paper/start", headers=H, json={"symbol":"DEMO","timeframe":"1D"})

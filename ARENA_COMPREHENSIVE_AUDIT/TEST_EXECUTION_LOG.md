@@ -1,8 +1,8 @@
 # Test Execution Log
 
-Generated: 2026-10-19T19:25:38.677009+00:00
+Generated: 2026-10-20T03:31:34.695580+00:00
 
-Commit: 4317e3a9f130db3f7fd03db53e00bdf66ac79e9f
+Commit: b9437dd43d1a1f3205d145ece4497a76d0d4a9b5
 Branch: arena/7087b053-axiom
 Version: 3.2.4
 
@@ -10,15 +10,15 @@ Total probes: 94
 
 | Category | Name | Status | Latency ms | Evidence |
 |---|---|---|---|---|
-| BASELINE | Commit matches expected 4317e3a | PASS |  | commit=4317e3a9f130db3f7fd03db53e00bdf66ac79e9f branch=arena/7087b053-axiom version=3.2.4 build_info={'version': '3.2.4' |
+| BASELINE | Commit matches expected 4317e3a | FAIL |  | commit=b9437dd43d1a1f3205d145ece4497a76d0d4a9b5 branch=arena/7087b053-axiom version=3.2.4 build_info={'version': '3.2.4' |
 | BASELINE | Working tree clean | FAIL |  | porcelain empty=False |
 | BASELINE | Python version | PASS |  | 3.11.2 (main, Apr  8 2026, 01:58:00) [GCC 12.2.0] |
 | BASELINE | Known-good tree availability | BLOCKED |  | Commit 752a452 not in clone — historical baseline treated as reference only, not present |
 | BASELINE | Windows executable available | BLOCKED |  | Linux sandbox — frozen exe not built; test_v310_frozen_e2e correctly SKIPPED |
 | BASELINE | Test suite baseline 1886/39 | PASS |  | 1886 passed, 39 skipped confirmed in previous run |
-| AUTH | GET /health public without token | PASS | 6.88 | status=200 body={'status': 'ok', 'version': '3.2.4', 'mode': 'PAPER', 'live_trading': False, 'broker': 'LOCAL_PAPER', 'r |
+| AUTH | GET /health public without token | PASS | 6.26 | status=200 body={'status': 'ok', 'version': '3.2.4', 'mode': 'PAPER', 'live_trading': False, 'broker': 'LOCAL_PAPER', 'r |
 | AUTH | Health truthfulness (PAPER) | PASS |  | broker=LOCAL_PAPER live=False real_routing=SIMULATED_LOCAL_PAPER |
-| AUTH | Authenticated dashboard/data 200 | PASS | 15.63 | status=200 |
+| AUTH | Authenticated dashboard/data 200 | PASS | 13.95 | status=200 |
 | AUTH | Unauthenticated dashboard/data 401 | PASS |  | status=401 detail=Invalid or missing bearer token |
 | AUTH | Invalid token 401 | PASS |  | status=401 |
 | AUTH | Protected /api/v2/overview with token | PASS |  | status=200 |
@@ -30,8 +30,8 @@ Total probes: 94
 | AUTH | Loopback without bearer passes | PASS |  | 127.0.0.1 allowed |
 | AUTH | Remote without bearer blocked | PASS |  | status=401 |
 | AUTH | Remote with correct bearer passes | PASS |  | correct token accepted |
-| AUTH | POST /setup/generate-token (loopback) | PASS |  | status=200 body={'token': 'RPh-nuvqaPEaGG2IcF9cvCvpl9zzRIPLdj8jo9kYrPQ', 'note': 'Stored in your browser session only un |
-| AUTH | Generated token not logged | PASS |  | new token length 43 not in logs |
+| AUTH | POST /setup/generate-token (loopback) | PASS |  | status=200 has_token_field=True token_len=43 |
+| AUTH | Generated token not logged (length only) | PASS |  | new token length 43 not in logs |
 | AUTH | Paper start unauthenticated blocked | PASS |  | status=401 |
 | AUTH | GET /api/wizard/preflight loopback | PASS |  | status=200 keys=['checks', 'ready'] |
 | AUTH | POST /api/credentials/reveal exists | PASS |  | status=200 |
@@ -41,7 +41,7 @@ Total probes: 94
 | API | Large payload handled | PASS |  | status=422 |
 | API | Concurrent /health 10x | PASS |  | codes=[200, 200, 200, 200, 200, 200, 200, 200, 200, 200] |
 | API | Paper sub-endpoints consistent | PASS |  | account=200 positions=200 orders=200 trades=200 |
-| API | Latency header present | PASS |  | header=0.70 |
+| API | Latency header present | PASS |  | header=0.64 |
 | API | Auth bypass /dashboard/data blocked | PASS |  | status=401 |
 | API | Auth bypass /paper/status blocked | PASS |  | status=401 |
 | API | Auth bypass /api/v2/overview blocked | PASS |  | status=401 |
@@ -80,12 +80,12 @@ Total probes: 94
 | SECURITY | Path traversal blocked | PASS |  | status=404 |
 | SECURITY | SQL injection payload handled | PASS |  | status=422 |
 | SECURITY | Default is PAPER not LIVE | PASS |  | health={'status': 'ok', 'version': '3.2.4', 'mode': 'PAPER', 'live_trading': False, 'broker': 'LOCAL_PAPER', 'real_order |
-| SECURITY | Dependency fastapi version | PASS |  | version=0.149.0 |
+| SECURITY | Dependency fastapi version | PASS |  | version=0.150.0 |
 | SECURITY | Dependency pydantic version | PASS |  | version=2.14.1 |
 | SECURITY | Dependency uvicorn version | PASS |  | version=0.54.0 |
 | SECURITY | Dependency httpx version | PASS |  | version=0.28.1 |
 | SECURITY | Dependency protobuf version | PASS |  | version=7.36.2 |
-| SECURITY | Dependency certifi version | PASS |  | version=2026.10.18 |
+| SECURITY | Dependency certifi version | PASS |  | version=2026.10.19 |
 | AXIOM | AXIOM modules import | PASS |  | version=0.1.0 |
 | AXIOM | Kronos disabled config -> DISABLED | PASS |  | state=KronosState.DISABLED |
 | AXIOM | Kronos stub without real weights state | PASS |  | state=KronosState.READY msg=stub:test loaded on cpu |
@@ -96,11 +96,11 @@ Total probes: 94
 | LEAKAGE | Warmup time-order validation | PASS |  | raised: Warmup must be same-symbol and strictly prior to evaluation |
 | LEAKAGE | No future leakage via history param | PASS |  | ran 20 bars without leakage |
 | LEAKAGE | Next-bar execution (no same-candle fill) | PASS |  | BacktestEngine uses broker.on_bar + handle_signal; fills occur on subsequent bar per PaperBroker docs |
-| PERF | Data validation 100 candles x100 | PASS | 0.23 | avg=0.23ms |
-| PERF | SMA(20) 500 closes x100 | PASS | 0.21 | avg=0.21ms |
+| PERF | Data validation 100 candles x100 | PASS | 0.22 | avg=0.22ms |
+| PERF | SMA(20) 500 closes x100 | PASS | 0.18 | avg=0.18ms |
 | PERF | Strategy eval x100 | PASS | 0.01 | avg=0.01ms |
-| PERF | Full backtest 500 bars | PASS | 178.59 | 178.59ms for 1600 bars |
-| PERF | Portfolio apply_fill x2000 | PASS | 0.0 | avg per fill 4.5us total=9.04ms |
-| PERF | API /health 50 requests | PASS | 2.51 | p50=2.51ms p95=2.98ms mean=2.55ms max=4.07ms |
-| PERF | API /paper/status auth 30 req | PASS | 2.48 | p50=2.48ms p95=2.86ms mean=2.90ms |
-| PERF | Memory usage after tests | PASS |  | 80.9 MB RSS |
+| PERF | Full backtest 500 bars | PASS | 169.79 | 169.79ms for 1600 bars |
+| PERF | Portfolio apply_fill x2000 | PASS | 0.0 | avg per fill 4.5us total=8.94ms |
+| PERF | API /health 50 requests | PASS | 2.9 | p50=2.90ms p95=3.43ms mean=3.01ms max=4.82ms |
+| PERF | API /paper/status auth 30 req | PASS | 3.12 | p50=3.12ms p95=3.53ms mean=3.53ms |
+| PERF | Memory usage after tests | PASS |  | 80.7 MB RSS |
