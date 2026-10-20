@@ -53,8 +53,8 @@ def _world(tmp: Path):
 
 
 def _env_for(world) -> dict[str, str]:
-    env = dict(os.environ)
-    env.update(world.env)
+    from tests.uninstaller_fixtures import merged_env
+    env = merged_env(world)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     env["PYTHONIOENCODING"] = "utf-8"

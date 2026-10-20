@@ -31,7 +31,7 @@ from uninstaller.model import ActionReport, Inventory, Issue
 from uninstaller.protect import ProtectionPolicy
 from uninstaller.quarantine import Quarantine
 from uninstaller.scanner import mark_duplicates, scan_drives, scan_known_paths, scan_registry
-from uninstaller.winapi import KnownPaths, Platform
+from uninstaller.winapi import KnownPaths, Platform, env_get
 
 
 def default_tool_home(platform: Platform) -> Path:
@@ -42,15 +42,15 @@ def default_tool_home(platform: Platform) -> Path:
     the operator selects.
     """
     env = platform.environ
-    explicit = (env.get("ARENA_UNINSTALL_HOME") or "").strip()
+    explicit = env_get(env, "ARENA_UNINSTALL_HOME").strip()
     if explicit:
         return Path(explicit).expanduser()
     if os.name == "nt":
-        base = env.get("LOCALAPPDATA") or env.get("APPDATA")
+        base = env_get(env, "LOCALAPPDATA") or env_get(env, "APPDATA")
         if base:
             return Path(base) / DEFAULT_TOOL_DIR_NAME
         return Path.home() / "AppData" / "Local" / DEFAULT_TOOL_DIR_NAME
-    xdg = env.get("XDG_DATA_HOME")
+    xdg = env_get(env, "XDG_DATA_HOME")
     if xdg:
         return Path(xdg) / DEFAULT_TOOL_DIR_NAME
     return Path.home() / ".local" / "share" / DEFAULT_TOOL_DIR_NAME

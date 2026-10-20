@@ -26,15 +26,24 @@ if VERSION_FILE.exists():
 elif os.environ.get("ARENA_UNINSTALL_VERSION_FILE"):
     version_arg = os.environ["ARENA_UNINSTALL_VERSION_FILE"]
 
+# Only two kinds of exclusion are listed:
+#
+#   1. the application itself — the uninstaller must never bundle what it is
+#      supposed to be able to remove;
+#   2. heavy third-party packages PyInstaller might pick up from the build
+#      environment, which an uninstaller has no use for.
+#
+# Standard-library modules are deliberately NOT excluded: saving a few hundred
+# kilobytes is not worth a binary that fails on a machine whose stdlib layout
+# differs from the build machine's. tkinter is the one exception — a console
+# tool cannot use a GUI toolkit.
 excludes = [
     "app", "desktop", "axiom", "scripts", "tools", "tests",
-    "fastapi", "starlette", "uvicorn", "pydantic", "httpx", "httpcore",
-    "anyio", "websockets", "protobuf", "dotenv", "numpy", "pandas",
-    "torch", "PySide6", "PyQt5", "PyQt6", "matplotlib", "scipy",
-    "setuptools", "pip", "wheel", "pytest", "_pytest",
-    "tkinter", "unittest", "pydoc", "doctest", "email", "xml", "xmlrpc",
-    "lib2to3", "multiprocessing", "asyncio", "concurrent", "sqlite3",
-    "curses", "distutils", "ensurepip", "venv", "zipapp",
+    "fastapi", "starlette", "uvicorn", "pydantic", "pydantic_core",
+    "httpx", "httpcore", "anyio", "websockets", "protobuf", "dotenv",
+    "numpy", "pandas", "torch", "PySide6", "PyQt5", "PyQt6",
+    "matplotlib", "scipy", "setuptools", "pip", "wheel", "pytest",
+    "_pytest", "tkinter",
 ]
 
 a = Analysis(

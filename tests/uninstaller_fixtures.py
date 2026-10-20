@@ -12,6 +12,7 @@ No third-party packages and no compiler: pure ``struct``.
 from __future__ import annotations
 
 import json
+import os
 import struct
 from pathlib import Path
 
@@ -302,6 +303,24 @@ def make_world(tmp: Path, *, install: bool = True, home: bool = True,
         "ARENA_UNINSTALL_HOME": str(world.tool_home),
     }
     return world
+
+
+def merged_env(world: World) -> dict[str, str]:
+    """The current environment with the fixture's locations applied.
+
+    Windows treats environment names case-insensitively, so replacing a value
+    must REMOVE any case-variant of the key first — otherwise the real
+    ``PROGRAMFILES`` can shadow the fixture's ``ProgramFiles`` and the tool
+    silently scans the wrong machine.
+    """
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        env[key] = value
+    for key, value in world.env.items():
+        for existing in [k for k in env if k.upper() == key.upper()]:
+            del env[existing]
+        env[key] = value
+    return env
 
 
 def fake_platform(world: World, *, entries=None, admin: bool = False,

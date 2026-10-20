@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.uninstaller_fixtures import fake_platform, make_world
+from tests.uninstaller_fixtures import fake_platform, make_world, merged_env
 from uninstaller.cli import main
 from uninstaller.constants import CONFIRMATION_PHRASE
 from uninstaller.winapi import KnownPaths
@@ -456,12 +456,15 @@ def test_entry_point_works_without_arena_installed(tmp_path):
     shutil.copytree(ROOT / "uninstaller", box / "uninstaller")
     shutil.copy2(ENTRY, box / "arena_uninstall.py")
     world = make_world(tmp_path / "machine")
-    env = dict(os.environ)
-    env.update(world.env)
+    env = merged_env(world)
     env["PYTHONPATH"] = str(box)
     out = subprocess.run([sys.executable, str(box / "arena_uninstall.py"),
                           "--mode", "deep", "--scan-path", str(world.root),
                           "--no-drives", "--scan-only"],
                          cwd=str(box), capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr
+    # The known application location must be recognised even though the tree
+    # was reached from the environment, not from a drive walk.
     assert "installation" in out.stdout
+    assert "runtime-home" in out.stdout
+    assert "trading-history" in out.stdout

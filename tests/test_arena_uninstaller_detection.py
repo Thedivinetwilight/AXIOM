@@ -370,3 +370,43 @@ def test_dedupe_keeps_the_richer_record(tmp_path):
     dedupe(inventory)
     assert len(inventory.matches) == 1
     assert inventory.matches[0].category == CATEGORY_INSTALLATION
+
+
+# ---------------------------------------------------------------------------
+# Windows environments are case-insensitive
+# ---------------------------------------------------------------------------
+
+
+def test_known_paths_are_read_case_insensitively(tmp_path):
+    from uninstaller.winapi import KnownPaths
+
+    env = {
+        "PROGRAMFILES": r"C:\PF",
+        "PROGRAMFILES(X86)": r"C:\PF86",
+        "LOCALAPPDATA": r"C:\LA",
+        "APPDATA": r"C:\RA",
+        "USERPROFILE": r"C:\Users\me",
+        "PUBLIC": r"C:\PublicData",
+        "TEMP": r"C:\Temp",
+    }
+    known = KnownPaths.from_env(env)
+    candidates = {str(p).replace("\\", "/") for p in known.install_candidates()}
+    assert "C:/PF/AXIOM" in candidates
+    assert known.local_appdata is not None
+    assert str(known.local_appdata).replace("\\", "/") == "C:/LA"
+    assert known.models_cache() is not None
+
+
+def test_merged_env_removes_case_variants(tmp_path):
+    from tests.uninstaller_fixtures import merged_env
+
+    world = make_world(tmp_path)
+    env = {"PROGRAMFILES": "C:\\Program Files", "LOCALAPPDATA": "C:\\La"}
+    merged = merged_env(world)
+    for key in ("PROGRAMFILES", "LOCALAPPDATA"):
+        variants = [k for k in merged if k.upper() == key]
+        assert len(variants) == 1, f"case-variant collision for {key}: {variants}"
+        expected = next(v for k, v in world.env.items() if k.upper() == key)
+        assert merged[variants[0]] == expected
+    # The real machine's value is replaced, not shadowed.
+    assert env["PROGRAMFILES"] != merged["ProgramFiles"]

@@ -400,6 +400,22 @@ def _quote(arg: str) -> str:
 # Well-known locations (env-derived so tests can point them at a sandbox)
 # ---------------------------------------------------------------------------
 
+def env_get(environ: dict[str, str], name: str) -> str:
+    """Read an environment variable regardless of key casing.
+
+    Windows environment blocks are case-insensitive, so a merged dict can
+    legitimately contain both ``PROGRAMFILES`` and ``ProgramFiles``. Picking
+    the wrong one silently changes where the uninstaller looks.
+    """
+    if name in environ:
+        return environ[name]
+    wanted = name.upper()
+    for key, value in environ.items():
+        if key.upper() == wanted:
+            return value
+    return ""
+
+
 @dataclass
 class KnownPaths:
     """Product-relevant well-known directories on this machine."""
@@ -416,18 +432,23 @@ class KnownPaths:
         env = environ if environ is not None else dict(os.environ)
         program_files = []
         for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
-            value = env.get(var)
+            value = env_get(env, var)
             if value:
                 path = Path(value)
                 if path not in program_files:
                     program_files.append(path)
+        local = env_get(env, "LOCALAPPDATA")
+        roaming = env_get(env, "APPDATA")
+        profile = env_get(env, "USERPROFILE")
+        public = env_get(env, "PUBLIC")
+        temp = env_get(env, "TEMP") or env_get(env, "TMP")
         return cls(
             program_files=program_files,
-            local_appdata=Path(env["LOCALAPPDATA"]) if env.get("LOCALAPPDATA") else None,
-            roaming_appdata=Path(env["APPDATA"]) if env.get("APPDATA") else None,
-            user_profile=Path(env["USERPROFILE"]) if env.get("USERPROFILE") else None,
-            public=Path(env["PUBLIC"]) if env.get("PUBLIC") else None,
-            temp=Path(env["TEMP"] or env["TMP"]) if (env.get("TEMP") or env.get("TMP")) else None,
+            local_appdata=Path(local) if local else None,
+            roaming_appdata=Path(roaming) if roaming else None,
+            user_profile=Path(profile) if profile else None,
+            public=Path(public) if public else None,
+            temp=Path(temp) if temp else None,
         )
 
     def install_candidates(self) -> list[Path]:
