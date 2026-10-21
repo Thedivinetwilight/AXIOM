@@ -119,7 +119,8 @@ def smoke_test(artifact: Path) -> bool:
     frontend JavaScript with a real parser, drives the real wizard button flow
     (start paper -> replay -> preflight -> START PAPER TRADING) against the
     running build, verifies simulated executions, restart recovery and
-    duplicate-launch handling, and checks that no secret reaches the logs.
+    duplicate-launch handling, checks the default Upstox-key startup in a
+    LOCAL_PAPER-configured frozen process, and ensures no live orders occur.
 
     Loaded by path: ``packaging/`` must NOT be a Python package, because the
     ``packaging`` name belongs to the PyPI library PyInstaller itself imports.
@@ -153,7 +154,15 @@ def smoke_test(artifact: Path) -> bool:
         print("\n  FAILED PAPER-RECOVERY CHECKS:")
         for entry in recovery_failed:
             print(f"    - {entry['name']}: {entry['detail']}")
-    return result["ok"] and recovery["ok"]
+
+    upstox_start = module.run_frozen_upstox_start_e2e(
+        artifact, ROOT / "build" / "upstox-start-e2e-workdir")
+    upstox_failed = [r for r in upstox_start["results"] if not r["ok"]]
+    if upstox_failed:
+        print("\n  FAILED UPSTOX-START CHECKS:")
+        for entry in upstox_failed:
+            print(f"    - {entry['name']}: {entry['detail']}")
+    return result["ok"] and recovery["ok"] and upstox_start["ok"]
 
 
 def main() -> int:
@@ -176,7 +185,8 @@ def main() -> int:
         print()
         if ok:
             print("  SMOKE TEST PASSED — the executable serves the interface,")
-            print("  creates its own data directory and writes its database there.")
+            print("  starts paper safely for replay and the default Upstox key,")
+            print("  and creates its database in the external user-data directory.")
         else:
             print("  SMOKE TEST FAILED — do not ship this build.")
         return 0 if ok else 1

@@ -673,6 +673,118 @@ def _get_json(base: str, path: str, token: str | None = None):
         return 0, {}
 
 
+def run_frozen_upstox_start_e2e(artifact: Path, workdir: Path,
+                                 *, verbose: bool = True) -> dict:
+    """Drive the actual frozen executable through Upstox-key paper startup.
+
+    The isolated config uses the wizard's default provider key and a local,
+    deliberately unreachable HTTP authorize URL. This exercises key
+    normalization, PaperStartRequest validation, LOCAL_PAPER startup and stop
+    in the packaged process without contacting Upstox or placing orders.
+    The market-data connection itself is intentionally not claimed here; no
+    real user credential is available to the release test.
+    """
+    workdir = Path(workdir)
+    if workdir.exists():
+        shutil.rmtree(workdir, ignore_errors=True)
+    home = workdir / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    workdir.mkdir(parents=True, exist_ok=True)
+    artifact = Path(artifact).resolve()
+    token = "arena-frozen-upstox-start-test-token"
+    key = "NSE_EQ|INE002A01018"
+    symbol = "NSE_EQ-INE002A01018"
+    port = _free_port()
+    base = f"http://127.0.0.1:{port}"
+    env_path = home / ".env"
+    env_path.write_text(
+        "\n".join((
+            f"API_TOKEN={token}",
+            "BROKER=LOCAL_PAPER",
+            "MODE=PAPER",
+            "DATA_SOURCE=upstox",
+            "MARKET_DATA_PROVIDER=upstox",
+            f"MARKET_DATA_ACCESS_TOKEN={token}",
+            f"MARKET_DATA_SYMBOLS={key}",
+            f"DEFAULT_SYMBOL={symbol}",
+            "DEFAULT_TIMEFRAME=1m",
+            "MARKET_DATA_MODE=ltpc",
+            "MARKET_DATA_AUTHORIZE_URL=http://127.0.0.1:9/test-authorize",
+            f"DATABASE_URL=sqlite:///{(home / 'paper.db').as_posix()}",
+            "",
+        )),
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    for name in (
+        "API_TOKEN", "BROKER", "MODE", "LIVE_TRADING", "LIVE_CONFIRM",
+        "UPSTOX_LIVE_ACCESS_TOKEN", "DATA_SOURCE", "MARKET_DATA_PROVIDER",
+        "MARKET_DATA_ACCESS_TOKEN", "MARKET_DATA_SYMBOLS", "DEFAULT_SYMBOL",
+        "DEFAULT_TIMEFRAME", "MARKET_DATA_MODE", "MARKET_DATA_AUTHORIZE_URL",
+        "DATABASE_URL", "DATA_DIR",
+    ):
+        env.pop(name, None)
+    env.update({"ARENA_HOME": str(home), "ARENA_PORT": str(port)})
+    log_path = workdir / "frozen-upstox-start.log"
+    process = None
+    results: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append({"name": name, "ok": bool(ok), "detail": detail})
+        if verbose:
+            print(f"  [frozen-upstox] {'PASS' if ok else 'FAIL'} {name}"
+                  + (f" — {detail}" if detail else ""), flush=True)
+
+    try:
+        with log_path.open("wb") as log:
+            process = subprocess.Popen(
+                [str(artifact), "--no-browser"], cwd=str(workdir), env=env,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            )
+        healthy = _wait_health(base, timeout=90)
+        check("frozen Upstox-configured executable starts", healthy)
+        if not healthy:
+            return {"ok": False, "results": results}
+
+        status, body = _post(
+            base, "/api/paper/start-default", {"source": "upstox"}, token,
+            timeout=30,
+        )
+        started = (
+            status == 200
+            and body.get("mode") == "PAPER"
+            and body.get("live_trading") is False
+            and body.get("symbols") == [symbol]
+            and body.get("state") in {"STARTING", "RUNNING"}
+        )
+        check(
+            "frozen paper start normalizes the default Upstox key",
+            started,
+            f"HTTP {status}; mode={body.get('mode')} state={body.get('state')} "
+            f"symbols={body.get('symbols')}",
+        )
+        order_status, orders = _get_json(base, "/paper/orders?limit=1000", token)
+        no_orders = order_status == 200 and orders.get("orders") == []
+        check("frozen Upstox-key smoke test places no paper/live orders", no_orders)
+        stopped, stop_body = _post(base, "/paper/stop", {}, token, timeout=20)
+        check("frozen Upstox-key smoke test stops cleanly",
+              stopped == 200 and stop_body.get("state") == "STOPPED",
+              str(stop_body.get("state")))
+        return {"ok": all(result["ok"] for result in results), "results": results}
+    except (OSError, subprocess.SubprocessError, urllib.error.URLError) as exc:
+        check("frozen Upstox-key startup test completes", False,
+              f"{type(exc).__name__}: {exc}")
+        return {"ok": False, "results": results}
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+
+
 def run_frozen_e2e(artifact: Path, workdir: Path, *, verbose: bool = True) -> dict:
     workdir = Path(workdir)
     if workdir.exists():
