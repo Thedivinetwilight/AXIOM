@@ -97,7 +97,15 @@ async def paper_start_default(body: StartDefaultRequest, request: Request):
         if not symbols:
             raise HTTPException(
                 422, "Live-market paper needs MARKET_DATA_SYMBOLS in the configuration.")
-        symbol = symbols[0]
+        # Configuration stores provider instrument keys; PaperStartRequest and
+        # the engine use Arena symbols. Validate and normalize at this boundary
+        # so the request matches the symbols emitted by UpstoxStream.
+        from app.data.upstox_stream import to_symbol
+        try:
+            symbol = to_symbol(symbols[0])
+        except ValueError as exc:
+            raise HTTPException(
+                422, f"Configured Upstox instrument key is invalid: {exc}") from exc
         # The live-data adapter builds intraday bars; a daily default cannot
         # drive it. This mirrors engine_timeframe() semantics.
         timeframe = settings.default_timeframe \

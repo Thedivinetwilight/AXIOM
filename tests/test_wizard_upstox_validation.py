@@ -96,7 +96,8 @@ class TestValidateMarketDataEndpoint:
         )
         result = run(wizard.validate_market_data(payload, SimpleNamespace()))
         assert result["ok"] is True
-        assert result["symbol"] == INSTRUMENT
+        assert result["symbol"] == "NSE_EQ-INE002A01018"
+        assert result["instrument_key"] == INSTRUMENT
         assert result["symbols"] == [INSTRUMENT]
         assert seen["token"] == "test-token"
 
@@ -218,7 +219,7 @@ class TestPreparePaperValidatesInstrumentKeys:
         run(wizard.prepare_paper(payload, req))
         assert probe_called["n"] == 1
         assert written["MARKET_DATA_SYMBOLS"] == f"{INSTRUMENT},NSE_EQ|INE003A01018"
-        assert written["DEFAULT_SYMBOL"] == INSTRUMENT
+        assert written["DEFAULT_SYMBOL"] == "NSE_EQ-INE002A01018"
 
     def test_empty_symbols_rejected(self, monkeypatch):
         probe_called, written, req, payload = self._request("  , ,, ", monkeypatch)

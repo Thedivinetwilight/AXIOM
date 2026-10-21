@@ -89,8 +89,24 @@ class UpstoxAuthError(RuntimeError):
 
 
 def to_symbol(instrument_key: str) -> str:
-    """Map a provider key to the project symbol charset (segments lack '-')."""
-    return instrument_key.replace("|", "-")
+    """Validate an Upstox provider key and map it to Arena's internal symbol.
+
+    Upstox transport/configuration uses ``SEGMENT|IDENTIFIER`` keys; candles
+    and the paper engine use the corresponding ``SEGMENT-IDENTIFIER`` form.
+    Keep the conversion explicit and reject keys that cannot be represented
+    by Arena's internal symbol contract.
+    """
+    if not isinstance(instrument_key, str) or not INSTRUMENT_KEY.fullmatch(instrument_key):
+        raise ValueError("Use a valid Upstox instrument key such as NSE_EQ|INE002A01018")
+    symbol = instrument_key.replace("|", "-")
+    from app.data.models import validate_symbol
+
+    try:
+        return validate_symbol(symbol)
+    except ValueError as exc:
+        raise ValueError(
+            f"Instrument key not usable as an internal symbol: {instrument_key!r}"
+        ) from exc
 
 
 def from_symbol(symbol: str) -> str:

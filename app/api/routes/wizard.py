@@ -219,11 +219,14 @@ async def prepare_paper(payload: PreparePaperRequest, request: Request) -> dict:
                 "The market-data credential was not accepted by Upstox "
                 f"({check.verdict}). {check.guidance} Nothing was saved.",
             )
+        from app.data.upstox_stream import to_symbol
         updates.update({
             "DATA_SOURCE": "upstox",
             "MARKET_DATA_ACCESS_TOKEN": md_token,
+            # Provider keys stay in MARKET_DATA_SYMBOLS; DEFAULT_SYMBOL is an
+            # Arena symbol, just like candles and PaperStartRequest.symbol.
             "MARKET_DATA_SYMBOLS": md_symbols,
-            "DEFAULT_SYMBOL": md_symbols_list[0],
+            "DEFAULT_SYMBOL": to_symbol(md_symbols_list[0]),
             "DEFAULT_TIMEFRAME": "1m",
         })
 
@@ -376,9 +379,11 @@ async def validate_market_data(payload: ValidateMarketDataRequest, request: Requ
             f"Upstox did not accept this market-data credential ({check.verdict}). "
             + check.guidance,
         )
+    from app.data.upstox_stream import to_symbol
     return {
         "ok": True,
-        "symbol": symbols[0],
+        "symbol": to_symbol(symbols[0]),
+        "instrument_key": symbols[0],
         "symbols": symbols,
         "verdict": check.verdict,
         "note": "Credential verified for Market Data Feed V3. Orders stay simulated in paper mode.",

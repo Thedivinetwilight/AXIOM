@@ -427,11 +427,12 @@ def cmd_paper_live(args) -> int:
     except ValueError:
         print(json.dumps({
             "ok": False,
-            "error": f"DEFAULT_SYMBOL={settings.default_symbol!r} is not an "
-                     "Upstox instrument key",
+            "error": f"DEFAULT_SYMBOL={settings.default_symbol!r} is not a supported "
+                     "Upstox display symbol",
             "hint": "paper-live streams real Upstox data, so it needs a real "
-                    "instrument. Set DEFAULT_SYMBOL=NSE_EQ|INE002A01018 (or use "
-                    "the paper/replay path: python run.py --mode paper "
+                    "instrument. Set DEFAULT_SYMBOL=NSE_EQ-INE002A01018 and "
+                    "MARKET_DATA_SYMBOLS=NSE_EQ|INE002A01018 (or use the "
+                    "paper/replay path: python run.py --mode paper "
                     "--source replay)",
         }, indent=2))
         return 2
