@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,6 +48,26 @@ MATRIX_METADATA = """
 Every row below corresponds to a labeled control in the 3.1.0 interface.
 The mapping (control -> endpoint) is what arena-app.js wires on click.
 """
+
+
+class TestPaperStatusTruthfulness:
+    """The browser must not equate an accepted request or stale cache with health."""
+
+    source = Path("app/static/arena-app.js").read_text(encoding="utf-8")
+
+    def test_start_feedback_reports_acceptance_not_running_health(self):
+        assert "Paper start accepted (" in self.source
+        assert "Paper engine is running." not in self.source
+        assert "checking current engine and feed status" in self.source
+
+    def test_paper_poll_has_finite_deadlines_and_stale_running_stop_path(self):
+        assert "PAPER_POLL_DEADLINE_MS = 5000" in self.source
+        assert "PAPER_STATUS_FRESH_MS = 8000" in self.source
+        assert "if (stopped || active) return false" in self.source
+        assert "generation += 1" in self.source
+        assert 'id: "paper-status-stale"' in self.source
+        assert 'paperStatusPresentation(state.paperStatusFresh, state.paper)' in self.source
+        assert '"STOP PAPER · LAST KNOWN RUNNING"' in self.source
 
 
 class TestPaperControls:

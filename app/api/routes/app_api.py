@@ -106,10 +106,11 @@ async def paper_start_default(body: StartDefaultRequest, request: Request):
         except ValueError as exc:
             raise HTTPException(
                 422, f"Configured Upstox instrument key is invalid: {exc}") from exc
-        # The live-data adapter builds intraday bars; a daily default cannot
-        # drive it. This mirrors engine_timeframe() semantics.
-        timeframe = settings.default_timeframe \
-            if settings.default_timeframe in ("1m", "5m", "15m", "30m", "1h") else "1m"
+        # Keep the paper request on the broker's configured timeframe. The
+        # paper route validates the supported Upstox/feed-mode pair and passes
+        # this exact value to the provider; unsupported defaults are rejected,
+        # never silently downgraded.
+        timeframe = settings.default_timeframe or ""
 
     payload = {
         "strategy": "moving_average",

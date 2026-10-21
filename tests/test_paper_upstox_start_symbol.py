@@ -75,7 +75,7 @@ def test_frontend_one_click_request_reaches_start_default_and_starts_paper(
     )
     app = create_app(settings)
     calls = {}
-    provider = SimpleNamespace(symbols=[INTERNAL_SYMBOL])
+    provider = SimpleNamespace(symbols=[INTERNAL_SYMBOL], timeframe="1m")
 
     def fake_stream_provider(settings_arg, source, **kwargs):
         calls["provider"] = provider

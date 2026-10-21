@@ -4,6 +4,28 @@ from app.data.realtime import BinanceStream, JSONWebSocketStream, ReplayStream
 #: the only timeframes the order engine can consume (it is intraday-only)
 ENGINE_TIMEFRAMES = ("1m", "5m", "15m", "30m")
 
+# The local PAPER simulator and the separate supervised/live engine have
+# different timeframe contracts. Upstox's tick-built PAPER path can consume
+# 1h bars, but it intentionally does not accept daily bars. Keep this list
+# paper-specific so adding 1h here cannot widen live-engine behavior.
+PAPER_UPSTOX_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h")
+
+
+def paper_upstox_compatibility_error(timeframe: str, mode: str) -> str:
+    """Return a safe, actionable error for an unsupported PAPER feed pair."""
+    from app.data.upstox_stream import INTERVAL_MODE_TIMEFRAMES, INTERVAL_MODES
+
+    if timeframe not in PAPER_UPSTOX_TIMEFRAMES:
+        supported = ", ".join(PAPER_UPSTOX_TIMEFRAMES)
+        return (f"Upstox paper supports timeframes {supported}; "
+                f"{timeframe or '(unset)'} is not supported")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode in INTERVAL_MODES and timeframe not in INTERVAL_MODE_TIMEFRAMES:
+        supported = "/".join(sorted(INTERVAL_MODE_TIMEFRAMES))
+        return (f"Upstox {normalized_mode} mode supports {supported} only; "
+                f"{timeframe} requires ltpc mode")
+    return ""
+
 
 def engine_timeframe(settings) -> str:
     """The one timeframe used by BOTH the stream provider and the engine.
@@ -56,7 +78,8 @@ def market_data_mode_error(settings) -> str:
     return ""
 
 
-def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None):
+def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None,
+                    timeframe: str | None = None):
     if source == "replay":
         return ReplayStream(bars, delay)
     if source == "binance":
@@ -82,9 +105,10 @@ def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None):
         return UpstoxStream(
             settings.market_data_access_token,
             keys,
-            # ONE definition of the engine timeframe: the engine refuses any
-            # timeframe outside this set, so the provider must use the same one.
-            timeframe=engine_timeframe(settings),
+            # Non-paper callers retain the supervised engine's timeframe
+            # contract. The paper caller passes its broker timeframe explicitly
+            # so its provider cannot silently downgrade (e.g. 1h -> 1m).
+            timeframe=timeframe if timeframe is not None else engine_timeframe(settings),
             mode=settings.market_data_mode,
             authorize_url=settings.market_data_authorize_url,
         )

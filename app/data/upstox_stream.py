@@ -552,8 +552,10 @@ class UpstoxStream(WebSocketProvider):
     async def stream(self, symbols: list[str], timeframe: str):
         """Yield completed candles with reconnect + resubscribe + re-auth."""
         if timeframe != self.timeframe:
+            self.status = "FAILED"
             raise ValueError("Stream timeframe mismatch")
         if any(symbol not in self.symbols for symbol in symbols):
+            self.status = "FAILED"
             raise ValueError("Unsubscribed stream symbol")
         from websockets.asyncio.client import connect
         from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -675,12 +677,18 @@ class UpstoxStream(WebSocketProvider):
                         await asyncio.sleep(
                             min(self.max_backoff, 2 ** min(attempts, 6)) + random()
                         )
+                except Exception:
+                    # A non-retriable failure is terminal for this stream
+                    # instance. Do not replace it with DISCONNECTED in cleanup.
+                    if self.status != "AUTH_FAILED":
+                        self.status = "FAILED"
+                    raise
                 finally:
                     self._socket = None
         finally:
-            # Keep a terminal auth failure visible in status; everything else
-            # ends disconnected (matching the established stream lifecycle).
-            if self.status != "AUTH_FAILED":
+            # Preserve terminal failures for /paper/status; ordinary
+            # cancellation and orderly stop remain DISCONNECTED.
+            if self.status not in {"AUTH_FAILED", "FAILED"}:
                 self.status = "DISCONNECTED"
 
     def _candles_allowed(self) -> bool:
@@ -688,9 +696,12 @@ class UpstoxStream(WebSocketProvider):
 
     async def close(self):
         self.closed = True
-        if self._socket:
-            await self._socket.close()
-        self.status = "DISCONNECTED"
+        try:
+            if self._socket:
+                await self._socket.close()
+        finally:
+            if self.status not in {"AUTH_FAILED", "FAILED"}:
+                self.status = "DISCONNECTED"
 
 
 # Requested provider-style name; identical read-only implementation.

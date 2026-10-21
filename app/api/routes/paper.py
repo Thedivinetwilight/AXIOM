@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, Request
 from app.api.schemas import PaperStartRequest
 from app.api.services import load_dataset
-from app.data.factory import stream_provider
+from app.data.factory import paper_upstox_compatibility_error, stream_provider
 
 router = APIRouter()
 
@@ -55,15 +55,29 @@ async def do_start(body: PaperStartRequest, request: Request):
         raise ValueError(
             "Paper timeframe must match DEFAULT_TIMEFRAME; restart with separate DB to change"
         )
+    if body.source == "upstox":
+        compatibility_error = paper_upstox_compatibility_error(
+            body.timeframe, settings.market_data_mode)
+        if compatibility_error:
+            # Refuse before constructing the async simulator task. Never
+            # silently substitute the supervised engine's fallback timeframe.
+            raise ValueError(compatibility_error)
     strategy = body.build_strategy()
     bars = load_dataset(request.app, body) if body.source == "replay" else None
     provider = stream_provider(
-        request.app.state.settings,
+        settings,
         body.source,
         bars=bars,
         delay=body.replay_delay,
         symbol=body.symbol,
+        timeframe=body.timeframe if body.source == "upstox" else None,
     )
+    if body.source == "upstox":
+        provider_timeframe = getattr(provider, "timeframe", None)
+        if provider_timeframe != body.timeframe:
+            raise ValueError(
+                "Upstox paper provider timeframe must match the paper broker timeframe"
+            )
     # Live adapters expose the exact symbols they subscribe to; keep controller,
     # broker and feed in agreement to avoid unsubscribed-symbol failures later.
     symbols = list(getattr(provider, "symbols", None) or [body.symbol])

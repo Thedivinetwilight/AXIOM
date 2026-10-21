@@ -29,6 +29,8 @@ class PaperSimulator:
         self.strategy = None
         self.task: asyncio.Task | None = None
         self.error: str | None = None
+        self.error_phase: str | None = None
+        self.error_reason: str | None = None
         # set by stop(); makes shutdown idempotent, which matters because
         # Ctrl+C reaches both the signal handler and the shutdown path.
         self._stopped = False
@@ -49,6 +51,39 @@ class PaperSimulator:
         # V0.6.2: risk-decision counters for live pipeline observability.
         self.risk_counters = {"actionable_signals": 0, "orders_created": 0, "skipped": 0}
 
+    def _record_failure(self, exc: Exception, phase: str) -> None:
+        """Expose only allowlisted diagnostics; never persist raw exception text."""
+        error_type = type(exc).__name__
+        message = str(exc)
+        if error_type == "UpstoxAuthError":
+            reason = "provider_authentication_failed"
+        elif message == "Stream timeframe mismatch":
+            reason = "provider_timeframe_mismatch"
+        elif message == "Unsubscribed stream symbol":
+            reason = "provider_symbol_mismatch"
+        elif message == "Live feed sent an unfinished/future candle":
+            reason = "unfinished_live_candle"
+        elif message == "Out-of-order live candle":
+            reason = "out_of_order_live_candle"
+        elif message == "Conflicting duplicate candle":
+            reason = "conflicting_duplicate_candle"
+        elif phase == "provider_stream":
+            reason = "provider_stream_failed"
+        elif phase in {"broker_cleanup", "provider_cleanup"}:
+            reason = "paper_cleanup_failed"
+        else:
+            reason = "bar_processing_failed"
+
+        self.state = BotState.ERROR
+        self.error = error_type
+        self.error_phase = phase
+        self.error_reason = reason
+        logger.error("paper_failed", extra={
+            "error": error_type,
+            "phase": phase,
+            "reason": reason,
+        })
+
     def status(self):
         status = {
             "mode": "PAPER",
@@ -62,6 +97,8 @@ class PaperSimulator:
             "signals": self.signals,
             "processed_bars": self.processed,
             "error": self.error,
+            "error_phase": self.error_phase,
+            "error_reason": self.error_reason,
         }
         # V0.6.1: live data adapters expose health/monitoring fields; secrets are
         # never included (see UpstoxStream.metrics). Existing keys are unchanged.
@@ -135,7 +172,8 @@ class PaperSimulator:
         )
         self.broker.context["selection"] = config
         self.provider, self.strategy, self.symbols = provider, strategy, symbols
-        self.error, self.state = None, BotState.STARTING
+        self.error = self.error_phase = self.error_reason = None
+        self.state = BotState.STARTING
         self.task = asyncio.create_task(self._run())
         return self.status()
 
@@ -287,6 +325,7 @@ class PaperSimulator:
 
     async def _run(self):
         self.state = BotState.RUNNING
+        phase = "provider_stream"
         try:
             async for candle in self.provider.stream(self.symbols, self.broker.timeframe):
                 # Replay resumes after the committed cursor. Live out-of-order data fails closed.
@@ -297,16 +336,24 @@ class PaperSimulator:
                     and candle.timestamp < parse_timestamp(last)
                 ):
                     continue
+                phase = "bar_processing"
                 self.process_bar(candle)
+                phase = "provider_stream"
         except asyncio.CancelledError:
             pass  # documented: loop exits on task cancellation
         except Exception as exc:
-            self.state = BotState.ERROR
-            self.error = type(exc).__name__  # Never echo provider URLs/auth payloads.
-            logger.error("paper_failed", extra={"error": type(exc).__name__})
+            self._record_failure(exc, phase)
         finally:
-            self.broker.cancel_all()
-            await self.provider.close()
+            try:
+                self.broker.cancel_all()
+            except Exception as exc:
+                if self.state != BotState.ERROR:
+                    self._record_failure(exc, "broker_cleanup")
+            try:
+                await self.provider.close()
+            except Exception as exc:
+                if self.state != BotState.ERROR:
+                    self._record_failure(exc, "provider_cleanup")
             if self.state != BotState.ERROR:
                 self.state = BotState.STOPPED
             logger.info("paper_stopped")
@@ -324,7 +371,8 @@ class PaperSimulator:
     async def resume(self):
         if self.state != BotState.PAUSED:
             raise ValueError("Can only resume a paused bot")
-        self.state, self.error = BotState.RUNNING, None
+        self.state = BotState.RUNNING
+        self.error = self.error_phase = self.error_reason = None
         return self.status()
 
     def request_stop(self) -> None:

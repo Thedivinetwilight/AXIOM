@@ -19,6 +19,8 @@
     boot: null,
     view: location.hash.replace(/^#\/?/, "") || "command",
     paper: null,
+    paperStatusFresh: false,
+    paperStatusUpdatedAt: null,
     account: null,
     orders: [],
     trades: [],
@@ -28,6 +30,10 @@
     strategies: [],
     datasets: [],
     polling: null,
+    paperPoller: null,
+    pollingVisibilityHandler: null,
+    pollingPageHideHandler: null,
+    pollingPageShowHandler: null,
     tokenGatePassed: false
   };
 
@@ -227,40 +233,194 @@
   }
 
   // ------------------------------------------------------------ polling
+  var PAPER_POLL_DEADLINE_MS = 5000;
+  var PAPER_STATUS_FRESH_MS = 8000;
+
+  // Kept independent of DOM/network APIs so timeout and response ordering can
+  // be exercised behaviorally under Node as well as in the browser.
+  function createPaperPoller(requests, callbacks, deadlineMs, freshnessMs) {
+    var generation = 0;
+    var statusRevision = 0;
+    var active = false;
+    var stopped = false;
+    var cycleTimer = null;
+    var freshnessTimer = null;
+
+    function clearCycleTimer() {
+      if (cycleTimer !== null) clearTimeout(cycleTimer);
+      cycleTimer = null;
+    }
+
+    function clearFreshnessTimer() {
+      if (freshnessTimer !== null) clearTimeout(freshnessTimer);
+      freshnessTimer = null;
+    }
+
+    function markStatus(result) {
+      statusRevision += 1;
+      clearFreshnessTimer();
+      callbacks.onStatus(result);
+      if (result.status !== "fulfilled") return;
+      var revision = statusRevision;
+      freshnessTimer = setTimeout(function () {
+        freshnessTimer = null;
+        if (!stopped && revision === statusRevision) callbacks.onStale("freshness_deadline");
+      }, freshnessMs);
+    }
+
+    function poll() {
+      if (stopped || active) return false;
+      active = true;
+      var cycle = ++generation;
+      var results = new Array(requests.length);
+      var settled = 0;
+
+      function isCurrent() { return !stopped && cycle === generation; }
+      function finish(timedOut) {
+        if (!isCurrent()) return;
+        clearCycleTimer();
+        active = false;
+        if (timedOut) {
+          // Invalidate every outstanding promise before allowing another poll.
+          generation += 1;
+          if (!results[0]) {
+            results[0] = { status: "rejected", reason: new Error("paper status poll timed out") };
+            markStatus(results[0]);
+          }
+        }
+        callbacks.onComplete(results, timedOut);
+      }
+
+      cycleTimer = setTimeout(function () { finish(true); }, deadlineMs);
+      requests.forEach(function (request, index) {
+        Promise.resolve().then(request).then(function (value) {
+          if (!isCurrent()) return;
+          results[index] = { status: "fulfilled", value: value };
+          settled += 1;
+          if (index === 0) markStatus(results[index]);
+          if (settled === requests.length) finish(false);
+        }, function (error) {
+          if (!isCurrent()) return;
+          results[index] = { status: "rejected", reason: error };
+          settled += 1;
+          if (index === 0) markStatus(results[index]);
+          if (settled === requests.length) finish(false);
+        });
+      });
+      return true;
+    }
+
+    function invalidate() {
+      if (stopped) return;
+      generation += 1;
+      active = false;
+      clearCycleTimer();
+    }
+
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      generation += 1;
+      active = false;
+      clearCycleTimer();
+      clearFreshnessTimer();
+    }
+
+    return { poll: poll, invalidate: invalidate, stop: stop };
+  }
+
+  function stopPolling(keepPageLifecycleListeners) {
+    if (state.polling !== null) clearInterval(state.polling);
+    state.polling = null;
+    if (state.paperPoller) state.paperPoller.stop();
+    state.paperPoller = null;
+    if (state.pollingVisibilityHandler) {
+      document.removeEventListener("visibilitychange", state.pollingVisibilityHandler);
+      state.pollingVisibilityHandler = null;
+    }
+    if (!keepPageLifecycleListeners && state.pollingPageHideHandler) {
+      window.removeEventListener("pagehide", state.pollingPageHideHandler);
+      state.pollingPageHideHandler = null;
+    }
+    if (!keepPageLifecycleListeners && state.pollingPageShowHandler) {
+      window.removeEventListener("pageshow", state.pollingPageShowHandler);
+      state.pollingPageShowHandler = null;
+    }
+  }
+
   function startPolling() {
-    if (state.polling) clearInterval(state.polling);
+    stopPolling();
+    state.paperStatusFresh = false;
+    refreshLive();
+    var paths = [
+      "/paper/status", "/paper/account", "/paper/orders?limit=60",
+      "/paper/trades?limit=60", "/paper/positions", "/dashboard/data"
+    ];
+    state.paperPoller = createPaperPoller(paths.map(function (path) {
+      return function () { return Arena.get(path); };
+    }), {
+      onStatus: function (result) {
+        state.paperStatusFresh = result.status === "fulfilled";
+        if (state.paperStatusFresh) {
+          state.paper = result.value;
+          state.paperStatusUpdatedAt = Date.now();
+        }
+        refreshLive();
+      },
+      onStale: function () {
+        state.paperStatusFresh = false;
+        setConn("STALE");
+        refreshLive();
+      },
+      onComplete: function (results) {
+        var okCount = 0;
+        results.forEach(function (r) { if (r && r.status === "fulfilled") okCount += 1; });
+        if (okCount === 0) {
+          setConn("ERROR");
+          refreshLive();
+          return;
+        }
+        setConn(okCount === results.length ? "CONNECTED" : "STALE");
+        if (results[1] && results[1].status === "fulfilled") {
+          state.account = results[1].value;
+          if (state.account && state.account.equity !== null && state.account.equity !== undefined) {
+            state.equityHistory.push({ x: new Date().toLocaleTimeString(), y: state.account.equity });
+            if (state.equityHistory.length > 400) state.equityHistory.shift();
+          }
+        }
+        if (results[2] && results[2].status === "fulfilled") state.orders = results[2].value.orders || [];
+        if (results[3] && results[3].status === "fulfilled") state.trades = results[3].value.trades || [];
+        if (results[4] && results[4].status === "fulfilled") state.positions = results[4].value.positions || [];
+        if (results[5] && results[5].status === "fulfilled") state.dash = results[5].value;
+        refreshLive();
+      }
+    }, PAPER_POLL_DEADLINE_MS, PAPER_STATUS_FRESH_MS);
+
     state.polling = setInterval(pollOnce, 3000);
+    state.pollingVisibilityHandler = function () { if (!document.hidden) pollOnce(); };
+    state.pollingPageHideHandler = function () { stopPolling(true); };
+    state.pollingPageShowHandler = function () { if (!state.polling) startPolling(); };
+    document.addEventListener("visibilitychange", state.pollingVisibilityHandler);
+    window.addEventListener("pagehide", state.pollingPageHideHandler);
+    window.addEventListener("pageshow", state.pollingPageShowHandler);
     pollOnce();
   }
 
-  function pollOnce() {
-    if (document.hidden) return;
-    Promise.allSettled([
-      Arena.get("/paper/status"),
-      Arena.get("/paper/account"),
-      Arena.get("/paper/orders?limit=60"),
-      Arena.get("/paper/trades?limit=60"),
-      Arena.get("/paper/positions"),
-      Arena.get("/dashboard/data")
-    ]).then(function (results) {
-      var okCount = 0;
-      results.forEach(function (r) { if (r.status === "fulfilled") okCount += 1; });
-      if (okCount === 0) { setConn("ERROR"); return; }
-      setConn(okCount === results.length ? "CONNECTED" : "STALE");
-      if (results[0].status === "fulfilled") state.paper = results[0].value;
-      if (results[1].status === "fulfilled") {
-        state.account = results[1].value;
-        if (state.account && state.account.equity !== null && state.account.equity !== undefined) {
-          state.equityHistory.push({ x: new Date().toLocaleTimeString(), y: state.account.equity });
-          if (state.equityHistory.length > 400) state.equityHistory.shift();
-        }
-      }
-      if (results[2].status === "fulfilled") state.orders = results[2].value.orders || [];
-      if (results[3].status === "fulfilled") state.trades = results[3].value.trades || [];
-      if (results[4].status === "fulfilled") state.positions = results[4].value.positions || [];
-      if (results[5].status === "fulfilled") state.dash = results[5].value;
-      refreshLive();
-    });
+  function pollOnce(force) {
+    if (document.hidden || !state.paperPoller) return;
+    if (force) state.paperPoller.invalidate();
+    state.paperPoller.poll();
+  }
+
+  function paperStatusPresentation(fresh, paper) {
+    if (fresh) return { stale: false, label: null, lastKnown: null, stopLabel: null };
+    var lastKnown = paper && paper.state ? paper.state : null;
+    return {
+      stale: true,
+      label: "PAPER STATUS STALE",
+      lastKnown: lastKnown,
+      stopLabel: lastKnown === "RUNNING" ? "STOP PAPER · LAST KNOWN RUNNING" : null
+    };
   }
 
   function setConn(status) {
@@ -303,32 +463,81 @@
     if (!host) return;
     host.innerHTML = "";
     var paperState = state.paper ? state.paper.state : "UNKNOWN";
+    var presentation = paperStatusPresentation(state.paperStatusFresh, state.paper);
+
+    if (presentation.stale) {
+      var lastSeen = state.paperStatusUpdatedAt
+        ? " · last seen " + new Date(state.paperStatusUpdatedAt).toLocaleTimeString()
+        : " · no successful status read yet";
+      host.appendChild(Arena.el("span", { "class": "badge warn", id: "paper-status-stale" }, [
+        document.createTextNode(presentation.label + lastSeen +
+          (presentation.lastKnown ? " · last known " + presentation.lastKnown : ""))
+      ]));
+      // Keep a safe stop path available for a last-known running session;
+      // never offer START from a stale stopped/unknown snapshot.
+      if (presentation.stopLabel) addStopButton(presentation.stopLabel);
+      return;
+    }
+
+    if (paperState === "STARTING") {
+      host.appendChild(Arena.el("span", { "class": "badge info" }, [
+        document.createTextNode("PAPER STARTING · awaiting provider status")
+      ]));
+      return;
+    }
+
+    if (paperState === "PAUSED") {
+      addStopButton("STOP PAPER");
+      host.appendChild(btn("RESUME", "ghost", "pause-resume-top", function (b) {
+        Arena.setBusy(b, true);
+        Arena.post("/paper/resume").then(function () { pollOnce(true); }).catch(function (e) {
+          Arena.setBusy(b, false); Arena.toast("err", e.message); pollOnce(true);
+        });
+      }));
+      return;
+    }
 
     if (paperState === "RUNNING") {
-      host.appendChild(btn("STOP PAPER", "danger", "stop-paper-top", function (b) {
-        Arena.confirmDialog("Stop paper trading?",
-          "Open orders are cancelled and the session is persisted. You can start again at any time.",
-          "Stop paper", true, function () {
-            Arena.setBusy(b, true, "Stopping…");
-            Arena.post("/paper/stop").then(function () {
-              Arena.toast("ok", "Paper engine stopped. State was saved.");
-              pollOnce();
-            }).catch(function (e) { Arena.setBusy(b, false); Arena.toast("err", e.message); });
-          });
-      }));
-      host.appendChild(btn(paperState === "PAUSED" ? "RESUME" : "PAUSE", "ghost", "pause-resume-top", function (b) {
-        var target = paperState === "PAUSED" ? "/paper/resume" : "/paper/pause";
+      addStopButton("STOP PAPER");
+      host.appendChild(btn("PAUSE", "ghost", "pause-resume-top", function (b) {
+        var target = "/paper/pause";
         Arena.setBusy(b, true);
-        Arena.post(target).then(function () { pollOnce(); }).catch(function (e) {
-          Arena.setBusy(b, false); Arena.toast("err", e.message);
+        Arena.post(target).then(function () { pollOnce(true); }).catch(function (e) {
+          Arena.setBusy(b, false); Arena.toast("err", e.message); pollOnce(true);
         });
       }));
     } else {
       host.appendChild(btn("START PAPER", "success", "start-paper-top", function (b) {
-        Arena.setBusy(b, true, "Starting…");
+        Arena.setBusy(b, true, "Requesting…");
+        state.paperStatusFresh = false;
+        refreshLive();
         Arena.post("/api/paper/start-default", { source: state.boot.data_source || "replay" })
-          .then(function () { Arena.toast("ok", "Paper engine is running."); pollOnce(); })
-          .catch(function (e) { Arena.setBusy(b, false); Arena.toast("err", e.message); });
+          .then(function (result) {
+            var acceptedState = result && result.state ? result.state : "accepted";
+            Arena.toast("info", "Paper start accepted (" + acceptedState + "); checking current engine and feed status.");
+            pollOnce(true);
+          })
+          .catch(function (e) {
+            Arena.setBusy(b, false);
+            Arena.toast("err", e.message);
+            pollOnce(true);
+          });
+      }));
+    }
+
+    function addStopButton(label) {
+      host.appendChild(btn(label, "danger", "stop-paper-top", function (b) {
+        Arena.confirmDialog("Stop paper trading?",
+          "Open orders are cancelled and the session is persisted. " +
+          (state.paperStatusFresh ? "You can start again at any time." :
+            "Status polling is stale; this uses the last known state and must be verified after polling recovers."),
+          "Stop paper", true, function () {
+            Arena.setBusy(b, true, "Stopping…");
+            Arena.post("/paper/stop").then(function () {
+              Arena.toast("info", "Paper stop request accepted; verifying current status.");
+              pollOnce(true);
+            }).catch(function (e) { Arena.setBusy(b, false); Arena.toast("err", e.message); pollOnce(true); });
+          });
       }));
     }
 
@@ -3549,5 +3758,13 @@
   viewResearch = function (root) { _origViewResearch(root); renderResearchMemory(root); };
 
 
-  document.addEventListener("DOMContentLoaded", start);
+  if (typeof module !== "undefined" && module.exports &&
+      typeof process !== "undefined" && process.versions && process.versions.node) {
+    module.exports = {
+      createPaperPoller: createPaperPoller,
+      paperStatusPresentation: paperStatusPresentation
+    };
+  } else {
+    document.addEventListener("DOMContentLoaded", start);
+  }
 })();
