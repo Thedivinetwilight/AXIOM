@@ -5,8 +5,18 @@
 **Scope:** read-only investigation of how `UPSTOX_SANDBOX_ACCESS_TOKEN` reaches
 the AXIOM process, plus a safe procedure for creating a local `.env`.
 
-No source was modified. No `.env` was committed. No secret value was printed,
-requested, or logged. No order or write operation was issued.
+No source was modified during the 2026-10-01 investigation. No `.env` was
+committed. No secret value was printed, requested, or logged. No order or write
+operation was issued.
+
+> **Status update (2026-10-21):** This is a historical diagnostic report. The
+> sandbox-token host-leak risk has since been fixed in the current source:
+> sandbox order and history URLs default to `api-sandbox.upstox.com`, and
+> Settings/broker construction reject production history hosts. Sandbox order
+> history may still be unsupported; the code reports that read capability as
+> unavailable/unverified and has no production fallback. The `sandbox-test`
+> CLI also loads Settings before reading a `.env`-only token. This update is a
+> source-level/test result, not verification against a real Upstox account.
 
 ---
 
@@ -109,8 +119,8 @@ From `app/config/settings.py`, cross-referenced with `.env.example`:
 |---|---|---|---|
 | `UPSTOX_SANDBOX_ACCESS_TOKEN` | 100 | 60 | **Yes — the only hard requirement** |
 | `BROKER` | 99 | 57 | Must be `UPSTOX_SANDBOX` to activate |
-| `UPSTOX_SANDBOX_BASE_URL` | 101 | 62 *(commented)* | No — defaults to `https://api-hft.upstox.com` |
-| `UPSTOX_SANDBOX_ORDER_HISTORY_URL` | 102 | 63 *(commented)* | No — defaults to `https://api.upstox.com/v2/order/history` |
+| `UPSTOX_SANDBOX_BASE_URL` | current Settings field | 62 *(commented)* | No — defaults to `https://api-sandbox.upstox.com` |
+| `UPSTOX_SANDBOX_ORDER_HISTORY_URL` | current Settings field | 63 *(commented)* | No — defaults to `https://api-sandbox.upstox.com/v2/order/history`; capability may be unavailable |
 | `SANDBOX_PRODUCT` | 103 | 64 | No — default `I`, validated ∈ `{I, D, MTF}` |
 | `SANDBOX_ORDER_TAG` | 104 | 65 | No — default `arena-v1` |
 

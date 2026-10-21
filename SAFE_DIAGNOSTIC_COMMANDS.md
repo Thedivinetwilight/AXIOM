@@ -100,8 +100,8 @@ Defaults, verified in `app/config/settings.py`:
 
 | Setting | Default | Line |
 | --- | --- | --- |
-| `upstox_sandbox_base_url` | `https://api-hft.upstox.com` | 101 |
-| `upstox_sandbox_order_history_url` | `https://api.upstox.com/v2/order/history` | 102 |
+| `upstox_sandbox_base_url` | `https://api-sandbox.upstox.com` | current Settings default |
+| `upstox_sandbox_order_history_url` | `https://api-sandbox.upstox.com/v2/order/history` | current Settings default; sandbox capability may be unavailable |
 | `market_data_authorize_url` | `https://api.upstox.com/v3/feed/market-data-feed/authorize` | 97 |
 
 ### 2.4 Risk limits (never secret, always worth checking)

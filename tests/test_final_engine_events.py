@@ -19,6 +19,7 @@ from app.engine.events import EventDrivenDecisionEngine, PauseGate
 from app.history.store import CandleStore, parse_local
 from app.research.scanner import OpportunityScanner
 from app.strategies import REGISTRY
+from tests.support import PassingNetEdgeGate
 
 BASE = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
 
@@ -161,7 +162,7 @@ class TestEnginePauseSkip:
             repository=repository, risk_limits=HardRiskLimits.from_settings(Settings()),
             instrument_keys={"X": "NSE_EQ|INE002A01018"},  # 3.0.2 explicit
             journal=LearningJournal(repository), timeframe="1m", evaluate_every=5,
-            pause_gate=gate)
+            pause_gate=gate, net_edge_gate=PassingNetEdgeGate())
         for i in range(40):
             sandbox.process_candle(candle(i, 100.0 + i * 0.01))
         assert state["placed"] == 0, "paused execution must not place orders"

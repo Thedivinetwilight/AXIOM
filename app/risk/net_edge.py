@@ -1,15 +1,10 @@
-"""Net Edge Gate — determines if expected value after realistic costs justifies trading.
+"""Net Edge Gate — determines whether a proposal clears realistic costs.
 
-Additive, fail-closed, deterministic, transparent. Sits immediately before HardRiskLimits.
-Uses existing Arena ExecutionConfig economics (commission, slippage, spread) rather
-than inventing contradictory accounting.
-
-Concept:
-  expected_edge = gross_expected - fees - slippage - spread_cost - market_impact
-  if net_expected <= threshold: NO TRADE
-
-If required inputs unavailable -> fail closed (NO TRADE) and log reason.
-Never bypasses hard risk.
+All P&L and cost arguments are monetary amounts in the same quote currency.
+``threshold`` is a return fraction (for example 0.001 = 10 bps), so it is
+converted to a monetary hurdle using the proposed position's notional before
+comparison. If the proposal, expected P&L, cost inputs, or notional required
+for that conversion is unavailable or invalid, the gate fails closed.
 """
 from __future__ import annotations
 
@@ -20,27 +15,47 @@ from dataclasses import dataclass
 logger = logging.getLogger("bot.risk.net_edge")
 
 
+def _finite_number(value) -> float | None:
+    """Return a finite real value, excluding bools and coercive strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        result = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 @dataclass(frozen=True)
 class NetEdgeResult:
     passes: bool
-    gross_expected: float
+    gross_expected: float | None
     fees: float
     spread_cost: float
     slippage: float
     market_impact: float
-    net_expected: float
-    threshold: float
+    net_expected: float | None
+    threshold: float  # configured fractional hurdle (kept for compatibility)
     reason: str
+    threshold_amount: float | None = None  # same currency as net_expected
 
 
 class NetEdgeGate:
     def __init__(self, threshold: float = 0.001, min_edge_bps: float = 10.0):
-        self.threshold = float(threshold)
-        self.min_edge_bps = float(min_edge_bps)
+        threshold_value = _finite_number(threshold)
+        min_edge_value = _finite_number(min_edge_bps)
+        if threshold_value is None or threshold_value < 0:
+            raise ValueError("threshold must be a finite non-negative fraction")
+        if min_edge_value is None or min_edge_value < 0:
+            raise ValueError("min_edge_bps must be finite and non-negative")
+        self.threshold = threshold_value
+        # Kept as a legacy constructor parameter. The configured fractional
+        # threshold is the single decision input; Settings documents its unit.
+        self.min_edge_bps = min_edge_value
 
     @classmethod
     def from_settings(cls, settings) -> "NetEdgeGate":
-        return cls(threshold=float(getattr(settings, "net_edge_threshold", 0.001)))
+        return cls(threshold=getattr(settings, "net_edge_threshold", 0.001))
 
     def evaluate(
         self,
@@ -61,111 +76,201 @@ class NetEdgeGate:
         slippage: float | None = None,
         market_impact: float | None = None,
     ) -> NetEdgeResult:
-        # Fail closed if gross not computable and win prob not provided
-        gross = gross_expected
-        if gross is None:
-            if expected_win_prob is not None and expected_win is not None and expected_loss is not None:
-                try:
-                    # E[R] = p*win - (1-p)*loss
-                    gross = float(expected_win_prob) * float(expected_win) - (1 - float(expected_win_prob)) * abs(float(expected_loss))
-                except Exception:
-                    gross = None
-            else:
-                gross = None
-
-        # If still None -> missing inputs -> fail closed
-        if gross is None or (isinstance(gross, float) and (math.isnan(gross) or math.isinf(gross))):
-            reason = "NET_EDGE_REJECT: missing gross_expected (fail closed)"
+        def reject(message: str, *, gross=None, fee=0.0, spread=0.0,
+                   slip=0.0, impact=0.0, net=None, threshold_amount=None):
+            reason = f"NET_EDGE_REJECT: {message}"
             logger.info(reason, extra={"threshold": self.threshold})
-            return NetEdgeResult(False, float("nan") if gross is None else gross, 0, 0, 0, 0, float("-inf"), self.threshold, reason)
+            return NetEdgeResult(
+                passes=False,
+                gross_expected=gross,
+                fees=fee,
+                spread_cost=spread,
+                slippage=slip,
+                market_impact=impact,
+                net_expected=net,
+                threshold=self.threshold,
+                reason=reason,
+                threshold_amount=threshold_amount,
+            )
 
-        # Validate gross
-        if not isinstance(gross, (int, float)) or math.isnan(float(gross)) or math.isinf(float(gross)):
-            reason = "NET_EDGE_REJECT: invalid gross_expected"
-            return NetEdgeResult(False, float(gross), 0, 0, 0, 0, float("-inf"), self.threshold, reason)
+        # A gross estimate is monetary P&L for this proposal. Win/loss inputs
+        # are accepted only when they form a finite probability-weighted amount.
+        gross = _finite_number(gross_expected)
+        if gross_expected is None:
+            probability = _finite_number(expected_win_prob)
+            win = _finite_number(expected_win)
+            loss = _finite_number(expected_loss)
+            if probability is None and expected_win_prob is None \
+                    and expected_win is None and expected_loss is None:
+                return reject("missing gross_expected (fail closed)")
+            if (probability is None or win is None or loss is None
+                    or not 0.0 <= probability <= 1.0 or win < 0.0):
+                return reject("invalid expected-value inputs (fail closed)")
+            gross = probability * win - (1.0 - probability) * abs(loss)
+            if not math.isfinite(gross):
+                return reject("invalid gross_expected (fail closed)")
+        elif gross is None:
+            return reject("invalid gross_expected (fail closed)")
 
-        # Compute costs if not provided
-        # Use provided or estimate from price*quantity*rates
+        # Validate and calculate proposal notional. A positive fractional
+        # threshold cannot be interpreted without this basis.
         notional = None
-        if price is not None and quantity is not None:
-            try:
-                notional = abs(float(price) * float(quantity))
-            except Exception:
-                notional = None
+        if price is not None or quantity is not None:
+            price_value = _finite_number(price)
+            quantity_value = _finite_number(quantity)
+            if (price_value is None or quantity_value is None
+                    or price_value <= 0.0 or quantity_value <= 0.0):
+                return reject("invalid price/quantity notional", gross=gross)
+            notional = price_value * quantity_value
+            if not math.isfinite(notional) or notional <= 0.0:
+                return reject("invalid price/quantity notional", gross=gross)
+        if self.threshold > 0.0 and notional is None:
+            return reject(
+                "missing notional for fractional threshold (fail closed)",
+                gross=gross,
+            )
+        threshold_amount = self.threshold * notional if notional is not None else 0.0
+        if not math.isfinite(threshold_amount):
+            return reject("invalid threshold amount", gross=gross)
 
-        # fees
-        fee_val = fees
-        if fee_val is None:
-            if notional is not None and commission_rate is not None:
-                try:
-                    fee_val = notional * float(commission_rate) * 2  # both sides
-                except Exception:
-                    fee_val = 0.0
-            else:
-                fee_val = 0.0
+        def explicit_cost(value, name):
+            parsed = _finite_number(value)
+            if parsed is None or parsed < 0.0:
+                return None, f"invalid {name} cost estimate (fail closed)"
+            return parsed, None
 
-        # spread_cost
-        spr_val = spread_cost
-        if spr_val is None:
-            if spread_bps is not None:
-                try:
-                    # spread_bps is in bps (e.g., 50 = 0.5%)
-                    spr_val = (float(spread_bps) / 10000.0) * (notional or 1.0)
-                except Exception:
-                    spr_val = 0.0
-            elif notional is not None:
-                # fallback: use commission's spread if available? Use 0
-                spr_val = 0.0
-            else:
-                spr_val = 0.0
+        # Fees: explicit monetary estimate takes precedence; otherwise estimate
+        # round-trip commission from notional and the per-side rate.
+        if fees is not None:
+            fee_value, error = explicit_cost(fees, "fee")
+            if error:
+                return reject(error, gross=gross, threshold_amount=threshold_amount)
+        elif commission_rate is None:
+            fee_value = 0.0
+        else:
+            rate = _finite_number(commission_rate)
+            if rate is None or rate < 0.0:
+                return reject("invalid commission rate (fail closed)", gross=gross,
+                              threshold_amount=threshold_amount)
+            if notional is None and rate != 0.0:
+                return reject("missing notional for commission estimate",
+                              gross=gross, threshold_amount=threshold_amount)
+            fee_value = (notional or 0.0) * rate * 2.0
+            if not math.isfinite(fee_value):
+                return reject("invalid fee estimate (fail closed)", gross=gross,
+                              threshold_amount=threshold_amount)
 
-        # slippage
-        slip_val = slippage
-        if slip_val is None:
-            if notional is not None and slippage_rate is not None:
-                try:
-                    slip_val = notional * float(slippage_rate)
-                except Exception:
-                    slip_val = 0.0
-            else:
-                slip_val = 0.0
+        # Spread: spread_bps is a full quoted spread, converted to currency.
+        if spread_cost is not None:
+            spread_value, error = explicit_cost(spread_cost, "spread")
+            if error:
+                return reject(error, gross=gross, fee=fee_value,
+                              threshold_amount=threshold_amount)
+        elif spread_bps is None:
+            spread_value = 0.0
+        else:
+            bps = _finite_number(spread_bps)
+            if bps is None or bps < 0.0:
+                return reject("invalid spread estimate (fail closed)", gross=gross,
+                              fee=fee_value, threshold_amount=threshold_amount)
+            if notional is None and bps != 0.0:
+                return reject("missing notional for spread estimate", gross=gross,
+                              fee=fee_value, threshold_amount=threshold_amount)
+            spread_value = (notional or 0.0) * bps / 10000.0
+            if not math.isfinite(spread_value):
+                return reject("invalid spread estimate (fail closed)", gross=gross,
+                              fee=fee_value, threshold_amount=threshold_amount)
 
-        # market impact: simple volatility * sqrt(quantity) proxy
-        impact_val = market_impact
-        if impact_val is None:
-            impact_val = 0.0
-            if volatility is not None and notional is not None:
-                try:
-                    # impact ~ vol * 0.1 * notional
-                    impact_val = float(volatility) * 0.1 * notional * 0.01
-                    if holding_period and holding_period > 0:
-                        impact_val /= math.sqrt(float(holding_period))
-                except Exception:
-                    impact_val = 0.0
+        # Slippage is charged on both entry and exit, matching ExecutionConfig.
+        if slippage is not None:
+            slip_value, error = explicit_cost(slippage, "slippage")
+            if error:
+                return reject(error, gross=gross, fee=fee_value,
+                              spread=spread_value,
+                              threshold_amount=threshold_amount)
+        elif slippage_rate is None:
+            slip_value = 0.0
+        else:
+            rate = _finite_number(slippage_rate)
+            if rate is None or rate < 0.0:
+                return reject("invalid slippage rate (fail closed)", gross=gross,
+                              fee=fee_value, spread=spread_value,
+                              threshold_amount=threshold_amount)
+            if notional is None and rate != 0.0:
+                return reject("missing notional for slippage estimate", gross=gross,
+                              fee=fee_value, spread=spread_value,
+                              threshold_amount=threshold_amount)
+            slip_value = (notional or 0.0) * rate * 2.0
+            if not math.isfinite(slip_value):
+                return reject("invalid slippage estimate (fail closed)", gross=gross,
+                              fee=fee_value, spread=spread_value,
+                              threshold_amount=threshold_amount)
 
-        # Guard against NaN/Inf in costs
-        for v in (fee_val, spr_val, slip_val, impact_val):
-            if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
-                reason = "NET_EDGE_REJECT: invalid cost estimate (fail closed)"
-                return NetEdgeResult(False, float(gross), 0, 0, 0, 0, float("-inf"), self.threshold, reason)
-            if v < 0:
-                # negative costs are invalid (would imply profit from costs)
-                reason = "NET_EDGE_REJECT: negative cost estimate"
-                return NetEdgeResult(False, float(gross), float(fee_val), float(spr_val), float(slip_val), float(impact_val), float("-inf"), self.threshold, reason)
+        # Small documented volatility/participation proxy. If requested, it
+        # needs both a valid volatility value and a notional basis.
+        if market_impact is not None:
+            impact_value, error = explicit_cost(market_impact, "market impact")
+            if error:
+                return reject(error, gross=gross, fee=fee_value,
+                              spread=spread_value, slip=slip_value,
+                              threshold_amount=threshold_amount)
+        elif volatility is None:
+            impact_value = 0.0
+        else:
+            vol = _finite_number(volatility)
+            if vol is None or vol < 0.0:
+                return reject("invalid volatility for market-impact estimate",
+                              gross=gross, fee=fee_value, spread=spread_value,
+                              slip=slip_value,
+                              threshold_amount=threshold_amount)
+            if notional is None and vol != 0.0:
+                return reject("missing notional for market-impact estimate",
+                              gross=gross, fee=fee_value, spread=spread_value,
+                              slip=slip_value,
+                              threshold_amount=threshold_amount)
+            impact_value = vol * 0.001 * (notional or 0.0)
+            if holding_period is not None:
+                period = _finite_number(holding_period)
+                if period is None or period <= 0.0:
+                    return reject("invalid holding period for market impact",
+                                  gross=gross, fee=fee_value, spread=spread_value,
+                                  slip=slip_value,
+                                  threshold_amount=threshold_amount)
+                impact_value /= math.sqrt(period)
+            if not math.isfinite(impact_value):
+                return reject("invalid market-impact estimate (fail closed)",
+                              gross=gross, fee=fee_value, spread=spread_value,
+                              slip=slip_value,
+                              threshold_amount=threshold_amount)
 
-        net = float(gross) - float(fee_val) - float(spr_val) - float(slip_val) - float(impact_val)
+        net = gross - fee_value - spread_value - slip_value - impact_value
+        if not math.isfinite(net):
+            return reject("net_expected invalid", gross=gross, fee=fee_value,
+                          spread=spread_value, slip=slip_value, impact=impact_value,
+                          threshold_amount=threshold_amount)
 
-        if math.isnan(net) or math.isinf(net):
-            reason = "NET_EDGE_REJECT: net_expected invalid"
-            return NetEdgeResult(False, float(gross), float(fee_val), float(spr_val), float(slip_val), float(impact_val), net, self.threshold, reason)
-
-        passes = net > self.threshold
-
+        passes = net > threshold_amount
+        verdict = "PASS" if passes else "REJECT"
+        reason = (
+            f"NET_EDGE_{verdict}: gross_expected={gross:.6f} "
+            f"fees={fee_value:.6f} spread={spread_value:.6f} "
+            f"slippage={slip_value:.6f} market_impact={impact_value:.6f} "
+            f"net_expected={net:.6f} threshold_rate={self.threshold:.6f} "
+            f"threshold_amount={threshold_amount:.6f}"
+        )
         if passes:
-            reason = f"NET_EDGE_PASS: gross_expected={gross:.6f} fees={fee_val:.6f} spread={spr_val:.6f} slippage={slip_val:.6f} net_expected={net:.6f} threshold={self.threshold:.6f}"
             logger.debug(reason)
         else:
-            reason = f"NET_EDGE_REJECT: gross_expected={gross:.6f} fees={fee_val:.6f} spread={spr_val:.6f} slippage={slip_val:.6f} net_expected={net:.6f} threshold={self.threshold:.6f}"
             logger.info(reason)
-
-        return NetEdgeResult(passes, float(gross), float(fee_val), float(spr_val), float(slip_val), float(impact_val), net, self.threshold, reason)
+        return NetEdgeResult(
+            passes=passes,
+            gross_expected=gross,
+            fees=fee_value,
+            spread_cost=spread_value,
+            slippage=slip_value,
+            market_impact=impact_value,
+            net_expected=net,
+            threshold=self.threshold,
+            reason=reason,
+            threshold_amount=threshold_amount,
+        )

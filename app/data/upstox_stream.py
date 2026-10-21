@@ -304,6 +304,7 @@ class UpstoxStream(WebSocketProvider):
         self._token = access_token
         self._keys = keys
         self._symbol_for = dict(zip(keys, symbols))
+        self._key_for_symbol = dict(zip(symbols, keys))
         self.symbols = symbols
         # Best-bid/ask remains a separate observed quote from OHLC candles; it
         # is never synthesized into candle data. The engine consumes only a
@@ -328,9 +329,23 @@ class UpstoxStream(WebSocketProvider):
         self.authenticated = False
         self.subscribed = False
         self.reconnects = 0
+        # Separate transport observations from candle accounting. A WebSocket
+        # message may be market-info, malformed text, a tick, or an interval bar;
+        # it is not itself a completed/delivered candle.
+        self.websocket_messages_received = 0
+        self.websocket_binary_messages_received = 0
+        self.websocket_text_messages_received = 0
+        self.websocket_connected_once = False
+        self.subscription_sent = False
+        self.last_connected_at: str | None = None
+        self.last_connection_error: dict | None = None
+        self.delivered_candles = 0
+        self.last_suppression: dict | None = None
         self.market_status: str | None = None
         self.segment_statuses: dict[str, str] = {}
         self.market_open: bool | None = None
+        self.market_open_segment: str | None = None
+        self.market_open_segment_status: str | None = None
         self.suppressed_by_market_status = 0
         self.last_tick: dict | None = None
         self.connect_latency = {"attempts": 0, "avg_ms": 0.0, "max_ms": 0.0, "last_ms": 0.0}
@@ -412,13 +427,17 @@ class UpstoxStream(WebSocketProvider):
         )
         self.segment_statuses = dict(segment_statuses)
         self.market_status = market_status
-        self.market_open = self._relevant_market_open()
+        (self.market_open_segment, self.market_open_segment_status,
+         self.market_open) = self._market_status_for_instrument(
+             self._keys[0] if self._keys else None)
         if changed:
             logger.info(
                 "UPSTOX_MARKET_STATUS",
                 extra={
                     "market_status": self.market_status,
                     "market_open": self.market_open,
+                    "market_open_segment": self.market_open_segment,
+                    "market_open_segment_status": self.market_open_segment_status,
                     "segments": dict(self.segment_statuses),
                 },
             )
@@ -482,22 +501,31 @@ class UpstoxStream(WebSocketProvider):
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
 
-    def _relevant_market_open(self) -> bool | None:
-        """Map segment statuses to open/closed for the subscribed instruments.
+    def _market_status_for_instrument(
+        self, instrument_key: str | None
+    ) -> tuple[str | None, str | None, bool | None]:
+        """Return the segment, its status and open decision for one key.
 
-        Tries the instrument exchange prefix (e.g. 'NSE' from 'NSE_EQ|…') in
-        the provider's map; if nothing matches, falls back to 'any segment
-        open'. Returns None only while no status has been received yet.
+        Prefer the exchange prefix (NSE from NSE_EQ|...), then the exact
+        instrument segment. If neither is present, preserve the historical
+        any-open fallback and identify that the decision was aggregate.
         """
         if not self.segment_statuses:
-            return None
-        for key in self._keys:
-            exchange = key.split("|", 1)[0].split("_", 1)[0]
-            if exchange in self.segment_statuses:
-                return self.segment_statuses[exchange] == MARKET_OPEN_STATUS
-            if key.split("|", 1)[0] in self.segment_statuses:
-                return self.segment_statuses[key.split("|", 1)[0]] == MARKET_OPEN_STATUS
-        return MARKET_OPEN_STATUS in self.segment_statuses.values()
+            return None, None, None
+        if instrument_key:
+            instrument_segment = instrument_key.split("|", 1)[0]
+            exchange = instrument_segment.split("_", 1)[0]
+            for segment in (exchange, instrument_segment):
+                if segment in self.segment_statuses:
+                    status = self.segment_statuses[segment]
+                    return segment, status, status == MARKET_OPEN_STATUS
+        is_open = MARKET_OPEN_STATUS in self.segment_statuses.values()
+        return "ANY_SEGMENT", self.market_status, is_open
+
+    def _relevant_market_open(self) -> bool | None:
+        """Compatibility helper for the first configured instrument."""
+        key = self._keys[0] if self._keys else None
+        return self._market_status_for_instrument(key)[2]
 
     def _decode(self, payload: bytes) -> list[Candle]:
         """Compatibility path: decode a frame and return completed candles."""
@@ -520,6 +548,25 @@ class UpstoxStream(WebSocketProvider):
         )
         self.feed_latency["max_ms"] = max(self.feed_latency["max_ms"], round(elapsed_ms, 3))
 
+    @staticmethod
+    def _connection_error_diagnostics(exc: BaseException) -> dict:
+        """Expose only safe transport metadata; never stringify the exception.
+
+        WebSocket close reasons, handshake bodies, headers and authorized URLs
+        are deliberately excluded because they are provider-controlled and may
+        contain sensitive material.
+        """
+        details = {"error_type": type(exc).__name__}
+        close = getattr(exc, "rcvd", None) or getattr(exc, "sent", None)
+        code = getattr(close, "code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            details["close_code"] = code
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            details["handshake_http_status"] = status
+        return details
+
     def metrics(self) -> dict:
         """Health/monitoring fields for /market/status. Never includes secrets."""
         counters = self._builder.metrics()
@@ -529,17 +576,32 @@ class UpstoxStream(WebSocketProvider):
             "feed_mode": self.mode,
             "timeframe": self.timeframe,
             "connection_status": self.status,
+            "websocket_connected_once": self.websocket_connected_once,
+            "last_connected_at": self.last_connected_at,
+            "subscription_sent": self.subscription_sent,
+            "websocket_messages_received": self.websocket_messages_received,
+            "websocket_binary_messages_received": self.websocket_binary_messages_received,
+            "websocket_text_messages_received": self.websocket_text_messages_received,
+            "last_connection_error": (dict(self.last_connection_error)
+                                      if self.last_connection_error else None),
             "authenticated": self.authenticated,
             "subscribed": self.subscribed,
             "last_message_time": self.last_message,
             "last_candle_time": self.last_candle_time,
+            "completed_candles": counters["completed_candles"],
+            "delivered_candles": self.delivered_candles,
+            "suppressed_candles": self.suppressed_by_market_status,
             "data_gap_detected": counters["gaps"] > 0,
             "stale_feed": counters["stale_feed"],
             "reconnects": self.reconnects,
             "market_status": self.market_status,
             "market_open": self.market_open,
+            "market_open_segment": self.market_open_segment,
+            "market_open_segment_status": self.market_open_segment_status,
             "segment_statuses": dict(self.segment_statuses),
             "suppressed_by_market_status": self.suppressed_by_market_status,
+            "last_suppression": (dict(self.last_suppression)
+                                 if self.last_suppression else None),
             "last_tick": dict(self.last_tick) if self.last_tick else None,
             "connect_latency_ms": dict(self.connect_latency),
             "feed_counters": counters,
@@ -602,11 +664,14 @@ class UpstoxStream(WebSocketProvider):
                             last_ms=elapsed_ms,
                         )
                         self._socket, self.status = socket, "CONNECTED"
+                        self.websocket_connected_once = True
+                        self.last_connected_at = datetime.now(timezone.utc).isoformat()
                         logger.info(
                             "UPSTOX_CONNECT",
                             extra={"connect_latency_ms": elapsed_ms, "reconnect": attempts > 0},
                         )
                         await socket.send(self.subscription())
+                        self.subscription_sent = True
                         logger.info(
                             "UPSTOX_SUBSCRIBE",
                             extra={"keys": len(self._keys), "mode": self.mode},
@@ -628,10 +693,13 @@ class UpstoxStream(WebSocketProvider):
                                     logger.warning("feed_stale")
                                 continue
                             self.last_message = datetime.now(timezone.utc).isoformat()
+                            self.websocket_messages_received += 1
                             if isinstance(message, str):
+                                self.websocket_text_messages_received += 1
                                 self._decoder.malformed += 1
                                 logger.warning("UPSTOX_DECODE_ERROR", extra={"reason": "text_frame"})
                                 continue
+                            self.websocket_binary_messages_received += 1
                             received_at = time.time()
                             decode_started = time.perf_counter()
                             events = self._decoder.decode(message, received_at)
@@ -644,16 +712,31 @@ class UpstoxStream(WebSocketProvider):
                             if bars:
                                 self.last_candle_time = bars[-1].available_at(self.timeframe).isoformat()
                             self.subscribed, attempts = True, 0
-                            if bars and not self._candles_allowed():
-                                self.suppressed_by_market_status += len(bars)
-                                feed_logger.warning(
-                                    "candles_suppressed_market_closed",
-                                    extra={"count": len(bars), "market_status": self.market_status},
-                                )
-                                continue
                             for bar in bars:
                                 if bar.symbol not in symbols:
                                     raise ValueError("Unsubscribed stream symbol")
+                                instrument_key = self._key_for_symbol.get(bar.symbol)
+                                segment, segment_status, is_open = (
+                                    self._market_status_for_instrument(instrument_key)
+                                )
+                                if self.require_market_status and is_open is not True:
+                                    self.suppressed_by_market_status += 1
+                                    self.last_suppression = {
+                                        "instrument_key": instrument_key,
+                                        "symbol": bar.symbol,
+                                        "market_status": self.market_status,
+                                        "market_open": is_open,
+                                        "market_open_segment": segment,
+                                        "market_open_segment_status": segment_status,
+                                        "segment_statuses": dict(self.segment_statuses),
+                                        "candle_timestamp": bar.timestamp.isoformat(),
+                                    }
+                                    feed_logger.warning(
+                                        "candles_suppressed_market_closed",
+                                        extra={"count": 1, **self.last_suppression},
+                                    )
+                                    continue
+                                self.delivered_candles += 1
                                 feed_logger.debug(
                                     "CANDLE_COMPLETED",
                                     extra={"symbol": bar.symbol, "timestamp": bar.timestamp.isoformat()},
@@ -669,9 +752,10 @@ class UpstoxStream(WebSocketProvider):
                     self.reconnects += 1
                     self.status = "RECONNECTING"
                     self.authenticated = self.subscribed = False
+                    self.last_connection_error = self._connection_error_diagnostics(exc)
                     logger.warning(
                         "UPSTOX_RECONNECT",
-                        extra={"error": type(exc).__name__, "attempt": attempts},
+                        extra={**self.last_connection_error, "attempt": attempts},
                     )
                     if not self.closed:
                         await asyncio.sleep(
@@ -691,8 +775,11 @@ class UpstoxStream(WebSocketProvider):
             if self.status not in {"AUTH_FAILED", "FAILED"}:
                 self.status = "DISCONNECTED"
 
-    def _candles_allowed(self) -> bool:
-        return not self.require_market_status or self.market_open is True
+    def _candles_allowed(self, instrument_key: str | None = None) -> bool:
+        if not self.require_market_status:
+            return True
+        key = instrument_key or (self._keys[0] if self._keys else None)
+        return self._market_status_for_instrument(key)[2] is True
 
     async def close(self):
         self.closed = True

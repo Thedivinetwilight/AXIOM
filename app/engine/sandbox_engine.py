@@ -29,6 +29,7 @@ them, and nothing in this engine can enable live trading.
 """
 
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
@@ -54,6 +55,18 @@ def intent_id_for(strategy: str, symbol: str, candle, side: str) -> str:
     return uuid5(NAMESPACE_URL, key).hex
 
 
+def _gross_expected_for_decision(decision: dict | None):
+    """Read only an explicit quote-currency estimate for this proposal.
+
+    A router score/confidence is not a calibrated P&L forecast. Missing edge
+    evidence must reach NetEdgeGate as ``None`` and be rejected; do not replace
+    it with fixed win/loss percentages or a synthetic positive return.
+    """
+    if not isinstance(decision, dict):
+        return None
+    return decision.get("gross_expected_pnl")
+
+
 class SandboxEngine:
     """Orchestrates data → strategies → risk → sandbox orders → reconciliation."""
 
@@ -68,7 +81,7 @@ class SandboxEngine:
                  market_timezone: str = "Asia/Kolkata",
                  stop_loss: float | None = 0.0,
                  take_profit: float | None = 0.0,
-                 cost_rate: float = 0.001,
+                 cost_rate: float | None = None,
                  net_edge_gate=None,
                  quality_scorer=None,
                  liquidity_intel=None,
@@ -130,7 +143,6 @@ class SandboxEngine:
         self.allocator = allocator
         self.stop_loss = float(stop_loss or 0.0)
         self.take_profit = float(take_profit or 0.0)
-        self.cost_rate = float(cost_rate)
         self.last_router_decision: dict | None = None
         self.last_events: list = []
         self._recovery_report: dict = {}
@@ -162,11 +174,29 @@ class SandboxEngine:
         # re-registered on every router strategy swap — never name-hardcoded.
         self._sync_cadence()
         # 3.0.5: performance / trade-quality gates (additive, never bypass hard risk)
-        try:
-            from app.config.settings import Settings as _Settings
-            _s = settings or (_Settings.from_env() if repository is not None else None)
-        except Exception:
-            _s = settings
+        from app.config.settings import Settings as _Settings
+        _s = (settings if settings is not None else
+              (_Settings.from_env() if repository is not None else None))
+        # Cost rates are per-side values, matching ExecutionConfig. The legacy
+        # cost_rate override remains a combined per-side commission/slippage
+        # rate for sizing; absent an override, use the actual configured
+        # commission, slippage, and half-spread rather than a fixed default.
+        if cost_rate is None:
+            self.commission_rate = float(getattr(_s, "commission", 0.0005))
+            self.slippage_rate = float(getattr(_s, "slippage", 0.0005))
+            spread_rate = float(getattr(_s, "spread", 0.0002))
+            self.cost_rate = (self.commission_rate + self.slippage_rate
+                              + spread_rate / 2.0)
+        else:
+            self.cost_rate = float(cost_rate)
+            self.commission_rate = self.cost_rate / 2.0
+            self.slippage_rate = self.cost_rate / 2.0
+        if (not math.isfinite(self.cost_rate) or self.cost_rate < 0
+                or not math.isfinite(self.commission_rate)
+                or self.commission_rate < 0
+                or not math.isfinite(self.slippage_rate)
+                or self.slippage_rate < 0):
+            raise ValueError("execution cost rates must be finite and non-negative")
         self.net_edge_gate = net_edge_gate or (NetEdgeGate.from_settings(_s) if _s else NetEdgeGate())
         self.quality_scorer = quality_scorer or (TradeQualityScorer.from_settings(_s) if _s else TradeQualityScorer())
         self.liquidity_intel = liquidity_intel or (LiquidityIntelligence.from_settings(_s) if _s else LiquidityIntelligence())
@@ -1386,37 +1416,36 @@ class SandboxEngine:
 
         # --- 3.0.5: net edge gate (immediately before hard risk, fail closed) ---
         try:
-            # Estimate gross expected from recent OOS or fixed
-            gross_expected = None
-            win_prob = None
-            win_mag = None
-            loss_mag = None
-            if self.last_router_decision:
-                try:
-                    conf = float(self.last_router_decision.get("confidence", 0.5))
-                    win_prob = 0.5 + (conf - 0.5) * 0.3
-                    base_win = 0.015
-                    base_loss = 0.01
-                    if 'vol' in locals() and vol:
-                        base_win *= (1 + vol*10)
-                        base_loss *= (1 + vol*10)
-                    win_mag = base_win * float(candle.close) * quantity
-                    loss_mag = base_loss * float(candle.close) * quantity
-                except Exception:
-                    win_prob = None
-            if gross_expected is None and win_prob is not None and win_mag is not None and loss_mag is not None:
-                gross_expected = win_prob * win_mag - (1-win_prob) * loss_mag
-            elif gross_expected is None:
-                # Fallback: use 2% * notional as gross (covers 1% fees + spread + volatility)
-                gross_expected = 0.02 * float(candle.close) * quantity
-            # Spread from liquidity snapshot; fallback to tight 2 bps (synthetic spread is 2 bps)
-            spread_bps = liq_snap.spread_bps if 'liq_snap' in locals() and liq_snap and liq_snap.spread_bps is not None else 5.0
-            # Costs: cost_rate is total round-trip, split into legs for realistic one-side cost
-            comm_rate = float(self.cost_rate) * 0.5
-            slip_rate = float(self.cost_rate) * 0.5
-            net_res = self.net_edge_gate.evaluate(gross_expected=gross_expected, price=float(candle.close), quantity=float(quantity), commission_rate=comm_rate, slippage_rate=slip_rate, spread_bps=spread_bps, volatility=vol if 'vol' in locals() else None, holding_period=5)
+            # Only an explicit, proposal-sized quote-currency estimate may
+            # justify entry. Confidence scores and fixed return assumptions
+            # are not expected P&L; absent evidence fails closed in the gate.
+            gross_expected = _gross_expected_for_decision(
+                self.last_router_decision)
+            # Use the liquidity snapshot's spread, or a separately labelled
+            # 5 bps conservative cost assumption if no spread estimate exists.
+            # This fallback is not market data and cannot validate a live quote.
+            spread_bps = (liq_snap.spread_bps
+                          if liq_snap is not None and liq_snap.spread_bps is not None
+                          else 5.0)
+            # Rates use the configured per-side economics; the gate charges
+            # commission/slippage on both entry and exit and the observed full
+            # spread once.
+            net_res = self.net_edge_gate.evaluate(
+                gross_expected=gross_expected,
+                price=float(candle.close), quantity=float(quantity),
+                commission_rate=self.commission_rate,
+                slippage_rate=self.slippage_rate,
+                spread_bps=spread_bps,
+                volatility=vol if 'vol' in locals() else None,
+                holding_period=5)
             if not net_res.passes:
-                self.repository.record_system_event("NET_EDGE_REJECT", {"symbol": candle.symbol, "gross": net_res.gross_expected, "net": net_res.net_expected, "threshold": net_res.threshold, "reason": net_res.reason})
+                self.repository.record_system_event("NET_EDGE_REJECT", {
+                    "symbol": candle.symbol,
+                    "gross": net_res.gross_expected,
+                    "net": net_res.net_expected,
+                    "threshold_rate": net_res.threshold,
+                    "threshold_amount": net_res.threshold_amount,
+                    "reason": net_res.reason})
                 return
         except Exception as exc:
             self._reject_entry_gate_failure("net_edge", candle, exc)
@@ -1629,6 +1658,30 @@ class SandboxEngine:
                 "EXECUTION_PAUSED_SKIP", {"side": side, "ts": candle.timestamp.isoformat(),
                                           "reason": reason})
             return
+        # Conservative exposure guard: an intent stuck UNKNOWN/UNRESOLVED
+        # means we cannot know what is already working at the broker (the
+        # response was lost or ambiguous, and remote lookup may be an
+        # unavailable capability). While ANY such intent exists, no new
+        # risk-increasing order may be sent — a second entry could duplicate
+        # exposure we cannot see. Risk-reducing exits (SELL) are NEVER blocked
+        # by this guard, exactly like the emergency-stop and pause gates.
+        if side == "BUY" and self.intent_journal is not None:
+            unresolved = self.intent_journal.unresolved()
+            if unresolved:
+                self.rejected_by_risk += 1
+                payload = {"reason": "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                           "side": side, "count": len(unresolved),
+                           "symbol": getattr(candle, "symbol", None),
+                           "ts": candle.timestamp.isoformat()}
+                try:
+                    self.repository.record_system_event("RISK_REJECT", payload)
+                except Exception as audit_exc:
+                    logger.error("UNRESOLVED_BLOCK_AUDIT_UNAVAILABLE",
+                                 extra={"error_type": type(audit_exc).__name__})
+                logger.warning(
+                    "UNRESOLVED_INTENT_BLOCKS_ENTRY",
+                    extra={"count": len(unresolved), "symbol": payload["symbol"]})
+                return
         intent_key = intent_id_for(self.strategy.name, candle.symbol, candle,
                                    side)  # V1 invariant format (dedup-safe)
         if self.intent_journal is not None \

@@ -15,6 +15,7 @@ permitted combination for every other broker. Broker hosts are classified in
 order host.
 """
 
+import math
 import os
 import types
 from dataclasses import dataclass, field, fields
@@ -25,6 +26,7 @@ from app.config.hosts import (
     DEFAULT_LIVE_BASE_URL,
     DEFAULT_ORDER_HISTORY_URL,
     DEFAULT_SANDBOX_BASE_URL,
+    DEFAULT_SANDBOX_ORDER_HISTORY_URL,
     FORBIDDEN_IN_LIVE,
     FORBIDDEN_IN_SANDBOX,
     LIVE_ORDER_HOSTS,
@@ -98,6 +100,32 @@ def coerce_env_value(name: str, annotation, raw):
     return raw  # str and any other annotation: verbatim
 
 
+def _validate_numeric_fields(instance) -> None:
+    """Reject malformed numeric controls before range checks can be bypassed.
+
+    NaN compares false in both directions, and dataclass annotations do not
+    enforce runtime types. Validate every declared integer/float field before
+    any safety logic consumes it, including optional protective exits.
+    """
+    hints = get_type_hints(type(instance))
+    for item in fields(instance):
+        optional, base = _unwrap_optional(hints.get(item.name, item.type))
+        value = getattr(instance, item.name)
+        if value is None and optional:
+            continue
+        if base is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{item.name.upper()} must be a finite number")
+            try:
+                finite = math.isfinite(float(value))
+            except (OverflowError, TypeError, ValueError):
+                finite = False
+            if not finite:
+                raise ValueError(f"{item.name.upper()} must be finite")
+        elif base is int and type(value) is not int:
+            raise ValueError(f"{item.name.upper()} must be an integer")
+
+
 @dataclass(frozen=True)
 class Settings:
     mode: str = "PAPER"
@@ -142,7 +170,13 @@ class Settings:
     # Sandbox order host. This MUST stay a sandbox host: api-hft.upstox.com is
     # the live order host and is refused by the sandbox broker.
     upstox_sandbox_base_url: str = DEFAULT_SANDBOX_BASE_URL
-    upstox_sandbox_order_history_url: str = DEFAULT_ORDER_HISTORY_URL
+    # Sandbox order-history READS stay on the sandbox host. The production
+    # history endpoint (api.upstox.com) is a LIVE-mode URL: a sandbox token is
+    # documented as sandbox-only and must never be sent to a production host.
+    # Order history is also not in the official sandbox-enabled API list, so a
+    # sandbox environment that does not expose it degrades to an explicit
+    # "capability unavailable" state — never to production fallback.
+    upstox_sandbox_order_history_url: str = DEFAULT_SANDBOX_ORDER_HISTORY_URL
     sandbox_product: str = "I"  # intraday product per documented V3 order API
     sandbox_order_tag: str = "arena-v1"
     # --- V2 (Arena LIVE): real-money routing, gated by four switches ---
@@ -251,6 +285,7 @@ class Settings:
     hot_path_max_latency_ms: float = 100.0
 
     def __post_init__(self):
+        _validate_numeric_fields(self)
         # V1 broker modes: paper, documented Upstox SANDBOX orders, and the
         # V2 gated real-money mode. The live host/token pair is validated only
         # for BROKER=UPSTOX_LIVE; every other broker stays paper/sandbox.
@@ -400,12 +435,26 @@ class Settings:
             raise ValueError(
                 "UPSTOX_SANDBOX_BASE_URL must be an HTTPS root URL on a "
                 "documented sandbox host")
+        history_host = host_of(self.upstox_sandbox_order_history_url)
+        if history_host in FORBIDDEN_IN_SANDBOX:
+            # A sandbox token must never be sent to a production host: the
+            # provider documents sandbox tokens as sandbox-only, and order
+            # history is not a sandbox-enabled API, so there is no legitimate
+            # production read to fall back to. Refuse instead of leaking the
+            # credential (this is the reconciliation-401 defect class: a
+            # production history 401 used to disable the whole sandbox broker).
+            raise ValueError(
+                f"UPSTOX_SANDBOX_ORDER_HISTORY_URL host {history_host!r} is a "
+                "production host; a sandbox token must never be sent there. "
+                "Use the sandbox host (order history is not a documented "
+                "sandbox capability, so a missing endpoint degrades to an "
+                "unavailable-capability state, never a production request)")
         if not is_trusted_upstox_url(
-                self.upstox_sandbox_order_history_url, READ_AND_AUTH_HOSTS,
+                self.upstox_sandbox_order_history_url, SANDBOX_ORDER_HOSTS,
                 expected_path="/v2/order/history"):
             raise ValueError(
                 "UPSTOX_SANDBOX_ORDER_HISTORY_URL must be the documented "
-                "HTTPS Upstox order-history endpoint")
+                "HTTPS Upstox order-history endpoint on a sandbox host")
 
     def _validate_live_mode(self) -> None:
         """All four locks + non-zero risk limits, or refuse to start.

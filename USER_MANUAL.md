@@ -481,8 +481,10 @@ instrument keys, e.g. `NSE_EQ|INE002A01018`; validated by regex),
 
 **Upstox sandbox (order APIs):**
 `UPSTOX_SANDBOX_ACCESS_TOKEN` (required iff `BROKER=UPSTOX_SANDBOX`),
-`UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com`,
-`UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api.upstox.com/v2/order/history`,
+`UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com`,
+`UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api-sandbox.upstox.com/v2/order/history`
+(the history route may be unavailable in sandbox; AXIOM never falls back to a
+production host),
 `SANDBOX_PRODUCT=I|D|MTF`, `SANDBOX_ORDER_TAG=arena-v1` (retained setting,
 passed to the broker; since 3.0.2 every ORDER carries the intent-derived
 12-char tag — this setting no longer overrides order tags).

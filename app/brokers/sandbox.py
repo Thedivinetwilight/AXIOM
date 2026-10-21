@@ -24,13 +24,30 @@ CURRENT documentation verified 2026-09-22 (V1 implementation):
   (documented UDAPI100040) — treated as already-closed, never fatal.
 - Modify Order V3 (sandbox-enabled): PUT {base}/v3/order/modify.
 - Reconciliation: GET {history_url}?order_id=… (documented `GET /order/history`
-  on api.upstox.com/v2; default https://api.upstox.com/v2/order/history) returns
-  the full ordered list of
+  on api.upstox.com/v2; LIVE default https://api.upstox.com/v2/order/history)
+  returns the full ordered list of
   status transitions (…, "open", "complete"/"rejected") including
   filled_quantity and average_price. Orders are retained for one trading day.
-  NOTE: sandbox order history is not part of the documented sandbox API surface
-  (sandbox currently supports place/modify/cancel), so sandbox reconciliation
-  against the production history endpoint may legitimately return no rows.
+  That production URL applies to the LIVE broker only.
+
+SANDBOX ORDER-HISTORY CAPABILITY (re-verified 2026-10-16 against the official
+Upstox docs and the official upstox-python SDK):
+- The documented sandbox-enabled API list is place/modify/cancel (+multi);
+  GET /v2/order/history is NOT sandbox-enabled. The official SDK's sandbox
+  allowlist is exactly {/v2/order/place, /v2/order/modify, /v2/order/cancel,
+  /v2/order/multi/place, /v3/order/place, /v3/order/modify, /v3/order/cancel}
+  and its sandbox mode pins every host to api-sandbox.upstox.com.
+- Consequences enforced by this class: the sandbox broker NEVER contacts a
+  production host — its history URL defaults to the sandbox host and a
+  production history URL is refused at construction (and by Settings). If the
+  sandbox environment does not expose the history path, the read side is
+  marked an unavailable capability (status_view/history_capability) while
+  order operations keep their own availability; orders stay in their
+  honestly-known local state (acknowledged, not confirmed) and the submission
+  journal keeps blocking blind resubmission. No production fallback, no
+  fabricated fills, no global order-disable caused by an unsupported read.
+- A 401/403 from the SANDBOX environment itself is a genuine credential
+  rejection (the same token the order APIs use) and still fails closed.
 - Documented operational caveats surfaced honestly: sandbox tokens are for
   sandbox orders only; order APIs can be static-IP restricted (UDAPI1154);
   order placement may require an exchange-approved algo name header
@@ -54,8 +71,8 @@ from uuid import uuid4
 import httpx
 
 from app.config.hosts import (
-    DEFAULT_ORDER_HISTORY_URL,
     DEFAULT_SANDBOX_BASE_URL,
+    DEFAULT_SANDBOX_ORDER_HISTORY_URL,
     FORBIDDEN_IN_SANDBOX,
     READ_AND_AUTH_HOSTS,
     SANDBOX_ORDER_HOSTS,
@@ -209,6 +226,17 @@ def classify_history_probe(response) -> dict:
     if status in {400, 404} and "UDAPI100010" in codes:
         return {"credential_accepted": True, "class": "documented_not_found",
                 "http_status": status, "codes": sorted(codes)}
+    if status in {404, 405}:
+        # No documented not-found code: the environment is telling us the
+        # ROUTE is not there (order history is not a documented sandbox
+        # capability). This says nothing about the credential — it is
+        # UNVERIFIED, which is a different answer from "rejected".
+        return {"credential_accepted": False, "class": "unsupported_endpoint",
+                "credential_state": "unverified", "http_status": status,
+                "codes": sorted(codes), "parse_ok": parse_ok,
+                "note": ("the sandbox environment did not expose GET "
+                         "/v2/order/history (not a documented sandbox "
+                         "capability); credential validity is UNVERIFIED")}
     return {"credential_accepted": False, "class": "unexpected",
             "http_status": status, "codes": sorted(codes),
             "parse_ok": parse_ok}
@@ -230,6 +258,12 @@ class UpstoxSandboxBroker:
     ALLOWED_HOSTS = SANDBOX_ALLOWED_HOSTS
     FORBIDDEN_HOSTS = SANDBOX_FORBIDDEN_HOSTS
     DEFAULT_BASE_URL = DEFAULT_SANDBOX_BASE_URL
+    #: Hosts whose /v2/order/history this broker may READ. For sandbox that is
+    #: the sandbox hosts only: the production read/auth host is refused so a
+    #: sandbox token can never be sent to production (the live subclass
+    #: overrides this to the documented production history host, which serves
+    #: the live broker's real orders).
+    ALLOWED_HISTORY_HOSTS = SANDBOX_ORDER_HOSTS
 
     def __init__(
         self,
@@ -237,7 +271,7 @@ class UpstoxSandboxBroker:
         instrument_key: str,
         *,
         base_url: str = DEFAULT_SANDBOX_BASE_URL,
-        history_url: str = DEFAULT_ORDER_HISTORY_URL,
+        history_url: str = DEFAULT_SANDBOX_ORDER_HISTORY_URL,
         product: str = "I",
         tag: str = "arena-v1",
         repository=None,
@@ -273,10 +307,31 @@ class UpstoxSandboxBroker:
         if not is_trusted_upstox_url(base_url, self.ALLOWED_HOSTS):
             raise ValueError("Broker base URL must be a secure HTTPS root on its order host")
         if not is_trusted_upstox_url(
-                history_url, READ_AND_AUTH_HOSTS,
+                history_url, self.ALLOWED_HISTORY_HOSTS,
                 expected_path="/v2/order/history"):
+            # The specific message for the dangerous case: a production
+            # history host configured on a SANDBOX broker. That was the
+            # reconciliation defect class — a 401 from production read APIs
+            # (which can never know about sandbox orders) fail-closed the
+            # whole broker AND leaked the sandbox token to a production host.
+            history_host = host_of(history_url)
+            if (not self.LIVE and history_host
+                    and history_host not in self.ALLOWED_HISTORY_HOSTS):
+                kind = ("a production host"
+                        if history_host in READ_AND_AUTH_HOSTS |
+                        {"api-hft.upstox.com"} else "not a sandbox host")
+                raise ValueError(
+                    f"Order-history URL host {history_host!r} is {kind}; "
+                    f"{self.MODE} must never send its token there. The URL "
+                    "must be the documented HTTPS Upstox order-history "
+                    "endpoint on a sandbox host "
+                    f"({', '.join(sorted(self.ALLOWED_HISTORY_HOSTS))}); "
+                    "order history is not a documented sandbox capability, "
+                    "so there is no production fallback")
             raise ValueError(
-                "Order-history URL must be the documented HTTPS Upstox endpoint")
+                "Order-history URL must be the documented HTTPS Upstox "
+                "order-history endpoint on an allowed host ("
+                f"{', '.join(sorted(self.ALLOWED_HISTORY_HOSTS))})")
         self._token = access_token
         self.instrument_key = instrument_key
         # 3.0.1: authoritative symbol → instrument_key resolution. The broker
@@ -293,6 +348,13 @@ class UpstoxSandboxBroker:
         self._timeout, self._transport = http_timeout, transport
         self._algo_name = algo_name
         self.available = True  # False after an auth rejection (fail closed)
+        #: Independent READ-side capability state for the order-history
+        #: endpoint (sandbox read APIs are provider-limited). A history
+        #: endpoint that is missing/unsupported/erroneous NEVER flips
+        #: ``available`` — order mutations and remote-status reads fail and
+        #: recover independently, per capability.
+        self.history_capability: dict = {
+            "state": "unknown", "reason": None, "checked_at": None}
         self.mode = self.MODE
         self.orders: dict[str, SandboxOrderState] = {}
         self.request_count = 0
@@ -391,6 +453,11 @@ class UpstoxSandboxBroker:
                     _time.sleep(0.05)
                     continue
             break
+        # Record the READ-side capability before the fail-closed auth branch
+        # so an auth rejection is attributable to the endpoint that produced
+        # it, and a missing/unsupported history endpoint never looks like a
+        # healthy-but-empty read.
+        self._note_history_capability(url, response.status_code)
         if response.status_code in {401, 403}:
             self.available = False  # fail closed on auth errors
             logger.error("SANDBOX_AUTH_FAILURE", extra={"http_status": response.status_code})
@@ -398,6 +465,48 @@ class UpstoxSandboxBroker:
                 f"Sandbox credential rejected (HTTP {response.status_code}); broker disabled"
             )
         return response
+
+    def _note_history_capability(self, url: str, status_code: int) -> None:
+        """Classify an order-history response into the read capability state.
+
+        Scope: ONLY requests whose target is the configured order-history
+        endpoint. Order mutations and this read capability are tracked
+        independently — an unsupported/erroneous history endpoint marks the
+        READ side unavailable (with the HTTP reason) and never flips the
+        broker-wide ``available`` flag that gates order operations.
+        """
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(str(url))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return
+        path = (parsed.path or "").rstrip("/")
+        if path != "/v2/order/history" or host_of(url) != host_of(self._history_url):
+            return
+        if status_code == 200:
+            state = "available"
+        elif status_code in {401, 403}:
+            state = "auth_rejected"
+        elif status_code in {404, 405}:
+            state = "unsupported"
+        elif status_code == 429:
+            state = "rate_limited"
+        elif status_code >= 500:
+            state = "provider_error"
+        else:
+            state = "unexpected"
+        reason = f"HTTP {status_code}"
+        previous = self.history_capability.get("state")
+        self.history_capability.update(
+            {"state": state, "reason": reason,
+             "checked_at": datetime.now(timezone.utc).isoformat()})
+        if previous != state:
+            # One log per transition; never contains the token or the query.
+            logger.warning(
+                "SANDBOX_HISTORY_CAPABILITY",
+                extra={"state": state, "reason": reason},
+            )
 
     # -- order flow ----------------------------------------------------------
 
@@ -1058,6 +1167,7 @@ class UpstoxSandboxBroker:
             "mode": self.mode,
             "live": self.LIVE,
             "available": self.available,
+            "history_capability": dict(self.history_capability),
             "instrument_key": self.instrument_key,
             "orders_tracked": len(self.orders),
             "open_orders": len(self.open_orders()),

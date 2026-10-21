@@ -4,8 +4,18 @@
 **Branch:** `arena/01a0ecfa-axiom`
 **Applies to:** Arena 3.0.5 backend + AXIOM desktop client
 
-Every code citation below was re-read from source this session. Where a claim
-comes from your local machine rather than this repository, it is labelled.
+Every code citation below was re-read from source during the historical
+2026-10-02 investigation. Where a claim comes from the operator's machine
+rather than this repository, it is labelled.
+
+> **Current status (2026-10-21):** This document records a pre-fix audit and is
+> not a current runbook. Sandbox order/history URLs now default to the sandbox
+> host; Settings and the broker reject production history hosts. The history
+> path may be unavailable on the provider sandbox, in which case the broker
+> reports that capability rather than contacting production or treating an
+> empty response as proof of success. No real Upstox service was contacted for
+> the current source-level tests. Use `.env.example` and `USER_MANUAL.md` for
+> current sandbox host values.
 
 ---
 
@@ -137,23 +147,27 @@ will not override it. Your instinct on this was correct.
 
 ---
 
-## 3. A real defect in the shipped defaults
+## 3. Historical host defect and current safe defaults
 
-Your local discovery is a genuine correction to this repository:
+The following values were the unsafe pre-fix defaults observed on 2026-10-02;
+they are retained here as audit history, not as current configuration advice:
 
-| Field | Repo default | Correct for Sandbox V3 |
+| Field | Historical unsafe value | Current source default / guard |
 |---|---|---|
-| `upstox_sandbox_base_url` | `https://api-hft.upstox.com` (`settings.py:101`) | `https://api-sandbox.upstox.com` |
-| `upstox_sandbox_order_history_url` | `https://api.upstox.com/v2/order/history` (`settings.py:102`) | no V2 equivalent on the sandbox host |
+| `upstox_sandbox_base_url` | `https://api-hft.upstox.com` (live order host) | `https://api-sandbox.upstox.com`; production order hosts are refused |
+| `upstox_sandbox_order_history_url` | `https://api.upstox.com/v2/order/history` (production) | `https://api-sandbox.upstox.com/v2/order/history`; production hosts are refused |
 
-That second row is the actual cause of your reconciliation 401: the shipped
-default points the **V2 production** history endpoint at a **sandbox** token.
-Your temporary patch treats the symptom; the default is the disease. See §5.
+The historical failure sent a sandbox token to the production history host.
+The current code confines sandbox reads to the sandbox host. If that history
+route is not exposed by the sandbox provider, its capability is reported as
+unavailable/unverified; there is no production fallback. This is a source-level
+safety guarantee and does not establish that the external route works.
 
-Both are overridable from `.env` without touching source:
+If overriding values in `.env`, keep both URLs on the sandbox host:
 
 ```
 UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com
+UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api-sandbox.upstox.com/v2/order/history
 ```
 
 ---
@@ -256,11 +270,11 @@ The correct fix is architectural, not a guard clause:
 Until that exists, `python -m app sandbox-test --place-order` should stay off,
 exactly as you concluded. An order you cannot reconcile is worse than no order.
 
-### 5a. What the shipped code actually does today (measured, not inferred)
+### 5a. Historical pre-fix behavior (measured in the 2026-10-02 tree)
 
-The repository has **no** `return []` stopgap. Its real behaviour is different,
-and the difference matters. Reproduced against the shipped defaults with a mock
-transport (sandbox `base_url`, production `history_url`) and one tracked order:
+This section describes the old code before the host-confinement fix. The
+reproduction below used a mock transport (sandbox `base_url`, production
+`history_url`) and one tracked order; it is not current behavior:
 
 ```
 available before: True
@@ -326,7 +340,7 @@ defaults the first reconciliation attempt disables the broker outright.
 | `.env` seems overridden | `load_dotenv(..., override=False)` — real env vars win | Clear the machine-level variable. |
 | `MARKET_DATA_TIMEFRAME must equal DEFAULT_TIMEFRAME` | The two differ (`settings.py:208`) | Set both to `1m`. |
 | Instrument rejected | Internal-symbol handling | `NSE_EQ\|INE002A01018` works; `NSE_INDEX\|Nifty 50` does not. |
-| Sandbox 401 on order APIs | Wrong host — repo default is `api-hft.upstox.com` | `UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com` |
+| Sandbox 401 on order APIs | Check sandbox token, entitlement, network, and sandbox host; current default is `api-sandbox.upstox.com` | `UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com`; never switch to a production host |
 | Sandbox 404 + `UDAPI100010` | **Not an error** — authenticated, order id absent | This is the success signal. |
 | Market-data 401 | Wrong token type, or sandbox token in the market-data slot | §4 |
 | 401 that repeats identically | Broker latches `available=False` after any 401/403 | Restart the process; fix the cause first. |
@@ -379,13 +393,12 @@ Live trading is not step 7. It is not on this list.
 - Arena source is not modified by any probe; the probes live outside the repo.
 - `.env` is gitignored and must never be committed.
 
-### 5b. Scoping the fix (measured, two attempts)
+### 5b. Historical fix-planning notes (superseded)
 
-The correct shape is known: stop the broker sending a sandbox credential to a
-non-sandbox history host, and take the honest unresolved path instead. The
-ordering matters — the guard must test `self.available` FIRST and re-raise, or
-it bypasses `_request`'s own `if not self.available: raise` and silently masks
-fail-closed. With that ordering, verified behaviour was:
+The notes below record the pre-fix investigation and implementation traps. The
+host-boundary fix and regression tests have since been integrated; review the
+current source and tests rather than treating the old completion status below
+as current. The original guard-order experiment recorded:
 
 ```
 1) credential reached production host: False
@@ -402,13 +415,12 @@ production history default and rely on reconciliation reaching it —
 pointed at a sandbox history host and its mock taught to route that host, the
 way `tests/test_v1_sandbox.py` was updated.
 
-Note also that `upstox_sandbox_order_history_url` is load-bearing for the
-diagnostic, not just for reconciliation: `app/__main__.py:562` issues
-`GET <history_url>?order_id=0` and derives the credential verdict from the
-status code. Blanking the default therefore breaks `sandbox-test` outright, so
-the default must stay and the guard belongs in the broker.
-
-Left undone deliberately rather than shipped half-applied.
+The old diagnostic depended on the history URL for its credential probe.
+Current `sandbox-test` keeps the probe on the sandbox host and distinguishes an
+unsupported history route (credential unverified) from a rejected credential;
+it never treats an empty result or production response as proof of sandbox
+credential validity. The implementation and tests supersede the following
+historical planning notes.
 
 ### 5c. Two implementation traps found while attempting the guard
 

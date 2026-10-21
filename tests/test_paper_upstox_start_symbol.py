@@ -40,11 +40,13 @@ def test_paper_request_keeps_the_internal_symbol_contract():
     assert PaperStartRequest(source="replay", symbol="RELIANCE").symbol == "RELIANCE"
     assert PaperStartRequest(source="replay", symbol="DEMO").symbol == "DEMO"
 
-    # Provider keys belong in Upstox configuration, not the generic Arena
-    # symbol field; accepting them here without normalization would mismatch
-    # the symbols emitted by UpstoxStream and consumed by PaperBroker.
+    # The paper-start API accepts the provider's key for Upstox and normalizes
+    # it before validation; non-Upstox requests retain the canonical contract.
+    assert PaperStartRequest(
+        source="upstox", symbol=INSTRUMENT_KEY, timeframe="1m"
+    ).symbol == INTERNAL_SYMBOL
     with pytest.raises(ValidationError, match="Invalid symbol"):
-        PaperStartRequest(source="upstox", symbol=INSTRUMENT_KEY, timeframe="1m")
+        PaperStartRequest(source="replay", symbol=INSTRUMENT_KEY, timeframe="1m")
 
 
 @pytest.mark.parametrize(

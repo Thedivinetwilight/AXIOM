@@ -64,7 +64,7 @@ def _provider_or_exit(settings):
 
 
 def cmd_upstox_test(args) -> int:
-    """Credential verification BEFORE connecting, then auth+connectivity proof."""
+    """Verify feed authorization and report transport/data evidence separately."""
     settings = _load_settings()
     provider = _provider_or_exit(settings)
 
@@ -77,17 +77,33 @@ def cmd_upstox_test(args) -> int:
             "credential_check": None,
             "authenticated": False,
             "websocket": "not_tried",
-            "frames": 0,
+            "websocket_status": provider.status,
+            "websocket_connected_once": False,
+            "subscription_sent": False,
+            "websocket_messages_received": 0,
+            "completed_candles": 0,
+            "suppressed_candles": 0,
+            "delivered_candles": 0,
+            # Compatibility field: candles means candles actually yielded to
+            # this CLI, not bars completed internally and then suppressed.
             "candles": 0,
             "market_status": None,
+            "market_open": None,
+            "market_open_segment": None,
+            "feed_mode": provider.mode,
+            "timeframe": provider.timeframe,
             "provider": "upstox",
             "instrument_keys": provider.metrics()["instrument_keys"],
+            "last_connection_error": None,
+            "stream_error_type": None,
             "note": "read-only market data; orders remain simulated (PAPER ONLY)",
         }
+        first_bar_task = None
+        agen = None
         try:
-            # V0.6.3: never assume the credential type — verify feed access
-            # behaviorally BEFORE any WebSocket connection. Tokens are opaque;
-            # only the documented GET authorize probe can prove feed access.
+            # Verify behaviorally before opening the WebSocket. This GET proves
+            # feed authorization only; the stream performs its own fresh
+            # authorize call and must complete a real feed-to-candle path.
             check = await verify_feed_credential(
                 settings.market_data_access_token,
                 authorize_url=settings.market_data_authorize_url,
@@ -96,24 +112,80 @@ def cmd_upstox_test(args) -> int:
             if check.verdict != "feed_ok":
                 summary["note"] += "; credential NOT verified for feed V3 → connection NOT attempted"
                 return summary
+
             agen = provider.stream(provider.symbols, provider.timeframe)
+
+            async def next_bar():
+                try:
+                    return await anext(agen)
+                except StopAsyncIteration:
+                    return None
+
+            first_bar_task = asyncio.create_task(next_bar())
             try:
-                bar = await asyncio.wait_for(anext(agen), timeout=args.timeout)
-                summary["websocket"] = "connected"
-                summary["candles"] = 1
-                summary["first_completed_candle"] = bar.to_dict()
-            except (asyncio.TimeoutError, StopAsyncIteration):
-                summary["websocket"] = (
-                    "connected_no_completed_candle_in_window"
-                    if provider.status in {"CONNECTED", "STALE"}
-                    else provider.status
-                )
+                # Shield the pending anext task: wait_for's normal cancellation
+                # would run stream.finally and erase CONNECTED before we can
+                # distinguish a deadline from a failed handshake.
+                bar = await asyncio.wait_for(
+                    asyncio.shield(first_bar_task), timeout=args.timeout)
+                if bar is not None:
+                    summary["first_completed_candle"] = bar.to_dict()
+            except asyncio.TimeoutError:
+                summary["deadline_reached"] = True
+            except Exception as exc:
+                # Never stringify provider exceptions: a library exception may
+                # include a URL or response details. The provider metrics carry
+                # the separately-sanitized close/handshake diagnostics.
+                summary["stream_error_type"] = type(exc).__name__
+
+            # Snapshot before cancelling the pending consumer or closing the
+            # provider. A final DISCONNECTED state after cleanup is not evidence
+            # that the handshake failed earlier in the test.
             metrics = provider.metrics()
-            summary["authenticated"] = metrics["authenticated"]
-            summary["market_status"] = metrics["market_status"]
-            summary["frames"] = metrics["feed_counters"]["completed_candles"]
-            summary["ok"] = summary["websocket"] == "connected"
+            summary.update({
+                "authenticated": metrics["authenticated"],
+                "websocket_status": metrics["connection_status"],
+                "websocket_connected_once": metrics["websocket_connected_once"],
+                "subscription_sent": metrics["subscription_sent"],
+                "websocket_messages_received": metrics["websocket_messages_received"],
+                "completed_candles": metrics["completed_candles"],
+                "suppressed_candles": metrics["suppressed_candles"],
+                "delivered_candles": metrics["delivered_candles"],
+                "candles": metrics["delivered_candles"],
+                "market_status": metrics["market_status"],
+                "market_open": metrics["market_open"],
+                "market_open_segment": metrics["market_open_segment"],
+                "feed_mode": metrics["feed_mode"],
+                "timeframe": metrics["timeframe"],
+                "instrument_keys": metrics["instrument_keys"],
+                "last_connection_error": metrics["last_connection_error"],
+            })
+            if summary.get("first_completed_candle") is not None:
+                summary["websocket"] = "connected"
+            elif metrics["websocket_connected_once"]:
+                if metrics["connection_status"] in {"CONNECTED", "STALE"}:
+                    summary["websocket"] = "connected_no_candle_before_deadline"
+                else:
+                    summary["websocket"] = "connected_then_lost_before_deadline"
+            elif metrics["connection_status"] in {"AUTH_FAILED", "FAILED"}:
+                summary["websocket"] = metrics["connection_status"]
+            else:
+                summary["websocket"] = "connection_not_established_before_deadline"
+            # A valid credential or open socket is not a successful market-data
+            # test. Success requires an actual completed candle delivered here.
+            summary["ok"] = summary["delivered_candles"] > 0
         finally:
+            if first_bar_task is not None and not first_bar_task.done():
+                first_bar_task.cancel()
+                try:
+                    await first_bar_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if agen is not None:
+                try:
+                    await agen.aclose()
+                except Exception as exc:
+                    summary["stream_cleanup_error_type"] = type(exc).__name__
             await provider.close()
         return summary
 
@@ -139,6 +211,9 @@ def cmd_market_stream(args) -> int:
                 print(
                     json.dumps(
                         {"event": "MARKET_STATUS", "market_status": status,
+                         "market_open": metrics["market_open"],
+                         "market_open_segment": metrics["market_open_segment"],
+                         "market_open_segment_status": metrics["market_open_segment_status"],
                          "segments": metrics["segment_statuses"]},
                         allow_nan=False,
                     ),
@@ -1110,7 +1185,9 @@ def cmd_live_preflight(args) -> int:
             probe=f"HTTP {verdict['http_status']} {verdict['class']} "
                   f"codes={verdict.get('codes', [])}",
         )
-        if verdict["class"] == "unexpected":
+        if verdict["class"] in {"unexpected", "unsupported_endpoint"}:
+            # Production exposes GET /v2/order/history; anything but the
+            # documented responses is an unexpected probe result here.
             payload["unexpected_probe_response"] = True
         if verdict["credential_accepted"] and repository is not None:
             # This is what unblocks NEW ENTRIES in the engine's TokenGuard.
@@ -1139,15 +1216,26 @@ def cmd_live_preflight(args) -> int:
 
 
 def cmd_sandbox_test(args) -> int:
-    """Verify SANDBOX credentials against the documented order APIs (read-only).
+    """Verify SANDBOX credentials against the sandbox environment (read-only).
 
-    Uses the documented GET /order/history with a probe order id:
-    401/403 → credential rejected (fail closed); HTTP 400/404 with the
-    documented 'order not found' code → credential ACCEPTED (no order placed);
-    network error → unreachable. --place-order explicitly submits one real
-    sandbox order at a tiny quantity (requires the flag, never default).
+    Probe: GET <sandbox order-history URL>?order_id=0 against the SANDBOX
+    host (a sandbox token is never sent to a production host):
+    401/403            → credential rejected (fail closed)          → exit 1
+    400/404 UDAPI100010→ credential ACCEPTED (no order placed)      → exit 0
+    404/405 otherwise  → read capability not exposed by the provider;
+                         credential UNVERIFIED (not "rejected")     → exit 4
+    network error      → unreachable                                → exit 1
+    Configuration refused → exit 2; token missing → exit 3 (no request).
+
+    --place-order explicitly submits one real sandbox order at a tiny
+    quantity (requires the flag, never default). When the read capability is
+    not exposed, --place-order is the ONLY honest credential check, so it is
+    permitted there; a refused credential (401/403) still refuses to place.
+    A placed order verifies the credential by authentication itself → exit 0.
     """
     import os
+
+    from app.config.hosts import host_of
 
     # Settings MUST be loaded before the token is read: Settings.from_env()
     # is what calls load_dotenv(), so reading os.environ first silently misses
@@ -1187,8 +1275,13 @@ def cmd_sandbox_test(args) -> int:
         "performed": True,
         "credential_accepted": False,
         "order_placed": False,
-        "note": "read-only history probe; sandbox orders only; never live",
+        "mode": broker.MODE,
+        # Hostnames only — never the token, never a credential-bearing URL.
+        "order_host": host_of(settings.upstox_sandbox_base_url),
+        "history_host": host_of(settings.upstox_sandbox_order_history_url),
+        "note": "read-only probe on the SANDBOX host; sandbox orders only; never live",
     }
+    probe_unverified_capability = False
     try:
 
         response = broker._request(
@@ -1198,16 +1291,38 @@ def cmd_sandbox_test(args) -> int:
 
         verdict = classify_history_probe(response)
         summary["credential_accepted"] = verdict["credential_accepted"]
+        summary["credential_state"] = (
+            "accepted" if verdict["credential_accepted"]
+            else "rejected" if verdict["class"] == "auth_rejected"
+            else "not_verified")
         summary["probe"] = (f"HTTP {verdict['http_status']} {verdict['class']} "
                             f"codes={verdict.get('codes', [])}")
         if verdict["class"] == "unexpected":
             summary["unexpected_probe_response"] = True
+        if verdict["class"] == "unsupported_endpoint":
+            # Not a rejection: the provider does not expose this read route
+            # in the sandbox, so read-only verification is impossible.
+            probe_unverified_capability = True
+            summary["credential_state"] = "unverified"
+            summary["capability"] = "order_history_not_exposed"
+            summary["diagnostic"] = (
+                "read-only verification unavailable: the sandbox environment "
+                "does not expose GET /v2/order/history (not a documented "
+                "sandbox capability). Credential validity is UNVERIFIED — "
+                "neither accepted nor rejected. Next step: run again with "
+                "--place-order for one authenticated sandbox order, or see "
+                "AXIOM_SANDBOX_READINESS.md.")
     except SandboxAuthError:
         summary["credential_accepted"] = False
+        summary["credential_state"] = "rejected"
         summary["probe"] = "credential rejected (401/403)"
     except SandboxRequestError as exc:
         summary["probe"] = str(exc)
-    if summary["credential_accepted"] and args.place_order:
+    # Place-order is permitted when the read probe VERIFIED the credential or
+    # when the read capability simply does not exist (then the authenticated
+    # order itself is the verification). A rejected credential never places.
+    may_place = (summary["credential_accepted"] or probe_unverified_capability)
+    if may_place and args.place_order:
         # FINAL-11/10 §60: this CLI path may only ever touch the SANDBOX. A
         # live order must never be placed from a CLI flag — real-money
         # submission exists only through the live execution gateway. Refuse
@@ -1221,15 +1336,37 @@ def cmd_sandbox_test(args) -> int:
                 "only through the live execution gateway.")
             print(json.dumps(summary, indent=2, default=str))
             return 2
-        intent = broker.submit("BUY", args.quantity, 0, order_type="MARKET",
-                               instrument_key=args.instrument)
+        try:
+            intent = broker.submit("BUY", args.quantity, 0, order_type="MARKET",
+                                   instrument_key=args.instrument)
+        except (SandboxAuthError, SandboxRequestError) as exc:
+            # The order attempt is itself an authenticated check: a 401 here
+            # is an authoritative credential rejection; a transport/provider
+            # failure leaves the credential state unchanged and honest.
+            summary["order_placed"] = False
+            summary["order_attempt_error"] = type(exc).__name__
+            if isinstance(exc, SandboxAuthError):
+                summary["credential_state"] = "rejected"
+                summary["probe"] = "credential rejected during order placement (401/403)"
+            print(json.dumps(summary, indent=2, default=str))
+            return 1
         fills = broker.reconcile()
         summary["order_placed"] = True
+        # Authentication succeeded end-to-end: the credential is verified by
+        # the only sandbox operation the provider documents for it.
+        summary["credential_accepted"] = True
+        summary["credential_state"] = "accepted"
+        summary["credential_verified_by"] = "authenticated order placement"
         summary["submitted_intent"] = intent[:12]
         summary["fills_after_reconcile"] = fills
+        summary["history_capability"] = dict(broker.history_capability)
         summary["ledger"] = broker.ledger.snapshot()
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if summary["credential_accepted"] else 1
+    if summary["order_placed"] or summary["credential_accepted"]:
+        return 0
+    if probe_unverified_capability:
+        return 4  # unverified (provider read capability not exposed)
+    return 1
 
 
 class DatasetBuilderRepositoryShim:

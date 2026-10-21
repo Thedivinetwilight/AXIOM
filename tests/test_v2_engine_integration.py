@@ -15,6 +15,7 @@ from app.learning.shadow import ShadowStrategyEngine
 from app.risk.limits import HardRiskLimits
 from app.strategies import create_strategy
 from app.strategies.base import Signal
+from tests.support import PassingNetEdgeGate
 
 INSTRUMENT = "NSE_EQ|INE002A01018"
 
@@ -74,7 +75,8 @@ def engine_env(tmp_path):
         risk_limits=HardRiskLimits.from_settings(Settings()),
         journal=LearningJournal(repository), timeframe="1m", evaluate_every=5,
         instrument_keys={"RELIANCE": INSTRUMENT},  # 3.0.2 explicit identity
-        regime_engine=regime, shadow_engine=shadow)
+        regime_engine=regime, shadow_engine=shadow,
+        net_edge_gate=PassingNetEdgeGate())
     yield engine, repository, state
     database.close()
 

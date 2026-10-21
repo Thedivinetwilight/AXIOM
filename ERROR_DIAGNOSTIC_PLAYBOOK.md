@@ -448,8 +448,8 @@ python -m app sandbox-test
 ```
 
 **HOW TO INTERPRET OUTPUT**
-- `SUSPICIOUS live-looking host` → cause 1. Fix `UPSTOX_SANDBOX_BASE_URL` (default
-  `https://api-hft.upstox.com`) before anything else.
+- `SUSPICIOUS live-looking host` → cause 1. Sandbox order requests must use
+  `https://api-sandbox.upstox.com`; production hosts are refused by Settings.
 - `has surrounding whitespace True` → cause 5; that alone produces 401.
 - `sandbox-test` reporting `credential_accepted: true` while the engine 401s → the *history*
   endpoint accepts the token but the *order* endpoint does not. That points at IP restriction or
@@ -457,10 +457,12 @@ python -m app sandbox-test
 - `sandbox-test` also rejected → the credential itself, or the host.
 
 **FIX**
-Correct the specific cause found. For the host:
+Correct the specific cause found. For the sandbox host, use only:
 ```
-UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com
+UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com
 ```
+Never use `api-hft.upstox.com` or `api.upstox.com` for sandbox orders/history. Sandbox history
+may be unsupported; AXIOM reports that capability as unavailable and never falls back to production.
 For IP restriction, register the current egress IP with Upstox — there is no client-side fix.
 
 **VERIFICATION**
@@ -535,7 +537,7 @@ SandboxRequestError: Sandbox API unreachable (network error)
 `POST /v3/order/place`, **the remote outcome is unknown**: the order may or may not exist.
 
 **LIKELY ROOT CAUSES**
-1. No outbound network / firewall blocking `api-hft.upstox.com` or `api.upstox.com`.
+1. No outbound network / firewall blocking `api-sandbox.upstox.com` (sandbox order requests). The production read host is not a sandbox fallback.
 2. TLS verification failure (corporate proxy, missing CA bundle).
 3. DNS resolution failure.
 4. Timeout under load (the broker uses `self._timeout`).
@@ -543,8 +545,9 @@ SandboxRequestError: Sandbox API unreachable (network error)
 
 **EXACT DIAGNOSTIC COMMANDS**
 ```bash
-python -c "import socket; print(socket.gethostbyname('api-hft.upstox.com'))"
-python -c "import httpx; r=httpx.get('https://api-hft.upstox.com', timeout=10); print('reachable', r.status_code)"
+python -c "import socket; print(socket.gethostbyname('api-sandbox.upstox.com'))"
+# Optional unauthenticated reachability check; never pass a sandbox token here.
+python -c "import httpx; r=httpx.get('https://api-sandbox.upstox.com', timeout=10); print('reachable', r.status_code)"
 python -c "
 from app.config.settings import Settings as S
 s=S.from_env()
@@ -553,8 +556,8 @@ for h in (s.upstox_sandbox_base_url, s.upstox_sandbox_order_history_url):
 "
 ```
 ```powershell
-Test-NetConnection api-hft.upstox.com -Port 443
-Resolve-DnsName api.upstox.com
+Test-NetConnection api-sandbox.upstox.com -Port 443
+Resolve-DnsName api-sandbox.upstox.com
 ```
 
 **HOW TO INTERPRET OUTPUT**
@@ -603,8 +606,9 @@ mis-diagnosed Upstox response in the system.*
 2. A genuine 404 *without* `UDAPI100010` → wrong URL path or host.
 3. Order history retention expired — documented as **one trading day**
    (`app/brokers/sandbox.py` docstring line 16), so yesterday's orders legitimately 404.
-4. The history endpoint host differs from the order host: history is
-   `https://api.upstox.com/v2/order/history`, orders are `https://api-hft.upstox.com`.
+4. The sandbox history route may not be exposed by the provider. The configured history URL stays on
+   `https://api-sandbox.upstox.com`; an unsupported response is reported as an unavailable capability,
+   not a credential rejection and never a reason to contact a production host.
 
 **EXACT DIAGNOSTIC COMMANDS**
 ```bash
@@ -614,18 +618,20 @@ sqlite3 "file:trading_bot.db?mode=ro" "SELECT ts, kind, payload FROM system_even
 ```
 
 **HOW TO INTERPRET OUTPUT**
-- `"credential_accepted": true` with `class: documented_not_found` → **your credentials work.**
-  Stop diagnosing auth.
-- `credential_accepted: false` with `class: unexpected` and a 404 → the URL or host is wrong; the
-  body did not carry `UDAPI100010`.
-- A 404 only for orders older than one trading day → cause 3, expected.
+- `"credential_accepted": true` with `class: documented_not_found` → the sandbox read probe accepted the credential.
+- `credential_state: "unverified"` / `capability: "order_history_not_exposed"` → history is unsupported;
+  this says nothing about credential validity. Do not switch to a production host.
+- `credential_state: "rejected"` after HTTP 401/403 → the sandbox endpoint rejected the credential.
+- A 404 without the documented `UDAPI100010` may indicate the route is unavailable; it is not proof of a bad token.
 
 **FIX**
-Usually none. For cause 2, restore the documented defaults:
+Use only sandbox-host URLs:
 ```
-UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api.upstox.com/v2/order/history
-UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com
+UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api-sandbox.upstox.com/v2/order/history
+UPSTOX_SANDBOX_BASE_URL=https://api-sandbox.upstox.com
 ```
+History may remain unavailable on sandbox; do not configure a production fallback. The current
+Settings defaults use these sandbox hosts and reject production history URLs.
 
 **VERIFICATION**
 ```bash

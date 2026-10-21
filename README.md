@@ -132,7 +132,9 @@ sandbox default, so a live token placed real orders while the broker, the
 audit tables, the dashboard and the reports all said "sandbox". The sandbox
 default is now `api-sandbox.upstox.com`, the live host is refused by the
 sandbox broker, and real-money routing goes through `UpstoxLiveBroker`
-(live audit tables, truthful `mode`/`live` labels, preflight command).
+(live audit tables, truthful `mode`/`live` labels, preflight command). Sandbox
+history reads are now pinned to the sandbox host too; an unsupported history
+route is reported as unavailable, never retried against production.
 
 Backtests, validation, and paper trading are simulations. **Historical results are not guarantees of future performance.** A high research score identifies a **selected candidate**, not a strategy guaranteed to make money. Sample prices are explicitly **synthetic**, not actual prices for RELIANCE, any exchange-listed stock, or a cryptocurrency.
 
@@ -143,15 +145,16 @@ learning layer** and a **dashboard** on top of the intact V0.6.4 platform.
 Nothing was removed: LOCAL_PAPER remains the default and the paper pipeline is
 pinned by `python -m app paper-test` (17/17 checks, exit 0).
 
-- **Modes.** `BROKER=LOCAL_PAPER` (default) | `UPSTOX_SANDBOX` | `LIVE` is
-  **rejected outright** — no live routing exists in V1. Sandbox requires
-  `UPSTOX_SANDBOX_ACCESS_TOKEN`; sandbox credentials only ever reach the
-  documented sandbox hosts (`api-hft.upstox.com` order APIs +
-  `api.upstox.com/v2/order/history` reconciliation), enforced by test.
+- **Modes.** `BROKER=LOCAL_PAPER` is the default; `UPSTOX_SANDBOX` is sandbox-only;
+  `UPSTOX_LIVE` requires the documented four-switch opt-in and non-zero hard limits,
+  while the bare `BROKER=LIVE` alias is rejected. Sandbox credentials are confined to
+  `api-sandbox.upstox.com`; sandbox history may be unavailable and never falls back to a
+  production host, enforced by host-guard and capability tests.
 - **Engine** (`python -m app engine`, requires `BROKER=UPSTOX_SANDBOX` and
   `DATA_SOURCE=upstox`): real V3 feed → strategies → **hard risk gate**
   (outside learning: max position value / open positions / daily loss /
-  trades per day) → sandbox orders → documented reconciliation. Deterministic
+  trades per day) → sandbox orders → sandbox-host reconciliation when available
+  (otherwise an explicit unavailable capability). Deterministic
   intent ids (uuid5 of strategy+symbol+candle+side) persist around each
   submission: **no duplicate orders after reconnect or restart**. An
   emergency STOP flag persists in `engine_state` and halts everything until

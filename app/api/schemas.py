@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from app.data.models import TIMEFRAMES, validate_symbol
 from app.strategies import create_strategy
 
@@ -43,3 +43,20 @@ class BacktestRequest(StrategyRequest):
 class PaperStartRequest(StrategyRequest):
     source: Literal["replay", "binance", "generic", "upstox"] = "replay"
     replay_delay: float = Field(default=0.05, ge=0, le=60)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_upstox_instrument_key(cls, value):
+        """Normalize the provider key at the paper-start API boundary.
+
+        Upstox configuration/subscriptions retain ``SEGMENT|IDENTIFIER``;
+        paper execution uses Arena's canonical ``SEGMENT-IDENTIFIER`` form.
+        """
+        if not isinstance(value, dict) or value.get("source", "replay") != "upstox":
+            return value
+        symbol = value.get("symbol")
+        if isinstance(symbol, str) and "|" in symbol:
+            normalized = dict(value)
+            normalized["symbol"] = symbol.replace("|", "-", 1)
+            return normalized
+        return value

@@ -1,5 +1,7 @@
 # Arena 3.0.5 — Complete Troubleshooting & Diagnostic Guide
 
+> **Historical guide:** This 3.0.5 snapshot predates the current 3.2.x source. Sandbox host values and risk details may have changed; use the current `.env.example`, `USER_MANUAL.md`, and test results as the source of truth. In current code, sandbox order/history traffic is confined to `api-sandbox.upstox.com`; production history is never a sandbox fallback.
+
 **Scope:** Arena 3.0.5 trading backend (`app/`), the AXIOM desktop client (`desktop/`), and the
 target chain **AXIOM → Arena 3.0.5 → Upstox Sandbox**.
 
@@ -473,13 +475,13 @@ From `app/brokers/sandbox.py` lines 176–178 and the call sites:
 | Modify order | `PUT` | `{base_url}/v3/order/modify` | `modify()` line 886 |
 | Reconcile / probe | `GET` | `{history_url}?order_id=…` | `reconcile()` line 648, `_child_remote_status()` line 751, `lookup_intent_order()` line 488 |
 
-Defaults (`Settings`, lines 104–106):
+Current source defaults (this section's original 3.0.5 line numbers are historical):
 
-- `upstox_sandbox_base_url = "https://api-hft.upstox.com"` (line 101)
-- `upstox_sandbox_order_history_url = "https://api.upstox.com/v2/order/history"` (line 102)
+- `upstox_sandbox_base_url = "https://api-sandbox.upstox.com"`
+- `upstox_sandbox_order_history_url = "https://api-sandbox.upstox.com/v2/order/history"`
 
-**Note the split:** orders go to `api-hft.upstox.com`; history goes to `api.upstox.com/v2`. Two
-different hosts. A 404 on history is not evidence about the order endpoint, and vice versa.
+Both sandbox requests stay on the sandbox host. The provider may not expose history in sandbox;
+that is reported as an unavailable capability and does not trigger a production-host fallback.
 
 ### 7.2 The safe credential probe
 
@@ -1641,7 +1643,7 @@ Belt-and-braces checklist before any start:
 ```powershell
 python -c "from app.config.settings import Settings as S; s=S.from_env(); print('mode',s.mode,'live',s.live_trading,'broker',s.broker,'base',s.upstox_sandbox_base_url)"
 ```
-Expected: `mode PAPER live False broker UPSTOX_SANDBOX base https://api-hft.upstox.com`.
+Expected current sandbox base: `https://api-sandbox.upstox.com` (never a production host).
 
 ---
 

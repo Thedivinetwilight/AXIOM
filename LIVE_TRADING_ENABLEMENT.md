@@ -1,6 +1,8 @@
 # Enabling Live Trading — Repository Analysis & Runbook
 
 > **Historical runbook snapshot:** its repository branch, audit commit and test counts predate the current branch state. It is not current proof of live readiness; see [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md).
+>
+> **Current sandbox boundary:** sandbox order and history requests are confined to `api-sandbox.upstox.com`; production history hosts are rejected. Sandbox history may be unavailable, with no production fallback. This is verified by source-level tests, not by a real Upstox account.
 
 
 **Repository:** `Thedivinetwilight/AXIOM` (branch `arena/01a0fcfb-axiom`)
@@ -18,6 +20,7 @@ active by default: the shipped defaults remain `MODE=PAPER`, `LIVE_TRADING=false
 | Item | Where | Status |
 |---|---|---|
 | Host classification corrected (live host is `api-hft…`, sandbox default `api-sandbox…`) | `app/config/hosts.py`, `app/brokers/sandbox.py`, `app/config/settings.py` | ✅ done |
+| Sandbox order and history credentials remain on sandbox hosts; production history is refused | `app/brokers/sandbox.py`, `app/config/settings.py` | ✅ verified by tests; external route availability not verified |
 | Sandbox broker refuses live order hosts (incl. `api.upstox.com`) | `app/brokers/sandbox.py` | ✅ done |
 | Real live broker with truthful identity + live-only hosts | `app/brokers/live.py` (`UpstoxLiveBroker`) | ✅ done |
 | Four-switch gate + non-zero risk-limit requirement | `app/config/settings.py` (`_validate_live_mode`) | ✅ done |

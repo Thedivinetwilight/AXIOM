@@ -92,10 +92,22 @@ FORBIDDEN_IN_LIVE = READ_AND_AUTH_HOSTS | SANDBOX_ORDER_HOSTS
 
 DEFAULT_SANDBOX_BASE_URL = "https://api-sandbox.upstox.com"
 DEFAULT_LIVE_BASE_URL = "https://api-hft.upstox.com"
-#: Order-history reads are a documented production (read-only) endpoint for both
-#: modes; sandbox order history is not part of the documented sandbox API
-#: surface, so sandbox reconciliation may legitimately return no rows.
+#: Order-history reads for LIVE orders are a documented production (read-only)
+#: endpoint: live orders exist on the production platform, so their history is
+#: read from the production host.
 DEFAULT_ORDER_HISTORY_URL = "https://api.upstox.com/v2/order/history"
+#: SANDBOX order-history reads stay ON THE SANDBOX HOST (verified against the
+#: official docs and the official upstox-python SDK sandbox allowlist,
+#: 2026-10-16: /v2/order/history is NOT a documented sandbox-enabled API —
+#: sandbox supports place/modify/cancel (+multi-place) only). Two rules follow:
+#:
+#: * a sandbox token must NEVER be sent to the production host
+#:   ``api.upstox.com`` (directive: sandbox credentials never reach production
+#:   endpoints; the provider documents sandbox tokens as sandbox-only);
+#: * if the sandbox environment does not expose the history path, the request
+#:   stays inside the sandbox boundary and the broker marks the read side as an
+#:   unavailable capability instead of disabling order operations or guessing.
+DEFAULT_SANDBOX_ORDER_HISTORY_URL = "https://api-sandbox.upstox.com/v2/order/history"
 
 
 def host_of(url: str) -> str:
