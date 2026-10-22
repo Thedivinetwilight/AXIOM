@@ -41,6 +41,26 @@ name: Windows build and installer
 
 on:
   workflow_dispatch:
+  # Push runs only reach a pull request indirectly, and a workflow_dispatch is
+  # unavailable to the automation token. The PR trigger is what actually puts a
+  # Windows exe + installer result on the change that produced it, tied to the
+  # merge commit, which is what the artifact checksum is supposed to attest.
+  # The same path filter keeps it off documentation-only changes.
+  pull_request:
+    branches:
+      - main
+      - "arena/**"
+    paths:
+      - "app/**"
+      - "arena.py"
+      - "run.py"
+      - "build_exe.py"
+      - "packaging/**"
+      - "docs/**"
+      - "tests/test_paper_database_recovery.py"
+      - "tests/test_windows_portability.py"
+      - "tests/test_packaging_single_exe.py"
+      - ".github/workflows/windows-build-installer.yml"
   push:
     branches:
       - "**"
@@ -59,7 +79,9 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  # Read-only: this workflow uploads run artifacts and never publishes a
+  # release. A pull-request run gets read access regardless of the request.
+  contents: read
 
 jobs:
   windows:
