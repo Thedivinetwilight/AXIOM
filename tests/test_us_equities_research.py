@@ -234,3 +234,35 @@ def test_cli_writes_a_requirements_report_and_never_invents_results(tmp_path):
     assert payload["explicitly_not_done"]
     assert not (out / "report.json").exists()
     assert not (out / "REPORT.md").exists()
+
+
+def test_documented_template_is_never_mistaken_for_a_dataset(tmp_path):
+    """The shipped example manifest must not satisfy the contract.
+
+    `data/us_equities` exists in the repository so operators know where to drop
+    data. If the loader accepted `manifest.example.json` as real provenance, a
+    shipped template would silently become a dataset claim.
+    """
+    import json
+    from pathlib import Path
+
+    from app.research.us_equities.dataset import DatasetError, load_dataset
+
+    repo = Path(__file__).resolve().parent.parent
+    shipped = repo / "data" / "us_equities"
+    assert (shipped / "manifest.example.json").exists()
+    assert not (shipped / "manifest.json").exists()
+
+    with pytest.raises(DatasetError, match="manifest.json is missing"):
+        load_dataset(shipped)
+
+    # A copied template still fails: its placeholders are not provenance.
+    copied = tmp_path / "ds"
+    copied.mkdir()
+    (copied / "manifest.json").write_text(
+        (shipped / "manifest.example.json").read_text(), encoding="utf-8")
+    payload = json.loads((copied / "manifest.json").read_text())
+    payload.pop("bars_csv", None)
+    (copied / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DatasetError):
+        load_dataset(copied)
