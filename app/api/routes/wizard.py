@@ -339,6 +339,7 @@ def _rebuild_engine_for(request: Request, settings) -> None:
             timeframe=settings.default_timeframe,
             repository=request.app.state.repository,
             calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+            risk_limits=(settings.paper_risk_limits() if hasattr(settings, "paper_risk_limits") else {}),
         )
         request.app.state.broker = new_broker
         request.app.state.simulator = PaperSimulator(new_broker)

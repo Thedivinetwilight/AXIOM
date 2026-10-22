@@ -1,5 +1,9 @@
 # AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0 code line)
 
+For the Alpaca US equities market-data and local paper execution path, see
+[`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md). It is paper-only and
+documents feed limits, risk caps, and research evidence requirements.
+
 > **Current source line:** 3.2.0. `AXIOM_PRODUCT_MANUAL.md` is a qualified
 > product overview, not a release-readiness certificate. Use
 > [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the

@@ -94,6 +94,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 timeframe=settings.default_timeframe,
                 repository=repository,
                 calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+                risk_limits=settings.paper_risk_limits(),
             )
             app.state.repository, app.state.broker = repository, broker
             app.state.simulator = PaperSimulator(broker)

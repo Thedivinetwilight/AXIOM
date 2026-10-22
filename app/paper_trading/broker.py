@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
+from math import isfinite
 import logging
 from app.backtesting.costs import ExecutionConfig
 from app.backtesting.orders import ACTIVE_STATUSES, Fill, Order
@@ -17,6 +18,30 @@ from app.paper_trading.compatibility import (
 )
 
 logger = logging.getLogger("bot.broker")
+
+
+class PaperRiskLimits:
+    """Separate entry-only limits, kept outside execution-cost account schema."""
+
+    def __init__(self, values=None):
+        values = values or {}
+        self.max_position_value = float(values.get("max_position_value", 0.0))
+        self.max_open_positions = int(values.get("max_open_positions", 0))
+        self.max_daily_loss = float(values.get("max_daily_loss", 0.0))
+        self.max_drawdown = float(values.get("max_drawdown", 0.0))
+        self.max_trades_per_day = int(values.get("max_trades_per_day", 0))
+        if any(not isfinite(v) or v < 0 for v in
+               (self.max_position_value, self.max_daily_loss)):
+            raise ValueError("Paper monetary risk limits must be finite and non-negative")
+        if any(v < 0 for v in (self.max_open_positions, self.max_trades_per_day)):
+            raise ValueError("Paper count risk limits must be non-negative")
+        if not isfinite(self.max_drawdown) or not 0 <= self.max_drawdown < 1:
+            raise ValueError("Paper max_drawdown must be in [0, 1)")
+
+    def to_dict(self):
+        return {name: getattr(self, name) for name in (
+            "max_position_value", "max_open_positions", "max_daily_loss",
+            "max_drawdown", "max_trades_per_day")}
 
 
 class BrokerInterface(ABC):
@@ -58,6 +83,7 @@ class PaperBroker(BrokerInterface):
         currency: str = "INR",
         timeframe: str = "1D",
         calendar=None,
+        risk_limits: dict | None = None,
         repository=None,
         restore=True,
     ):
@@ -66,6 +92,7 @@ class PaperBroker(BrokerInterface):
         if timeframe not in TIMEFRAMES:
             raise ValueError("Unsupported timeframe")
         self.config = config or ExecutionConfig()
+        self.risk_limits = PaperRiskLimits(risk_limits)
         self.currency, self.timeframe = currency, timeframe
         self.calendar = calendar or ContinuousCalendar()
         self.portfolio = Portfolio(self.config.initial_capital)
@@ -112,6 +139,20 @@ class PaperBroker(BrokerInterface):
         if self.repository:
             self.repository.save_broker(self, snapshot)
 
+    def _update_paper_entry_halts(self, timestamp: str):
+        from zoneinfo import ZoneInfo
+
+        zone = getattr(self.calendar, "timezone", "UTC")
+        day = parse_timestamp(timestamp).astimezone(ZoneInfo(zone)).date().isoformat()
+        halts = self.context.setdefault("paper_risk_halts", {})
+        equity, limits = self.portfolio.equity, self.risk_limits
+        if limits.max_daily_loss > 0 and self.portfolio.day_start_equity - equity >= limits.max_daily_loss:
+            halts["daily_loss_date"] = day
+        if (limits.max_drawdown > 0 and self.portfolio.peak > 0
+                and 1 - equity / self.portfolio.peak >= limits.max_drawdown):
+            halts["drawdown"] = True
+        return day, halts.get("daily_loss_date") == day, bool(halts.get("drawdown"))
+
     def dump(self):
         return {
             "config": asdict(self.config),
@@ -124,6 +165,7 @@ class PaperBroker(BrokerInterface):
             "last_bars": self.last_bars,
             "last_candles": self.last_candles,
             "context": self.context,
+            "risk_limits": self.risk_limits.to_dict(),
         }
 
     def place_order(self, order: Order) -> dict:
@@ -244,6 +286,16 @@ class PaperBroker(BrokerInterface):
             return None  # Reconnect/replay idempotency.
         if not self.calendar.is_open(candle.timestamp):
             return None
+        # Roll the session-day boundary on last-known equity, then mark this
+        # symbol at the new bar's open before deciding whether resting entries
+        # remain allowed after a price gap.
+        self.portfolio.snapshot(timestamp, self.currency)
+        self.portfolio.marks[candle.symbol] = candle.open
+        _, daily_halt, drawdown_halt = self._update_paper_entry_halts(timestamp)
+        if daily_halt or drawdown_halt:
+            for pending in self.orders.values():
+                if pending.side == "BUY" and pending.status in ACTIVE_STATUSES:
+                    pending.status, pending.reason = "CANCELLED", "paper_risk_limit_breach"
         exposed_at_open = bool(self.portfolio.positions)
         budget = candle.volume * self.config.max_participation
         bought = False
@@ -259,6 +311,14 @@ class PaperBroker(BrokerInterface):
             if order.side == "BUY":
                 affordable = self.portfolio.cash / (price * (1 + self.config.commission))
                 quantity = min(quantity, affordable)
+                cap = self.risk_limits.max_position_value
+                if cap > 0:
+                    position = self.portfolio.positions.get(candle.symbol)
+                    current_value = position.quantity * price if position else 0.0
+                    quantity = min(quantity, max(0.0, cap - current_value) / price)
+                    if quantity <= 1e-8:
+                        order.status, order.reason = "CANCELLED", "paper_max_position_value"
+                        continue
                 if quantity <= 1e-8:
                     order.status, order.reason = "REJECTED", "insufficient_cash"
                     continue
@@ -364,7 +424,38 @@ class PaperBroker(BrokerInterface):
             mark = self.portfolio.marks.get(symbol)
             if mark is None:
                 raise ValueError("No market price for sizing")
+            limits = self.risk_limits
+            trade_day, daily_halt, drawdown_halt = self._update_paper_entry_halts(timestamp)
+            from zoneinfo import ZoneInfo
+            calendar_zone = getattr(self.calendar, "timezone", "UTC")
+            entry_count = sum(
+                1 for order in self.orders.values()
+                if order.side == "BUY"
+                and parse_timestamp(order.timestamp).astimezone(ZoneInfo(calendar_zone)).date().isoformat()
+                == trade_day
+            )
+            open_or_pending = len(self.portfolio.positions) + sum(
+                1 for order in self.orders.values()
+                if order.side == "BUY" and order.status in ACTIVE_STATUSES
+                and order.symbol not in self.portfolio.positions
+            )
+            block_reason = None
+            if daily_halt:
+                block_reason = "paper_max_daily_loss"
+            elif drawdown_halt:
+                block_reason = "paper_max_drawdown"
+            elif limits.max_open_positions and open_or_pending >= limits.max_open_positions:
+                block_reason = "paper_max_open_positions"
+            elif limits.max_trades_per_day and entry_count >= limits.max_trades_per_day:
+                block_reason = "paper_max_trades_per_day"
+            if block_reason:
+                logger.warning("paper_entry_blocked", extra={"symbol": symbol, "reason": block_reason})
+                if persist:
+                    self._persist()
+                return
             budget = min(self.portfolio.cash, self.portfolio.equity * self.config.position_size)
+            if limits.max_position_value > 0:
+                budget = min(budget, limits.max_position_value)
             quantity = budget / (self.config.fill_price(mark, "BUY") * (1 + self.config.commission))
             if quantity > 1e-8:
                 order = Order(symbol, "BUY", quantity, timestamp, strategy)

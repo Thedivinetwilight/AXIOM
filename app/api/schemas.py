@@ -41,7 +41,7 @@ class BacktestRequest(StrategyRequest):
 
 
 class PaperStartRequest(StrategyRequest):
-    source: Literal["replay", "binance", "generic", "upstox"] = "replay"
+    source: Literal["replay", "binance", "generic", "upstox", "alpaca"] = "replay"
     replay_delay: float = Field(default=0.05, ge=0, le=60)
 
     @model_validator(mode="before")
@@ -60,3 +60,11 @@ class PaperStartRequest(StrategyRequest):
             normalized["symbol"] = symbol.replace("|", "-", 1)
             return normalized
         return value
+
+    @model_validator(mode="after")
+    def validate_alpaca_ticker(self):
+        if self.source == "alpaca":
+            from app.data.alpaca import validate_us_symbol
+
+            self.symbol = validate_us_symbol(self.symbol)
+        return self

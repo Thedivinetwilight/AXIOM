@@ -738,7 +738,8 @@
     var box = document.createElement("div");
     var kv = Arena.el("dl", { "class": "kv" });
     var rows = [
-      ["Source", state.boot.data_source === "upstox" ? "Upstox live market data" : "Bundled replay dataset"],
+      ["Source", state.boot.data_source === "upstox" ? "Upstox live market data" :
+        (state.boot.data_source === "alpaca" ? "Alpaca US market data · local paper fills" : "Bundled replay dataset")],
       ["Instrument", (state.paper && state.paper.symbols && state.paper.symbols.join(", ")) || state.boot.settings.default_symbol || "—"],
       ["Timeframe", (state.paper && state.paper.parameters && "(engine)") || state.boot.settings.default_timeframe || "—"],
       ["Feed", null],
