@@ -208,6 +208,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Checksum the verified artifacts against this commit
+        # An artifact is only evidence if it can be tied to a commit. The
+        # digest is emitted as a notice so it is readable from the API without
+        # downloading the (large) artifact, and it names the commit it came
+        # from.
+        if: success()
+        shell: pwsh
+        run: |
+          $commit = "${{ github.sha }}"
+          $files = @(Get-ChildItem -Path "dist\Arena.exe" -ErrorAction SilentlyContinue)
+          $files += @(Get-ChildItem -Path "dist\installer\*.exe" -ErrorAction SilentlyContinue)
+          if ($files.Count -lt 2) {
+            Write-Error "expected the executable and the installer, found $($files.Count)"
+            exit 1
+          }
+          foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash.ToLower()
+            $size = $file.Length
+            $name = $file.Name
+            Write-Output "$name  sha256=$hash  $size bytes  commit=$commit"
+            Write-Output "::notice title=SHA256 $name::sha256=$hash size=$size commit=$commit"
+          }
+
       - name: Upload the Windows artifacts
         # Only after every gate above passed: a failed run must not publish
         # an artifact that was never verified.
