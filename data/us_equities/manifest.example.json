@@ -1,0 +1,24 @@
+{
+  "_comment": "TEMPLATE ONLY. Every <angle-bracket> value is a placeholder that must be replaced with something you can defend. This file is not read by the harness: copy it to manifest.json only after the CSVs exist and the provenance is real.",
+  "schema": "axiom.us.equities.dataset/1",
+  "source": {
+    "name": "<vendor or dataset name>",
+    "license": "<licence that permits local storage and research use>",
+    "url": "<where it came from>",
+    "retrieved_at": "<ISO-8601 UTC timestamp>",
+    "feed": "<sip|consolidated|vendor-specific>"
+  },
+  "adjustment": "<raw|split|split_dividend>",
+  "price_basis": "<e.g. split-and-dividend-adjusted close>",
+  "bar_timeframe": "1D",
+  "bar_timestamp_convention": "session_close",
+  "timezone": "UTC",
+  "benchmark": "SPY",
+  "universe": {
+    "kind": "point_in_time",
+    "membership_csv": "universe.csv",
+    "description": "<how membership was reconstructed, and from what>"
+  },
+  "bars_csv": "bars.csv",
+  "corporate_actions_csv": "corporate_actions.csv"
+}

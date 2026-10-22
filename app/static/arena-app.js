@@ -568,6 +568,11 @@
       Arena.el("span", { "data-live-bind": "paper.state" })
     ]));
 
+    // US paper session status (feed freshness, connection, risk, simulated label)
+    root.appendChild(Arena.el("div", { "class": "section-gap" }, [
+      card("US paper session · simulated fills", usPaperPanel())
+    ]));
+
     // ACCOUNT row
     root.appendChild(sectionTitle("Account"));
     var accountGrid = Arena.el("div", { "class": "grid cols-4" });
@@ -734,11 +739,155 @@
     return s === null || s === undefined ? "—" : s;
   }
 
+  // ---------------------------------------------------------------------
+  // US equities paper session (Alpaca market data, local simulated fills).
+  // Read-only view over /paper/status. Nothing here can place an order and
+  // nothing here can reach a broker: every row is derived from paper state.
+  // ---------------------------------------------------------------------
+  function usPaperPanel() {
+    var box = document.createElement("div");
+    var banner = Arena.el("div", { "class": "badge warn", style: "margin-bottom:12px" },
+      [document.createTextNode("PAPER ONLY · every order, fill and position below is SIMULATED locally. No broker order is sent.")]);
+    box.appendChild(banner);
+    var kv = Arena.el("dl", { "class": "kv" });
+    box.appendChild(kv);
+    var eventsHost = Arena.el("div", { style: "margin-top:12px" });
+    box.appendChild(eventsHost);
+
+    function row(label, valueNode) {
+      kv.appendChild(Arena.el("dt", {}, [document.createTextNode(label)]));
+      kv.appendChild(Arena.el("dd", {}, [valueNode]));
+    }
+    function text(value) { return document.createTextNode(value === null || value === undefined || value === "" ? "—" : String(value)); }
+    function badge(textValue) { var d = Arena.el("span"); d.appendChild(Arena.stateBadge(textValue)); return d; }
+
+    function render() {
+      kv.innerHTML = "";
+      eventsHost.innerHTML = "";
+      var p = state.paper || {};
+      var limits = p.paper_risk_limits || null;
+      var halts = p.paper_risk_halts || {};
+      var warm = p.warmup || null;
+
+      row("Session clock", text([p.session_timezone || "America/New_York",
+        p.market_status || "—",
+        p.market_open === false ? "(outside regular session)" : ""].join(" · ").trim()));
+      row("Feed", text([p.provider || "—", p.feed_mode || "—", p.timeframe || "—"].join(" · ")));
+      row("Connection", badge(p.connection || "DISCONNECTED"));
+      row("Authenticated / subscribed", text(
+        (p.authenticated ? "authenticated" : "not authenticated") + " / " +
+        (p.subscribed ? "subscribed" : "not subscribed")));
+      row("Last completed bar", text(p.last_candle_time || "—"));
+      row("Feed freshness", badge(p.stale_feed === true ? "STALE" :
+        (p.stale_feed === false ? "FRESH" : "UNKNOWN")));
+      if (p.stale_reason) row("Freshness note", text(p.stale_reason));
+      row("Reconnects", text(p.reconnects === undefined ? "—" : p.reconnects));
+      if (warm) row("Warm-up bars", text((warm.loaded === undefined ? "—" : warm.loaded) +
+        " loaded / " + (warm.requested === undefined ? "—" : warm.requested) +
+        " requested · " + (warm.status || "unknown")));
+      if (p.risk_counters) row("Feed hygiene", text(
+        "rejected " + (p.risk_counters.rejected_bars || 0) +
+        " · out-of-session " + (p.risk_counters.out_of_session_bars || 0) +
+        " · duplicates " + (p.risk_counters.deduplicated_bars || 0)));
+      if (limits) {
+        row("Risk limits", text([
+          "position " + limits.max_position_value,
+          "open " + limits.max_open_positions,
+          "daily loss " + limits.max_daily_loss,
+          "drawdown " + limits.max_drawdown,
+          "trades/day " + limits.max_trades_per_day,
+          "gross " + limits.max_gross_exposure,
+          "halt " + limits.halt_policy
+        ].join(" · ")));
+        var halted = (halts.daily_loss_date ? "daily-loss halt " + halts.daily_loss_date + " · " : "") +
+          (halts.drawdown ? "drawdown halt latched" : "");
+        row("Risk halts", badge(halted ? "BLOCKED" : "READY"));
+        if (halted) row("Halt detail", text(halted));
+        if (p.gross_exposure !== undefined) row("Gross exposure", text(
+          String(p.gross_exposure) + " / equity " + String(p.paper_account_equity === undefined ? "—" : p.paper_account_equity)));
+      }
+      row("Engine error", text(p.error_reason || "none"));
+
+      // The kill control lives next to the status it kills. It calls exactly
+      // the same two endpoints as the header controls, so there is no second
+      // implementation that could drift, and it cannot place an order.
+      var actions = Arena.el("div", { style: "display:flex;gap:8px;margin-top:12px" });
+      var engineState = p.state || "STOPPED";
+      if (engineState === "RUNNING" || engineState === "PAUSED") {
+        var stop = Arena.el("button", { "class": "btn danger sm", id: "us-paper-stop" },
+          [document.createTextNode("STOP SIMULATED SESSION")]);
+        stop.addEventListener("click", function () {
+          Arena.confirmDialog("Stop the simulated US paper session?",
+            "Resting simulated orders are cancelled and the account is persisted. " +
+            "Nothing is sent to Alpaca — this session has no broker connection to close.",
+            "Stop session", true, function () {
+              Arena.setBusy(stop, true, "Stopping…");
+              Arena.post("/paper/stop").then(function () {
+                Arena.toast("info", "Paper stop accepted; verifying status.");
+                pollOnce(true);
+              }).catch(function (e) {
+                Arena.setBusy(stop, false); Arena.toast("err", e.message); pollOnce(true);
+              });
+            });
+        });
+        actions.appendChild(stop);
+        if (engineState === "PAUSED") {
+          var resume = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("RESUME")]);
+          resume.addEventListener("click", function () {
+            Arena.post("/paper/resume").then(function () { pollOnce(true); })
+              .catch(function (e) { Arena.toast("err", e.message); pollOnce(true); });
+          });
+          actions.appendChild(resume);
+        }
+      } else {
+        var start = Arena.el("button", { "class": "btn success sm", id: "us-paper-start" },
+          [document.createTextNode("START SIMULATED SESSION")]);
+        start.addEventListener("click", function () {
+          Arena.confirmDialog("Start a simulated US paper session?",
+            "AXIOM will subscribe to market data only. Every order and fill is simulated " +
+            "locally inside the paper broker; no order endpoint is called and no real money moves.",
+            "Start session", true, function () {
+              Arena.setBusy(start, true, "Starting…");
+              state.paperStatusFresh = false;
+              refreshLive();
+              Arena.post("/api/paper/start-default", { source: "alpaca" })
+                .then(function (result) {
+                  Arena.toast("info", "Simulated session starting (" +
+                    (result && result.state ? result.state : "accepted") + "); checking status.");
+                  pollOnce(true);
+                })
+                .catch(function (e) { Arena.setBusy(start, false); Arena.toast("err", e.message); pollOnce(true); });
+            });
+        });
+        actions.appendChild(start);
+      }
+      box.appendChild(actions);
+
+      var events = p.paper_risk_events || [];
+      if (events.length) {
+        eventsHost.appendChild(Arena.el("div", { style: "font-size:12px;color:#7d89a3;margin-bottom:6px" },
+          [document.createTextNode("Recent paper risk events (newest last)")]));
+        events.slice(-6).forEach(function (e) {
+          var detail = "";
+          try { detail = JSON.stringify(e.detail || {}); } catch (err) { detail = ""; }
+          eventsHost.appendChild(Arena.el("div", { "class": "mono", style: "font-size:11.5px;color:#9aa6bd" },
+            [document.createTextNode(String(e.timestamp || "") + "  " + String(e.kind || "") + "  " + detail)]));
+        });
+      }
+    }
+
+    render();
+    var oldRefresh = refreshLive;
+    refreshLive = function () { oldRefresh(); if (document.body.contains(box)) render(); };
+    return box;
+  }
+
   function marketPanel() {
     var box = document.createElement("div");
     var kv = Arena.el("dl", { "class": "kv" });
     var rows = [
-      ["Source", state.boot.data_source === "upstox" ? "Upstox live market data" : "Bundled replay dataset"],
+      ["Source", state.boot.data_source === "upstox" ? "Upstox live market data" :
+        (state.boot.data_source === "alpaca" ? "Alpaca US market data · local paper fills" : "Bundled replay dataset")],
       ["Instrument", (state.paper && state.paper.symbols && state.paper.symbols.join(", ")) || state.boot.settings.default_symbol || "—"],
       ["Timeframe", (state.paper && state.paper.parameters && "(engine)") || state.boot.settings.default_timeframe || "—"],
       ["Feed", null],

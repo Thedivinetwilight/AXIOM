@@ -158,6 +158,7 @@ var Arena = (function () {
     if (broker === "UPSTOX_LIVE" && boot.live_trading) { cls = "live"; label = "LIVE — REAL MONEY"; }
     else if (broker === "UPSTOX_SANDBOX") { cls = "sandbox"; label = "SANDBOX ORDERS"; }
     else if (String((boot && boot.data_source) || "") === "upstox") { cls = "paper"; label = "PAPER — LIVE MARKET DATA / SIMULATED ORDERS"; }
+    else if (String((boot && boot.data_source) || "") === "alpaca") { cls = "paper"; label = "PAPER — ALPACA US DATA / LOCAL SIMULATED ORDERS"; }
     else { cls = "paper"; label = "PAPER — SIMULATED"; }
     return el("span", { "class": "badge lg " + cls }, [el("span", { "class": "dot" }), document.createTextNode(label)]);
   }

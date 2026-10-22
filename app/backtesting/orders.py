@@ -21,10 +21,18 @@ class Order:
     average_price: float = 0.0
     fees: float = 0.0
     reason: str | None = None
+    # Deterministic identity for strategy-generated paper orders. A crash +
+    # restart that re-delivers the same closed bar must not duplicate the
+    # simulated entry; manual/API orders keep a random id and no dedupe key.
+    dedupe_key: str | None = None
 
     def __post_init__(self):
         validate_symbol(self.symbol)
         parse_timestamp(self.timestamp)
+        if self.dedupe_key is not None and (
+            not isinstance(self.dedupe_key, str) or len(self.dedupe_key) > 200
+        ):
+            raise ValueError("dedupe_key must be a string of at most 200 characters")
         if self.side not in {"BUY", "SELL"} or self.order_type not in {"MARKET", "LIMIT"}:
             raise ValueError("Unsupported order side/type")
         if not isfinite(self.quantity) or self.quantity <= 0:

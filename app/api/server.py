@@ -71,7 +71,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         # schema, rewriting the account, or touching a single row: the
         # inspection is read-only (SQLite mode=ro).
         current_calendar = calendar_signature(
-            make_calendar(settings.market_calendar, settings.default_timeframe)
+            make_calendar(settings.market_calendar, settings.default_timeframe,
+                          **settings.calendar_overrides())
         )
         mismatch = inspect_paper_account(
             settings.database_url,
@@ -93,7 +94,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 currency=settings.currency,
                 timeframe=settings.default_timeframe,
                 repository=repository,
-                calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+                calendar=make_calendar(settings.market_calendar,
+                                       settings.default_timeframe,
+                                       **settings.calendar_overrides()),
+                risk_limits=settings.paper_risk_limits(),
             )
             app.state.repository, app.state.broker = repository, broker
             app.state.simulator = PaperSimulator(broker)

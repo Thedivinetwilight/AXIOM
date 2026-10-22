@@ -62,6 +62,18 @@ async def do_start(body: PaperStartRequest, request: Request):
             # Refuse before constructing the async simulator task. Never
             # silently substitute the supervised engine's fallback timeframe.
             raise ValueError(compatibility_error)
+    if body.source == "alpaca":
+        if str(getattr(settings, "mode", "PAPER")).upper() != "PAPER" or bool(
+            getattr(settings, "live_trading", False)
+        ) or str(getattr(settings, "broker", "LOCAL_PAPER")).upper() != "LOCAL_PAPER":
+            raise ValueError("Alpaca is available only as a market-data feed for local PAPER")
+        if str(getattr(settings, "market", "")).lower() != "us" or str(
+            getattr(settings, "currency", "")
+        ).upper() != "USD":
+            raise ValueError("Select MARKET=us and CURRENCY=USD for Alpaca US equities")
+        from app.data.alpaca import validate_us_symbol
+
+        validate_us_symbol(body.symbol)
     strategy = body.build_strategy()
     bars = load_dataset(request.app, body) if body.source == "replay" else None
     provider = stream_provider(
@@ -70,7 +82,7 @@ async def do_start(body: PaperStartRequest, request: Request):
         bars=bars,
         delay=body.replay_delay,
         symbol=body.symbol,
-        timeframe=body.timeframe if body.source == "upstox" else None,
+        timeframe=body.timeframe if body.source in {"upstox", "alpaca"} else None,
     )
     if body.source == "upstox":
         provider_timeframe = getattr(provider, "timeframe", None)
@@ -78,6 +90,8 @@ async def do_start(body: PaperStartRequest, request: Request):
             raise ValueError(
                 "Upstox paper provider timeframe must match the paper broker timeframe"
             )
+    if body.source == "alpaca" and getattr(provider, "supported_timeframes", None) != frozenset({"1m"}):
+        raise ValueError("Alpaca paper provider timeframe contract mismatch")
     # Live adapters expose the exact symbols they subscribe to; keep controller,
     # broker and feed in agreement to avoid unsubscribed-symbol failures later.
     symbols = list(getattr(provider, "symbols", None) or [body.symbol])

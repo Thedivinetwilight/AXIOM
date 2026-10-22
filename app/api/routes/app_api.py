@@ -72,7 +72,7 @@ async def instance_status(request: Request) -> dict:
 
 
 class StartDefaultRequest(BaseModel):
-    source: str = Field(default="replay", pattern="^(replay|upstox)$")
+    source: str = Field(default="replay", pattern="^(replay|upstox|alpaca)$")
     replay_delay: float = Field(default=0.02, ge=0, le=60)
 
 
@@ -92,7 +92,7 @@ async def paper_start_default(body: StartDefaultRequest, request: Request):
     if source == "replay":
         symbol = settings.default_symbol or "DEMO"
         timeframe = settings.default_timeframe or "1D"
-    else:
+    elif source == "upstox":
         symbols = settings.market_data_symbol_list()
         if not symbols:
             raise HTTPException(
@@ -110,6 +110,11 @@ async def paper_start_default(body: StartDefaultRequest, request: Request):
         # paper route validates the supported Upstox/feed-mode pair and passes
         # this exact value to the provider; unsupported defaults are rejected,
         # never silently downgraded.
+        timeframe = settings.default_timeframe or ""
+    else:
+        # Alpaca subscribes to plain US ticker symbols and always emits 1m
+        # finalized bars in the current streaming adapter.
+        symbol = settings.default_symbol or ""
         timeframe = settings.default_timeframe or ""
 
     payload = {

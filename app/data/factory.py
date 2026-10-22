@@ -112,4 +112,28 @@ def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None,
             mode=settings.market_data_mode,
             authorize_url=settings.market_data_authorize_url,
         )
+    if source == "alpaca":
+        from app.data.alpaca import AlpacaStream
+
+        if str(getattr(settings, "mode", "PAPER")).upper() != "PAPER" or bool(
+            getattr(settings, "live_trading", False)
+        ) or str(getattr(settings, "broker", "LOCAL_PAPER")).upper() != "LOCAL_PAPER":
+            raise ValueError("Alpaca US data can only feed the local paper simulator")
+        if str(getattr(settings, "market", "")).lower() != "us" or str(
+            getattr(settings, "currency", "")
+        ).upper() != "USD":
+            raise ValueError("Alpaca stream requires the US market and USD paper account")
+        if timeframe != "1m":
+            raise ValueError("Alpaca live paper stream currently supports 1m bars only")
+        symbols = settings.alpaca_symbol_list() or ([symbol] if symbol else [])
+        if not symbols:
+            raise ValueError("Specify a US ticker to subscribe to Alpaca")
+        if symbol and symbol.upper() not in symbols:
+            raise ValueError("Requested ticker is not in ALPACA_SYMBOLS")
+        return AlpacaStream(
+            settings.alpaca_api_key,
+            settings.alpaca_api_secret,
+            symbols,
+            feed=settings.alpaca_data_feed,
+        )
     raise ValueError("Unknown market data source")

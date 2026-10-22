@@ -1,5 +1,18 @@
 # AXIOM-MONEY-PRINTER — Market Intelligence & Trading Workstation (3.2.0 code line)
 
+For the Alpaca US equities market-data and local paper execution path, start
+with the operator manual:
+[`docs/US_EQUITIES_PAPER_OPERATOR_MANUAL.md`](docs/US_EQUITIES_PAPER_OPERATOR_MANUAL.md)
+(configuration, data-only credentials, market hours, start/stop, status, risk
+controls, troubleshooting, restart/recovery, evidence limits) and the technical
+summary [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md).
+
+The path is **paper-only**: `MODE=PAPER`, `LIVE_TRADING=false` and
+`BROKER=LOCAL_PAPER` are enforced, and Alpaca is used only as a read-only
+market-data feed. Strategy research runs through
+`tools/us_equities_research.py`, which refuses to evaluate anything without a
+licensed, point-in-time US dataset and never substitutes synthetic prices.
+
 > **Current source line:** 3.2.0. `AXIOM_PRODUCT_MANUAL.md` is a qualified
 > product overview, not a release-readiness certificate. Use
 > [`AXIOM_CURRENT_AUDIT_REPORT.md`](AXIOM_CURRENT_AUDIT_REPORT.md) for the

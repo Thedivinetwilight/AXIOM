@@ -68,9 +68,9 @@ MARKETS: Mapping[str, MarketDefinition] = {
                   "2026-11-26", "2026-12-25"),
         default_tick_size=0.01, default_lot_size=1,
         symbol_help="Exchange-listed ticker (e.g. AAPL)",
-        data_source_label="Recorded/replay (no live source configured)",
+        data_source_label="Alpaca read-only US equity market data (paper fills)",
         live_source_label="No live broker configured", broker_mapping="NONE",
-        notes="Live execution for US markets is not configured in this build.",
+        notes="US market-data paper mode only; no US live execution is configured.",
     ),
     "japan": MarketDefinition(
         market_id="japan", display_name="Japan (TSE)", country="JP",
@@ -208,23 +208,36 @@ def market_session_state(market_id: str, now: datetime | None = None) -> Session
         return SessionState(market.market_id, "ALWAYS", iso,
                             "Context market: no session gating", None, None, market.timezone)
 
+    if market.market_id == "us":
+        from app.markets.us_calendar import USEquitiesCalendar
+
+        # The US answer comes from the same calendar object the paper engine
+        # enforces, so "OPEN" here can never disagree with an accepted bar.
+        us_calendar = USEquitiesCalendar()
+        is_holiday = (
+            local.weekday() < 5 and not us_calendar.is_trading_day(local.date())
+        )
+        close_time = us_calendar.close_time(local.date())
+    else:
+        is_holiday = local.date().isoformat() in market.holidays
+        close_time = market.session_close
     date_iso = local.date().isoformat()
-    if date_iso in market.holidays:
-        next_open = _next_open(market, local)
-        return SessionState(market.market_id, "HOLIDAY", iso,
-                            f"{date_iso} is a listed market holiday",
-                            next_open.isoformat(timespec="seconds"),
-                            _minutes(local, next_open), market.timezone)
     if local.weekday() in market.weekend_days:
         next_open = _next_open(market, local)
         return SessionState(market.market_id, "WEEKEND", iso,
                             "Market is closed for the weekend",
                             next_open.isoformat(timespec="seconds"),
                             _minutes(local, next_open), market.timezone)
+    if is_holiday:
+        next_open = _next_open(market, local)
+        return SessionState(market.market_id, "HOLIDAY", iso,
+                            f"{date_iso} is a listed market holiday",
+                            next_open.isoformat(timespec="seconds"),
+                            _minutes(local, next_open), market.timezone)
 
     open_at = local.replace(hour=market.session_open.hour, minute=market.session_open.minute,
                             second=0, microsecond=0)
-    close_at = local.replace(hour=market.session_close.hour, minute=market.session_close.minute,
+    close_at = local.replace(hour=close_time.hour, minute=close_time.minute,
                              second=0, microsecond=0)
     pre_open_at = open_at - timedelta(minutes=_PRE_OPEN_MINUTES)
 
@@ -251,6 +264,16 @@ def _minutes(local: datetime, target: datetime) -> int:
 
 
 def _next_open(market: MarketDefinition, local: datetime) -> datetime:
+    if market.market_id == "us":
+        from app.markets.us_calendar import USEquitiesCalendar
+
+        calendar = USEquitiesCalendar()
+        bounds = calendar.next_session_bounds(local)
+        if bounds is not None:
+            return bounds[0]
+        return datetime.combine(  # pragma: no cover — defensive
+            local.date() + timedelta(days=1), market.session_open, ZoneInfo(market.timezone)
+        )
     candidate = (local + timedelta(days=1)).replace(
         hour=market.session_open.hour, minute=market.session_open.minute,
         second=0, microsecond=0)
