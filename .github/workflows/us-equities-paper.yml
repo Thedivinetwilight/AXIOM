@@ -1,7 +1,6 @@
 name: US equities paper checks
 
-on:
-  push:
+on:`n  workflow_dispatch:`n  push:
     branches:
       - codex/**
 
