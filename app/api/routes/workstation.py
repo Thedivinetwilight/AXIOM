@@ -51,6 +51,60 @@ async def market_session(market_id: str) -> dict:
         raise HTTPException(404, str(exc))
 
 
+@router.get("/api/forex/scope", dependencies=[Depends(authenticate)])
+async def forex_scope() -> dict:
+    """Expose the bounded research specification without implying support.
+
+    This endpoint performs no broker or provider calls. All unknown external
+    readiness stays blocked; only the USDINR exchange-futures paper math is
+    described. OTC spot, CFDs, and live orders are explicitly out of scope.
+    """
+    from app.forex.contracts import (
+        CONTRACT_UNITS, EXCHANGE, EXCHANGE_SEGMENT, MVP_PAIR, PIP_SIZE,
+        PRODUCT, SESSION_CLOSE, SESSION_OPEN, TICK_SIZE,
+    )
+
+    return {
+        "asset_class": "FX",
+        "jurisdiction": "IN",
+        "support_status": "BLOCKED_UNVERIFIED",
+        "scope_type": "candidate_paper_research_only",
+        "candidate_product": PRODUCT,
+        "candidate_pair": MVP_PAIR,
+        "exchange": EXCHANGE,
+        "provider_segment": EXCHANGE_SEGMENT,
+        "contract_units_per_lot": CONTRACT_UNITS,
+        "tick_size_quote_currency": str(TICK_SIZE),
+        "display_pip_size_quote_currency": str(PIP_SIZE),
+        "ticks_per_display_pip": int(PIP_SIZE / TICK_SIZE),
+        "quote_currency": "INR",
+        "account_currency": "INR",
+        "session_hint": {"timezone": "Asia/Kolkata", "open": SESSION_OPEN,
+                          "close": SESSION_CLOSE, "holiday_status": "UNKNOWN",
+                          "dst": "not_applicable_fixed_IST",
+                          "provider_status_required": True},
+        "paper": {"mode": "PAPER", "broker_endpoint_calls": False,
+                  "accounting_module": "domain_only_not_wired_to_simulator",
+                  "durable_state": "NOT_IMPLEMENTED"},
+        "market_data": {"provider": "upstox", "account_entitlement": "UNVERIFIED",
+                         "connection": "NOT_TESTED", "quote_freshness": "NOT_OBSERVED"},
+        "live": {"enabled": False, "supported": False,
+                 "reason": "No NCD_FO live broker adapter or account/legal readiness evidence; existing NSE_EQ-only live guards remain unchanged."},
+        "excluded_products": ["OTC spot", "CFDs", "offshore leveraged FX"],
+        "blockers": [
+            "No user-specific RBI/FEMA eligibility or permitted-purpose verification.",
+            "No Upstox NCD_FO account entitlement, current contract record, or authorized feed observation has been verified.",
+            "Paper accounting is a tested domain component only; it is not yet connected to the app simulator, durable journal, or UI order lifecycle.",
+            "Current exchange holiday calendar and live NCD_FO segment status are not verified here.",
+        ],
+        "source_urls": [
+            "https://rbi.org.in/Scripts/BS_ViewMasDirections.aspx?id=10485",
+            "https://www.nseindia.com/static/products-services/currency-derivatives-contract-specification-inr",
+            "https://upstox.com/developer/api-documentation/instrument-search/",
+            "https://upstox.com/developer/api-documentation/v3/get-market-data-feed/",
+        ],
+    }
+
 # =====================================================================
 # UNIVERSES (spec sections 4, 60) — market-scoped, persisted
 # =====================================================================

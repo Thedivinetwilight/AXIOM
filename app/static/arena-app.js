@@ -146,6 +146,7 @@
     [
       ["command", "◧", "Command Center"],
       ["markets", "◎", "Markets"],
+      ["forex", "¤", "Forex (blocked)"],
       ["research", "⚗", "Research"],
       ["models", "▲", "Models"],
       ["trading", "⇄", "Trading"],
@@ -214,7 +215,7 @@
     mainEl.innerHTML = "";
     mainEl.scrollTop = 0;
     var views = {
-      command: viewCommand, markets: viewMarkets, research: viewResearch,
+      command: viewCommand, markets: viewMarkets, forex: viewForex, research: viewResearch,
       models: viewModels, trading: viewTrading, risk: viewRisk,
       intelligence: viewIntelligence, reports: viewReports,
       execution: viewTrading, events: viewIntelligence, alerts: viewIntelligence,
@@ -1929,6 +1930,63 @@
     state.axiomPolling = setInterval(function () {
       if (!document.hidden) updateStatusbar();
     }, 5000);
+  }
+
+  // =====================================================================
+  // Forex: scope and blockers only. No entry/order controls are exposed.
+  // =====================================================================
+  function viewForex(root) {
+    root.appendChild(Arena.el("h1", { "class": "page-title" }, [document.createTextNode("Forex — blocked / research specification only")]));
+    root.appendChild(Arena.el("p", { "class": "page-sub" }, [document.createTextNode(
+      "This is not a supported or trade-ready Forex path. The candidate scope is India-listed USDINR currency futures only; OTC spot and CFDs are different products and are excluded. No broker or provider connection is attempted here.")]));
+    var host = Arena.el("div", { "class": "grid cols-2" });
+    var scope = Arena.el("div", { "class": "card-body" }, [document.createTextNode("Loading scope evidence…")]);
+    host.appendChild(card("Candidate instrument and current evidence", scope));
+    var blockers = Arena.el("div", { "class": "card-body" }, [document.createTextNode("Loading blockers…")]);
+    host.appendChild(card("Readiness and external actions", blockers));
+    root.appendChild(host);
+    Arena.get("/api/forex/scope").then(function (d) {
+      scope.innerHTML = "";
+      scope.appendChild(Arena.el("div", { "class": "banner warn" }, [
+        Arena.el("b", {}, [document.createTextNode(d.support_status || "BLOCKED_UNVERIFIED")]),
+        document.createTextNode(" · Paper accounting domain only; no connected Forex trading lifecycle.")
+      ]));
+      scope.appendChild(Arena.el("dl", { "class": "kv" }, kvRows([
+        ["Asset class", d.asset_class], ["Jurisdiction", d.jurisdiction],
+        ["Product", d.candidate_product], ["Pair", d.candidate_pair],
+        ["Venue / provider segment", d.exchange + " / " + d.provider_segment],
+        ["Provider / account", (d.market_data && d.market_data.provider) + " / " + (d.market_data && d.market_data.account_entitlement)],
+        ["Mode", d.paper && d.paper.mode + " only"],
+        ["Account currency", d.account_currency],
+        ["Contract units", d.contract_units_per_lot + " USD per lot"],
+        ["Exchange tick", d.tick_size_quote_currency + " INR per USD"],
+        ["Display pip convention", d.display_pip_size_quote_currency + " INR; " + d.ticks_per_display_pip + " ticks per display pip"],
+        ["Session", d.session_hint && d.session_hint.open + "–" + d.session_hint.close + " " + d.session_hint.timezone],
+        ["Holiday / provider status", d.session_hint && d.session_hint.holiday_status + " / " + (d.market_data && d.market_data.quote_freshness)],
+        ["Paper engine / persistence", d.paper && d.paper.accounting_module + " / " + d.paper.durable_state],
+        ["Live", "DISABLED — " + (d.live && d.live.reason)]
+      ])));
+      scope.appendChild(Arena.el("p", { "class": "hint faint" }, [document.createTextNode(
+        "The display pip is only a calculation convention for this exchange future; it is not an OTC spot contract. Simulated fills, if added, would not be broker execution evidence.")]));
+      blockers.innerHTML = "";
+      (d.blockers || []).forEach(function (item) {
+        blockers.appendChild(Arena.el("div", { "class": "banner warn", style: "margin:6px 0" }, [document.createTextNode(item)]));
+      });
+      var excluded = Arena.el("p", { "class": "hint faint" }, [document.createTextNode(
+        "Excluded: " + (d.excluded_products || []).join(", ") + ". No readiness, Arm, Activate, order, or cancellation controls are provided on this screen.")]);
+      blockers.appendChild(excluded);
+      var refs = Arena.el("div", { "class": "hint faint" }, [document.createTextNode("Evidence references: ")]);
+      (d.source_urls || []).forEach(function (url, index) {
+        if (index) refs.appendChild(document.createTextNode(" · "));
+        refs.appendChild(Arena.el("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, [document.createTextNode("Source " + (index + 1))]));
+      });
+      blockers.appendChild(refs);
+      blockers.appendChild(freshnessRow(new Date().toISOString(), "scope evaluated"));
+    }).catch(function (e) {
+      scope.innerHTML = ""; blockers.innerHTML = "";
+      scope.appendChild(Arena.el("div", { "class": "banner err" }, [document.createTextNode("Scope endpoint unavailable: " + e.message)]));
+      blockers.appendChild(Arena.el("div", { "class": "banner warn" }, [document.createTextNode("Unknown evidence remains blocked. No Forex execution controls are available." )]));
+    });
   }
 
   // =====================================================================
