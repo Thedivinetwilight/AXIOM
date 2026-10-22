@@ -61,6 +61,7 @@ on:
       - "tests/test_kronos_runtime.py"
       - "tests/test_upstox_v062.py"
       - "tests/test_live_ops_v2_1.py"
+      - "tests/test_us_equities_paper.py"
       - "axiom/**"
     tags:
       - "v*"
