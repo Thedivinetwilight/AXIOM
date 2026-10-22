@@ -62,6 +62,12 @@ on:
       - "tests/test_upstox_v062.py"
       - "tests/test_live_ops_v2_1.py"
       - "tests/test_us_equities_paper.py"
+      - "tests/test_us_equities_research.py"
+      - "tests/us_equity_fixtures.py"
+      - "app/research/us_equities/**"
+      - "tools/us_equities_research.py"
+      - "docs/US_EQUITIES_PAPER.md"
+      - "docs/US_EQUITIES_PAPER_OPERATOR_MANUAL.md"
       - "axiom/**"
     tags:
       - "v*"

@@ -49,7 +49,7 @@ def execution_price(order: Order, candle: Candle, config: ExecutionConfig) -> fl
     return price
 
 
-def make_calendar(name: str, timeframe: str):
+def make_calendar(name: str, timeframe: str, *, closed_dates=(), early_close_dates=()):
     if name == "continuous":
         return ContinuousCalendar()
     if name == "nse-session" and timeframe != "1D":
@@ -57,15 +57,20 @@ def make_calendar(name: str, timeframe: str):
     if name == "us-equities":
         from app.markets.us_calendar import USEquitiesCalendar
 
-        return USEquitiesCalendar()
+        # Operator overrides only (exchange notices for extraordinary
+        # closures); the scheduled rule set needs no overrides.
+        return USEquitiesCalendar(
+            closed_dates=closed_dates, early_close_dates=early_close_dates
+        )
     raise ValueError(
         "NSE session example supports intraday only; add daily/holiday calendar adapter"
     )
 
 
 def calendar_signature(calendar) -> dict:
-    if type(calendar).__name__ == "USEquitiesCalendar":
-        return calendar.signature()
+    signature = getattr(calendar, "signature", None)
+    if callable(signature):
+        return signature()
     if isinstance(calendar, SessionCalendar):
         return {
             "type": "session",

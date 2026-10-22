@@ -338,7 +338,8 @@ def _rebuild_engine_for(request: Request, settings) -> None:
             currency=settings.currency,
             timeframe=settings.default_timeframe,
             repository=request.app.state.repository,
-            calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+            calendar=make_calendar(settings.market_calendar, settings.default_timeframe,
+                                   **settings.calendar_overrides()),
             risk_limits=(settings.paper_risk_limits() if hasattr(settings, "paper_risk_limits") else {}),
         )
         request.app.state.broker = new_broker

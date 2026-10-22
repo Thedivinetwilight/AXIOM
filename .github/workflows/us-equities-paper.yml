@@ -1,0 +1,130 @@
+name: US equities paper gate
+
+# Purpose: give the US equities paper feature its own PR-attached check.
+#
+# `Build executable` runs on push, so its results only reach a pull request
+# indirectly (and only when one of its path filters matches). That is how PR #5
+# was reported as "no checks" while the branch had already been pushed. This
+# workflow triggers on `pull_request`, so every PR that touches the US paper
+# path gets a named, PR-linked result.
+#
+# Workflows added in a pull request DO run for that pull request's
+# `pull_request` event (GitHub uses the workflow file from the merge commit),
+# which is why no change to the base branch is needed.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "arena/**"
+    paths:
+      - "app/data/alpaca.py"
+      - "app/markets/us_calendar.py"
+      - "app/markets/registry.py"
+      - "app/paper_trading/**"
+      - "app/research/us_equities/**"
+      - "app/backtesting/**"
+      - "app/config/settings.py"
+      - "app/api/**"
+      - "app/static/**"
+      - "tools/us_equities_research.py"
+      - "tests/test_us_equities_paper.py"
+      - "tests/test_us_equities_research.py"
+      - "tests/us_equity_fixtures.py"
+      - "docs/US_EQUITIES_PAPER.md"
+      - "docs/US_EQUITIES_PAPER_OPERATOR_MANUAL.md"
+      - ".github/workflows/us-equities-paper.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: us-paper-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  us-paper:
+    name: US paper suite + full suite + JS checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: JavaScript syntax gate
+        run: |
+          node --version
+          for file in app/static/*.js; do
+            node --check "$file"
+          done
+          echo "all static JavaScript parses"
+
+      - name: US equities paper suite
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header \
+            tests/test_us_equities_paper.py \
+            tests/test_us_equities_research.py 2>&1 | tee us-paper.txt
+
+      - name: Research harness data availability (informational)
+        # The harness refuses to invent results. In CI there is no licensed
+        # dataset, so this step asserts the refusal is explicit and exits 2;
+        # it must never print a performance number.
+        shell: bash
+        run: |
+          set +e
+          python tools/us_equities_research.py --dataset data/us_equities \
+            --out "${RUNNER_TEMP}/us-paper-report" > refusal.txt 2>&1
+          code=$?
+          cat refusal.txt
+          if [ "$code" -ne 2 ]; then
+            echo "::error title=Research harness::expected exit 2 (no dataset) but got $code"
+            exit 1
+          fi
+          if [ ! -f "${RUNNER_TEMP}/us-paper-report/DATA_REQUIRED.json" ]; then
+            echo "::error title=Research harness::DATA_REQUIRED.json was not written"
+            exit 1
+          fi
+          if grep -qiE "sharpe|net return|total_return" refusal.txt; then
+            echo "::error title=Research harness::a refusal must not contain performance numbers"
+            exit 1
+          fi
+
+      - name: Complete test suite (hard gate)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q --no-header -k "not slow" --junitxml=pytest-results.xml \
+            2>&1 | tee pytest-output.txt
+
+      - name: Report failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f pytest-output.txt ]; then
+            grep -E "^(FAILED|ERROR)" pytest-output.txt | awk 'NR <= 25' | while IFS= read -r line; do
+              echo "::error title=Suite failure::${line}"
+            done
+          fi
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: us-paper-results-${{ github.run_number }}
+          path: |
+            pytest-output.txt
+            pytest-results.xml
+            us-paper.txt
+          if-no-files-found: warn
+          retention-days: 7

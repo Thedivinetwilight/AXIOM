@@ -49,7 +49,16 @@ class PaperSimulator:
             "avg_order_ms": 0.0,
         }
         # V0.6.2: risk-decision counters for live pipeline observability.
-        self.risk_counters = {"actionable_signals": 0, "orders_created": 0, "skipped": 0}
+        self.risk_counters = {
+            "actionable_signals": 0,
+            "orders_created": 0,
+            "skipped": 0,
+            # Feed-hygiene counters: every one of these is a bar the engine
+            # refused or ignored, surfaced so a silent feed problem is visible.
+            "rejected_bars": 0,
+            "out_of_session_bars": 0,
+            "deduplicated_bars": 0,
+        }
 
     def _record_failure(self, exc: Exception, phase: str) -> None:
         """Expose only allowlisted diagnostics; never persist raw exception text."""
@@ -57,6 +66,18 @@ class PaperSimulator:
         message = str(exc)
         if error_type == "UpstoxAuthError":
             reason = "provider_authentication_failed"
+        elif message in {
+            "Alpaca stream rejected authentication/subscription",
+            "Alpaca stream authentication failed",
+            "Alpaca stream subscription failed",
+            "Alpaca did not confirm authentication",
+            "Alpaca did not confirm the bar subscription",
+        }:
+            reason = "provider_authentication_failed"
+        elif message == "Alpaca stream failed repeatedly":
+            reason = "provider_stream_failed"
+        elif message == "Alpaca sent malformed stream data":
+            reason = "malformed_stream_data"
         elif message == "Stream timeframe mismatch":
             reason = "provider_timeframe_mismatch"
         elif message == "Unsubscribed stream symbol":
@@ -116,7 +137,10 @@ class PaperSimulator:
                 "last_candle_time",
                 "data_gap_detected",
                 "stale_feed",
+                "stale_reason",
+                "warmup",
                 "paper_mode",
+                "paper_only",
                 "reconnects",
                 "feed_counters",
                 "feed_latency_ms",
@@ -140,6 +164,15 @@ class PaperSimulator:
             status["paper_risk_halts"] = dict(
                 self.broker.context.get("paper_risk_halts", {})
             )
+            status["paper_risk_events"] = list(
+                self.broker.context.get("risk_events", [])
+            )[-10:]
+            status["gross_exposure"] = round(self.broker.gross_exposure(), 6)
+            status["paper_account_equity"] = round(self.broker.portfolio.equity, 6)
+        status["simulated_fills"] = True
+        status["session_timezone"] = getattr(
+            self.broker.calendar, "timezone", "UTC"
+        )
         return status
 
     async def start(self, provider, strategy, symbols):
@@ -186,22 +219,36 @@ class PaperSimulator:
 
     def process_bar(self, candle):
         validate([candle], self.broker.timeframe).require_valid()
-        if not isinstance(self.provider, ReplayStream) and candle.available_at(
-            self.broker.timeframe
-        ) > datetime.now(timezone.utc) + timedelta(seconds=2):
-            raise ValueError("Live feed sent an unfinished/future candle")
-        stale_after = getattr(self.provider, "stale_after_seconds", None)
-        if stale_after is not None and (
-            datetime.now(timezone.utc) - candle.available_at(self.broker.timeframe)
-        ).total_seconds() > stale_after:
-            raise ValueError("Live feed sent a stale candle")
+        is_live = not isinstance(self.provider, ReplayStream)
+        if is_live:
+            now = datetime.now(timezone.utc)
+            available_at = candle.available_at(self.broker.timeframe)
+            if available_at > now + timedelta(seconds=2):
+                self.risk_counters["rejected_bars"] += 1
+                raise ValueError("Live feed sent an unfinished/future candle")
+            if not self.broker.calendar.is_open(candle.timestamp):
+                # Pre/post-market or out-of-session bar. Dropping it is the safe
+                # action (the paper account only trades the regular session);
+                # crashing the session on it would be a denial-of-service by
+                # feed composition. The counter keeps it visible.
+                self.risk_counters["out_of_session_bars"] += 1
+                return
+            stale_after = getattr(self.provider, "stale_after_seconds", None)
+            if stale_after is not None and (
+                now - available_at
+            ).total_seconds() > stale_after:
+                self.risk_counters["rejected_bars"] += 1
+                raise ValueError("Live feed sent a stale candle")
         last = self.broker.last_bars.get(candle.symbol)
         if last and candle.timestamp <= parse_timestamp(last):
             if candle.timestamp == parse_timestamp(last):
                 prior = self.broker.last_candles.get(candle.symbol)
                 if prior and prior != candle.to_dict():
+                    self.risk_counters["rejected_bars"] += 1
                     raise ValueError("Conflicting duplicate candle")
+                self.risk_counters["deduplicated_bars"] += 1
                 return  # duplicate closed-candle reconnect event
+            self.risk_counters["rejected_bars"] += 1
             raise ValueError("Out-of-order live candle")
         history = self._history.setdefault(candle.symbol, [])
         if history:
@@ -335,10 +382,47 @@ class PaperSimulator:
         except Exception:  # pragma: no cover - telemetry must not break paper
             logger.exception("workstation observation failed (telemetry only)")
 
+    async def _prepare_history(self) -> None:
+        """Prime indicators from completed history before the live loop starts.
+
+        Only providers that expose ``warmup_bars`` participate (currently the
+        Alpaca adapter). Every seeded bar is already complete at call time and
+        is filtered against the broker's own cursor, so this cannot look ahead.
+        A failure degrades to an empty warm-up; it never fabricates a bar.
+        """
+        warmup = getattr(self.provider, "warmup_bars", None)
+        if warmup is None or not self.symbols:
+            return
+        need = int(getattr(self.strategy, "history_limit", 0) or 0)
+        if need <= 0:
+            return
+        if all(len(self._history.get(symbol, [])) >= need for symbol in self.symbols):
+            return
+        try:
+            bars = await warmup(min(need, 1000))
+        except Exception as exc:  # pragma: no cover — provider-specific failure mode
+            logger.warning("paper_warmup_failed", extra={"error": type(exc).__name__})
+            return
+        for symbol in self.symbols:
+            existing = self._history.setdefault(symbol, [])
+            if existing:
+                continue
+            cursor = self.broker.last_bars.get(symbol)
+            floor = parse_timestamp(cursor) if cursor else None
+            seeded = [
+                bar for bar in bars
+                if bar.symbol == symbol and (floor is None or bar.timestamp > floor)
+            ][-need:]
+            if seeded:
+                self._history[symbol] = seeded
+                logger.info("paper_warmup", extra={"symbol": symbol,
+                                                   "bars": len(seeded)})
+
     async def _run(self):
         self.state = BotState.RUNNING
         phase = "provider_stream"
         try:
+            await self._prepare_history()
             async for candle in self.provider.stream(self.symbols, self.broker.timeframe):
                 # Replay resumes after the committed cursor. Live out-of-order data fails closed.
                 last = self.broker.last_bars.get(candle.symbol)

@@ -446,7 +446,10 @@ def test_health_reports_version_and_paper_only(tmp_path):
         headers = {"Authorization": "Bearer local-test-token"}
         status = client.get("/market/status", headers=headers).json()
         assert status["paper_mode"] is True
+        # Feed-hygiene counters are additive: a refused or ignored bar must be
+        # visible in the status payload rather than silently disappearing.
         assert status["risk_counters"] == {
             "actionable_signals": 0, "orders_created": 0, "skipped": 0,
+            "rejected_bars": 0, "out_of_session_bars": 0, "deduplicated_bars": 0,
         }
         assert "access_token" not in json.dumps(status)

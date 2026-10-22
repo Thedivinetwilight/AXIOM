@@ -568,6 +568,11 @@
       Arena.el("span", { "data-live-bind": "paper.state" })
     ]));
 
+    // US paper session status (feed freshness, connection, risk, simulated label)
+    root.appendChild(Arena.el("div", { "class": "section-gap" }, [
+      card("US paper session · simulated fills", usPaperPanel())
+    ]));
+
     // ACCOUNT row
     root.appendChild(sectionTitle("Account"));
     var accountGrid = Arena.el("div", { "class": "grid cols-4" });
@@ -732,6 +737,94 @@
   function bootSetting(name) {
     var s = state.boot && state.boot.settings ? state.boot.settings[name] : null;
     return s === null || s === undefined ? "—" : s;
+  }
+
+  // ---------------------------------------------------------------------
+  // US equities paper session (Alpaca market data, local simulated fills).
+  // Read-only view over /paper/status. Nothing here can place an order and
+  // nothing here can reach a broker: every row is derived from paper state.
+  // ---------------------------------------------------------------------
+  function usPaperPanel() {
+    var box = document.createElement("div");
+    var banner = Arena.el("div", { "class": "badge warn", style: "margin-bottom:12px" },
+      [document.createTextNode("PAPER ONLY · every order, fill and position below is SIMULATED locally. No broker order is sent.")]);
+    box.appendChild(banner);
+    var kv = Arena.el("dl", { "class": "kv" });
+    box.appendChild(kv);
+    var eventsHost = Arena.el("div", { style: "margin-top:12px" });
+    box.appendChild(eventsHost);
+
+    function row(label, valueNode) {
+      kv.appendChild(Arena.el("dt", {}, [document.createTextNode(label)]));
+      kv.appendChild(Arena.el("dd", {}, [valueNode]));
+    }
+    function text(value) { return document.createTextNode(value === null || value === undefined || value === "" ? "—" : String(value)); }
+    function badge(textValue) { var d = Arena.el("span"); d.appendChild(Arena.stateBadge(textValue)); return d; }
+
+    function render() {
+      kv.innerHTML = "";
+      eventsHost.innerHTML = "";
+      var p = state.paper || {};
+      var limits = p.paper_risk_limits || null;
+      var halts = p.paper_risk_halts || {};
+      var warm = p.warmup || null;
+
+      row("Session clock", text([p.session_timezone || "America/New_York",
+        p.market_status || "—",
+        p.market_open === false ? "(outside regular session)" : ""].join(" · ").trim()));
+      row("Feed", text([p.provider || "—", p.feed_mode || "—", p.timeframe || "—"].join(" · ")));
+      row("Connection", badge(p.connection || "DISCONNECTED"));
+      row("Authenticated / subscribed", text(
+        (p.authenticated ? "authenticated" : "not authenticated") + " / " +
+        (p.subscribed ? "subscribed" : "not subscribed")));
+      row("Last completed bar", text(p.last_candle_time || "—"));
+      row("Feed freshness", badge(p.stale_feed === true ? "STALE" :
+        (p.stale_feed === false ? "FRESH" : "UNKNOWN")));
+      if (p.stale_reason) row("Freshness note", text(p.stale_reason));
+      row("Reconnects", text(p.reconnects === undefined ? "—" : p.reconnects));
+      if (warm) row("Warm-up bars", text((warm.loaded === undefined ? "—" : warm.loaded) +
+        " loaded / " + (warm.requested === undefined ? "—" : warm.requested) +
+        " requested · " + (warm.status || "unknown")));
+      if (p.risk_counters) row("Feed hygiene", text(
+        "rejected " + (p.risk_counters.rejected_bars || 0) +
+        " · out-of-session " + (p.risk_counters.out_of_session_bars || 0) +
+        " · duplicates " + (p.risk_counters.deduplicated_bars || 0)));
+      if (limits) {
+        row("Risk limits", text([
+          "position " + limits.max_position_value,
+          "open " + limits.max_open_positions,
+          "daily loss " + limits.max_daily_loss,
+          "drawdown " + limits.max_drawdown,
+          "trades/day " + limits.max_trades_per_day,
+          "gross " + limits.max_gross_exposure,
+          "halt " + limits.halt_policy
+        ].join(" · ")));
+        var halted = (halts.daily_loss_date ? "daily-loss halt " + halts.daily_loss_date + " · " : "") +
+          (halts.drawdown ? "drawdown halt latched" : "");
+        row("Risk halts", badge(halted ? "BLOCKED" : "READY"));
+        if (halted) row("Halt detail", text(halted));
+        if (p.gross_exposure !== undefined) row("Gross exposure", text(
+          String(p.gross_exposure) + " / equity " + String(p.paper_account_equity === undefined ? "—" : p.paper_account_equity)));
+      }
+      row("Engine error", text(p.error_reason || "none"));
+
+      var events = p.paper_risk_events || [];
+      if (events.length) {
+        eventsHost.appendChild(Arena.el("div", { style: "font-size:12px;color:#7d89a3;margin-bottom:6px" },
+          [document.createTextNode("Recent paper risk events (newest last)")]));
+        events.slice(-6).forEach(function (e) {
+          var detail = "";
+          try { detail = JSON.stringify(e.detail || {}); } catch (err) { detail = ""; }
+          eventsHost.appendChild(Arena.el("div", { "class": "mono", style: "font-size:11.5px;color:#9aa6bd" },
+            [document.createTextNode(String(e.timestamp || "") + "  " + String(e.kind || "") + "  " + detail)]));
+        });
+      }
+    }
+
+    render();
+    var oldRefresh = refreshLive;
+    refreshLive = function () { oldRefresh(); if (document.body.contains(box)) render(); };
+    return box;
   }
 
   function marketPanel() {

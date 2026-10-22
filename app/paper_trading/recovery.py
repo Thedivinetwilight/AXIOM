@@ -98,7 +98,8 @@ def create_separate_paper_database(
                 "Recovery requires a file-backed SQLite database; no database was changed."
             )
         expected_calendar = calendar_signature(
-            make_calendar(settings.market_calendar, settings.default_timeframe)
+            make_calendar(settings.market_calendar, settings.default_timeframe,
+                          **settings.calendar_overrides())
         )
         mismatch = inspect_paper_account(
             settings.database_url,
