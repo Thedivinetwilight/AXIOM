@@ -862,3 +862,50 @@ def test_mocked_us_session_generates_only_simulated_orders_and_fills(monkeypatch
     # Risk caps held for the whole session.
     for position in broker.portfolio.positions.values():
         assert position.quantity * position.entry_price <= 2_000 + 1e-6
+
+
+def test_stopped_engine_still_reports_paper_identity_and_session_state():
+    """An operator must not have to start a session to learn what it would do.
+
+    Before any start: mode/broker/paper-only/simulated-fill labelling must be
+    present, and the session clock must come from the calendar rather than
+    being blank. An unknown clock reports UNKNOWN, never "OPEN".
+    """
+    broker = PaperBroker(
+        ExecutionConfig(initial_capital=10_000, position_size=0.5),
+        currency="USD", timeframe="1m",
+        calendar=USEquitiesCalendar(closed_dates=[]),
+    )
+    status = PaperSimulator(broker).status()
+    assert status["mode"] == "PAPER"
+    assert status["broker"] == "LOCAL_PAPER"
+    assert status["live_trading"] is False
+    assert status["paper_only"] is True
+    assert status["simulated_fills"] is True
+    assert status["session_timezone"] == "America/New_York"
+    assert status["market_status"] in {"OPEN", "CLOSED"}
+    assert isinstance(status["market_open"], bool)
+    assert status["state"] == "STOPPED"
+    # The US holiday set is what makes "OPEN" trustworthy, so show it is real.
+    assert USEquitiesCalendar().is_open(
+        datetime(2026, 11, 26, 15, 0, tzinfo=UTC)) is False
+    # 2026-11-27 is a 13:00 ET early close, so 14:00 ET is already closed
+    # while the same clock time is open on a normal session.
+    assert USEquitiesCalendar().is_open(
+        datetime(2026, 11, 27, 19, 0, tzinfo=UTC)) is False
+    assert USEquitiesCalendar().is_open(
+        datetime(2026, 11, 25, 19, 0, tzinfo=UTC)) is True
+
+
+def test_unknown_session_clock_is_reported_as_unknown():
+    class NoClock:
+        pass
+
+    broker = PaperBroker(
+        ExecutionConfig(initial_capital=10_000, position_size=0.5),
+        currency="USD", timeframe="1m", calendar=NoClock(),
+    )
+    status = PaperSimulator(broker).status()
+    assert status["market_status"] == "UNKNOWN"
+    assert status["market_open"] is None
+    assert "no session clock" in status["market_status_detail"]

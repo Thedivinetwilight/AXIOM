@@ -21,6 +21,24 @@ class BotState(str, Enum):
     ERROR = "ERROR"
 
 
+def _session_state(calendar) -> tuple[str, str | None]:
+    """OPEN / CLOSED / UNKNOWN for a calendar, never raising.
+
+    A simulator that cannot tell the time must say so: an unknown session
+    state is not the same thing as an open session.
+    """
+    is_open = getattr(calendar, "is_open", None)
+    if not callable(is_open):
+        return "UNKNOWN", "calendar exposes no session clock"
+    try:
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        return ("OPEN" if is_open(_dt.now(_tz.utc)) else "CLOSED"), None
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        return "UNKNOWN", f"{type(exc).__name__}: {exc}"
+
+
 class PaperSimulator:
     def __init__(self, broker):
         self.broker = broker
@@ -170,9 +188,20 @@ class PaperSimulator:
             status["gross_exposure"] = round(self.broker.gross_exposure(), 6)
             status["paper_account_equity"] = round(self.broker.portfolio.equity, 6)
         status["simulated_fills"] = True
+        status["paper_only"] = True
+        status["broker"] = "LOCAL_PAPER"
         status["session_timezone"] = getattr(
             self.broker.calendar, "timezone", "UTC"
         )
+        # Session state belongs to the calendar, not to the feed: an operator
+        # must be able to see "the market is closed" on a STOPPED engine
+        # before starting one, instead of reading an empty status and
+        # guessing. Missing data is still reported as missing, never as live.
+        if "market_status" not in status:
+            open_now, reason = _session_state(self.broker.calendar)
+            status["market_status"] = open_now
+            status["market_open"] = None if open_now == "UNKNOWN" else open_now == "OPEN"
+            status["market_status_detail"] = reason
         return status
 
     async def start(self, provider, strategy, symbols):

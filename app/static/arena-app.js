@@ -808,6 +808,61 @@
       }
       row("Engine error", text(p.error_reason || "none"));
 
+      // The kill control lives next to the status it kills. It calls exactly
+      // the same two endpoints as the header controls, so there is no second
+      // implementation that could drift, and it cannot place an order.
+      var actions = Arena.el("div", { style: "display:flex;gap:8px;margin-top:12px" });
+      var engineState = p.state || "STOPPED";
+      if (engineState === "RUNNING" || engineState === "PAUSED") {
+        var stop = Arena.el("button", { "class": "btn danger sm", id: "us-paper-stop" },
+          [document.createTextNode("STOP SIMULATED SESSION")]);
+        stop.addEventListener("click", function () {
+          Arena.confirmDialog("Stop the simulated US paper session?",
+            "Resting simulated orders are cancelled and the account is persisted. " +
+            "Nothing is sent to Alpaca — this session has no broker connection to close.",
+            "Stop session", true, function () {
+              Arena.setBusy(stop, true, "Stopping…");
+              Arena.post("/paper/stop").then(function () {
+                Arena.toast("info", "Paper stop accepted; verifying status.");
+                pollOnce(true);
+              }).catch(function (e) {
+                Arena.setBusy(stop, false); Arena.toast("err", e.message); pollOnce(true);
+              });
+            });
+        });
+        actions.appendChild(stop);
+        if (engineState === "PAUSED") {
+          var resume = Arena.el("button", { "class": "btn ghost sm" }, [document.createTextNode("RESUME")]);
+          resume.addEventListener("click", function () {
+            Arena.post("/paper/resume").then(function () { pollOnce(true); })
+              .catch(function (e) { Arena.toast("err", e.message); pollOnce(true); });
+          });
+          actions.appendChild(resume);
+        }
+      } else {
+        var start = Arena.el("button", { "class": "btn success sm", id: "us-paper-start" },
+          [document.createTextNode("START SIMULATED SESSION")]);
+        start.addEventListener("click", function () {
+          Arena.confirmDialog("Start a simulated US paper session?",
+            "AXIOM will subscribe to market data only. Every order and fill is simulated " +
+            "locally inside the paper broker; no order endpoint is called and no real money moves.",
+            "Start session", true, function () {
+              Arena.setBusy(start, true, "Starting…");
+              state.paperStatusFresh = false;
+              refreshLive();
+              Arena.post("/api/paper/start-default", { source: "alpaca" })
+                .then(function (result) {
+                  Arena.toast("info", "Simulated session starting (" +
+                    (result && result.state ? result.state : "accepted") + "); checking status.");
+                  pollOnce(true);
+                })
+                .catch(function (e) { Arena.setBusy(start, false); Arena.toast("err", e.message); pollOnce(true); });
+            });
+        });
+        actions.appendChild(start);
+      }
+      box.appendChild(actions);
+
       var events = p.paper_risk_events || [];
       if (events.length) {
         eventsHost.appendChild(Arena.el("div", { style: "font-size:12px;color:#7d89a3;margin-bottom:6px" },

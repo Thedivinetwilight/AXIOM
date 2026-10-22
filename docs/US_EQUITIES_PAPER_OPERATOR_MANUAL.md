@@ -192,9 +192,13 @@ print(market_session_state("us", datetime(2026, 11, 27, 12, 45)).to_dict())
 1. Start AXIOM (`python -m app` or the executable) and open the local URL.
 2. The mode badge must read **`PAPER — ALPACA US DATA / LOCAL SIMULATED ORDERS`**.
 3. Command Center → **US paper session · simulated fills** shows session clock,
-   feed, connection, freshness and risk limits before you start anything.
-4. Press **START PAPER**. If the engine is already running the button is
-   replaced by **STOP PAPER**.
+   feed, connection, freshness and risk limits **before you start anything**.
+   On a stopped engine the card still reports `PAPER`, `LOCAL_PAPER`,
+   `simulated_fills: true` and the calendar's `OPEN`/`CLOSED` state, so you can
+   confirm the session clock is right before committing to a start.
+4. Press **START SIMULATED SESSION** on that card (or **START PAPER** in the
+   header — both call the same endpoint) and confirm the dialog. The dialog
+   states in plain words that no order endpoint is called.
 5. Watch the same card: `Connection: CONNECTED`, `authenticated /
    subscribed`, `Last completed bar` advancing each minute, `Feed freshness:
    FRESH`.
@@ -244,12 +248,14 @@ refused rather than silently resampled.
 | Field | Meaning |
 | --- | --- |
 | `mode` / `live_trading` | Always `PAPER` / `false` |
-| `simulated_fills`, `paper_mode` | `true` — every fill is simulated |
+| `simulated_fills`, `paper_mode`, `paper_only` | `true` — every fill is simulated |
+| `broker` | Always `LOCAL_PAPER`: the in-process simulator, not a broker |
 | `state` | `STOPPED`, `STARTING`, `RUNNING`, `PAUSED`, `ERROR` |
 | `connection` | Provider socket state: `DISCONNECTED`, `CONNECTING`, `CONNECTED`, `RECONNECTING` |
 | `authenticated`, `subscribed` | Handshake and subscription confirmed by the feed |
 | `provider`, `feed_mode`, `timeframe` | `alpaca`, `iex`/`sip`, `1m` |
-| `market_status`, `market_open` | Session clock from the US calendar |
+| `market_status`, `market_open` | `OPEN`/`CLOSED`/`UNKNOWN` from the US calendar; present even when the engine is stopped |
+| `market_status_detail` | Why the clock is `UNKNOWN`, if it is (for example a calendar with no session support) |
 | `last_candle_time` | Completion time of the newest accepted bar |
 | `stale_feed`, `stale_reason` | `true` when no completed bar arrived within 120 s **while the market is open**; a closed market reports `stale_reason: market_closed` instead of a misleading red badge |
 | `reconnects` | Counted socket reconnects |
@@ -317,9 +323,15 @@ To clear a latched drawdown halt you must reset the paper account (use a fresh
 
 ### 9.1 Kill / stop control
 
-The Command Center engine controls always expose a stop button whenever the
-engine is `RUNNING`, `PAUSED`, or the status poll is stale but the last known
-state was running. It asks for confirmation, then `POST /paper/stop`.
+There are two stop controls and both call the same endpoint, so neither can
+drift from the other:
+
+- the header engine controls, always present whenever the engine is `RUNNING`,
+  `PAUSED`, or the status poll is stale but the last known state was running;
+- **STOP SIMULATED SESSION** inside the US paper card, next to the status it
+  stops, with **RESUME** beside it when paused.
+
+Both ask for confirmation, then `POST /paper/stop`.
 
 Stopping: cancels every working order (`reason=bot_stopped`), stops the bar
 loop, persists the account and releases the database writer. Calling it twice is
