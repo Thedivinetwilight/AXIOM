@@ -1,0 +1,169 @@
+name: windows release
+
+# Builds, tests and publishes the Windows x64 executable + installer for one
+# exact commit. Paper only: the smoke tests use generated local tokens and the
+# bundled DEMO data, and never contact a broker.
+#
+# Trigger:
+#   * push to this branch when the packaging files change (automatic build)
+#   * workflow_dispatch, to build a specific commit on demand
+on:
+  push:
+    branches:
+      - arena/5ed3f6b6-axiom
+    paths:
+      - 'packaging/windows/**'
+      - '.github/workflows/windows-release.yml'
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character commit SHA to build
+        required: true
+        type: string
+      version:
+        description: Version label for the installer and artifacts
+        required: true
+        default: 3.2.5-chart-us.1
+        type: string
+      publish_release:
+        description: Publish a GitHub prerelease from the built artifacts
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build + install-test (windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Push builds use the pushed commit; manual runs use the requested one.
+      TARGET_COMMIT: ${{ inputs.commit || github.sha }}
+      VERSION: ${{ inputs.version || '3.2.5-chart-us.1' }}
+      PUBLISH: ${{ inputs.publish_release || 'true' }}
+    steps:
+      - name: Checkout the exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_COMMIT }}
+          fetch-depth: 0
+
+      - name: Show what is being built
+        shell: pwsh
+        run: |
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+          python -c "import sys,platform;print(sys.version);print(platform.machine())"
+          Write-Host "TARGET_COMMIT=$env:TARGET_COMMIT VERSION=$env:VERSION"
+
+      - name: Build, test and package
+        shell: pwsh
+        working-directory: packaging/windows
+        run: |
+          ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION"
+
+      - name: Verify the produced artifacts
+        shell: pwsh
+        working-directory: packaging/windows
+        run: |
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:TARGET_COMMIT) { throw "metadata commit $($meta.commit) != $env:TARGET_COMMIT" }
+          foreach ($a in $meta.artifacts) {
+            $path = Join-Path dist $a.name
+            if (-not (Test-Path $path)) { throw "missing artifact $($a.name)" }
+            $hash = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
+            if ($hash -ne $a.sha256) { throw "hash mismatch for $($a.name)" }
+            Write-Host ("verified {0}  {1}" -f $a.name, $hash)
+          }
+          if ($meta.test_results.smoke_failed -ne 0) { throw "smoke failures: $($meta.test_results.smoke_failed)" }
+          Write-Host "smoke checks: $($meta.test_results.smoke_checks.Count) passed"
+
+      - name: Install the installer silently, then uninstall it
+        shell: pwsh
+        working-directory: packaging/windows
+        run: |
+          # Proves the installer actually installs and removes itself on Windows.
+          $setup = (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
+          Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait | Out-Null
+          if (-not (Test-Path (Join-Path $dir 'AXIOM-Chart.exe'))) { throw 'installer did not install AXIOM-Chart.exe' }
+          Write-Host "installed to $dir"
+          $exe = Join-Path $dir 'AXIOM-Chart.exe'
+          $env:AXIOM_DATA_DIR = Join-Path $env:TEMP ('axiom-installed-' + [guid]::NewGuid().ToString('N'))
+          $env:AXIOM_PORT = '8135'
+          $p = Start-Process -FilePath $exe -ArgumentList '--no-browser' -PassThru -WindowStyle Hidden
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Milliseconds 500
+            if ($p.HasExited) { break }
+            try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/health' -TimeoutSec 2; $ok = $true; break } catch { }
+          }
+          if (-not $ok) { throw 'the installed application did not answer /health' }
+          $chart = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart' -TimeoutSec 10
+          if ($chart.StatusCode -ne 200) { throw '/chart did not return 200 from the installed copy' }
+          $js = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/static/chart/chart.js' -TimeoutSec 10
+          if ($js.StatusCode -ne 200) { throw 'chart.js missing from the installed copy' }
+          Write-Host 'installed copy: launch, /health, /chart, static assets OK'
+          if (-not $p.HasExited) { $p.Kill() }
+          Start-Process -FilePath (Join-Path $dir 'unins000.exe') -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait | Out-Null
+          if (Test-Path (Join-Path $dir 'AXIOM-Chart.exe')) { throw 'uninstall left the executable behind' }
+          if (-not (Test-Path $env:AXIOM_DATA_DIR)) { throw 'uninstall deleted the user data folder; it must be kept' }
+          Write-Host 'uninstall removed program files and kept user data'
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axiom-chart-windows-x64-${{ env.VERSION }}
+          path: |
+            packaging/windows/dist/*.exe
+            packaging/windows/dist/BUILD_METADATA.json
+            packaging/windows/dist/SHA256SUMS.txt
+            packaging/windows/dist/SOURCE_COMMIT.txt
+            packaging/windows/dist/install-test-log.txt
+            packaging/windows/WINDOWS_INSTALL_MANUAL.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the prerelease
+        if: ${{ env.PUBLISH == 'true' }}
+        shell: pwsh
+        working-directory: packaging/windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          $tag = "v$($env:VERSION)"
+          $notes = @"
+          Windows x64 build of AXIOM at commit ``$($meta.commit)``.
+
+          **Paper only.** ``MODE=PAPER``, ``LIVE_TRADING=false`` and ``BROKER=LOCAL_PAPER`` are
+          enforced in settings and re-checked by the launcher; the package contains no
+          live broker client and no live order endpoint.
+
+          Test results on this runner: focused suites **$($meta.test_results.focused_windows)**,
+          full suite **$($meta.test_results.full_windows)** ($($meta.test_results.full_summary)),
+          and **$($meta.test_results.smoke_checks.Count - $meta.test_results.smoke_failed)** on-machine
+          smoke checks passed (install, launch, /chart, static assets, token gate, DEMO data,
+          paper session start/stop, fail-closed cases).
+
+          No strategy in this build is profitable, validated or ready for real money.
+          "@
+          $assets = @(
+            (Get-ChildItem dist -Filter '*-setup.exe').FullName
+            (Join-Path dist 'AXIOM-Chart.exe')
+            (Join-Path dist 'BUILD_METADATA.json')
+            (Join-Path dist 'SHA256SUMS.txt')
+            (Join-Path dist 'install-test-log.txt')
+            (Join-Path 'WINDOWS_INSTALL_MANUAL.md')
+          )
+          gh release create $tag --prerelease --target $meta.commit `
+            --title "AXIOM chart terminal + US paper data $($env:VERSION) (Windows x64)" `
+            --notes $notes @assets
+          Write-Host "published $tag"
