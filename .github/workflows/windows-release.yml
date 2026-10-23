@@ -121,85 +121,104 @@ jobs:
         working-directory: src/packaging/windows
         run: |
           $ErrorActionPreference = 'Stop'
-          function Abort($msg) { Write-Host "::error title=install-test::$msg"; throw $msg }
+          function Phase($n, $msg) { Write-Host "::notice title=install-test panel $n::$msg"; Write-Host "== $n: $msg" }
+          $script:phase = 'init'
+          try {
+            Phase 1 'locate the installer'
+            $script:phase = 'locate installer'
+            $setup = (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
+            if (-not $setup) { throw 'no *-setup.exe in dist' }
+            Write-Host "installer: $setup ($([math]::Round((Get-Item $setup).Length/1MB,1)) MB)"
 
-          $setup = (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
-          $dir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
-          Write-Host "installer: $setup"
-          Write-Host "expected install dir: $dir"
-
-          # --- silent install -------------------------------------------------
-          $proc = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=' + (Join-Path $env:TEMP 'axiom-install.log') -PassThru -Wait
-          Write-Host "installer exit code: $($proc.ExitCode)"
-          if ($proc.ExitCode -ne 0) {
+            $dir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
+            $installed = Join-Path $dir 'AXIOM-Chart.exe'
             $log = Join-Path $env:TEMP 'axiom-install.log'
-            if (Test-Path $log) { Get-Content $log -Tail 40 | ForEach-Object { Write-Host $_ } }
-            Abort "installer exited $($proc.ExitCode)"
-          }
-          $installed = Join-Path $dir 'AXIOM-Chart.exe'
-          for ($i = 0; $i -lt 60 -and -not (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
-          if (-not (Test-Path $installed)) {
-            Write-Host 'contents of the install dir, if any:'
-            if (Test-Path $dir) { Get-ChildItem $dir | ForEach-Object { Write-Host "  $($_.Name)" } }
-            else { Write-Host '  (directory does not exist)' }
-            Abort "installer did not place AXIOM-Chart.exe in $dir"
-          }
-          Write-Host "installed: $installed"
+            Write-Host "install dir: $dir"
 
-          # --- launch the installed copy --------------------------------------
-          $env:AXIOM_DATA_DIR = Join-Path $env:TEMP ('axiom-installed-' + [guid]::NewGuid().ToString('N'))
-          $env:AXIOM_PORT = '8135'
-          $outLog = Join-Path $env:TEMP 'axiom-installed-stdout.log'
-          $p = Start-Process -FilePath $installed -ArgumentList '--no-browser' -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError ($outLog + '.err')
-          $ok = $false
-          for ($i = 0; $i -lt 180; $i++) {
-            Start-Sleep -Milliseconds 500
-            if ($p.HasExited) { break }
-            try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/health' -TimeoutSec 2; $ok = $true; break } catch { }
-          }
-          if (-not $ok) {
-            Write-Host "exited: $($p.HasExited) code: $($p.ExitCode)"
-            foreach ($f in @($outLog, $outLog + '.err')) {
-              if (Test-Path $f) { Write-Host "--- $f"; Get-Content $f -Tail 40 | ForEach-Object { Write-Host $_ } }
+            Phase 2 'silent install'
+            $script:phase = 'silent install'
+            $args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dir","/LOG=$log")
+            Write-Host "arguments: $($args -join ' ')"
+            $proc = Start-Process -FilePath $setup -ArgumentList $args -PassThru -Wait
+            Write-Host "installer exit code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0) {
+              if (Test-Path $log) { Get-Content $log -Tail 60 | ForEach-Object { Write-Host "  log| $_" } }
+              throw "installer exited with code $($proc.ExitCode)"
             }
-            if (-not $p.HasExited) { $p.Kill() }
-            Abort 'the installed application did not answer /health'
+
+            Phase 3 'verify the installed files'
+            $script:phase = 'verify installed files'
+            for ($i = 0; $i -lt 40 -and -not (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
+            if (-not (Test-Path $installed)) {
+              if (Test-Path $dir) { Get-ChildItem $dir | ForEach-Object { Write-Host "  found| $($_.Name)" } }
+              else { Write-Host "  $dir does not exist" }
+              $other = Get-ChildItem -Path $env:LOCALAPPDATA -Recurse -Filter 'AXIOM-Chart.exe' -ErrorAction SilentlyContinue -Depth 4 | Select-Object -First 3
+              foreach ($o in $other) { Write-Host "  elsewhere| $($o.FullName)" }
+              throw "AXIOM-Chart.exe was not installed into $dir"
+            }
+            Write-Host "installed: $installed"
+
+            Phase 4 'launch the installed copy'
+            $script:phase = 'launch installed copy'
+            $env:AXIOM_DATA_DIR = Join-Path $env:TEMP ('axiom-installed-' + [guid]::NewGuid().ToString('N'))
+            $env:AXIOM_PORT = '8135'
+            $outLog = Join-Path $env:TEMP 'axiom-installed-out.log'
+            $errLog = Join-Path $env:TEMP 'axiom-installed-err.log'
+            $p = Start-Process -FilePath $installed -ArgumentList '--no-browser' -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+            $ok = $false
+            for ($i = 0; $i -lt 240; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ($p.HasExited) { break }
+              try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/health' -TimeoutSec 2; $ok = $true; break } catch { }
+            }
+            if (-not $ok) {
+              Write-Host "exited=$($p.HasExited) code=$(if ($p.HasExited) { $p.ExitCode } else { 'running' })"
+              foreach ($f in @($outLog, $errLog)) { if (Test-Path $f) { Write-Host "--- $f"; Get-Content $f -Tail 40 | ForEach-Object { Write-Host "  app| $_" } } }
+              if (-not $p.HasExited) { $p.Kill() }
+              throw 'the installed application never answered /health'
+            }
+            Write-Host 'installed copy answered /health'
+
+            Phase 5 'chart page and static assets from the installed copy'
+            $script:phase = 'installed chart page'
+            $chart = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart' -TimeoutSec 15
+            if ($chart.StatusCode -ne 200) { throw "/chart returned $($chart.StatusCode)" }
+            if ($chart.Content -notmatch 'PAPER') { throw 'the chart page does not show the PAPER badge' }
+            Write-Host '/chart 200 and displays PAPER'
+            $js = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/static/chart/chart.js' -TimeoutSec 15
+            if ($js.StatusCode -ne 200) { throw 'chart.js is missing from the installed copy' }
+            Write-Host "static chart.js served ($($js.RawContentLength) bytes)"
+            $anon = 0
+            try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart/data?symbol=DEMO&timeframe=1D' -TimeoutSec 5 }
+            catch { $anon = [int]$_.Exception.Response.StatusCode }
+            if ($anon -ne 401) { throw "a data route answered without a token ($anon)" }
+            Write-Host 'data route still requires the token (401 without it)'
+
+            Phase 6 'shut down and uninstall'
+            $script:phase = 'uninstall'
+            $p.Kill()
+            $p.WaitForExit(10000) | Out-Null
+            Start-Sleep -Seconds 3
+            $uninstaller = Join-Path $dir 'unins000.exe'
+            if (-not (Test-Path $uninstaller)) { throw 'the uninstaller was not installed' }
+            $u = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
+            Write-Host "uninstaller exit code: $($u.ExitCode)"
+            for ($i = 0; $i -lt 40 -and (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
+            if (Test-Path $installed) {
+              Get-ChildItem $dir | ForEach-Object { Write-Host "  left| $($_.Name)" }
+              throw 'uninstall left AXIOM-Chart.exe behind'
+            }
+            if (-not (Test-Path $env:AXIOM_DATA_DIR)) { throw 'uninstall deleted the user data folder; it must be preserved' }
+            Write-Host 'uninstall removed the program files and kept the user data folder'
+
+            Write-Host '::notice title=install-test::PASS - install, launch, /chart, static assets, token gate and uninstall verified'
           }
-          Write-Host 'installed copy: /health OK'
-
-          $chart = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart' -TimeoutSec 15
-          if ($chart.StatusCode -ne 200) { Abort "/chart returned $($chart.StatusCode) from the installed copy" }
-          if ($chart.Content -notmatch 'PAPER') { Abort 'the installed chart page does not show the PAPER badge' }
-          Write-Host 'installed copy: /chart OK and displays PAPER'
-
-          $js = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/static/chart/chart.js' -TimeoutSec 15
-          if ($js.StatusCode -ne 200) { Abort 'chart.js missing from the installed copy' }
-          Write-Host "installed copy: static chart assets OK ($($js.RawContentLength) bytes)"
-
-          $anon = 0
-          try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart/data?symbol=DEMO&timeframe=1D' -TimeoutSec 5 }
-          catch { $anon = [int]$_.Exception.Response.StatusCode }
-          if ($anon -ne 401) { Abort "installed copy answered a data route without a token ($anon)" }
-          Write-Host 'installed copy: data route still requires the token'
-
-          # --- shut down, then uninstall --------------------------------------
-          $p.Kill()
-          $p.WaitForExit(10000) | Out-Null
-          Start-Sleep -Seconds 3
-          $uninstaller = Join-Path $dir 'unins000.exe'
-          if (-not (Test-Path $uninstaller)) { Abort 'the uninstaller was not installed' }
-          $u = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
-          Write-Host "uninstaller exit code: $($u.ExitCode)"
-          for ($i = 0; $i -lt 40 -and (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
-          if (Test-Path $installed) {
-            Get-ChildItem $dir | ForEach-Object { Write-Host "  left: $($_.Name)" }
-            Abort 'uninstall left AXIOM-Chart.exe behind'
+          catch {
+            $msg = "$_"
+            Write-Host "::error title=install-test failed in phase '$script:phase'::$msg"
+            Set-Content -Path (Join-Path 'dist' 'INSTALL_TEST_ERROR.txt') -Value "phase: $script:phase`n$msg" -Encoding utf8
+            exit 1
           }
-          if (-not (Test-Path $env:AXIOM_DATA_DIR)) {
-            Abort 'uninstall deleted the user data folder; it must be preserved'
-          }
-          Write-Host 'uninstall removed the program files and kept the user data folder'
-          Write-Host '::notice title=install-test::install, launch, /chart, static assets and uninstall all verified'
 
       - name: Upload build artifacts
         if: always()
