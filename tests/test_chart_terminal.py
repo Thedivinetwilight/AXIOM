@@ -558,6 +558,35 @@ class TestPaperTicketApi:
             assert client.post("/paper/order", headers=H, json=body).status_code == 422, body
 
 
+class TestProxiedPageAccess:
+    """A proxied deployment can serve the page; data still needs the token."""
+
+    def test_page_is_refused_to_a_remote_client_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/p.db")
+        monkeypatch.setenv("API_TOKEN", TOKEN)
+        settings = Settings.from_env()
+        assert settings.ui_allow_proxy_pages is False
+        app = create_app(settings, data_dir=REPO / "data")
+        with TestClient(app, client=("203.0.113.9", 5000)) as test_client:
+            assert test_client.get("/chart").status_code == 401
+            # ... and the bearer still opens it.
+            assert test_client.get("/chart", headers=H).status_code == 200
+
+    def test_opt_in_serves_the_page_but_never_the_data(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/p2.db")
+        monkeypatch.setenv("API_TOKEN", TOKEN)
+        monkeypatch.setenv("UI_ALLOW_PROXY_PAGES", "true")
+        settings = Settings.from_env()
+        app = create_app(settings, data_dir=REPO / "data")
+        with TestClient(app, client=("203.0.113.9", 5000)) as test_client:
+            assert test_client.get("/chart").status_code == 200
+            # Every data route is unchanged: no token, no data.
+            for path in ("/chart/data", "/chart/symbols", "/paper/ticket?symbol=DEMO",
+                         "/dashboard/data"):
+                assert test_client.get(path).status_code == 401, path
+            assert test_client.get("/chart/data", headers=H).status_code == 200
+
+
 class TestManualOrdersRefuseAnythingButLocalPaper:
     def test_non_local_broker_is_refused(self, client):
         from app.paper_trading import manual

@@ -145,6 +145,7 @@ const ctx = (() => {
   const stack = [];
   const display = [];
   let path = [];
+  let breaks = [];
   let started = false;
 
   function push(entry) {
@@ -168,15 +169,20 @@ const ctx = (() => {
     translate() {},
     scale() {},
     setLineDash(dash) { state.lineDash = dash || []; },
-    beginPath() { path = []; started = false; },
-    moveTo(x, y) { path.push([x, y]); started = true; },
+    beginPath() { path = []; breaks = []; started = false; },
+    moveTo(x, y) {
+      // A moveTo starts a new subpath: renderers must not connect across it.
+      if (path.length) breaks.push(path.length);
+      path.push([x, y]);
+      started = true;
+    },
     lineTo(x, y) { if (!started) { path.push([x, y]); started = true; } else path.push([x, y]); },
     closePath() { if (path.length) path.push([path[0][0], path[0][1]]); },
     rect(x, y, w, h) { path = [[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]; },
     roundRect(x, y, w, h) { impl.rect(x, y, w, h); },
     arc() {},
-    fill() { push({ type: "poly", points: path.slice(), closed: true }); },
-    stroke() { push({ type: "poly", points: path.slice(), closed: false }); },
+    fill() { push({ type: "poly", points: path.slice(), closed: true, breaks: [] }); },
+    stroke() { push({ type: "poly", points: path.slice(), closed: false, breaks: breaks.slice() }); },
     fillRect(x, y, w, h) { push({ type: "rect", x, y, w, h }); },
     strokeRect(x, y, w, h) { push({ type: "rect", x, y, w, h, stroke: true }); },
     clearRect() {},

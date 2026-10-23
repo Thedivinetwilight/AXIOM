@@ -378,8 +378,11 @@ python run.py --mode api --host 127.0.0.1 --port 8000
 ```
 
 Set `API_TOKEN` in `.env` first. `/health`, `/` and — for **local
-(loopback) browsers only** — the `/dashboard` HTML page load without a
-token (the page contains no secrets; it asks you for the token and sends it
+(loopback) browsers only** — the `/dashboard` and `/chart` HTML pages load
+without a token. Running behind a reverse proxy? Set
+`UI_ALLOW_PROXY_PAGES=true` to serve those pages to remote clients; they
+contain no secret and no account data, and every data route still requires the
+bearer token (the page contains no secrets; it asks you for the token and sends it
 as an `Authorization: Bearer` header on its API calls). Every other route —
 including `/dashboard/data` and the engine STOP/RESUME controls — returns
 **503** without a configured token and **401** on a wrong

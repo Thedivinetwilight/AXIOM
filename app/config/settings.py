@@ -85,6 +85,14 @@ class Settings:
     max_participation: float = 0.10
     database_url: str = "sqlite:///trading_bot.db"
     api_token: str = field(default="", repr=False)
+    # The HTML pages contain no secrets and every data route stays behind the
+    # bearer token. By default a page is only served to a loopback client
+    # because a local browser can be trusted with a local page; a reverse
+    # proxy makes every client look remote, which would otherwise make the UI
+    # unreachable. Set this when the deployment terminates TLS/HTTP in front
+    # of AXIOM. It does NOT relax the data routes: without API_TOKEN they
+    # still answer 503.
+    ui_allow_proxy_pages: bool = False
     market_data_token: str = field(default="", repr=False)
     data_ws_url: str = field(default="", repr=False)
     data_source: str = "replay"
