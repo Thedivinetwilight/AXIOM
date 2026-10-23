@@ -238,6 +238,16 @@ to attach to a bug report — `axiom.env` is not.
    used by the CLI (`python -m app engine`) whose host check only warns. It is
    unreachable from the installed application.
 7. **No profitability claim** for any strategy in this build.
+8. **The monitoring and maintenance modules are POSIX-only in this source line.**
+   `app/monitoring` imports the POSIX `resource` module, so on Windows three
+   tests fail on import (`ModuleNotFoundError: No module named 'resource'`) and
+   two `TestMaintenanceWiring` tests fail as a consequence. Two further tests
+   assume POSIX behaviour (a `chmod`-based file-mode assertion in
+   `tests/test_upstox_v062.py` and a CLI exit code in
+   `tests/test_v2_api_cli.py`). All 7 are outside the chart-terminal path:
+   the focused US-paper/chart suites pass, as do the 21 on-machine application
+   checks and the 18-step installer acceptance test. They are listed, not
+   hidden — see §12.
 
 ## 11. Where the paper-only guarantee is enforced
 
@@ -248,3 +258,33 @@ to attach to a bug report — `axiom.env` is not.
 | no live routing | the package has no live-broker client and no live order endpoint |
 | visible paper mode | the chart header always shows `PAPER · SIMULATED ORDERS`; every payload carries `paper_only: true`, `live_trading: false` |
 | honest data labelling | every chart payload names its feed; sample CSVs are labelled *NOT MARKET DATA* |
+
+## 12. What was tested, and how to check this download yourself
+
+The published build is compiled on a Windows x64 machine from one exact commit.
+Its record travels with it:
+
+| File | What it is |
+|---|---|
+| `BUILD_METADATA.json` | the source commit, its subject and date, the runner and toolchain versions, every test result and the SHA-256 of each artifact |
+| `SHA256SUMS.txt` | the same hashes in `sha256sum -c` format |
+| `SOURCE_COMMIT.txt` | the installed record of the commit, also copied into the install folder |
+| `install-test-log.txt` | the 21 on-machine checks of the frozen executable (launch, `/health`, `/chart`, chart assets, token gate, paper order path, fail-closed cases) |
+| `installer-test-log.txt` | the 18-step installer acceptance test: silent install, launch of the installed copy, `/chart` with the PAPER badge, bundled assets, 401 without a token, silent uninstall that keeps operator data |
+| `pytest-focused.log`, `pytest-full.log` | the Windows test runs, complete |
+
+Every release asset is listed in the release notes with its SHA-256. To check
+what you downloaded:
+
+```powershell
+Get-FileHash .\AXIOM-Chart-*-setup.exe -Algorithm SHA256
+# or, if you keep SHA256SUMS.txt beside the file:
+Get-Content SHA256SUMS.txt | ForEach-Object {
+    $hash, $name = $_ -split '\s+', 2
+    $actual = (Get-FileHash ".\$name" -Algorithm SHA256).Hash.ToLower()
+    "{0}  {1}" -f $(if ($actual -eq $hash) { 'OK  ' } else { 'FAIL' }), $name
+}
+```
+
+The binaries are unsigned, so SmartScreen may warn: check the hash against the
+release notes before choosing *More info → Run anyway*.
