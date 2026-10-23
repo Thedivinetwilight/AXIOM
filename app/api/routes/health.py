@@ -31,7 +31,9 @@ small{{color:#bac9d9}}code{{color:#75e7b2}}
 </style><main><span class="badge">Arena {__version__} · PAPER ONLY</span>
 <h1>Arena</h1><p>Historical research, chronological validation, and simulated execution.
 Real-money order routing is not implemented.</p>
-<p><a href="/health">Check API health →</a> &nbsp; <a href="/docs">Explore API documentation →</a></p>
+<p><a href="/chart">Open the chart &amp; trade terminal →</a> &nbsp;
+<a href="/dashboard">Dashboard →</a> &nbsp;
+<a href="/health">API health →</a> &nbsp; <a href="/docs">API docs →</a></p>
 <section><h2>Safe by default</h2><p><code>MODE=PAPER</code> · <code>LIVE_TRADING=false</code></p>
 <p>Set your own private <code>API_TOKEN</code> in your local environment to enable protected endpoints.
 An empty token disables account access and bot controls.</p></section>

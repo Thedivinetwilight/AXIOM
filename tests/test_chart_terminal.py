@@ -501,8 +501,9 @@ class TestChartApi:
                           params={"symbol": "DEMO", "timeframe": "1D",
                                   "limit": 5000}).status_code == 422
 
-    def test_dashboard_links_to_the_chart(self, client):
+    def test_dashboard_and_landing_page_link_to_the_chart(self, client):
         assert 'href="/chart"' in client.get("/dashboard").text
+        assert 'href="/chart"' in client.get("/").text
 
 
 def wait_for_bar(client, symbol="DEMO", tries=60):
