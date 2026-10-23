@@ -72,6 +72,9 @@ const CHART = {
   live_trading: false,
   source: "engine",
   source_label: "paper engine feed",
+  data_feed: "replay",
+  data_feed_label: "DEMO REPLAY SAMPLE DATA · NOT MARKET DATA",
+  market_data: false,
   source_timeframe: "1m",
   live: true,
   note: null,
@@ -433,21 +436,40 @@ check(calls.fillText >= 10, "axis and legend text was drawn (fillText=" + calls.
 const SYMBOL = LIVE_CHART ? LIVE_CHART.symbol : "AAPL";
 check(elements.get("legend-symbol").textContent.indexOf(SYMBOL) >= 0,
   "legend shows the symbol (got: " + elements.get("legend-symbol").textContent + ")");
+/* The feed badge is the safeguard against reading a DEMO replay as a market
+ * result: it must show whatever the payload names, and never a hard-coded
+ * "market data" claim. */
+const feedText = elements.get("feed-badge") ? elements.get("feed-badge").textContent : "";
+check(feedText === (LIVE_CHART ? LIVE_CHART.data_feed_label : "DEMO REPLAY SAMPLE DATA · NOT MARKET DATA"),
+  "feed badge names the payload's feed (got: " + feedText + ")");
+if (!(LIVE_CHART && LIVE_CHART.market_data)) {
+  check(feedText.indexOf("NOT MARKET DATA") >= 0,
+    "a non-market feed is labelled as such (got: " + feedText + ")");
+  check(elements.get("feed-badge").className.indexOf("warn") >= 0,
+    "a non-market feed is not styled as a healthy feed");
+}
 check(elements.get("legend-ohlc").textContent.indexOf("O ") === 0,
   "legend shows OHLC");
-check(elements.get("source-badge").textContent.indexOf("paper engine") >= 0,
-  "source badge names the feed");
+check(
+  elements.get("source-badge").textContent.indexOf(
+    LIVE_CHART ? LIVE_CHART.source_label : "paper engine") >= 0,
+  "source badge names the feed (got: " + elements.get("source-badge").textContent + ")");
 check(elements.get("ticket-price-value").textContent.length > 0 &&
   elements.get("ticket-price-value").textContent !== "—",
   "ticket shows a price");
-check(elements.get("ticket-position").textContent.indexOf("@") > 0,
-  "ticket shows the open position");
+if (LIVE_CHART ? LIVE_CHART.position : true) {
+  check(elements.get("ticket-position").textContent.indexOf("@") > 0,
+    "ticket shows the open position");
+}
 check(elements.get("lim-position").textContent !== "—", "risk caps rendered");
-check(elements.get("btn-session").textContent.indexOf("RUNNING") > 0,
+const sessionState = LIVE_CHART
+  ? String((LIVE_CHART.session || {}).state || "STOPPED")
+  : "RUNNING";
+check(elements.get("btn-session").textContent.indexOf(sessionState) > 0,
   "session control reflects the engine state (got " +
   elements.get("btn-session").textContent + ")");
-check(elements.get("btn-session").dataset.running === "1",
-  "session control is armed to stop a running session");
+check((elements.get("btn-session").dataset.running === "1") === (sessionState === "RUNNING"),
+  "session control is armed to stop only a running session");
 check(document.title.indexOf("AXIOM paper") > 0, "document title updated");
 
 /* ---------------------------------------------------- trade the ticket */
@@ -552,11 +574,20 @@ if (state_timeframe() === "1D") {
  * one under the bar for a BUY, a red one above it for a SELL. */
 const arrows = (colour) => ctx.__display.filter((op) =>
   op.type === "poly" && op.closed && op.points.length === 4 && op.fillStyle === colour);
-check(arrows("#26a69a").length >= 1, "a BUY marker was drawn");
-check(arrows("#ef5350").length >= 1, "a SELL marker was drawn");
+if (!LIVE_CHART) {
+  check(arrows("#26a69a").length >= 1, "a BUY marker was drawn");
+  check(arrows("#ef5350").length >= 1, "a SELL marker was drawn");
+}
 const buyArrow = arrows("#26a69a")[0];
-check(buyArrow && buyArrow.points[0][1] < buyArrow.points[1][1],
-  "the BUY arrow points up (apex above its base)");
+if (buyArrow) {
+  check(buyArrow.points[0][1] < buyArrow.points[1][1],
+    "the BUY arrow points up (apex above its base)");
+}
+const sellArrow = arrows("#ef5350")[0];
+if (sellArrow) {
+  check(sellArrow.points[0][1] > sellArrow.points[1][1],
+    "the SELL arrow points down (apex below its base)");
+}
 
 function state_timeframe() {
   return LIVE_CHART ? LIVE_CHART.timeframe : "1m";

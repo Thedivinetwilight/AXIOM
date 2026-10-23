@@ -97,6 +97,11 @@ class PaperSimulator:
                     status[key] = feed[key]
         status["processing_latency_ms"] = dict(self.latency)
         status["risk_counters"] = dict(self.risk_counters)
+        if hasattr(self.broker, "risk_limits"):
+            status["paper_risk_limits"] = self.broker.risk_limits.to_dict()
+            status["paper_risk_halts"] = dict(
+                self.broker.context.get("paper_risk_halts", {})
+            )
         return status
 
     async def start(self, provider, strategy, symbols):
@@ -146,6 +151,11 @@ class PaperSimulator:
             self.broker.timeframe
         ) > datetime.now(timezone.utc) + timedelta(seconds=2):
             raise ValueError("Live feed sent an unfinished/future candle")
+        stale_after = getattr(self.provider, "stale_after_seconds", None)
+        if stale_after is not None and (
+            datetime.now(timezone.utc) - candle.available_at(self.broker.timeframe)
+        ).total_seconds() > stale_after:
+            raise ValueError("Live feed sent a stale candle")
         last = self.broker.last_bars.get(candle.symbol)
         if last and candle.timestamp <= parse_timestamp(last):
             if candle.timestamp == parse_timestamp(last):

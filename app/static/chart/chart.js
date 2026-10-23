@@ -987,6 +987,14 @@
     source.textContent = "source " + (data.source_label || "—");
     source.className = "badge " + (data.live ? "ok" : "");
     source.title = data.note || "";
+    // The feed badge is the one line that must never be ambiguous: a DEMO
+    // replay is sample data, and it says so where the symbol is read.
+    var feed = $("feed-badge");
+    feed.textContent = data.data_feed_label || "feed —";
+    feed.className = "badge " + (data.market_data ? "ok" : "warn");
+    feed.title = data.market_data
+      ? "Bars from the configured market-data feed. Every fill is simulated locally."
+      : "These bars are not market data; do not read performance from them.";
     var session = data.session || {};
     var conn = $("conn");
     conn.textContent = "market " + (session.market_status || (data.live ? "LIVE" : "no session"));

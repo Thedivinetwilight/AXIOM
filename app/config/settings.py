@@ -73,6 +73,7 @@ class Settings:
     initial_capital: float = 100_000.0  # float per annotation (3.0.2 audit;
     # the env parser is annotation-driven regardless of the default literal)
     currency: str = "INR"
+    market: str = "india"  # india | us; selects which session rules apply
     market_calendar: str = "continuous"
     default_symbol: str = "DEMO"
     default_timeframe: str = "1D"
@@ -83,6 +84,13 @@ class Settings:
     stop_loss: float | None = 0.05
     take_profit: float | None = 0.10
     max_participation: float = 0.10
+    # Dedicated paper entry limits. Zero disables a limit for existing replay
+    # workflows; the US Alpaca paper mode below requires every cap explicitly.
+    paper_max_position_value: float = 0.0
+    paper_max_open_positions: int = 0
+    paper_max_daily_loss: float = 0.0
+    paper_max_drawdown: float = 0.0
+    paper_max_trades_per_day: int = 0
     database_url: str = "sqlite:///trading_bot.db"
     api_token: str = field(default="", repr=False)
     # The HTML pages contain no secrets and every data route stays behind the
@@ -103,6 +111,13 @@ class Settings:
     market_data_mode: str = "ltpc"
     market_data_access_token: str = field(default="", repr=False)
     market_data_authorize_url: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+    # Alpaca is used only for read-only US equity market data. The paper
+    # execution path remains the local PaperBroker; no Alpaca trading client is
+    # configured or constructed.
+    alpaca_api_key: str = field(default="", repr=False)
+    alpaca_api_secret: str = field(default="", repr=False)
+    alpaca_data_feed: str = "iex"
+    alpaca_symbols: str = ""
     # --- V1 (Arena): explicit broker modes + sandbox + hard risk limits ---
     broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX (LIVE is not enabled)
     upstox_sandbox_access_token: str = field(default="", repr=False)
@@ -157,9 +172,9 @@ class Settings:
         from app.backtesting.costs import ExecutionConfig
 
         ExecutionConfig(**self.execution_kwargs())
-        if self.market_calendar not in {"continuous", "nse-session"}:
+        if self.market_calendar not in {"continuous", "nse-session", "us-equities"}:
             raise ValueError("Unknown market calendar")
-        if self.data_source not in {"replay", "binance", "generic", "upstox"}:
+        if self.data_source not in {"replay", "binance", "generic", "upstox", "alpaca"}:
             raise ValueError("Unknown data source")
         # V1 broker modes: paper and documented Upstox SANDBOX orders only.
         broker = self.broker.upper()
@@ -179,6 +194,14 @@ class Settings:
         for name in ("max_open_positions", "max_trades_per_day"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name.upper()} cannot be negative")
+        for name in ("paper_max_position_value", "paper_max_daily_loss"):
+            if getattr(self, name) < 0 or getattr(self, name) != getattr(self, name):
+                raise ValueError(f"{name.upper()} must be finite and non-negative")
+        for name in ("paper_max_open_positions", "paper_max_trades_per_day"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name.upper()} cannot be negative")
+        if not 0 <= self.paper_max_drawdown < 1:
+            raise ValueError("PAPER_MAX_DRAWDOWN must be in [0, 1)")
         # 3.0.5 gates: fail-closed validation
         if self.net_edge_threshold < 0 or self.net_edge_threshold > 0.1:
             raise ValueError("NET_EDGE_THRESHOLD must be 0..0.1")
@@ -222,10 +245,50 @@ class Settings:
                         "MARKET_DATA_SYMBOLS must be comma-separated Upstox instrument "
                         "keys, e.g. NSE_EQ|INE002A01018"
                     )
+        if self.data_source == "alpaca":
+            if self.mode.upper() != "PAPER" or self.live_trading or broker != "LOCAL_PAPER":
+                raise ValueError("Alpaca US market data is supported only with local PAPER execution")
+            if self.market.lower() != "us" or self.currency.upper() != "USD":
+                raise ValueError("DATA_SOURCE=alpaca requires MARKET=us and CURRENCY=USD")
+            if self.market_calendar != "us-equities":
+                raise ValueError("DATA_SOURCE=alpaca requires MARKET_CALENDAR=us-equities")
+            if self.alpaca_data_feed not in {"iex", "sip", "delayed_sip"}:
+                raise ValueError("ALPACA_DATA_FEED must be iex, sip or delayed_sip")
+            from app.data.alpaca import validate_us_symbol
+
+            alpaca_symbols = self.alpaca_symbol_list()
+            if len(set(alpaca_symbols)) != len(alpaca_symbols):
+                raise ValueError("ALPACA_SYMBOLS must contain distinct tickers")
+            for ticker in alpaca_symbols:
+                validate_us_symbol(ticker)
+            if not self.alpaca_api_key.strip() or not self.alpaca_api_secret.strip():
+                raise ValueError("DATA_SOURCE=alpaca requires ALPACA_API_KEY and ALPACA_API_SECRET")
+            if self.default_timeframe != "1m":
+                raise ValueError("Alpaca paper streaming currently supports DEFAULT_TIMEFRAME=1m only")
+            if self.paper_max_position_value <= 0 or self.paper_max_open_positions <= 0:
+                raise ValueError("US paper mode requires PAPER_MAX_POSITION_VALUE and PAPER_MAX_OPEN_POSITIONS > 0")
+            if self.paper_max_daily_loss <= 0 or self.paper_max_trades_per_day <= 0:
+                raise ValueError("US paper mode requires PAPER_MAX_DAILY_LOSS and PAPER_MAX_TRADES_PER_DAY > 0")
+            if not 0 < self.paper_max_drawdown < 1:
+                raise ValueError("US paper mode requires PAPER_MAX_DRAWDOWN in (0, 1)")
 
     def market_data_symbol_list(self) -> list[str]:
         """Comma-separated MARKET_DATA_SYMBOLS → instrument key list."""
         return [item.strip() for item in self.market_data_symbols.split(",") if item.strip()]
+
+    def alpaca_symbol_list(self) -> list[str]:
+        """Comma-separated plain US tickers for the read-only market-data feed."""
+        return [item.strip().upper() for item in self.alpaca_symbols.split(",") if item.strip()]
+
+    def paper_risk_limits(self) -> dict:
+        """Entry-only paper limits, separate from execution-cost account schema."""
+        return {
+            "max_position_value": self.paper_max_position_value,
+            "max_open_positions": self.paper_max_open_positions,
+            "max_daily_loss": self.paper_max_daily_loss,
+            "max_drawdown": self.paper_max_drawdown,
+            "max_trades_per_day": self.paper_max_trades_per_day,
+        }
 
     def execution_kwargs(self) -> dict:
         names = (

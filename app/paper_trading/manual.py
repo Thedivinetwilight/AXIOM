@@ -40,6 +40,25 @@ _EPS = 1e-6
 logger = logging.getLogger("bot.manual")
 
 
+_PAPER_BLOCK_MESSAGES = {
+    "paper_max_daily_loss": (
+        "the paper daily-loss limit has been reached; new entries are blocked "
+        "for the rest of the session"
+    ),
+    "paper_max_drawdown": (
+        "the paper drawdown limit has been reached; new entries stay blocked "
+        "until the paper account is reset or reviewed"
+    ),
+    "paper_max_open_positions": "the paper open-position cap is already reached",
+    "paper_max_trades_per_day": (
+        "the paper daily entry limit has been reached; exits are still allowed"
+    ),
+    "paper_max_position_value": (
+        "the paper position-value cap would be exceeded by this order"
+    ),
+}
+
+
 class ManualOrderRejected(ValueError):
     """A manual order that the paper account will not accept, with a reason."""
 
@@ -50,20 +69,48 @@ class ManualOrderRejected(ValueError):
 
 @dataclass(frozen=True)
 class ManualLimits:
-    """The configured hard caps, mirrored from Settings (0 = disabled)."""
+    """The configured hard caps, mirrored from Settings (0 = disabled).
+
+    Two sets of caps can exist: the V1 hard limits and the paper-specific
+    entry limits used by the US market-data mode. The ticket and the order
+    checks both use the *stricter* of the two, so a smaller cap configured for
+    a US paper account is never displayed or enforced as a larger one.
+    """
 
     max_position_value: float = 0.0
     max_open_positions: int = 0
     max_daily_loss: float = 0.0
     max_trades_per_day: int = 0
+    max_drawdown: float = 0.0
+
+    @staticmethod
+    def _tighter(first, second):
+        values = [value for value in (first, second) if value]
+        return min(values) if values else 0
 
     @classmethod
     def from_settings(cls, settings) -> "ManualLimits":
+        paper = {}
+        if hasattr(settings, "paper_risk_limits"):
+            paper = settings.paper_risk_limits() or {}
         return cls(
-            max_position_value=float(getattr(settings, "max_position_value", 0.0) or 0.0),
-            max_open_positions=int(getattr(settings, "max_open_positions", 0) or 0),
-            max_daily_loss=float(getattr(settings, "max_daily_loss", 0.0) or 0.0),
-            max_trades_per_day=int(getattr(settings, "max_trades_per_day", 0) or 0),
+            max_position_value=cls._tighter(
+                float(getattr(settings, "max_position_value", 0.0) or 0.0),
+                float(paper.get("max_position_value", 0.0) or 0.0),
+            ),
+            max_open_positions=cls._tighter(
+                int(getattr(settings, "max_open_positions", 0) or 0),
+                int(paper.get("max_open_positions", 0) or 0),
+            ),
+            max_daily_loss=cls._tighter(
+                float(getattr(settings, "max_daily_loss", 0.0) or 0.0),
+                float(paper.get("max_daily_loss", 0.0) or 0.0),
+            ),
+            max_trades_per_day=cls._tighter(
+                int(getattr(settings, "max_trades_per_day", 0) or 0),
+                int(paper.get("max_trades_per_day", 0) or 0),
+            ),
+            max_drawdown=float(paper.get("max_drawdown", 0.0) or 0.0),
         )
 
     def to_dict(self) -> dict:
@@ -72,6 +119,7 @@ class ManualLimits:
             "max_open_positions": self.max_open_positions,
             "max_daily_loss": self.max_daily_loss,
             "max_trades_per_day": self.max_trades_per_day,
+            "max_drawdown": self.max_drawdown,
             "allow_short": False,
         }
 
@@ -331,12 +379,25 @@ def place_order(
     if quantity <= 0:
         raise ValueError("quantity must be positive")
 
+    placed_at = (timestamp or account_clock(broker)).astimezone(timezone.utc)
     if side == "BUY":
+        # The broker's paper limits are enforced on the same account clock a
+        # strategy entry uses. Checked before the local caps so the reason
+        # reported is the one the broker would actually apply.
+        gate = getattr(broker, "paper_entry_block_reason", None)
+        if gate is not None:
+            reason = gate(
+                symbol,
+                placed_at.isoformat(),
+                order_value=quantity * fill_price * (1 + broker.config.commission),
+            )
+            if reason:
+                raise ManualOrderRejected(reason, _PAPER_BLOCK_MESSAGES.get(
+                    reason, f"new entries are blocked ({reason})"))
         _check_buy(broker, symbol, quantity, fill_price, limits)
     else:
         _check_sell(broker, symbol, quantity)
 
-    placed_at = (timestamp or account_clock(broker)).astimezone(timezone.utc)
     order = Order(
         symbol,
         side,

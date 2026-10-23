@@ -51,13 +51,20 @@ async def start_default(request: Request):
     settings = request.app.state.settings
     broker = _require_local_paper(request)
     source = str(getattr(settings, "data_source", "replay") or "replay").lower()
-    if source not in {"replay", "upstox", "generic", "binance"}:
+    if source not in {"replay", "upstox", "generic", "binance", "alpaca"}:
         raise HTTPException(
             409,
             f"DATA_SOURCE={source} is not a paper market-data source; "
-            "configure replay/upstox/generic/binance",
+            "configure replay/upstox/generic/binance/alpaca",
         )
     symbol = (settings.default_symbol or "").strip().upper()
+    if source == "alpaca" and symbol not in settings.alpaca_symbol_list():
+        # The feed subscribes to ALPACA_SYMBOLS; start the first configured one
+        # rather than asking the user to retype the list.
+        configured = settings.alpaca_symbol_list()
+        if not configured:
+            raise HTTPException(409, "ALPACA_SYMBOLS is empty; name at least one ticker")
+        symbol = configured[0]
     if not symbol:
         raise HTTPException(409, "DEFAULT_SYMBOL is not configured")
     timeframe = settings.default_timeframe or broker.timeframe
@@ -74,15 +81,31 @@ async def start(body: PaperStartRequest, request: Request):
         raise ValueError(
             "Paper timeframe must match DEFAULT_TIMEFRAME; restart with separate DB to change"
         )
+    settings = request.app.state.settings
+    if body.source == "alpaca":
+        if str(getattr(settings, "mode", "PAPER")).upper() != "PAPER" or bool(
+            getattr(settings, "live_trading", False)
+        ) or str(getattr(settings, "broker", "LOCAL_PAPER")).upper() != "LOCAL_PAPER":
+            raise ValueError("Alpaca is available only as a market-data feed for local PAPER")
+        if str(getattr(settings, "market", "")).lower() != "us" or str(
+            getattr(settings, "currency", "")
+        ).upper() != "USD":
+            raise ValueError("Select MARKET=us and CURRENCY=USD for Alpaca US equities")
+        from app.data.alpaca import validate_us_symbol
+
+        validate_us_symbol(body.symbol)
     strategy = body.build_strategy()
     bars = load_dataset(request.app, body) if body.source == "replay" else None
     provider = stream_provider(
-        request.app.state.settings,
+        settings,
         body.source,
         bars=bars,
         delay=body.replay_delay,
         symbol=body.symbol,
+        timeframe=body.timeframe if body.source in {"upstox", "alpaca"} else None,
     )
+    if body.source == "alpaca" and getattr(provider, "supported_timeframes", None) != frozenset({"1m"}):
+        raise ValueError("Alpaca paper provider timeframe contract mismatch")
     # Live adapters expose the exact symbols they subscribe to; keep controller,
     # broker and feed in agreement to avoid unsubscribed-symbol failures later.
     symbols = list(getattr(provider, "symbols", None) or [body.symbol])

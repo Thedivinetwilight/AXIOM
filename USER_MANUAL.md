@@ -498,6 +498,22 @@ only (up to 1,500 bars per symbol), so a restart redraws from the feed, not from
 a stored archive. Marker positions are approximate to the drawn bar. Nothing
 here is a profitability claim, and a fill is a model of a fill.
 
+**What the bars are.** The badge next to the symbol names the feed, and it is
+the badge to trust: `DEMO REPLAY SAMPLE DATA · NOT MARKET DATA` for the bundled
+`DEMO`/`ALT` CSVs, `LOCAL CSV PREVIEW · NOT MARKET DATA` for a dataset preview,
+and `ALPACA US MARKET DATA · LOCAL SIMULATED FILLS` when real (read-only) US
+bars are feeding a paper session. The badge never claims a live market feed for
+sample data; do not read strategy performance off a DEMO chart.
+
+**US equities (Alpaca market data, simulated fills).** Set `MARKET=us`,
+`CURRENCY=USD`, `MARKET_CALENDAR=us-equities`, `DATA_SOURCE=alpaca`,
+`DEFAULT_TIMEFRAME=1m`, `BROKER=LOCAL_PAPER` and the five `PAPER_MAX_*` limits,
+plus your own `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (never in chat).
+This is a market-*data* key: AXIOM contains no Alpaca order client. The New
+York session (09:30–16:00, 13:00 early closes, weekends, US holidays) gates
+bars and fills, and the chart header shows `OPEN`/`CLOSED` from that calendar.
+Full details and the paper-risk semantics: [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md).
+
 **Monitor** — feed: dashboard Feed panel or `/api/v2/market_data`;
 strategies/router: `/api/v2/strategies`, `/api/v2/learning`, Learning panel;
 positions/orders/P&L: Account + Positions panels or `/paper/*`;

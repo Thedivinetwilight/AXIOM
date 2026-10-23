@@ -1,5 +1,10 @@
 # Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
 
+For the chart terminal, see `USER_MANUAL.md` section 5. For the read-only
+Alpaca US equities market-data path with local simulated fills, see
+[`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md): it is paper-only and
+states its feed, risk caps and research-evidence requirements.
+
 **Arena is a working, modular Python research and paper-trading platform,
 identified as `arena` version `3.0.5`. Real-money order routing does not exist
 in this project.** Sections below keep the full release history (V0.1 → V0.6 →

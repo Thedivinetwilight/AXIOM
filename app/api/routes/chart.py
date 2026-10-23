@@ -25,6 +25,66 @@ PAGE = Path(__file__).resolve().parents[2] / "static" / "chart" / "index.html"
 
 TIMEFRAME_ORDER = ["1m", "5m", "15m", "30m", "1h", "4h", "1D"]
 
+# What the drawn bars actually are. A replay/DEMO chart is sample data and must
+# never be read as a market-data result, so every payload names its feed and
+# the terminal shows that name next to the symbol.
+FEED_LABELS = {
+    "alpaca": "ALPACA US MARKET DATA · LOCAL SIMULATED FILLS",
+    "upstox": "UPSTOX MARKET DATA · LOCAL SIMULATED FILLS",
+    "replay": "DEMO REPLAY SAMPLE DATA · NOT MARKET DATA",
+    "dataset": "LOCAL CSV PREVIEW · NOT MARKET DATA",
+    "none": "NO DATA",
+}
+
+
+def _provider_name(simulator) -> str:
+    """The feed currently attached to the paper session, if any."""
+    provider = getattr(simulator, "provider", None)
+    metrics = getattr(provider, "metrics", None)
+    if not callable(metrics):
+        return ""
+    try:
+        return str((metrics() or {}).get("provider") or "")
+    except Exception:  # metrics are telemetry; never fail a chart request
+        return ""
+
+
+def _feed_identity(request, symbol: str, *, dataset: bool = False) -> tuple[str, str]:
+    """(feed key, label) for bars belonging to `symbol`."""
+    settings = request.app.state.settings
+    simulator = getattr(request.app.state, "simulator", None)
+    provider = _provider_name(simulator)
+    configured = str(getattr(settings, "data_source", "") or "").lower()
+    if provider in {"alpaca", "upstox"}:
+        key = provider
+    elif configured in {"alpaca", "upstox"}:
+        key = configured
+    elif dataset and configured == "replay":
+        # Under DATA_SOURCE=replay this CSV is exactly what the engine will
+        # stream, so it is the DEMO sample data — and it says so.
+        key = "replay"
+    elif dataset:
+        key = "dataset"
+    else:
+        key = "replay"
+    label = FEED_LABELS.get(key, key.upper())
+    if key == "alpaca" and provider != "alpaca":
+        label += " · NO SESSION RUNNING"
+    return key, label
+
+
+def _us_market_state() -> dict:
+    from app.markets.us_calendar import USEquitiesCalendar
+
+    state = USEquitiesCalendar().market_state(datetime.now(timezone.utc))
+    return {
+        "market_status": state["status"],
+        "market_open": state["market_open"],
+        "market_next_transition": state["next_transition"],
+        "market_timezone": state["timezone"],
+        "market_session": state["session"],
+    }
+
 
 def _timeframes_for(source_timeframe: str) -> list[str]:
     if not source_timeframe:
@@ -82,12 +142,33 @@ async def chart_data(
     overlay_keys, oscillator_keys = _indicator_keys(indicators)
 
     resolved = chart_source.resolve(request.app, spec.symbol, spec.timeframe, spec.limit)
+    if (
+        not resolved.candles
+        and resolved.source == "none"
+        and str(getattr(settings, "data_source", "")).lower() == "alpaca"
+        and spec.symbol in settings.alpaca_symbol_list()
+    ):
+        # Configured but empty: say what will make bars appear, not just
+        # "no data" — the stream is the only thing that can fill this chart.
+        resolved = chart_source.ResolvedSeries(
+            source=resolved.source,
+            source_label=resolved.source_label,
+            timeframe=spec.timeframe,
+            source_timeframe=spec.timeframe,
+            note=(
+                f"no Alpaca bars for {spec.symbol} yet: start the paper session; "
+                "bars are drawn as the read-only 1-minute stream delivers closed candles"
+            ),
+            available_timeframes=chart_source.symbol_timeframes(request.app, spec.symbol, None),
+        )
     if not resolved.candles and resolved.note and resolved.source_timeframe != spec.timeframe:
         # Asking for 5m when the only data is daily is a request we cannot
         # honour; say why instead of quietly drawing something else.
         raise ValueError(resolved.note)
 
     candles = resolved.candles
+    dataset_backed = str(resolved.source).startswith("dataset")
+    feed_key, feed_label = _feed_identity(request, spec.symbol, dataset=dataset_backed)
     status = simulator.status() if simulator else {}
     session = {
         "state": status.get("state"),
@@ -98,6 +179,10 @@ async def chart_data(
         "timeframe": status.get("timeframe") or getattr(broker, "timeframe", None),
         "provider": status.get("provider"),
     }
+    if feed_key == "alpaca":
+        # The New York calendar is the authority here: a silent feed during a
+        # closed session is expected, not a fault.
+        session.update(_us_market_state())
 
     payload = {
         "symbol": spec.symbol,
@@ -107,6 +192,9 @@ async def chart_data(
         "live_trading": False,
         "source": resolved.source,
         "source_label": resolved.source_label,
+        "data_feed": feed_key,
+        "data_feed_label": feed_label,
+        "market_data": feed_key in {"alpaca", "upstox"} and bool(candles),
         "source_timeframe": resolved.source_timeframe,
         "live": resolved.live,
         "note": resolved.note,
@@ -158,19 +246,24 @@ async def chart_symbols(request: Request):
     def add(symbol: str, *, source: str, source_timeframe: str, live: bool = False):
         if not symbol:
             return
+        feed_key, feed_label = _feed_identity(
+            request, symbol, dataset=str(source).startswith("dataset")
+        )
         entry = entries.get(symbol)
         if entry is None:
-            entry = {
+            entries[symbol] = {
                 "symbol": symbol,
                 "source": source,
                 "source_timeframe": source_timeframe,
                 "timeframes": _timeframes_for(source_timeframe),
                 "live": live,
+                "data_feed": feed_key,
+                "data_feed_label": feed_label,
             }
-            entries[symbol] = entry
         elif source == "engine" and not entry["live"]:
             entry.update(source=source, source_timeframe=source_timeframe,
-                         timeframes=_timeframes_for(source_timeframe), live=live)
+                         timeframes=_timeframes_for(source_timeframe), live=live,
+                         data_feed=feed_key, data_feed_label=feed_label)
 
     for symbol in getattr(simulator, "symbols", []) or []:
         add(symbol, source="engine", source_timeframe=engine_timeframe,
@@ -192,6 +285,11 @@ async def chart_symbols(request: Request):
         add(symbol, source="position", source_timeframe=engine_timeframe)
     for symbol in (getattr(broker, "last_candles", None) or {}):
         add(symbol, source="engine:last-bar", source_timeframe=engine_timeframe)
+    if str(getattr(settings, "data_source", "")).lower() == "alpaca":
+        # Subscribe before the first bar arrives: the operator can pick AAPL
+        # and see the honest empty state instead of an empty dropdown.
+        for symbol in settings.alpaca_symbol_list():
+            add(symbol, source="alpaca", source_timeframe=settings.default_timeframe or "1m")
 
     ordered = sorted(entries.values(), key=lambda item: (not item["live"], item["symbol"]))
     default = (settings.default_symbol or "").strip().upper()

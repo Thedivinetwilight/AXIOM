@@ -54,12 +54,18 @@ def make_calendar(name: str, timeframe: str):
         return ContinuousCalendar()
     if name == "nse-session" and timeframe != "1D":
         return SessionCalendar()
+    if name == "us-equities":
+        from app.markets.us_calendar import USEquitiesCalendar
+
+        return USEquitiesCalendar()
     raise ValueError(
         "NSE session example supports intraday only; add daily/holiday calendar adapter"
     )
 
 
 def calendar_signature(calendar) -> dict:
+    if type(calendar).__name__ == "USEquitiesCalendar":
+        return calendar.signature()
     if isinstance(calendar, SessionCalendar):
         return {
             "type": "session",
