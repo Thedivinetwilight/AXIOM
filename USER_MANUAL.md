@@ -392,6 +392,11 @@ including `/dashboard/data` and the engine STOP/RESUME controls — returns
 | `/health` | public health probe (no auth): `{"status":"ok","version":"3.0.4","mode":"PAPER","live_trading":false,"real_order_routing":"NOT_IMPLEMENTED"}` |
 | `/` | public landing page (HTML; account data stays behind auth) |
 | `/dashboard` | **the HTML dashboard page** |
+| `/chart` | **chart terminal + paper ticket** (§5.1) |
+| `/chart/data` `/chart/symbols` | candles, overlays, markers and instruments for the terminal |
+| `/paper/ticket?symbol=` | price, headroom and blockers for one instrument |
+| `/paper/order` (POST) | place one **simulated** manual order |
+| `/api/paper/start-default` (POST) | start a paper session from the configured source |
 | `/dashboard/data` | JSON powering the dashboard panels |
 | `/engine/stop` (POST) | emergency STOP (see §14) |
 | `/engine/resume` (POST) | clear the persisted STOP flag |
@@ -417,6 +422,78 @@ promotions), **Recent Events** (durable system events). The v2
 `/api/v2/risk` view exposes hard-limit configuration; drawdown is visible in
 `/api/v2/performance` and the equity/drawdown SVG charts. Emergency
 STOP/RESUME buttons are on the dashboard page and in the desktop app.
+
+### 5.1 Chart terminal and manual paper trading (`/chart`)
+
+Open **`http://127.0.0.1:8000/chart`** (linked from the dashboard header as
+**CHARTS + TRADE**). It is a self-contained page: no CDN, no remote script, no
+build step. It charts the bars the paper engine is actually processing and lets
+you place **simulated** orders against them.
+
+**The chart**
+
+- Candles with volume, a 20/50-bar SMA and EMA-200 overlay set, and an RSI
+  pane. Toggle any indicator with the buttons in the top bar.
+- Scroll to zoom, drag to pan, double-click to reset, `F` to follow the newest
+  bar, `R` to reset, `←`/`→` to pan. `+`/`-` zoom.
+- Timeframes are **derived, never faked**: 5m/15m/30m/1h/4h are aggregated from
+  completed 1-minute bars by whole multiples, and a bucket is emitted only when
+  every one of its source bars is present and contiguous. A gap in the feed
+  therefore appears as a gap, not as a candle whose volume silently excludes
+  the missing minutes. Daily bars are never synthesised from intraday bars (a
+  session is a calendar boundary, not a whole number of UTC seconds) and
+  intraday bars are never synthesised from daily ones — ask for an impossible
+  combination and you get an explanation, not a redrawn chart.
+- Colour-coded markers are drawn from fills the local paper broker recorded:
+  `B`/`S` triangles at the bar a fill occurred on, hover for size, price, fee
+  and reason. Resting limit orders appear as dashed price lines. The open
+  position's entry, stop and target are drawn as labelled levels.
+- The provenance badge always names the source: **paper engine feed** (bars this
+  process processed), **dataset *file*** (a CSV preview, never labelled live) or
+  **no data**. An empty chart means there is no data; nothing is generated to
+  fill the screen.
+
+**The ticket** (right-hand column)
+
+1. Pick a side — **BUY** or **SELL**.
+2. Type a quantity, or press **MAX** to use the headroom the account actually
+   has under its caps.
+3. Choose **MARKET** or **LIMIT** (a limit needs a price).
+4. Press **PLACE SIMULATED BUY/SELL** and confirm.
+
+Every order is filled by the in-process `PaperBroker`:
+
+- A **market** order fills immediately at the **last completed bar's close**
+  plus the configured commission, half-spread and slippage. The forming bar is
+  never used — its price is not known yet.
+- A **limit** order rests and is filled by the normal bar loop when a bar trades
+  through it, exactly like a strategy order. A marketable limit fills
+  immediately and never worse than its limit.
+- The order is stamped with the **account's clock** (the last processed bar),
+  not the wall clock, so a resting order can fill on the next bar and cannot
+  fill on the bar it was placed against.
+- **Shorting is refused** with an explicit reason: borrow availability, locate
+  fees and recall risk are not modelled anywhere in this project, so a short
+  could not be defended.
+- The configured hard limits (`MAX_POSITION_VALUE`, `MAX_OPEN_POSITIONS`,
+  `MAX_DAILY_LOSS`, `MAX_TRADES_PER_DAY`) apply exactly as they do to a strategy
+  order, a position cap also counts working BUY orders, and cash is never
+  overspent. A rejection always states which limit bound and by how much.
+- The dialog and the page banner both say the order is simulated. There is no
+  code path from this page to a broker: the only order call is
+  `POST /paper/order`, which refuses to run unless the process is
+  `MODE=PAPER`, `LIVE_TRADING=false` **and** `BROKER=LOCAL_PAPER`.
+
+**Before you can trade, a session must be running** — the ticket needs a
+completed bar to price against. The empty state offers **START PAPER SESSION**,
+which starts the engine from the configured `DATA_SOURCE`, or use the dashboard
+controls. With `DATA_SOURCE=replay` this is an offline, deterministic demo; with
+`upstox` it is real Indian market **data** feeding simulated fills.
+
+**Limits of this view:** the chart keeps bars in memory for the current process
+only (up to 1,500 bars per symbol), so a restart redraws from the feed, not from
+a stored archive. Marker positions are approximate to the drawn bar. Nothing
+here is a profitability claim, and a fill is a model of a fill.
 
 **Monitor** — feed: dashboard Feed panel or `/api/v2/market_data`;
 strategies/router: `/api/v2/strategies`, `/api/v2/learning`, Learning panel;

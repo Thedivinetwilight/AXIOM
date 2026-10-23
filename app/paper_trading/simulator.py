@@ -33,6 +33,12 @@ class PaperSimulator:
         self.processed = 0
         self.symbols: list[str] = []
         self._history: dict[str, list[Candle]] = {}
+        # Chart buffer: the bars this process actually processed, for the
+        # trading terminal. Kept in memory on purpose — the paper account row
+        # must not grow by a bar per minute, and a chart that silently lost
+        # its history would be worse than one that says so.
+        self.chart_bars: dict[str, list[Candle]] = {}
+        self.chart_limit = 1500
         # V0.6.1: wall-clock processing latency stages (rolling aggregates only).
         self.latency = {
             "bars": 0,
@@ -168,6 +174,9 @@ class PaperSimulator:
             return
         history.append(candle)
         history[:] = history[-self.strategy.history_limit :]
+        drawn = self.chart_bars.setdefault(candle.symbol, [])
+        drawn.append(candle)
+        del drawn[: -self.chart_limit]
         evaluated = time.perf_counter()
         signal = (
             self.strategy.generate_signal(tuple(history))
