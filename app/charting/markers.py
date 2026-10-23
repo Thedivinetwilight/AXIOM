@@ -63,10 +63,22 @@ def order_markers(broker, symbol: str, candles: list[Candle], timeframe: str) ->
     from app.backtesting.orders import ACTIVE_STATUSES
 
     markers: list[dict] = []
+    last_bar = candles[-1].timestamp if candles else None
     for order in getattr(broker, "orders", {}).values():
         if order.symbol != symbol or order.status not in ACTIVE_STATUSES:
             continue
         index = bucket_index(candles, order.timestamp, timeframe)
+        if index is None and last_bar is not None:
+            # A resting order placed after the newest drawn bar is still a
+            # live instruction: draw it at the right-hand edge rather than
+            # hiding it, exactly as a live chart shows a working order.
+            try:
+                from app.data.models import parse_timestamp
+
+                if parse_timestamp(order.timestamp) > last_bar:
+                    index = len(candles) - 1
+            except ValueError:
+                index = None
         markers.append(
             {
                 "bar": index,

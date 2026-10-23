@@ -199,6 +199,21 @@ class TestMarkers:
         assert resting[0]["status"] == "NEW"
         assert resting[0]["limit_price"] == 50.0
 
+    def test_resting_order_newer_than_the_drawn_bars_still_appears(self):
+        from app.charting.markers import order_markers
+
+        engine = broker()
+        engine.on_bar(minute(0), persist=False)
+        place_order(engine, symbol="AAPL", side="BUY", quantity=1, order_type="LIMIT",
+                    limit_price=50.0, limits=ManualLimits())
+        # The order is stamped at the account clock, one bar after the drawn
+        # history if only the first bar is on screen; it must still be visible.
+        drawn = [minute(0)]
+        marks = order_markers(engine, "AAPL", drawn, "1m")
+        assert len(marks) == 1
+        assert marks[0]["bar"] == 0
+        assert marks[0]["on_chart"] is True
+
     def test_position_levels_come_from_the_open_position(self):
         from app.charting.markers import position_levels
 
