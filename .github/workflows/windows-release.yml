@@ -188,9 +188,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
           $tag = "v$($env:VERSION)"
           $passed = $meta.test_results.smoke_checks.Count - $meta.test_results.smoke_failed
+
+          # The checksums are printed in the release notes as well as shipped in
+          # SHA256SUMS.txt, so a downloader can check what they got without
+          # having to trust the asset listing.
+          $sums = @(Get-Content dist\SHA256SUMS.txt | Where-Object { $_.Trim() })
+          $sumBlock = ($sums | ForEach-Object { '    ' + $_.Trim() }) -join "`n"
+          $installLog = Get-Content dist\installer-test-log.txt -Raw
+          $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+
           $notes = @"
           Windows x64 build of AXIOM at commit ``$($meta.commit)``.
 
@@ -198,21 +209,41 @@ jobs:
           enforced when settings load and re-checked by the launcher. The package contains
           no live broker client and no live order endpoint; every fill is simulated locally.
 
-          **Test results on this runner:** focused suites ``$($meta.test_results.focused_windows)``,
-          full suite ``$($meta.test_results.full_windows)`` (``$($meta.test_results.full_summary)``),
-          ``$passed`` on-machine checks passed, plus a silent install / launch / /chart /
-          uninstall cycle of the produced installer.
+          **Test results on this runner**
 
-          No strategy in this build is profitable, validated or ready for real money.
+          * focused suites: ``$($meta.test_results.focused_windows)``
+          * full suite: ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
+          * on-machine application checks: $passed passed, $($meta.test_results.smoke_failed) failed
+          * installer acceptance test: $installPassed passed, $installFailed failed
+            (silent install, launch, ``/health``, ``/chart`` with the PAPER badge, bundled
+            chart assets, unauthenticated data request rejected with 401, silent uninstall
+            that keeps the operator data folder) - full log in ``installer-test-log.txt``
+
+          **SHA-256 of every asset** (identical to ``SHA256SUMS.txt``)
+
+          ``$sumBlock``
+
+          The installer is per-user (no administrator prompt), installs to
+          ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and never deletes ``%LOCALAPPDATA%\AXIOM``
+          on uninstall unless you answer yes to the prompt.
+
+          No strategy in this build is profitable, validated or ready for real money. See
+          ``WINDOWS_INSTALL_MANUAL.md``.
           "@
+
           $assets = @(
             (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
             (Join-Path (Get-Location) 'dist\AXIOM-Chart.exe')
             (Join-Path (Get-Location) 'dist\BUILD_METADATA.json')
             (Join-Path (Get-Location) 'dist\SHA256SUMS.txt')
+            (Join-Path (Get-Location) 'dist\SOURCE_COMMIT.txt')
             (Join-Path (Get-Location) 'dist\install-test-log.txt')
+            (Join-Path (Get-Location) 'dist\installer-test-log.txt')
+            (Join-Path (Get-Location) 'pytest-focused.log')
+            (Join-Path (Get-Location) 'pytest-full.log')
             (Join-Path (Get-Location) 'WINDOWS_INSTALL_MANUAL.md')
           )
+          foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             Write-Host "tag $tag exists; replacing that prerelease"
