@@ -119,106 +119,40 @@ jobs:
       - name: Install the installer, launch the installed copy, then uninstall
         shell: pwsh
         working-directory: src/packaging/windows
+        # The whole test lives in install_test.ps1: it logs to
+        # dist\installer-test-log.txt and announces every phase as an Actions
+        # notice annotation, so a failure is attributable from the check-run
+        # annotations even when the hosted step log cannot be downloaded.
+        run: ./install_test.ps1 -DistDir dist
+
+      - name: Publish the installer test log on failure
+        # When the installer test fails, the hosted runner's raw log cannot be
+        # downloaded from every environment. The log is therefore committed to
+        # the packaging branch so the failure can be read directly. This step
+        # only runs on failure and never fails the job itself.
+        if: failure()
+        shell: pwsh
+        continue-on-error: true
         run: |
-          $ErrorActionPreference = 'Stop'
-          function Phase($n, $msg) { Write-Host "::notice title=install-test panel $n::$msg"; Write-Host "== $n: $msg" }
-          $script:phase = 'init'
-          try {
-            Phase 1 'locate the installer'
-            $script:phase = 'locate installer'
-            $setup = (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
-            if (-not $setup) { throw 'no *-setup.exe in dist' }
-            Write-Host "installer: $setup ($([math]::Round((Get-Item $setup).Length/1MB,1)) MB)"
-
-            $dir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
-            $installed = Join-Path $dir 'AXIOM-Chart.exe'
-            $log = Join-Path $env:TEMP 'axiom-install.log'
-            Write-Host "install dir: $dir"
-
-            Phase 2 'silent install'
-            $script:phase = 'silent install'
-            $args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dir","/LOG=$log")
-            Write-Host "arguments: $($args -join ' ')"
-            $proc = Start-Process -FilePath $setup -ArgumentList $args -PassThru -Wait
-            Write-Host "installer exit code: $($proc.ExitCode)"
-            if ($proc.ExitCode -ne 0) {
-              if (Test-Path $log) { Get-Content $log -Tail 60 | ForEach-Object { Write-Host "  log| $_" } }
-              throw "installer exited with code $($proc.ExitCode)"
-            }
-
-            Phase 3 'verify the installed files'
-            $script:phase = 'verify installed files'
-            for ($i = 0; $i -lt 40 -and -not (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
-            if (-not (Test-Path $installed)) {
-              if (Test-Path $dir) { Get-ChildItem $dir | ForEach-Object { Write-Host "  found| $($_.Name)" } }
-              else { Write-Host "  $dir does not exist" }
-              $other = Get-ChildItem -Path $env:LOCALAPPDATA -Recurse -Filter 'AXIOM-Chart.exe' -ErrorAction SilentlyContinue -Depth 4 | Select-Object -First 3
-              foreach ($o in $other) { Write-Host "  elsewhere| $($o.FullName)" }
-              throw "AXIOM-Chart.exe was not installed into $dir"
-            }
-            Write-Host "installed: $installed"
-
-            Phase 4 'launch the installed copy'
-            $script:phase = 'launch installed copy'
-            $env:AXIOM_DATA_DIR = Join-Path $env:TEMP ('axiom-installed-' + [guid]::NewGuid().ToString('N'))
-            $env:AXIOM_PORT = '8135'
-            $outLog = Join-Path $env:TEMP 'axiom-installed-out.log'
-            $errLog = Join-Path $env:TEMP 'axiom-installed-err.log'
-            $p = Start-Process -FilePath $installed -ArgumentList '--no-browser' -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-            $ok = $false
-            for ($i = 0; $i -lt 240; $i++) {
-              Start-Sleep -Milliseconds 500
-              if ($p.HasExited) { break }
-              try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/health' -TimeoutSec 2; $ok = $true; break } catch { }
-            }
-            if (-not $ok) {
-              Write-Host "exited=$($p.HasExited) code=$(if ($p.HasExited) { $p.ExitCode } else { 'running' })"
-              foreach ($f in @($outLog, $errLog)) { if (Test-Path $f) { Write-Host "--- $f"; Get-Content $f -Tail 40 | ForEach-Object { Write-Host "  app| $_" } } }
-              if (-not $p.HasExited) { $p.Kill() }
-              throw 'the installed application never answered /health'
-            }
-            Write-Host 'installed copy answered /health'
-
-            Phase 5 'chart page and static assets from the installed copy'
-            $script:phase = 'installed chart page'
-            $chart = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart' -TimeoutSec 15
-            if ($chart.StatusCode -ne 200) { throw "/chart returned $($chart.StatusCode)" }
-            if ($chart.Content -notmatch 'PAPER') { throw 'the chart page does not show the PAPER badge' }
-            Write-Host '/chart 200 and displays PAPER'
-            $js = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/static/chart/chart.js' -TimeoutSec 15
-            if ($js.StatusCode -ne 200) { throw 'chart.js is missing from the installed copy' }
-            Write-Host "static chart.js served ($($js.RawContentLength) bytes)"
-            $anon = 0
-            try { $null = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8135/chart/data?symbol=DEMO&timeframe=1D' -TimeoutSec 5 }
-            catch { $anon = [int]$_.Exception.Response.StatusCode }
-            if ($anon -ne 401) { throw "a data route answered without a token ($anon)" }
-            Write-Host 'data route still requires the token (401 without it)'
-
-            Phase 6 'shut down and uninstall'
-            $script:phase = 'uninstall'
-            $p.Kill()
-            $p.WaitForExit(10000) | Out-Null
-            Start-Sleep -Seconds 3
-            $uninstaller = Join-Path $dir 'unins000.exe'
-            if (-not (Test-Path $uninstaller)) { throw 'the uninstaller was not installed' }
-            $u = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
-            Write-Host "uninstaller exit code: $($u.ExitCode)"
-            for ($i = 0; $i -lt 40 -and (Test-Path $installed); $i++) { Start-Sleep -Milliseconds 500 }
-            if (Test-Path $installed) {
-              Get-ChildItem $dir | ForEach-Object { Write-Host "  left| $($_.Name)" }
-              throw 'uninstall left AXIOM-Chart.exe behind'
-            }
-            if (-not (Test-Path $env:AXIOM_DATA_DIR)) { throw 'uninstall deleted the user data folder; it must be preserved' }
-            Write-Host 'uninstall removed the program files and kept the user data folder'
-
-            Write-Host '::notice title=install-test::PASS - install, launch, /chart, static assets, token gate and uninstall verified'
+          $ErrorActionPreference = 'Continue'
+          $log = 'src/packaging/windows/dist/installer-test-log.txt'
+          $err = 'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
+          if (-not (Test-Path $log) -and -not (Test-Path $err)) {
+            Write-Host 'no installer test log was produced'
+            exit 0
           }
-          catch {
-            $msg = "$_"
-            Write-Host "::error title=install-test failed in phase '$script:phase'::$msg"
-            Set-Content -Path (Join-Path 'dist' 'INSTALL_TEST_ERROR.txt') -Value "phase: $script:phase`n$msg" -Encoding utf8
-            exit 1
-          }
+          $kit = Join-Path $env:GITHUB_WORKSPACE '_kit'
+          $dest = Join-Path $kit 'packaging/windows/diagnostics'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item $log $dest -Force -ErrorAction SilentlyContinue
+          Copy-Item $err $dest -Force -ErrorAction SilentlyContinue
+          git -C $kit config user.name 'axiom-ci'
+          git -C $kit config user.email 'axiom-ci@users.noreply.github.com'
+          git -C $kit add -A packaging/windows/diagnostics
+          git -C $kit diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { Write-Host 'the published log is unchanged'; exit 0 }
+          git -C $kit commit -m 'ci: record the installer test log for inspection'
+          git -C $kit push origin ('HEAD:{0}' -f $env:GITHUB_REF_NAME)
 
       - name: Upload build artifacts
         if: always()
@@ -231,6 +165,8 @@ jobs:
             src/packaging/windows/dist/SHA256SUMS.txt
             src/packaging/windows/dist/SOURCE_COMMIT.txt
             src/packaging/windows/dist/install-test-log.txt
+            src/packaging/windows/dist/installer-test-log.txt
+            src/packaging/windows/dist/INSTALL_TEST_ERROR.txt
             src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
             src/packaging/windows/pytest-full.log
             src/packaging/windows/pytest-focused.log

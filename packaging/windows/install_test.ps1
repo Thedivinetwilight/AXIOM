@@ -1,0 +1,276 @@
+<#
+    Install, launch, exercise and uninstall the AXIOM chart terminal.
+
+    This script is the on-machine acceptance test for the Windows installer. It
+    runs on a GitHub Windows runner (or any Windows 10/11 x64 machine) and
+    proves, against the *installed* copy - not the build output directory - that
+
+      1. the installer runs silently and places the application where asked,
+      2. the installed executable starts and answers /health on loopback,
+      3. /chart returns 200 and shows the PAPER badge,
+      4. the chart's own static assets are inside the package (no CDN),
+      5. a data route still refuses to answer without a token,
+      6. the uninstaller removes the program files but keeps operator data.
+
+    Paper only: the test uses a throw-away data directory under %TEMP%, the
+    bundled DEMO sample data and a locally generated token. No broker is
+    contacted and no credential is read or written.
+
+    Every phase is announced twice: as a line in the log file, and as a GitHub
+    Actions notice annotation, so a failure is attributable even when the raw
+    step log cannot be retrieved. The full log is written to
+    dist\installer-test-log.txt, and a failure also writes
+    dist\INSTALL_TEST_ERROR.txt.
+
+    Usage (from packaging/windows):
+        pwsh -File install_test.ps1 -DistDir dist
+#>
+
+[CmdletBinding()]
+param(
+    [string]$DistDir = 'dist',
+    [int]$Port = 0
+)
+
+$ErrorActionPreference = 'Stop'
+
+$script:Phase = 'start'
+$script:LogPath = Join-Path $DistDir 'installer-test-log.txt'
+$script:ErrorPath = Join-Path $DistDir 'INSTALL_TEST_ERROR.txt'
+$script:Failures = New-Object System.Collections.Generic.List[string]
+
+function Say {
+    param([string]$Message)
+    Write-Host $Message
+    Add-Content -Path $script:LogPath -Value $Message -Encoding utf8
+}
+
+function Note {
+    # A notice annotation is the only channel that survives when the hosted
+    # runner log is not retrievable, so every phase announces itself here.
+    param([string]$Message)
+    Say $Message
+    Write-Host ('::notice title=install-test::{0}' -f $Message)
+}
+
+function Step {
+    param([string]$Phase, [string]$Message)
+    $script:Phase = $Phase
+    Note ('[{0}] {1}' -f $Phase, $Message)
+}
+
+function Check {
+    param([bool]$Condition, [string]$Description)
+    if ($Condition) {
+        Say ('PASS  {0}' -f $Description)
+    } else {
+        Say ('FAIL  {0}' -f $Description)
+        $script:Failures.Add($Description)
+    }
+    return $Condition
+}
+
+function Get-FreePort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $listener.Stop()
+    return $port
+}
+
+Set-Content -Path $script:LogPath -Value ('AXIOM installer test  ' + (Get-Date -Format o)) -Encoding utf8
+Remove-Item -Path $script:ErrorPath -ErrorAction SilentlyContinue
+
+$app = $null
+$installedExe = $null
+$installDir = $null
+$dataDir = $null
+
+try {
+    # ---------------------------------------------------------------- phase 1
+    Step 'install' 'locating the installer'
+    if (-not (Test-Path $DistDir)) { throw "the dist directory '$DistDir' does not exist" }
+    $setupItem = Get-ChildItem -Path $DistDir -Filter '*-setup.exe' | Select-Object -First 1
+    if (-not $setupItem) { throw "no *-setup.exe was found in $DistDir" }
+    $setup = $setupItem.FullName
+    Say ('installer: {0} ({1:N1} MB)' -f $setup, ($setupItem.Length / 1MB))
+
+    $installDir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
+    $installedExe = Join-Path $installDir 'AXIOM-Chart.exe'
+    $installLog = Join-Path $env:TEMP 'axiom-install.log'
+    Say ('install dir: {0}' -f $installDir)
+    Say ('install log: {0}' -f $installLog)
+    if (Test-Path $installDir) {
+        Say 'a previous install directory is present; leaving it to the installer to upgrade'
+    }
+
+    # ---------------------------------------------------------------- phase 2
+    Step 'install' 'running the installer silently'
+    $setupArgs = @(
+        '/VERYSILENT'
+        '/SUPPRESSMSGBOXES'
+        '/NORESTART'
+        ('/DIR="{0}"' -f $installDir)
+        ('/LOG="{0}"' -f $installLog)
+    )
+    Say ('arguments: {0}' -f ($setupArgs -join ' '))
+    $setupProc = Start-Process -FilePath $setup -ArgumentList $setupArgs -PassThru -Wait
+    Say ('installer exit code: {0}' -f $setupProc.ExitCode)
+    if ($setupProc.ExitCode -ne 0) {
+        if (Test-Path $installLog) {
+            Say '--- installer log (tail)'
+            Get-Content -Path $installLog -Tail 80 | ForEach-Object { Say ('  inno| {0}' -f $_) }
+        } else {
+            Say 'the installer produced no log file'
+        }
+        throw ('the installer exited with code {0}' -f $setupProc.ExitCode)
+    }
+    Check ($setupProc.ExitCode -eq 0) 'silent install reported success'
+
+    # ---------------------------------------------------------------- phase 3
+    Step 'installed files' 'verifying what the installer placed on disk'
+    for ($i = 0; $i -lt 120 -and -not (Test-Path $installedExe); $i++) { Start-Sleep -Milliseconds 500 }
+    if (-not (Test-Path $installedExe)) {
+        if (Test-Path $installDir) {
+            Say ('contents of {0}:' -f $installDir)
+            Get-ChildItem -Path $installDir | ForEach-Object { Say ('  found| {0}' -f $_.Name) }
+        } else {
+            Say ('{0} does not exist' -f $installDir)
+        }
+        Get-ChildItem -Path $env:LOCALAPPDATA -Recurse -Depth 3 -Filter 'AXIOM-Chart.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 3 | ForEach-Object { Say ('  elsewhere| {0}' -f $_.FullName) }
+        throw ('AXIOM-Chart.exe was not installed into {0}' -f $installDir)
+    }
+    if (Test-Path $installLog) {
+        Get-Content -Path $installLog -Tail 12 | ForEach-Object { Say ('  inno| {0}' -f $_) }
+    }
+    Check (Test-Path $installedExe) ('the installer placed AXIOM-Chart.exe in {0}' -f $installDir)
+    Check (Test-Path (Join-Path $installDir 'WINDOWS_INSTALL_MANUAL.md')) 'the user manual was installed next to the executable'
+    Check (Test-Path (Join-Path $installDir 'SOURCE_COMMIT.txt')) 'the source commit record was installed'
+    $uninstaller = Join-Path $installDir 'unins000.exe'
+    Check (Test-Path $uninstaller) 'the uninstaller was installed'
+
+    # ---------------------------------------------------------------- phase 4
+    Step 'launch' 'starting the installed copy and waiting for /health'
+    $dataDir = Join-Path $env:TEMP ('axiom-installed-' + [guid]::NewGuid().ToString('N'))
+    if ($Port -le 0) { $Port = Get-FreePort }
+    $base = 'http://127.0.0.1:{0}' -f $Port
+    Say ('data dir: {0}' -f $dataDir)
+    Say ('port:     {0}' -f $Port)
+    $env:AXIOM_DATA_DIR = $dataDir
+    $env:AXIOM_PORT = ('{0}' -f $Port)
+    $env:MODE = 'PAPER'
+    $env:LIVE_TRADING = 'false'
+    $env:BROKER = 'LOCAL_PAPER'
+
+    $outLog = Join-Path $env:TEMP 'axiom-installed-stdout.log'
+    $errLog = Join-Path $env:TEMP 'axiom-installed-stderr.log'
+    Remove-Item -Path $outLog, $errLog -ErrorAction SilentlyContinue
+    $app = Start-Process -FilePath $installedExe -ArgumentList '--no-browser' -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+
+    $healthy = $false
+    for ($i = 0; $i -lt 240; $i++) {
+        Start-Sleep -Milliseconds 500
+        if ($app.HasExited) { break }
+        try {
+            $null = Invoke-WebRequest -UseBasicParsing ('{0}/health' -f $base) -TimeoutSec 2
+            $healthy = $true
+            break
+        } catch { }
+    }
+    if (-not $healthy) {
+        if ($app.HasExited) { Say ('the application exited with code {0}' -f $app.ExitCode) }
+        else { Say 'the application is still running but never answered' }
+        foreach ($f in @($outLog, $errLog)) {
+            if (Test-Path $f) {
+                Say ('--- {0}' -f $f)
+                Get-Content -Path $f -Tail 60 | ForEach-Object { Say ('  app| {0}' -f $_) }
+            }
+        }
+        if (-not $app.HasExited) { $app.Kill() }
+        throw ('the installed application never answered {0}/health' -f $base)
+    }
+    Check $healthy 'the installed copy answered /health on loopback'
+
+    # ---------------------------------------------------------------- phase 5
+    Step 'chart' 'checking the chart page, its assets and the token gate'
+    $chart = Invoke-WebRequest -UseBasicParsing ('{0}/chart' -f $base) -TimeoutSec 20
+    Check ($chart.StatusCode -eq 200) ('/chart returns 200 (got {0})' -f $chart.StatusCode)
+    Check ($chart.Content -match 'PAPER') '/chart displays the PAPER badge'
+    Check ($chart.Content -notmatch '(?i)live trading enabled|REAL MONEY') '/chart makes no live-money claim'
+
+    $js = Invoke-WebRequest -UseBasicParsing ('{0}/static/chart/chart.js' -f $base) -TimeoutSec 20
+    Check ($js.StatusCode -eq 200) 'chart.js is served from the installed package'
+    Check ($js.Content -match 'markerPoint') 'the served chart.js is the real renderer'
+    $css = Invoke-WebRequest -UseBasicParsing ('{0}/static/chart/chart.css' -f $base) -TimeoutSec 20
+    Check ($css.StatusCode -eq 200) 'chart.css is served from the installed package'
+
+    $anon = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/chart/data?symbol=DEMO&timeframe=1D' -f $base) -TimeoutSec 10
+        $anon = 200
+    } catch {
+        if ($_.Exception.Response) { $anon = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anon -eq 401) ('a chart data route still refuses to answer without a token (got {0})' -f $anon)
+
+    $envFile = Join-Path $dataDir 'config.json'
+    if (Test-Path $envFile) {
+        $cfgText = Get-Content -Path $envFile -Raw
+        Check ($cfgText -notmatch '(?i)"(live_trading)"\s*:\s*true') 'the runtime config does not enable live trading'
+        Check ($cfgText -notmatch '(?i)(api_secret|access_token|secret_key)') 'the runtime config holds no broker credential'
+    } else {
+        Say 'no config.json was written; nothing to inspect for live credentials'
+    }
+
+    # ---------------------------------------------------------------- phase 6
+    Step 'uninstall' 'stopping the application and removing it'
+    if (-not $app.HasExited) {
+        $app.Kill()
+        $app.WaitForExit(15000) | Out-Null
+    }
+    Start-Sleep -Seconds 3
+    if (-not (Test-Path $uninstaller)) { throw 'the uninstaller disappeared before it could be run' }
+    $un = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru -Wait
+    Say ('uninstaller exit code: {0}' -f $un.ExitCode)
+    for ($i = 0; $i -lt 120 -and (Test-Path $installedExe); $i++) { Start-Sleep -Milliseconds 500 }
+    if (Test-Path $installedExe) {
+        Get-ChildItem -Path $installDir | ForEach-Object { Say ('  left| {0}' -f $_.Name) }
+    }
+    Check (-not (Test-Path $installedExe)) 'the uninstaller removed AXIOM-Chart.exe'
+    Check (Test-Path $dataDir) ('the uninstaller kept the operator data folder {0}' -f $dataDir)
+
+    # ------------------------------------------------------------------ result
+    Say ''
+    if ($script:Failures.Count -gt 0) {
+        throw ('{0} check(s) failed: {1}' -f $script:Failures.Count, ($script:Failures -join '; '))
+    }
+    Note 'PASS - install, launch, /chart, static assets, token gate and uninstall verified on this machine'
+    exit 0
+}
+catch {
+    $message = ($_ | Out-String).Trim()
+    $stack = $_.ScriptStackTrace
+    Say ''
+    Say ('FAILED in phase [{0}]' -f $script:Phase)
+    Say $message
+    if ($stack) { Say ('stack: {0}' -f $stack) }
+    if ($app -and -not $app.HasExited) { $app.Kill() }
+    if (Test-Path $script:LogPath) {
+        Copy-Item -Path $script:LogPath -Destination (Join-Path $DistDir 'installer-test-log.txt') -Force -ErrorAction SilentlyContinue
+    }
+    Set-Content -Path $script:ErrorPath -Encoding utf8 -Value (@(
+        ('phase: {0}' -f $script:Phase)
+        $message
+        ('stack: {0}' -f $stack)
+    ) -join "`n")
+    # Annotations are capped and single-line, so send the phase and the first
+    # line of the message; the full text is in dist\INSTALL_TEST_ERROR.txt.
+    $firstLine = ($message -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    Write-Host ('::error title=install-test failed in phase {0}::{1}' -f $script:Phase, $firstLine)
+    if ($stack) {
+        $stackLine = ($stack -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+        Write-Host ('::error title=install-test at::{0}' -f $stackLine)
+    }
+    exit 1
+}
