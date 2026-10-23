@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from threading import Lock
 from fastapi import Depends, FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from app.api.auth import authenticate
 from app import __version__
@@ -13,7 +14,9 @@ from app.backtesting.costs import ExecutionConfig
 from app.paper_trading.broker import PaperBroker
 from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
-from app.api.routes import dashboard, health, market, strategies, backtests, paper, v2, market_events
+from app.api.routes import (
+    dashboard, health, market, strategies, backtests, paper, v2, market_events, chart,
+)
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -30,6 +33,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 timeframe=settings.default_timeframe,
                 repository=repository,
                 calendar=make_calendar(settings.market_calendar, settings.default_timeframe),
+                risk_limits=settings.paper_risk_limits(),
             )
             app.state.repository, app.state.broker = repository, broker
             app.state.simulator = PaperSimulator(broker)
@@ -87,8 +91,16 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # /dashboard/data and the engine STOP/RESUME controls keep the full
     # bearer gate (see app/api/auth.py).
     app.include_router(dashboard.router)
+    # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
+    # every data route declares its own bearer dependency.
+    app.include_router(chart.router)
     for module in (market, strategies, backtests, paper, v2, market_events):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
+    # Static assets for the chart terminal. Local files only: no CDN, no
+    # remote script, and nothing secret is ever placed here.
+    static_dir = Path(__file__).resolve().parent.parent / "static"
+    if static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     app.state.sandbox_engine = None  # set by the sandbox engine embedding
     app.state.sandbox_broker = None
     return app

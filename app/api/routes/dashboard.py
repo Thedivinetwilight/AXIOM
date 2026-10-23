@@ -203,11 +203,14 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 border-radius:8px;cursor:pointer;font-size:14px}
 .stop:disabled{opacity:.5}
 .pos{color:#75e7b2}.neg{color:#ff9aa5}
+.chartlink{background:#12506f;border:1px solid #2b7ba8;color:#cfeeff;padding:8px 14px;
+border-radius:8px;font-size:14px;text-decoration:none}
 #err{color:#ff9aa5;font-size:13px}
 </style><header>
 <strong>Arena 3.0.5</strong><span class="badge" id="mode">…</span>
 <span class="badge warn">LIVE: NOT ENABLED IN V1</span>
 <span id="conn" class="badge">…</span>
+<a class="chartlink" href="/chart" title="TradingView-style chart and paper ticket">CHARTS + TRADE</a>
 <button class="stop" id="stop">EMERGENCY STOP</button><span id="err"></span>
 </header><main>
 <section><h2>Account</h2><table id="account"></table></section>

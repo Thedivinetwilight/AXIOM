@@ -1,5 +1,10 @@
 # Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
 
+For the chart terminal, see `USER_MANUAL.md` section 5. For the read-only
+Alpaca US equities market-data path with local simulated fills, see
+[`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md): it is paper-only and
+states its feed, risk caps and research-evidence requirements.
+
 **Arena is a working, modular Python research and paper-trading platform,
 identified as `arena` version `3.0.5`. Real-money order routing does not exist
 in this project.** Sections below keep the full release history (V0.1 → V0.6 →
@@ -227,6 +232,15 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
+- **Chart terminal + manual paper ticket** (`/chart`, linked from the
+  dashboard): a self-contained canvas chart — candles, volume, SMA 20/50,
+  EMA 200, RSI, zoom/pan, trade markers from real paper fills, working-limit
+  lines and entry/stop/target levels — plus a ticket that places **simulated**
+  market or limit orders in the local paper broker. Aggregation is honest:
+  intraday timeframes are built only from complete, contiguous source bars and
+  daily bars are never synthesised. Shorting is refused (no borrow model);
+  every configured hard limit applies; the page cannot reach a broker.
+  Documented in USER_MANUAL §5.1.
 - **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
   (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth

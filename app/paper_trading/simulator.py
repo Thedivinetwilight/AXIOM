@@ -33,6 +33,12 @@ class PaperSimulator:
         self.processed = 0
         self.symbols: list[str] = []
         self._history: dict[str, list[Candle]] = {}
+        # Chart buffer: the bars this process actually processed, for the
+        # trading terminal. Kept in memory on purpose — the paper account row
+        # must not grow by a bar per minute, and a chart that silently lost
+        # its history would be worse than one that says so.
+        self.chart_bars: dict[str, list[Candle]] = {}
+        self.chart_limit = 1500
         # V0.6.1: wall-clock processing latency stages (rolling aggregates only).
         self.latency = {
             "bars": 0,
@@ -91,6 +97,11 @@ class PaperSimulator:
                     status[key] = feed[key]
         status["processing_latency_ms"] = dict(self.latency)
         status["risk_counters"] = dict(self.risk_counters)
+        if hasattr(self.broker, "risk_limits"):
+            status["paper_risk_limits"] = self.broker.risk_limits.to_dict()
+            status["paper_risk_halts"] = dict(
+                self.broker.context.get("paper_risk_halts", {})
+            )
         return status
 
     async def start(self, provider, strategy, symbols):
@@ -140,6 +151,11 @@ class PaperSimulator:
             self.broker.timeframe
         ) > datetime.now(timezone.utc) + timedelta(seconds=2):
             raise ValueError("Live feed sent an unfinished/future candle")
+        stale_after = getattr(self.provider, "stale_after_seconds", None)
+        if stale_after is not None and (
+            datetime.now(timezone.utc) - candle.available_at(self.broker.timeframe)
+        ).total_seconds() > stale_after:
+            raise ValueError("Live feed sent a stale candle")
         last = self.broker.last_bars.get(candle.symbol)
         if last and candle.timestamp <= parse_timestamp(last):
             if candle.timestamp == parse_timestamp(last):
@@ -168,6 +184,9 @@ class PaperSimulator:
             return
         history.append(candle)
         history[:] = history[-self.strategy.history_limit :]
+        drawn = self.chart_bars.setdefault(candle.symbol, [])
+        drawn.append(candle)
+        del drawn[: -self.chart_limit]
         evaluated = time.perf_counter()
         signal = (
             self.strategy.generate_signal(tuple(history))
