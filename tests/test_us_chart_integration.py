@@ -232,6 +232,25 @@ class TestDemoIsNeverMistakenForMarketData:
             assert body["market_data"] is False
             assert "NOT MARKET DATA" in body["data_feed_label"]
 
+    def test_demo_dataset_is_not_relabelled_by_an_alpaca_account(self, tmp_path):
+        """A CSV preview stays sample data even when DATA_SOURCE=alpaca."""
+        app = create_app(us_settings(tmp_path), data_dir=REPO / "data")
+        with TestClient(app) as client:
+            body = client.get("/chart/symbols", headers=H).json()
+            demos = {entry["symbol"]: entry for entry in body["symbols"]}
+            for symbol in ("DEMO", "ALT"):
+                assert demos[symbol]["data_feed"] in {"dataset", "replay"}
+                assert "ALPACA" not in demos[symbol]["data_feed_label"]
+                assert "NOT MARKET DATA" in demos[symbol]["data_feed_label"]
+            payload = client.get(
+                "/chart/data?symbol=DEMO&timeframe=1D", headers=H
+            ).json()
+            assert payload["data_feed"] in {"dataset", "replay"}
+            assert payload["market_data"] is False
+            # A CSV preview is not a US session, so no New York state is claimed.
+            assert payload["session"].get("market_status") is None
+            assert payload["session"].get("market_timezone") is None
+
     def test_dataset_preview_is_labelled_as_a_local_csv(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/demo2.db")
         monkeypatch.setenv("API_TOKEN", TOKEN)

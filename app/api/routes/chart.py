@@ -55,16 +55,15 @@ def _feed_identity(request, symbol: str, *, dataset: bool = False) -> tuple[str,
     simulator = getattr(request.app.state, "simulator", None)
     provider = _provider_name(simulator)
     configured = str(getattr(settings, "data_source", "") or "").lower()
-    if provider in {"alpaca", "upstox"}:
+    if dataset:
+        # A CSV is never market data, whatever feed the account is configured
+        # for. Under DATA_SOURCE=replay it is exactly what the engine will
+        # stream, so it is the DEMO sample data — and it says so.
+        key = "replay" if configured == "replay" else "dataset"
+    elif provider in {"alpaca", "upstox"}:
         key = provider
     elif configured in {"alpaca", "upstox"}:
         key = configured
-    elif dataset and configured == "replay":
-        # Under DATA_SOURCE=replay this CSV is exactly what the engine will
-        # stream, so it is the DEMO sample data — and it says so.
-        key = "replay"
-    elif dataset:
-        key = "dataset"
     else:
         key = "replay"
     label = FEED_LABELS.get(key, key.upper())
