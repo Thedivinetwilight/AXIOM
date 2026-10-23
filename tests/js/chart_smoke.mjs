@@ -548,6 +548,16 @@ if (state_timeframe() === "1D") {
     "intraday axis marks the day boundary (got " + JSON.stringify(labels) + ")");
 }
 
+/* Every fill the fixture carries should leave an arrow on the canvas: a green
+ * one under the bar for a BUY, a red one above it for a SELL. */
+const arrows = (colour) => ctx.__display.filter((op) =>
+  op.type === "poly" && op.closed && op.points.length === 4 && op.fillStyle === colour);
+check(arrows("#26a69a").length >= 1, "a BUY marker was drawn");
+check(arrows("#ef5350").length >= 1, "a SELL marker was drawn");
+const buyArrow = arrows("#26a69a")[0];
+check(buyArrow && buyArrow.points[0][1] < buyArrow.points[1][1],
+  "the BUY arrow points up (apex above its base)");
+
 function state_timeframe() {
   return LIVE_CHART ? LIVE_CHART.timeframe : "1m";
 }

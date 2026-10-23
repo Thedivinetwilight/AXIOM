@@ -460,9 +460,9 @@
     if (x < geo.plot.x - 20 || x > geo.plot.x + geo.plot.w + 20) return null;
     var y;
     if (marker.side === "BUY") {
-      y = yOf(data.bars.low[index], bounds) + 12;
+      y = yOf(data.bars.low[index], bounds) + 16;
     } else {
-      y = yOf(data.bars.high[index], bounds) - 12;
+      y = yOf(data.bars.high[index], bounds) - 16;
     }
     return { x: x, y: y };
   }
@@ -497,21 +497,21 @@
       if (!point) return;
       var buy = marker.side === "BUY";
       var color = buy ? COLORS.up : COLORS.down;
+      // Bare arrows, like TradingView: the letter that used to sit inside is
+      // illegible at this size, and the hover tooltip already names the fill.
       ctx.fillStyle = color;
       ctx.beginPath();
       if (buy) {
-        ctx.moveTo(point.x, point.y - 8);
-        ctx.lineTo(point.x - 5, point.y + 1);
-        ctx.lineTo(point.x + 5, point.y + 1);
+        ctx.moveTo(point.x, point.y - 10);
+        ctx.lineTo(point.x - 6, point.y + 1);
+        ctx.lineTo(point.x + 6, point.y + 1);
       } else {
-        ctx.moveTo(point.x, point.y + 8);
-        ctx.lineTo(point.x - 5, point.y - 1);
-        ctx.lineTo(point.x + 5, point.y - 1);
+        ctx.moveTo(point.x, point.y + 10);
+        ctx.lineTo(point.x - 6, point.y - 1);
+        ctx.lineTo(point.x + 6, point.y - 1);
       }
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = "#06121c";
-      ctx.fillText(buy ? "B" : "S", point.x, point.y - 1);
     });
 
     if (state.hoverMarker) {
