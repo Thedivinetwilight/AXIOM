@@ -76,15 +76,24 @@ $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused US/chart suites failed on Windows' }
 Write-Host 'focused suites passed'
 
-Step '3a. Full test suite (recorded; pre-existing Windows failures do not block the build)'
+Step '3a. Full test suite (recorded; the packaging gate is the focused suite above)'
 & python -m pytest -q 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-full.log')
 $FullExit = $LASTEXITCODE
 $FullTail = (Get-Content (Join-Path $Kit 'pytest-full.log') -Tail 30) -join "`n"
+# Name the failures, not just the count: a summary without identities cannot be
+# checked by anyone reading the release later.
+$FullFailures = @(Get-Content (Join-Path $Kit 'pytest-full.log') |
+    Where-Object { $_ -match '^(FAILED|ERROR) ' } |
+    ForEach-Object { $_.Trim() })
 $FullSummary = 'unknown'
 if ($FullTail -match '(\d+) passed') { $FullSummary = "$($Matches[1]) passed" }
 if ($FullTail -match '(\d+) failed') { $FullSummary = "$FullSummary, $($Matches[1]) failed" }
-if ($FullExit -eq 0) { Write-Host "full suite passed ($FullSummary)" }
-else { Write-Host "full suite: $FullSummary (recorded, not blocking)" -ForegroundColor Yellow }
+if ($FullExit -eq 0) {
+    Write-Host "full suite passed ($FullSummary)"
+} else {
+    Write-Host "full suite: $FullSummary (recorded, not blocking)" -ForegroundColor Yellow
+    foreach ($f in $FullFailures) { Write-Host "  failing| $f" -ForegroundColor Yellow }
+}
 
 # ------------------------------------------------------------------ 4. freeze
 Step '4. Freeze with PyInstaller'
@@ -291,6 +300,7 @@ $Meta = [ordered]@{
         focused_windows = 'passed'
         full_windows    = $(if ($FullExit -eq 0) { 'passed' } else { 'failed' })
         full_summary    = $FullSummary
+        full_failures   = @($FullFailures)
         smoke_checks    = @($Log | Where-Object { $_ -match '^(PASS|FAIL)' })
         smoke_failed    = @($Log | Where-Object { $_ -match '^FAIL' }).Count
     }

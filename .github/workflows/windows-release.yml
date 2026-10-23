@@ -198,6 +198,12 @@ jobs:
           # having to trust the asset listing.
           $sums = @(Get-Content dist\SHA256SUMS.txt | Where-Object { $_.Trim() })
           $sumBlock = ($sums | ForEach-Object { '    ' + $_.Trim() }) -join "`n"
+          $fullFailures = @($meta.test_results.full_failures | Where-Object { $_ })
+          if ($fullFailures.Count -eq 0) {
+            $failureBlock = 'none'
+          } else {
+            $failureBlock = ($fullFailures | ForEach-Object { '    ' + $_ }) -join "`n"
+          }
           $installLog = Get-Content dist\installer-test-log.txt -Raw
           $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
           $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
@@ -211,17 +217,23 @@ jobs:
 
           **Test results on this runner**
 
-          * focused suites: ``$($meta.test_results.focused_windows)``
-          * full suite: ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
+          * focused suites (the packaging gate): ``$($meta.test_results.focused_windows)``
+          * full suite (recorded, not gated): ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
           * on-machine application checks: $passed passed, $($meta.test_results.smoke_failed) failed
-          * installer acceptance test: $installPassed passed, $installFailed failed
-            (silent install, launch, ``/health``, ``/chart`` with the PAPER badge, bundled
-            chart assets, unauthenticated data request rejected with 401, silent uninstall
-            that keeps the operator data folder) - full log in ``installer-test-log.txt``
+          * installer acceptance test: $installPassed passed, $installFailed failed - silent
+            install, launch, ``/health``, ``/chart`` with the PAPER badge, bundled chart
+            assets, an unauthenticated data request rejected with 401, and a silent
+            uninstall that keeps the operator data folder. Full log in
+            ``installer-test-log.txt``.
+
+          Failing tests in the full suite on this runner, listed in full so the result can be
+          checked rather than taken on trust:
+
+          $failureBlock
 
           **SHA-256 of every asset** (identical to ``SHA256SUMS.txt``)
 
-          ``$sumBlock``
+          $sumBlock
 
           The installer is per-user (no administrator prompt), installs to
           ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and never deletes ``%LOCALAPPDATA%\AXIOM``
