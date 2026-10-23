@@ -1,9 +1,0 @@
-phase: uninstall
-Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:246
-Line |
- 246 |          throw ('{0} check(s) failed: {1}' -f $script:Failures.Count,  …
-     |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | 1 check(s) failed: the uninstaller removed AXIOM-Chart.exe
-stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 246
-at <ScriptBlock>, D:\a\_temp\e7ff7e86-4191-4336-985c-5ef68a893f96.ps1: line 2
-at <ScriptBlock>, <No file>: line 1
