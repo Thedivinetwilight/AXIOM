@@ -70,6 +70,30 @@ function Check {
     return $Condition
 }
 
+function Get-AppProcesses {
+    # A PyInstaller onefile executable runs a child process of the same name, so
+    # stopping only the process we started would leave the application, and its
+    # lock on the installed executable, alive.
+    return @(Get-Process -Name 'AXIOM-Chart' -ErrorAction SilentlyContinue)
+}
+
+function Stop-App {
+    $running = Get-AppProcesses
+    foreach ($proc in $running) {
+        try {
+            $proc.Kill()
+            $proc.WaitForExit(10000) | Out-Null
+        } catch {
+            Say ('  could not stop pid {0}: {1}' -f $proc.Id, $_.Exception.Message)
+        }
+    }
+    for ($i = 0; $i -lt 80; $i++) {
+        if (@(Get-AppProcesses).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    return (@(Get-AppProcesses).Count -eq 0)
+}
+
 function Get-FreePort {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -225,17 +249,31 @@ try {
 
     # ---------------------------------------------------------------- phase 6
     Step 'uninstall' 'stopping the application and removing it'
-    if (-not $app.HasExited) {
-        $app.Kill()
-        $app.WaitForExit(15000) | Out-Null
-    }
+    Say ('AXIOM-Chart processes before shutdown: {0}' -f (@(Get-AppProcesses).Count))
+    $stopped = Stop-App
+    Check $stopped 'every AXIOM-Chart process stopped before uninstalling'
     Start-Sleep -Seconds 3
     if (-not (Test-Path $uninstaller)) { throw 'the uninstaller disappeared before it could be run' }
-    $un = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru -Wait
+    $uninstallLog = Join-Path $env:TEMP 'axiom-uninstall.log'
+    $unArgs = @(
+        '/VERYSILENT'
+        '/SUPPRESSMSGBOXES'
+        '/NORESTART'
+        ('/LOG="{0}"' -f $uninstallLog)
+    )
+    $un = Start-Process -FilePath $uninstaller -ArgumentList $unArgs -PassThru -Wait
     Say ('uninstaller exit code: {0}' -f $un.ExitCode)
+    Check ($un.ExitCode -eq 0) 'the uninstaller reported success'
     for ($i = 0; $i -lt 120 -and (Test-Path $installedExe); $i++) { Start-Sleep -Milliseconds 500 }
     if (Test-Path $installedExe) {
         Get-ChildItem -Path $installDir | ForEach-Object { Say ('  left| {0}' -f $_.Name) }
+        Say ('AXIOM-Chart processes after uninstall: {0}' -f (@(Get-AppProcesses).Count))
+        if (Test-Path $uninstallLog) {
+            Say '--- uninstaller log (tail)'
+            Get-Content -Path $uninstallLog -Tail 80 | ForEach-Object { Say ('  unins| {0}' -f $_) }
+        } else {
+            Say 'the uninstaller produced no log file'
+        }
     }
     Check (-not (Test-Path $installedExe)) 'the uninstaller removed AXIOM-Chart.exe'
     Check (Test-Path $dataDir) ('the uninstaller kept the operator data folder {0}' -f $dataDir)
@@ -266,7 +304,8 @@ catch {
     ) -join "`n")
     # Annotations are capped and single-line, so send the phase and the first
     # line of the message; the full text is in dist\INSTALL_TEST_ERROR.txt.
-    $firstLine = ($message -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    $firstLine = ($_.Exception.Message -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    if (-not $firstLine) { $firstLine = ($message -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1) }
     Write-Host ('::error title=install-test failed in phase {0}::{1}' -f $script:Phase, $firstLine)
     if ($stack) {
         $stackLine = ($stack -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
