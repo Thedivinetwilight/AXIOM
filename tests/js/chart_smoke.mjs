@@ -8,6 +8,9 @@
  * ticket showed.
  *
  * Usage: node tests/js/chart_smoke.mjs [path-to-chart.js]
+ *   CHART_PAYLOAD=<file>  render a /chart/data payload captured from a live
+ *                         server instead of the canned fixture
+ *   CHART_DISPLAY=<file>  also write the recorded display list as JSON
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -28,6 +31,13 @@ function isoMinutes(offset) {
   const base = Date.parse("2026-10-22T13:30:00Z");
   return new Date(base + offset * 60_000).toISOString();
 }
+
+/* CHART_PAYLOAD=/path/to.json renders a payload captured from a real running
+ * server instead of the fixture, which is how the layout gets checked against
+ * actual data rather than against data that happens to look nice. */
+const external = process.env.CHART_PAYLOAD
+  ? JSON.parse(readFileSync(process.env.CHART_PAYLOAD, "utf8"))
+  : null;
 
 const BARS = 240;
 const bars = {
@@ -103,16 +113,34 @@ const CHART = {
   generated_at: new Date().toISOString()
 };
 
-const SYMBOLS = {
-  symbols: [{
-    symbol: "AAPL", source: "engine", source_timeframe: "1m",
-    timeframes: ["1m", "5m", "15m", "30m", "1h", "4h"], live: true
-  }],
-  default: "AAPL",
-  timeframes: ["1m", "5m"],
-  paper_only: true,
-  live_trading: false
-};
+const LIVE_CHART = external;
+
+const SYMBOLS = LIVE_CHART
+  ? {
+      symbols: [{
+        symbol: LIVE_CHART.symbol,
+        source: LIVE_CHART.source,
+        source_timeframe: LIVE_CHART.source_timeframe,
+        // The captured payload is one (symbol, timeframe) pair; advertise
+        // exactly that, or the harness would draw it under the wrong label.
+        timeframes: [LIVE_CHART.timeframe],
+        live: LIVE_CHART.live
+      }],
+      default: LIVE_CHART.symbol,
+      timeframes: [LIVE_CHART.timeframe],
+      paper_only: true,
+      live_trading: false
+    }
+  : {
+      symbols: [{
+        symbol: "AAPL", source: "engine", source_timeframe: "1m",
+        timeframes: ["1m", "5m", "15m", "30m", "1h", "4h"], live: true
+      }],
+      default: "AAPL",
+      timeframes: ["1m", "5m"],
+      paper_only: true,
+      live_trading: false
+    };
 
 const TICKET = {
   symbol: "AAPL", last_price: 104.9, priced_at: bars.time[BARS - 1],
@@ -148,17 +176,18 @@ const ctx = (() => {
   let breaks = [];
   let started = false;
 
+  // The display list is always recorded: it is cheap here and it lets the
+  // assertions below inspect what the frame actually drew, not just which
+  // canvas methods were touched.
   function push(entry) {
-    if (process.env.CHART_DISPLAY) {
-      display.push({
-        ...entry,
-        fillStyle: state.fillStyle,
-        strokeStyle: state.strokeStyle,
-        lineWidth: state.lineWidth,
-        globalAlpha: state.globalAlpha,
-        font: state.font
-      });
-    }
+    display.push({
+      ...entry,
+      fillStyle: state.fillStyle,
+      strokeStyle: state.strokeStyle,
+      lineWidth: state.lineWidth,
+      globalAlpha: state.globalAlpha,
+      font: state.font
+    });
   }
 
   const impl = {
@@ -326,6 +355,15 @@ function response(payload) {
 
 const fetchImpl = (url, options) => {
   if (String(url).indexOf("/chart/symbols") === 0) return response(SYMBOLS);
+  if (String(url).indexOf("/chart/data") === 0 && LIVE_CHART) {
+    const requested = new URL("http://x" + url).searchParams;
+    const keys = (requested.get("indicators") || "").split(",").filter(Boolean);
+    const payload = JSON.parse(JSON.stringify(LIVE_CHART));
+    payload.timeframe = requested.get("timeframe") || payload.timeframe;
+    payload.overlays = (payload.overlays || []).filter((o) => keys.indexOf(o.key) >= 0);
+    payload.oscillators = (payload.oscillators || []).filter((o) => keys.indexOf(o.key) >= 0);
+    return response(payload);
+  }
   if (String(url).indexOf("/chart/data") === 0) {
     const requested = new URL("http://x" + url).searchParams;
     const timeframe = requested.get("timeframe") || "1m";
@@ -392,7 +430,8 @@ check(booted, "script executed");
 check(calls.fillRect > 50, "candles and volume were drawn (fillRect=" + calls.fillRect + ")");
 check(calls.moveTo > 50, "wick/line primitives were drawn (moveTo=" + calls.moveTo + ")");
 check(calls.fillText >= 10, "axis and legend text was drawn (fillText=" + calls.fillText + ")");
-check(elements.get("legend-symbol").textContent.indexOf("AAPL") >= 0,
+const SYMBOL = LIVE_CHART ? LIVE_CHART.symbol : "AAPL";
+check(elements.get("legend-symbol").textContent.indexOf(SYMBOL) >= 0,
   "legend shows the symbol (got: " + elements.get("legend-symbol").textContent + ")");
 check(elements.get("legend-ohlc").textContent.indexOf("O ") === 0,
   "legend shows OHLC");
@@ -431,7 +470,7 @@ click("btn-place");
 await settle();
 check(posted !== null, "clicking PLACE posted an order");
 if (posted) {
-  check(posted.symbol === "AAPL", "order carries the charted symbol");
+  check(posted.symbol === SYMBOL, "order carries the charted symbol");
   check(posted.side === "BUY", "order carries the selected side");
   check(posted.quantity === 2.5, "order carries the typed quantity (got " + posted.quantity + ")");
   check(posted.order_type === "MARKET", "order type defaults to MARKET");
@@ -493,6 +532,24 @@ if (process.env.CHART_DISPLAY) {
     width: 1180, height: 640, operations: ctx.__display
   }));
   console.log("display list written to " + process.env.CHART_DISPLAY);
+}
+
+/* Time-axis labels must suit the timeframe: a daily chart never repeats a
+ * clock time, and an intraday chart marks the day once and then shows time. */
+const labels = ctx.__display
+  .filter((op) => op.type === "text" && op.y >= 610 && op.y <= 632)
+  .map((op) => op.text);
+check(labels.length > 2, "time axis drew labels (" + labels.length + ")");
+if (state_timeframe() === "1D") {
+  check(labels.every((label) => /^\d\d-\d\d-\d\d$/.test(label)),
+    "daily axis labels are dates only (got " + JSON.stringify(labels) + ")");
+} else {
+  check(labels.some((label) => /^\d\d-\d\d \d\d:\d\d$/.test(label)),
+    "intraday axis marks the day boundary (got " + JSON.stringify(labels) + ")");
+}
+
+function state_timeframe() {
+  return LIVE_CHART ? LIVE_CHART.timeframe : "1m";
 }
 
 console.log("chart harness: " + JSON.stringify(calls));

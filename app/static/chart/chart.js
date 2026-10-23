@@ -122,6 +122,12 @@
     return date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate());
   }
 
+  function monthDay(iso) {
+    var day = dayOf(iso);
+    // dayOf() returns a placeholder for an unparsable stamp; keep it as-is.
+    return day.length > 5 ? day.slice(5) : day;
+  }
+
   function axisLabel(iso, timeframe) {
     if (timeframe === "1D") return dayOf(iso).slice(2);
     return clockOf(iso);
@@ -604,7 +610,9 @@
       var stamp = state.data.bars.time[index];
       var label = axisLabel(stamp, state.timeframe);
       if (state.timeframe !== "1D" && (i === 0 || dayOf(stamp) !== previousDay)) {
-        label = dayOf(stamp).slice(5) + " " + label;
+        // On an intraday chart the day boundary is the important label: show
+        // month-day once, then the clock, rather than repeating a full date.
+        label = monthDay(stamp) + " " + label;
         previousDay = dayOf(stamp);
       }
       ctx.fillText(label, x, geo.timeY);
