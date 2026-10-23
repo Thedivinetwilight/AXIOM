@@ -24,6 +24,14 @@ on:
     paths:
       - 'packaging/windows/BUILD_TARGET'
       - 'packaging/windows/VERSION'
+      - 'packaging/windows/axiom.spec'
+      - 'packaging/windows/axiom.iss'
+      - 'packaging/windows/axiom_launcher.py'
+      - 'packaging/windows/build_windows.ps1'
+      - 'packaging/windows/install_test.ps1'
+      - 'packaging/windows/requirements-build.txt'
+      - 'packaging/windows/version_info.txt'
+      - 'packaging/windows/WINDOWS_INSTALL_MANUAL.md'
       - '.github/workflows/windows-release.yml'
   workflow_dispatch:
     inputs:
