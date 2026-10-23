@@ -4,16 +4,12 @@ name: windows release
 # exact commit. Paper only: the smoke tests use generated local tokens and the
 # bundled DEMO data, and never contact a broker.
 #
-# Trigger:
-#   * push to this branch when the packaging files change (automatic build)
-#   * workflow_dispatch, to build a specific commit on demand
+# Trigger: workflow_dispatch only, with the exact source commit as an input.
+# The application code comes from that commit; the packaging kit is taken from
+# the branch this workflow runs on, so an application commit that predates the
+# kit can still be packaged (and the tree is kept clean for the build's own
+# "is the tree clean" guard).
 on:
-  push:
-    branches:
-      - arena/5ed3f6b6-axiom
-    paths:
-      - 'packaging/windows/**'
-      - '.github/workflows/windows-release.yml'
   workflow_dispatch:
     inputs:
       commit:
@@ -44,16 +40,37 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      # Push builds use the pushed commit; manual runs use the requested one.
-      TARGET_COMMIT: ${{ inputs.commit || github.sha }}
-      VERSION: ${{ inputs.version || '3.2.5-chart-us.1' }}
-      PUBLISH: ${{ inputs.publish_release || 'true' }}
+      TARGET_COMMIT: ${{ inputs.commit }}
+      KIT_REF: ${{ github.sha }}
+      VERSION: ${{ inputs.version }}
+      PUBLISH: ${{ inputs.publish_release }}
     steps:
-      - name: Checkout the exact commit
+      - name: Checkout the exact source commit
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TARGET_COMMIT }}
           fetch-depth: 0
+
+      - name: Checkout the packaging kit from this branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.KIT_REF }}
+          path: _kit
+          fetch-depth: 1
+
+      - name: Stage the kit without dirtying the source tree
+        shell: pwsh
+        run: |
+          if (-not (Test-Path _kit/packaging/windows)) { throw 'the packaging kit is missing from the branch' }
+          Copy-Item -Recurse -Force _kit/packaging .
+          # The build script refuses to run on a dirty tree. The kit is a build
+          # input, not part of the source commit, so exclude it locally.
+          Add-Content -Path .git/info/exclude -Value 'packaging/'
+          Add-Content -Path .git/info/exclude -Value '_kit/'
+          git status --porcelain
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -ne $env:TARGET_COMMIT) { throw "checked out $sha, expected $env:TARGET_COMMIT" }
+          Write-Host "source commit verified: $sha"
 
       - name: Show what is being built
         shell: pwsh
@@ -163,6 +180,11 @@ jobs:
             (Join-Path dist 'install-test-log.txt')
             (Join-Path 'WINDOWS_INSTALL_MANUAL.md')
           )
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "tag $tag already exists; replacing its release"
+            gh release delete $tag --yes --cleanup-tag
+          }
           gh release create $tag --prerelease --target $meta.commit `
             --title "AXIOM chart terminal + US paper data $($env:VERSION) (Windows x64)" `
             --notes $notes @assets
