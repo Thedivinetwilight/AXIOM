@@ -1,0 +1,12 @@
+{
+  "name": "axiom-operator-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-pinned headless DOM tests for AXIOM's local operator assets",
+  "scripts": {
+    "test": "node tests/js/chart_smoke.mjs && node tests/js/terminal_smoke.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
