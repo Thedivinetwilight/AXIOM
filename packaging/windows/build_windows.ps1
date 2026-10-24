@@ -49,7 +49,15 @@ trap {
     # Cmdlet and HTTP failures too, otherwise a green test suite can hide the
     # actual packaging/smoke error when hosted raw logs are unavailable.
     $message = $_.Exception.Message
-    Set-Content -Path (Join-Path $Kit 'build-error.txt') -Value $message -Encoding utf8
+    $position = $_.InvocationInfo.PositionMessage
+    Set-Content -Path (Join-Path $Kit 'build-error.txt') -Value @($message, $position) -Encoding utf8
+    $smokeVariable = Get-Variable -Name SmokeHome -ErrorAction SilentlyContinue
+    if ($smokeVariable -and $smokeVariable.Value) {
+        foreach ($name in @('launcher-stdout.log', 'launcher-stderr.log')) {
+            $source = Join-Path $smokeVariable.Value $name
+            if (Test-Path $source) { Copy-Item $source (Join-Path $Kit "frozen-$name") -Force }
+        }
+    }
     Write-Host "::error title=AXIOM Windows build error::$message"
     exit 1
 }

@@ -105,7 +105,7 @@ jobs:
           # The build script changes its own working directory. Pin the log to
           # an absolute path so Tee-Object cannot relocate it during the build.
           $buildLog = Join-Path $env:GITHUB_WORKSPACE 'src\packaging\windows\build-windows.log'
-          & ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION" 2>&1 |
+          & ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION" *>&1 |
             Tee-Object -FilePath $buildLog
 
       - name: Verify the produced artifacts
@@ -177,6 +177,8 @@ jobs:
           $candidates = @(
             'src/packaging/windows/build-windows.log',
             'src/packaging/windows/build-error.txt',
+            'src/packaging/windows/frozen-launcher-stdout.log',
+            'src/packaging/windows/frozen-launcher-stderr.log',
             'src/packaging/windows/pytest-focused.log',
             'src/packaging/windows/pytest-full.log',
             'src/packaging/windows/js-chart.log',
