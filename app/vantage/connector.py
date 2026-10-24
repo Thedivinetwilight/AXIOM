@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+import logging
 from math import isfinite
 from typing import Any
 
@@ -17,6 +18,8 @@ from app.vantage.models import (
     iso_now, mask_login, public_dict, utcnow,
 )
 
+
+logger = logging.getLogger(__name__)
 
 AXIOM_MAGIC = 26042026
 TRADE_MODE_LABELS = {
@@ -320,7 +323,9 @@ class MT5Connector:
         try:
             self.gateway.shutdown()
         except Exception:
-            pass
+            # Shutdown is best effort during error recovery. Do not log a raw
+            # gateway exception because it could contain environment details.
+            logger.warning("MT5 shutdown did not complete cleanly during disconnect")
         self.connected = False
 
     def connect(self, credentials: dict, expected_mode: SessionMode) -> AccountSnapshot:

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build, test and package the AXIOM chart terminal for Windows x64.
+    Build, test and package AXIOM Operator for Windows x64.
 
 .DESCRIPTION
     Runs on a Windows x64 machine or a GitHub Actions windows-latest runner.
@@ -8,10 +8,10 @@
 
       1. verify the source commit matches what was asked for, tree clean
       2. install runtime + pinned build requirements
-      3. run the focused suites (hard gate) and the full suite (recorded honestly)
+      3. run focused + full Python and both JavaScript suites (all hard gates)
       4. freeze the application with PyInstaller (onefile AXIOM-Chart.exe)
-      5. smoke-test the frozen executable on this machine: launch, API, /chart,
-         static assets, token gate, DEMO data, paper session start/stop
+      5. smoke-test the frozen executable: /terminal, legacy /chart, assets,
+         token gate, disconnected Vantage default, DEMO data and paper controls
       6. fail-closed checks: the exe must refuse non-paper configurations
       7. build the Inno Setup installer
       8. write SOURCE_COMMIT.txt, SHA256SUMS.txt and BUILD_METADATA.json
@@ -70,30 +70,42 @@ if ($LASTEXITCODE -ne 0) { Fail 'pip install failed' }
 $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
-Step '3. Focused test suites (hard gate)'
-& python -m pytest -q tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+Step '3. Focused Python test suites (hard gate)'
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
-if ($FocusedExit -ne 0) { Fail 'focused US/chart suites failed on Windows' }
-Write-Host 'focused suites passed'
+if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
+Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
 
-Step '3a. Full test suite (recorded; the packaging gate is the focused suite above)'
+Step '3a. JavaScript operator suites (hard gate)'
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail 'Node.js is required for UI tests' }
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { Fail 'npm is required for pinned UI test dependencies' }
+& npm ci --ignore-scripts --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { Fail 'npm ci failed' }
+& node --check app/static/chart/chart.js
+if ($LASTEXITCODE -ne 0) { Fail 'legacy chart JavaScript syntax failed' }
+& node --check app/static/terminal/terminal.js
+if ($LASTEXITCODE -ne 0) { Fail 'operator JavaScript syntax failed' }
+& node tests/js/chart_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-chart.log')
+if ($LASTEXITCODE -ne 0) { Fail 'legacy chart JavaScript harness failed' }
+& node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal.log')
+if ($LASTEXITCODE -ne 0) { Fail 'operator JavaScript interaction harness failed' }
+
+Step '3b. Full Python test suite (hard gate)'
 & python -m pytest -q 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-full.log')
 $FullExit = $LASTEXITCODE
 $FullTail = (Get-Content (Join-Path $Kit 'pytest-full.log') -Tail 30) -join "`n"
-# Name the failures, not just the count: a summary without identities cannot be
-# checked by anyone reading the release later.
 $FullFailures = @(Get-Content (Join-Path $Kit 'pytest-full.log') |
     Where-Object { $_ -match '^(FAILED|ERROR) ' } |
     ForEach-Object { $_.Trim() })
 $FullSummary = 'unknown'
 if ($FullTail -match '(\d+) passed') { $FullSummary = "$($Matches[1]) passed" }
 if ($FullTail -match '(\d+) failed') { $FullSummary = "$FullSummary, $($Matches[1]) failed" }
-if ($FullExit -eq 0) {
-    Write-Host "full suite passed ($FullSummary)"
-} else {
-    Write-Host "full suite: $FullSummary (recorded, not blocking)" -ForegroundColor Yellow
-    foreach ($f in $FullFailures) { Write-Host "  failing| $f" -ForegroundColor Yellow }
+if ($FullTail -match '(\d+) skipped') { $FullSummary = "$FullSummary, $($Matches[1]) skipped" }
+if ($FullExit -ne 0) {
+    foreach ($f in $FullFailures) { Write-Host "  failing| $f" -ForegroundColor Red }
+    Fail "full Python suite failed on Windows: $FullSummary"
 }
+Write-Host "full suite passed ($FullSummary)"
 
 # ------------------------------------------------------------------ 4. freeze
 Step '4. Freeze with PyInstaller'
@@ -126,7 +138,9 @@ function Check($ok, $label) {
     return [bool]$ok
 }
 
-$Proc = Start-Process -FilePath $Exe -ArgumentList '--no-browser' -PassThru -WindowStyle Hidden
+$SmokeOut = Join-Path $SmokeHome 'launcher-stdout.log'
+$SmokeErr = Join-Path $SmokeHome 'launcher-stderr.log'
+$Proc = Start-Process -FilePath $Exe -ArgumentList '--no-browser' -PassThru -WindowStyle Hidden -RedirectStandardOutput $SmokeOut -RedirectStandardError $SmokeErr
 $Ready = $false
 for ($i = 0; $i -lt 90; $i++) {
     Start-Sleep -Milliseconds 500
@@ -143,6 +157,15 @@ try {
     $Ok = (Check ($Chart.StatusCode -eq 200) '/chart returns 200') -and $Ok
     $Ok = (Check ($Chart.Content -match 'PAPER') 'chart page displays the PAPER badge') -and $Ok
 
+    $Terminal = Invoke-WebRequest -UseBasicParsing "$Base/terminal" -TimeoutSec 10
+    $Ok = (Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'VANTAGE LIVE' -and $Terminal.Content -match 'AXIOM PAPER') '/terminal returns all explicit execution modes') -and $Ok
+    $TerminalJs = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.js" -TimeoutSec 10
+    $Ok = (Check ($TerminalJs.StatusCode -eq 200 -and $TerminalJs.Content -match 'submitVantageReview') 'operator terminal.js served from the bundle') -and $Ok
+    $TerminalCss = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.css" -TimeoutSec 10
+    $Ok = (Check ($TerminalCss.StatusCode -eq 200) 'operator terminal.css served from the bundle') -and $Ok
+    $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 10
+    $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Vantage' -and $Manual.Content -match 'Arm') 'bundled user manual covers Vantage lifecycle') -and $Ok
+
     $Js = Invoke-WebRequest -UseBasicParsing "$Base/static/chart/chart.js" -TimeoutSec 10
     $Ok = (Check ($Js.StatusCode -eq 200 -and $Js.Content -match 'markerPoint') 'chart.js served from the bundle') -and $Ok
     $Css = Invoke-WebRequest -UseBasicParsing "$Base/static/chart/chart.css" -TimeoutSec 10
@@ -153,10 +176,27 @@ try {
     try { $null = Invoke-WebRequest -UseBasicParsing "$Base/chart/data?symbol=DEMO&timeframe=1D" -TimeoutSec 5 }
     catch { $Anon = [int]$_.Exception.Response.StatusCode }
     $Ok = (Check ($Anon -eq 401) "data route refuses anonymous request ($Anon)") -and $Ok
+    $AnonTrading = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/trading/status" -TimeoutSec 5 }
+    catch { $AnonTrading = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($AnonTrading -eq 401) "Vantage status refuses anonymous request ($AnonTrading)") -and $Ok
 
     $Cfg = Get-Content (Join-Path $SmokeHome 'axiom.env')
     $Token = (($Cfg | Select-String '^API_TOKEN=').Line) -replace '^API_TOKEN=', ''
     $Headers = @{ Authorization = "Bearer $Token" }
+
+    $Trading = Invoke-RestMethod -Headers $Headers "$Base/api/trading/status"
+    $Ok = (Check ($Trading.mode -eq 'AXIOM_PAPER' -and -not $Trading.armed -and -not $Trading.active) 'operator starts in independent PAPER, disarmed') -and $Ok
+    $Capabilities = Invoke-RestMethod -Headers $Headers "$Base/api/trading/connection"
+    $Ok = (Check ($Capabilities.secret_store -match 'Windows DPAPI') 'Windows DPAPI protected storage is available') -and $Ok
+    $Ok = (Check ($Capabilities.mt5_package_available -eq $true) 'official MetaTrader5 module is present in the frozen build') -and $Ok
+    $DemoBody = @{ mode = 'VANTAGE_DEMO' } | ConvertTo-Json
+    $Demo = Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/json' -Body $DemoBody "$Base/api/trading/session"
+    $Ok = (Check ($Demo.mode -eq 'VANTAGE_DEMO' -and -not $Demo.connected -and -not $Demo.armed -and -not $Demo.active) 'selecting DEMO never auto-connects or activates') -and $Ok
+    $Disconnected = Invoke-RestMethod -Headers $Headers "$Base/api/trading/workspace"
+    $Ok = (Check ($Disconnected.broker_state_available -eq $false -and $null -eq $Disconnected.reconciled_at) 'disconnected workspace is explicitly not a flat-account snapshot') -and $Ok
+    $PaperBody = @{ mode = 'AXIOM_PAPER' } | ConvertTo-Json
+    $null = Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/json' -Body $PaperBody "$Base/api/trading/session"
 
     $Symbols = Invoke-RestMethod -Headers $Headers "$Base/chart/symbols"
     $Ok = (Check ($Symbols.symbols.Count -gt 0) "symbols listed ($($Symbols.symbols.Count))") -and $Ok
@@ -190,7 +230,15 @@ try {
 }
 finally {
     if (-not $Proc.HasExited) { $Proc.Kill(); $Proc.WaitForExit(5000) }
+    # A onefile bootloader can have a same-named child. Stop only processes
+    # whose executable is this build, never unrelated AXIOM installations.
+    Get-Process -Name 'AXIOM-Chart' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $Exe } |
+        ForEach-Object { try { $_.Kill(); $_.WaitForExit(5000) } catch { } }
 }
+$LauncherOutput = @((Get-Content $SmokeOut -Raw -ErrorAction SilentlyContinue), (Get-Content $SmokeErr -Raw -ErrorAction SilentlyContinue)) -join "`n"
+if ($Token -and $LauncherOutput -match [regex]::Escape($Token)) { Fail 'launcher output exposed the local API token' }
+Note 'PASS  launcher output does not expose the local API token'
 
 Step '6. Fail-closed checks'
 function Test-Refuses([string]$Name, [hashtable]$Overrides) {
@@ -291,8 +339,9 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
         full_tests    = 'python -m pytest -q'
+        javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
         installer     = "ISCC.exe /DMyAppVersion=$Version axiom.iss"
     }
@@ -301,17 +350,27 @@ $Meta = [ordered]@{
         full_windows    = $(if ($FullExit -eq 0) { 'passed' } else { 'failed' })
         full_summary    = $FullSummary
         full_failures   = @($FullFailures)
+        javascript      = 'chart smoke + operator interaction passed'
+        dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
+        fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
+        vantage_demo    = 'NOT TESTED - no Vantage demo account available to CI'
+        vantage_live    = 'NOT TESTED - live login/orders prohibited in CI'
         smoke_checks    = @($Log | Where-Object { $_ -match '^(PASS|FAIL)' })
         smoke_failed    = @($Log | Where-Object { $_ -match '^FAIL' }).Count
     }
-    paper_only    = [ordered]@{
-        mode              = 'PAPER (enforced by Settings and re-checked by the launcher)'
-        live_trading      = $false
-        broker            = 'LOCAL_PAPER'
-        order_path        = 'POST /paper/order -> _require_local_paper() -> in-process PaperBroker'
-        live_routing      = 'absent from the package'
+    execution_safety = [ordered]@{
+        default_mode      = 'AXIOM_PAPER; Vantage disconnected and disarmed'
+        legacy_process    = 'MODE=PAPER, LIVE_TRADING=false, BROKER=LOCAL_PAPER enforced for the legacy engine'
+        paper_order_path  = 'POST /paper/order -> _require_local_paper() -> in-process PaperBroker (simulated fills)'
+        vantage_order_path = 'authenticated review -> durable intent -> one official MT5 request -> broker reconciliation'
+        live_routing      = 'present but blocked until exact identity, readiness, Arm, separate Activate and final review'
+        automation        = 'Vantage automation unavailable and OFF'
         fail_closed_cases = @('MODE=LIVE', 'LIVE_TRADING=true', 'BROKER=UPSTOX_SANDBOX',
                               'alpaca without credentials', 'alpaca without limits', 'empty API_TOKEN')
+    }
+    signing       = [ordered]@{
+        status = 'UNSIGNED'
+        detail = 'No code-signing certificate was configured; installer and executable are unsigned.'
     }
     artifacts     = $Artifacts
     pip_freeze    = $PipFreeze

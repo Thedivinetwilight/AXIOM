@@ -1,12 +1,10 @@
-; AXIOM chart terminal - Windows x64 installer (Inno Setup 6).
+; AXIOM Operator - Windows x64 installer (Inno Setup 6).
 ;
-; Paper only. The installer ships the frozen application and its documentation;
-; it carries no credentials, installs no service and registers nothing that can
-; reach a broker. Every writable thing (config, paper database, logs) lives in
-; %LOCALAPPDATA%\AXIOM, which this installer never touches on install, upgrade
-; or uninstall unless the operator explicitly answers "yes" when asked.
+; Ships local paper and the guarded official Vantage MT5 integration. No
+; credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
+; live in %LOCALAPPDATA%\AXIOM, preserved on upgrade and silent uninstall.
 ;
-; Build with:  ISCC.exe /DMyAppVersion=3.2.5 axiom.iss
+; Build with:  ISCC.exe /DMyAppVersion=3.3.0a1 axiom.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
@@ -15,7 +13,7 @@
   #define SourceExe "dist\AXIOM-Chart.exe"
 #endif
 
-#define MyAppName "AXIOM Chart Terminal"
+#define MyAppName "AXIOM Operator"
 #define MyAppPublisher "AXIOM"
 #define MyAppExeName "AXIOM-Chart.exe"
 ; Stable identity: an upgrade must replace the previous install, not add a
@@ -37,7 +35,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir=dist
-OutputBaseFilename=AXIOM-Chart-{#MyAppVersion}-windows-x64-setup
+OutputBaseFilename=AXIOM-Operator-{#MyAppVersion}-windows-x64-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -60,7 +58,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\SOURCE_COMMIT.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "WINDOWS_INSTALL_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\USER_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\US_EQUITIES_PAPER.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\VANTAGE_NEXT_VERSION_PLAN.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
@@ -69,8 +69,8 @@ Name: "{group}\AXIOM user manual"; Filename: "{app}\WINDOWS_INSTALL_MANUAL.md"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-; The application opens the chart in the default browser itself.
-Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName} (paper mode)"; Flags: nowait postinstall skipifsilent
+; Opens the operator console; Vantage remains disconnected and disarmed.
+Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName} (paper default; Vantage disarmed)"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Nothing here: program files are handled by Inno, and the operator's paper
@@ -95,10 +95,10 @@ begin
     exit;  { a silent uninstall always keeps the operator's data }
   if not DirExists(UserDataDir()) then
     exit;
-  Answer := MsgBox('Your AXIOM paper account, settings and logs are kept in:'
+  Answer := MsgBox('Your AXIOM paper state, Vantage journals, protected credentials, settings and logs are kept in:'
     + #13#10#13#10 + UserDataDir() + #13#10#13#10
     + 'Do you also want to DELETE that folder?' + #13#10#13#10
-    + 'Choose No to keep your paper history for a later reinstall.',
+    + 'Choose No to keep all operator data for a later reinstall.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2);
   DeleteUserData := Answer = IDYES;
 end;

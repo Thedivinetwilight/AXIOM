@@ -481,6 +481,7 @@ function renderConnections() {
     ["Currency", account.currency || "Not verified"],
     ["Trading permission", status.connected ? (account.trade_allowed && account.terminal_trade_allowed ? "Permitted by account/terminal" : "Disabled") : "Not verified"],
     ["Read-only test", info?.test_is_read_only === false ? "Not guaranteed" : "Initialize / identify / discover / reconcile only"],
+    ["MT5 Python package", info ? (info.mt5_package_available ? "Installed (not necessarily connected)" : "Unavailable on this host") : "Checking…"],
   ];
   $("connection-account").innerHTML = rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
 }
@@ -1129,7 +1130,7 @@ function bindEvents() {
   $("refresh-interval").addEventListener("change", configureRefresh);
   $("download-diagnostics").addEventListener("click", () => downloadJson(`axiom-redacted-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, {
     generated_at: new Date().toISOString(), note: "No API token, password, ciphertext, or full account login included. Review before sharing.",
-    workspace: state.workspace, readiness: state.readiness, connection: state.connectionInfo ? { secret_store: state.connectionInfo.secret_store, profiles: state.connectionInfo.profiles, test_is_read_only: state.connectionInfo.test_is_read_only } : null,
+    workspace: state.workspace, readiness: state.readiness, connection: state.connectionInfo ? { secret_store: state.connectionInfo.secret_store, profiles: state.connectionInfo.profiles, test_is_read_only: state.connectionInfo.test_is_read_only, mt5_package_available: state.connectionInfo.mt5_package_available, mt5_integration: state.connectionInfo.mt5_integration } : null,
   }));
   if (globalThis.ResizeObserver) new ResizeObserver(() => drawChart()).observe($("terminal-chart"));
 }

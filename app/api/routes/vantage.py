@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from app.vantage.gateway import mt5_package_available
 from app.vantage.models import OrderInput, SessionMode
 
 
@@ -169,6 +170,8 @@ def connection(request: Request):
             for mode in (SessionMode.DEMO, SessionMode.LIVE)
         },
         "secret_store": getattr(request.app.state, "vantage_secret_status", "unavailable"),
+        "mt5_package_available": mt5_package_available(),
+        "mt5_integration": "official MetaTrader5 Python package + local MT5 terminal",
         "servers": ["VantageMarkets-Live 13"],
         "test_is_read_only": True,
         "note": "Test connection initializes/identifies/discovers/reconciles only. It never places, modifies or cancels an order.",

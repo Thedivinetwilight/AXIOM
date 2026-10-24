@@ -9,6 +9,7 @@ package. No method in this wrapper logs its arguments or results.
 from __future__ import annotations
 
 from datetime import datetime
+import importlib.util
 import os
 from typing import Any
 
@@ -29,6 +30,16 @@ def as_dict(row: Any) -> dict:
         for name in dir(row)
         if not name.startswith("_") and not callable(getattr(row, name))
     }
+
+
+def mt5_package_available() -> bool:
+    """Report module presence only; never initialize or contact a terminal."""
+    if os.name != "nt":
+        return False
+    try:
+        return importlib.util.find_spec("MetaTrader5") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 class OfficialMT5Gateway:

@@ -77,6 +77,15 @@ def test_all_trading_apis_require_bearer_and_paper_is_default(client):
     overview = client.get("/api/trading/overview", headers=HEADERS).json()
     assert overview["paper_only"] is True and overview["simulated"] is True
     assert overview["status"]["automation_enabled"] is False
+    terminal = client.get("/terminal")
+    assert terminal.status_code == 200
+    assert 'id="page-connections"' in terminal.text
+    assert "VantageMarkets-Live 13" in terminal.text
+    assert client.get("/static/terminal/terminal.js").status_code == 200
+    assert client.get("/static/terminal/terminal.css").status_code == 200
+    capabilities = client.get("/api/trading/connection", headers=HEADERS).json()
+    assert capabilities["mt5_package_available"] is False  # Linux fake/test host
+    assert "plaintext fallback is disabled" in capabilities["secret_store"]
 
 
 def test_validation_and_credential_responses_never_echo_secrets(client):

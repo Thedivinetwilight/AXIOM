@@ -1,113 +1,118 @@
-# AXIOM Chart Terminal — Windows x64
+# AXIOM Operator — Windows x64 Install Guide
 
-Install, launch, configure, upgrade and remove AXIOM's paper-trading chart
-terminal.
+**Version:** 3.3.0a1
 
-> **Paper only.** AXIOM cannot place a real order. `MODE=PAPER`,
-> `LIVE_TRADING=false` and `BROKER=LOCAL_PAPER` are enforced when settings load,
-> re-checked by the launcher before the server starts, and every fill is made by
-> an in-process simulator. The package contains no live broker client.
->
-> **No profitability claim.** The bundled `DEMO`/`ALT` CSVs are sample data and
-> the chart labels them *"DEMO REPLAY SAMPLE DATA · NOT MARKET DATA"*. No
-> strategy in this build has out-of-sample, after-cost evidence.
+**Applies to:** the AXIOM Operator installer and portable executable built from the exact commit named in `BUILD_METADATA.json`.
 
-The exact source commit, build environment, commands and test results are in
-`BUILD_METADATA.json`, installed next to the program and attached to the release.
+This guide covers installation and Windows-specific operation. Read the bundled **AXIOM Operator User Manual** before connecting a demo or live account. It explains credentials, account-discovered instruments, risk, readiness, Arm/Activate, reviewed orders, reconciliation and recovery.
+
+> **Trading risk:** AXIOM supports independent local paper, Vantage MT5 demo, and explicitly gated Vantage MT5 live modes. It does not claim profitability or live readiness. Package tests, demo fills and a successful connection do not remove market risk.
 
 ---
 
 ## 1. Requirements
 
-- Windows 10 or Windows 11, **x64**.
-- No administrator rights (per-user install), no separate Python,
-  no Visual C++ redistributable step.
-- A browser (Edge, Chrome or Firefox) for the chart.
-- Internet only if you enable a live market **data** feed. The default `replay`
-  mode is fully offline.
+- Windows 10 or 11, **x64**.
+- A current Edge, Chrome or Firefox browser.
+- No separate Python installation for the frozen executable.
+- Per-user installation; administrator rights are not normally required.
+- For Vantage modes: the Vantage MetaTrader 5 desktop terminal and an account/server explicitly supplied by Vantage. The official `MetaTrader5` Python package is bundled, but the desktop terminal is a separate prerequisite.
 
-## 2. Install
+AXIOM binds to loopback and opens a local browser page. Do not expose its API to a network or the internet.
 
-1. Download the installer and `SHA256SUMS.txt`.
-2. Verify the download:
+## 2. Release files and verification
 
-   ```powershell
-   Get-FileHash .\AXIOM-Chart-*-windows-x64-setup.exe -Algorithm SHA256
-   ```
+A complete release provides, for the same source commit:
 
-   Compare with the matching line in `SHA256SUMS.txt` or the release notes.
-3. Run the installer. If SmartScreen says *"Windows protected your PC"*, choose
-   **More info → Run anyway**: the binaries are not code-signed.
-4. The wizard installs to `%LOCALAPPDATA%\Programs\AXIOM-Chart`, creates a Start
-   Menu entry and (optionally) a desktop shortcut, and offers to start AXIOM.
-
-**No installer?** `AXIOM-Chart.exe` is the same application as a single portable
-file: run it from anywhere (including a USB stick). It writes nothing next to
-itself.
-
-## 3. First launch
-
-Start **AXIOM Chart Terminal**. A console window opens — that window *is* the
-application, and closing it stops AXIOM — and your browser opens at
-`http://127.0.0.1:8000/chart`.
-
-```
-  ___  _  _ ___  __  __
- / _ \| || |_ _| \ \/ /   AXIOM chart terminal
-| (_) | __ || |   >  <    chart + US paper data
- \___/|_||_|___| /_/\_\   PAPER ONLY - every fill is simulated
-
-  config   C:\Users\<you>\AppData\Local\AXIOM\axiom.env
-  data     C:\Users\<you>\AppData\Local\AXIOM
-  feed     replay
-  token    <your local API token>
-           paste this when the chart asks; it stays on this machine
-
-  chart    http://127.0.0.1:8000/chart
-  stop     Ctrl+C in this window
+```text
+AXIOM-Operator-<version>-windows-x64-setup.exe
+AXIOM-Chart.exe                       # portable Operator executable
+BUILD_METADATA.json
+installer-test-log.txt
+SHA256SUMS.txt
 ```
 
-On first run AXIOM creates, outside the program folder:
+The release may also include test logs/manuals. Read `BUILD_METADATA.json` for the runner, commands, actual test outcomes, skipped demo/live checks and signing status.
 
+Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
+
+```powershell
+Get-FileHash .\AXIOM-Operator-3.3.0a1-windows-x64-setup.exe -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
 ```
+
+The file name and full 64-character hash must match the same release. Do not use a hash from another version.
+
+**Signing:** these builds are **unsigned unless the exact release metadata explicitly says otherwise**. Windows SmartScreen can show a warning and no verified publisher identity is claimed. Verify the source/release and hash; do not treat bypassing a warning as a safety check.
+
+## 3. Install
+
+1. Close running AXIOM instances.
+2. Run `AXIOM-Operator-<version>-windows-x64-setup.exe`.
+3. Review the install location and shortcuts. For upgrade compatibility, the executable and default folder retain the technical name `AXIOM-Chart`; the displayed product is **AXIOM Operator**.
+4. Launch from the Start Menu/desktop shortcut or the final wizard page.
+
+The installer bundles the operator UI, legacy chart, official MT5 Python dependency, manuals, version information and build metadata. It does not install the Vantage MT5 desktop terminal and does not contain broker credentials.
+
+## 4. Portable executable
+
+Run:
+
+```text
+AXIOM-Chart.exe
+```
+
+The portable file contains the same application as the installed executable. “Portable” means no installer is required; it does **not** mean credential/data files travel with the executable. AXIOM writes operator data under the current user's `%LOCALAPPDATA%\AXIOM` directory.
+
+Only run one writer against a data directory. The readiness writer-lock check must pass before Vantage activation.
+
+## 5. First launch and local token
+
+A console window opens and the browser navigates to:
+
+```text
+http://127.0.0.1:<port>/terminal
+```
+
+Keep the console open. Closing it stops the local application. The launcher prints sanitized paths, mode/feed information and the local URL; it deliberately does **not** print the API token or broker secrets.
+
+On first run AXIOM creates per-user data similar to:
+
+```text
 %LOCALAPPDATA%\AXIOM\
-  axiom.env          your configuration (contains the local API token)
-  axiom-paper.db     paper account: orders, fills, positions, P&L
-  logs\              application log
+  axiom.env             local process configuration and API_TOKEN
+  axiom-paper.db        durable paper/Vantage journals and runtime state
+  secrets\              Windows-DPAPI-protected Vantage credential files
+  logs\                 sanitized application logs
 ```
 
-The chart asks for the token the first time — copy the `token` line from the
-console and paste it. It is remembered only for that browser tab. It protects
-the local API from other programs on your machine; it is **not** a broker
-credential.
+When the operator page asks for the local token:
 
-Stop with **Ctrl+C** in the console (clean database shutdown).
+1. Open `%LOCALAPPDATA%\AXIOM\axiom.env` in Notepad.
+2. Copy only the value after `API_TOKEN=` into the token field.
+3. Do not share the file or value. It is remembered only for the current browser tab.
 
-## 4. Using the terminal
+This token is separate from the Vantage login/password and from Alpaca/Upstox data credentials. It never authorizes live trading.
 
-- **Symbol / timeframe buttons** in the header; `DEMO` and `ALT` are the bundled
-  sample datasets.
-- **SESSION** starts the paper engine from your configured `DATA_SOURCE`;
-  starting a session is what makes bars flow. Press it again (or **STOP** in the
-  dashboard) to stop.
-- **Scroll** = zoom, **drag** = pan, **double-click** = reset, `F` = follow the
-  newest bar, `R` = reset.
-- **Ticket** (right panel): side, quantity or notional, `MARKET` or `LIMIT`.
-  Click the chart to set a limit price. **PLACE** sends the order to the local
-  simulator only. **FLATTEN** exits the position.
-- **The feed badge is the one to trust**: `DEMO REPLAY SAMPLE DATA · NOT MARKET
-  DATA` for sample CSVs, `ALPACA US MARKET DATA · LOCAL SIMULATED FILLS` when
-  real market data is feeding the paper engine. `market_data: false` in the API
-  payload means it is not market data.
-- The **session badge** in US mode reads `OPEN` / `PRE_OPEN` / `CLOSED` from the
-  New York calendar, not from your PC clock.
+The initial mode is independent **AXIOM PAPER**, with Vantage disconnected/disarmed. If a Vantage environment was previously selected, startup still does not connect, Arm, Activate or submit an order.
 
-## 5. Configuration
+## 6. Vantage MT5 setup
 
-Edit `%LOCALAPPDATA%\AXIOM\axiom.env` in Notepad and restart AXIOM. The file is
-outside the program folder, so **upgrading never touches it**.
+1. Install/open the Vantage MT5 terminal using Vantage's official instructions.
+2. Confirm the exact server and account type yourself. For the requested live environment, the server text supplied for selection is `VantageMarkets-Live 13`; use it only if Vantage assigned it to your account.
+3. In AXIOM, explicitly select **VANTAGE DEMO** or **VANTAGE LIVE**. A demo account is recommended for familiarization.
+4. On **Connections**, enter the numeric login, trading password, exact server and terminal path if needed. Save or explicitly Replace the environment-specific profile.
+5. Run **Test connection (read only)**. Verify the returned masked login/server and discovered instruments.
 
-### 5.1 Safety switches — change these and the app refuses to start
+Secrets use Windows DPAPI for the current Windows user. They are not stored in `axiom.env` and are not returned by the API. The local token remains separate.
+
+The **MT5 package available** indicator is only a module-capability check. It is not proof of terminal installation, login, connectivity, account permission, readiness or activation.
+
+A read-only test does not place, cancel or modify orders. To enable reviewed manual orders, complete instrument selection, all risk limits, readiness, Arm and separate Activate, then review and confirm each order. See the main User Manual.
+
+## 7. Configuration and ports
+
+Legacy process/feed settings remain in `%LOCALAPPDATA%\AXIOM\axiom.env`. The launcher still enforces the legacy engine's safe process configuration:
 
 ```dotenv
 MODE=PAPER
@@ -115,176 +120,85 @@ LIVE_TRADING=false
 BROKER=LOCAL_PAPER
 ```
 
-### 5.2 Everyday settings
+These settings do **not** remove or disable the separately gated Vantage adapter in the Operator application. They prevent the legacy engine from being reconfigured as another broker.
 
-| Key | Default | Meaning |
-|---|---|---|
-| `INITIAL_CAPITAL` | `100000` | starting cash (new database only) |
-| `CURRENCY` | `INR` | account currency label |
-| `DATA_SOURCE` | `replay` | `replay`, or `alpaca`/`upstox` for market data |
-| `DEFAULT_SYMBOL` | `DEMO` | instrument shown first |
-| `DEFAULT_TIMEFRAME` | `1D` | must match the feed's native timeframe |
-| `API_TOKEN` | generated | local API token |
-| `COMMISSION` / `SLIPPAGE` / `SPREAD` | `0.0005 / 0.0005 / 0.0002` | simulated costs |
-| `STOP_LOSS` / `TAKE_PROFIT` | `0.05 / 0.10` | protective exits (fractions) or `none` |
-| `POSITION_SIZE` | `0.25` | fraction of equity per strategy entry |
-| `MAX_POSITION_VALUE`, `MAX_OPEN_POSITIONS`, `MAX_DAILY_LOSS`, `MAX_TRADES_PER_DAY` | `0` (off) | optional hard caps |
+The default local port is 8000; the launcher can select another port in its documented range and prints the actual URL. To request a specific starting port, set `AXIOM_PORT` before launch.
 
-Port: set the environment variable `AXIOM_PORT` before starting. Default 8000;
-if busy, the next free port in 8000–8019 is used and printed.
+Vantage risk limits, selected instruments and credential metadata are managed in the authenticated Operator UI, not by adding broker passwords to `axiom.env`.
 
-## 6. US equities paper mode (read-only Alpaca market data)
+## 8. Upgrade
 
-Market **data** only — the package has no Alpaca order client.
+1. Download and hash-verify the new installer from the same trusted release process.
+2. Close AXIOM and run the new installer over the existing installation.
+3. Confirm the new version and `/terminal` after launch.
 
-1. Get a market-data key from your own Alpaca account. The free `iex` feed is
-   the IEX venue only, not a consolidated tape; `sip` needs a paid entitlement.
-2. Edit `axiom.env` and uncomment/fill **every** line:
+The installer replaces program files in the same per-user location and does not write the operator data directory. Configuration/local token, SQLite journals, paper state, protected credentials and logs are designed to remain in place.
 
-   ```dotenv
-   MARKET=us
-   CURRENCY=USD
-   MARKET_CALENDAR=us-equities
-   DATA_SOURCE=alpaca
-   DEFAULT_SYMBOL=AAPL
-   DEFAULT_TIMEFRAME=1m
-   ALPACA_API_KEY=...your key...
-   ALPACA_API_SECRET=...your secret...
-   ALPACA_DATA_FEED=iex
-   ALPACA_SYMBOLS=AAPL,MSFT
-   PAPER_MAX_POSITION_VALUE=1000
-   PAPER_MAX_OPEN_POSITIONS=2
-   PAPER_MAX_DAILY_LOSS=100
-   PAPER_MAX_DRAWDOWN=0.05
-   PAPER_MAX_TRADES_PER_DAY=4
-   DATABASE_URL=sqlite:///C:/Users/<you>/AppData/Local/AXIOM/axiom-paper-us.db
-   ```
+The Windows acceptance test performs a real silent upgrade and checks preservation of the complete private configuration, a benign user-data sentinel and the SQLite database before launching the upgraded copy. Consult the exact release's `installer-test-log.txt` and `BUILD_METADATA.json`; do not infer this result from the script's presence.
 
-   All five `PAPER_MAX_*` limits are required in this mode and have no defaults.
-   Use a new `DATABASE_URL` whenever you change them or switch market.
-3. Restart AXIOM, press **SESSION**, and confirm the feed badge says
-   `ALPACA US MARKET DATA · LOCAL SIMULATED FILLS` and the session badge says
-   `OPEN` during 09:30–16:00 New York (13:00 on early-close days).
-4. Bars outside the New York session are dropped before they reach the engine
-   and never appear on the chart. A quiet chart outside session hours is correct.
+An upgrade never means prior readiness/Arm/Activate survives. Startup is disconnected/disarmed and automation is off. Review migrations/release notes before upgrading a system with unresolved broker intents.
 
-Keep `axiom.env` private — it can contain your market-data key. Never paste a key
-into an issue, chat or screenshot.
+**Rollback:** uninstall without deleting user data, then install the older verified package. A rollback does not reconcile broker orders and cannot make an unknown outcome safe. Preserve the journal and reconcile in MT5/AXIOM before any new order.
 
-## 7. Upgrading
+## 9. Uninstall and data deletion
 
-Run the new installer. It replaces the program files in the same folder and
-reuses the same Start Menu entry (stable application ID).
+Use **Settings → Apps → Installed apps → AXIOM Operator → Uninstall** or the Start Menu uninstall entry.
 
-- **Your paper account, configuration and logs are kept** — they live in
-  `%LOCALAPPDATA%\AXIOM`, which the installer never writes to.
-- Your settings file is not rewritten, so an upgrade cannot silently change your
-  risk caps.
-- A paper database created with different account settings (or different risk
-  limits) is refused rather than re-interpreted; AXIOM then asks for a new
-  `DATABASE_URL`. Keep the old `.db` as an archive.
-- **Rollback:** uninstall, then install the older version. Your data folder is
-  untouched either way.
+Program files and shortcuts are removed. Interactive uninstall asks whether to delete `%LOCALAPPDATA%\AXIOM`:
 
-## 8. Uninstall
+- **No (default):** keep paper state, Vantage journals/intents, protected credentials, settings and logs for reinstall/recovery.
+- **Yes:** permanently delete that operator data, including protected credential files and audit evidence. Verify broker state and make any needed lawful backups first.
 
-*Settings → Apps → Installed apps → AXIOM Chart Terminal → Uninstall*, or the
-Start Menu uninstall entry.
+Silent `/VERYSILENT` uninstall preserves user data. Keeping DPAPI files does not make them portable to another Windows user; treat them as sensitive even though they are encrypted.
 
-Program files and shortcuts are removed, then the uninstaller asks:
+Uninstalling AXIOM does not cancel MT5 orders, close positions or disable trading at Vantage. Check the broker terminal independently.
 
-> Your AXIOM paper account, settings and logs are kept in
-> `…\AppData\Local\AXIOM`. Do you also want to DELETE that folder?
+## 10. Windows verification commands
 
-Choose **No** (default) to keep your paper history. A silent uninstall
-(`/VERYSILENT`) always keeps it. To remove everything, delete
-`%LOCALAPPDATA%\AXIOM` afterwards.
-
-## 9. Troubleshooting
-
-| Symptom | Cause and fix |
-|---|---|
-| Console flashes and closes | Start it from PowerShell to read the message: `& "$env:LOCALAPPDATA\Programs\AXIOM-Chart\AXIOM-Chart.exe"` |
-| `this build is paper-only and will not start with: MODE=…` | Your `axiom.env` asks for something other than paper. Set `MODE=PAPER`, `LIVE_TRADING=false`, `BROKER=LOCAL_PAPER`. |
-| `DATA_SOURCE=alpaca requires ALPACA_API_KEY and ALPACA_API_SECRET` | Fill both keys, or set `DATA_SOURCE=replay`. |
-| `US paper mode requires PAPER_MAX_…` | All five `PAPER_MAX_*` values must be present, positive, and drawdown between 0 and 1. |
-| `Saved paper risk limits differ; use a new database` | You changed caps on an existing account. Use a new `DATABASE_URL` or restore the old caps. |
-| Chart returns **503** | `API_TOKEN` is empty. Delete `axiom.env` to regenerate one (your database is kept). |
-| Chart asks for the token again | The browser tab was closed. Paste the token printed in the console. |
-| `no bars for this symbol yet` | No session is running for that symbol. Press **SESSION**, or pick `DEMO`/`ALT`. |
-| US chart empty during the day | Check the header says `OPEN`; outside 09:30–16:00 New York nothing is expected. Confirm `/paper/status` shows `provider: alpaca` and a fresh `last_candle_time`. |
-| `no free local port` | Something occupies 8000–8019. Set `AXIOM_PORT=8050` before launching. |
-| Port 8000 shows a different app | An older AXIOM instance is running. Close it, or use `AXIOM_PORT`. |
-| `database is locked` | Two instances share one data folder. Close the extra one. |
-| SmartScreen or antivirus blocks the exe | Unsigned build. Verify the SHA-256, then allow it. |
-| Start over with a clean paper account | Close AXIOM, rename `%LOCALAPPDATA%\AXIOM` to `AXIOM-old`, start again. |
-
-**Logs:** `%LOCALAPPDATA%\AXIOM\logs\`. A log contains no credentials and is safe
-to attach to a bug report — `axiom.env` is not.
-
-## 10. Known limitations
-
-1. **Unsigned binaries.** SmartScreen may warn; verify the SHA-256.
-2. **No historical backfill in the chart.** It draws bars the running engine
-   processed (max 1,500 per symbol, in memory); a restart redraws from the feed.
-3. **Streaming is completed 1-minute bars only** in US mode. Other timeframes
-   come from exact intraday aggregation; daily bars are never synthesised.
-4. **Token re-entry per browser tab**, by design of the page.
-5. **Offline holiday calendar.** Regular NYSE holidays and 13:00 early closes
-   are computed locally; an exceptional exchange closure is not auto-discovered.
-6. **Upstox sandbox routing is not host-locked in this source line.** The
-   packaged launcher can only start the local paper broker and the API constructs
-   nothing else, but the repository also contains an Upstox *sandbox* order client
-   used by the CLI (`python -m app engine`) whose host check only warns. It is
-   unreachable from the installed application.
-7. **No profitability claim** for any strategy in this build.
-8. **The monitoring and maintenance modules are POSIX-only in this source line.**
-   `app/monitoring` imports the POSIX `resource` module, so on Windows three
-   tests fail on import (`ModuleNotFoundError: No module named 'resource'`) and
-   two `TestMaintenanceWiring` tests fail as a consequence. Two further tests
-   assume POSIX behaviour (a `chmod`-based file-mode assertion in
-   `tests/test_upstox_v062.py` and a CLI exit code in
-   `tests/test_v2_api_cli.py`). All 7 are outside the chart-terminal path:
-   the focused US-paper/chart suites pass, as do the 21 on-machine application
-   checks and the 18-step installer acceptance test. They are listed, not
-   hidden — see §12.
-
-## 11. Where the paper-only guarantee is enforced
-
-| Guarantee | Enforcement |
-|---|---|
-| only PAPER | `app/config/settings.py` raises for any other `MODE`/`LIVE_TRADING`; the launcher refuses before the server starts |
-| only the local broker | `_require_local_paper()` gates `POST /paper/order`; the API constructs only `PaperBroker` |
-| no live routing | the package has no live-broker client and no live order endpoint |
-| visible paper mode | the chart header always shows `PAPER · SIMULATED ORDERS`; every payload carries `paper_only: true`, `live_trading: false` |
-| honest data labelling | every chart payload names its feed; sample CSVs are labelled *NOT MARKET DATA* |
-
-## 12. What was tested, and how to check this download yourself
-
-The published build is compiled on a Windows x64 machine from one exact commit.
-Its record travels with it:
-
-| File | What it is |
-|---|---|
-| `BUILD_METADATA.json` | the source commit, its subject and date, the runner and toolchain versions, every test result and the SHA-256 of each artifact |
-| `SHA256SUMS.txt` | the same hashes in `sha256sum -c` format |
-| `SOURCE_COMMIT.txt` | the installed record of the commit, also copied into the install folder |
-| `install-test-log.txt` | the 21 on-machine checks of the frozen executable (launch, `/health`, `/chart`, chart assets, token gate, paper order path, fail-closed cases) |
-| `installer-test-log.txt` | the 18-step installer acceptance test: silent install, launch of the installed copy, `/chart` with the PAPER badge, bundled assets, 401 without a token, silent uninstall that keeps operator data |
-| `pytest-focused.log`, `pytest-full.log` | the Windows test runs, complete |
-
-Every release asset is listed in the release notes with its SHA-256. To check
-what you downloaded:
+Maintainers can reproduce the build on a real Windows x64 machine with the pinned toolchain:
 
 ```powershell
-Get-FileHash .\AXIOM-Chart-*-setup.exe -Algorithm SHA256
-# or, if you keep SHA256SUMS.txt beside the file:
-Get-Content SHA256SUMS.txt | ForEach-Object {
-    $hash, $name = $_ -split '\s+', 2
-    $actual = (Get-FileHash ".\$name" -Algorithm SHA256).Hash.ToLower()
-    "{0}  {1}" -f $(if ($actual -eq $hash) { 'OK  ' } else { 'FAIL' }), $name
-}
+cd packaging\windows
+powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
+  -SourceDir ..\.. -ExpectedCommit <full-source-commit>
 ```
 
-The binaries are unsigned, so SmartScreen may warn: check the hash against the
-release notes before choosing *More info → Run anyway*.
+The script requires a clean source tree, runs focused and full Python tests, both pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller frozen-app smoke/fail-closed checks, and Inno Setup packaging. It refuses to produce a success result when a hard gate fails.
+
+Run the separate installed-copy acceptance test against the generated setup file:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_test.ps1 -DistDir dist
+```
+
+It checks install, launch, operator/chart/manual/static assets, authentication, safe Vantage defaults, MT5-module/DPAPI capability, upgrade preservation and uninstall. It uses no Vantage credential and performs no MT5 login or order.
+
+A source checkout, Linux test, fake-MT5 test or script is not a substitute for these real-Windows results.
+
+## 11. Troubleshooting
+
+| Symptom | Action |
+|---|---|
+| SmartScreen / unknown publisher | Confirm the exact release and SHA-256. Builds are unsigned unless metadata says otherwise. |
+| Executable flashes closed | Start it from PowerShell to read the sanitized error. Keep the console open during normal use. |
+| Browser asks for token repeatedly | Token storage is tab-scoped. Read `API_TOKEN` from private `axiom.env`; it is not printed by the launcher. |
+| Port 8000 belongs to another app | Close the old AXIOM instance or set `AXIOM_PORT`; use the actual URL printed by the launcher. |
+| `database is locked` / writer lock fails | Close duplicate writers. Do not bypass the lock or copy a live database as a running backup. |
+| MT5 package unavailable | Confirm you are using the current frozen Windows build and inspect its metadata. |
+| MT5 terminal/login unavailable | Verify the separate Vantage terminal, executable path, numeric login/password and exact server. Never send credentials for support. |
+| DPAPI credential cannot be read | Re-enter it as the same intended Windows user; DPAPI data is not a portable plaintext backup. |
+| Vantage controls blocked | This is expected until connection, selection, risk, readiness, Arm, Activate and final review all pass. Read the specific blocker. |
+| Upgrade preserved data but trading is disarmed | Required behavior. Reconnect/reconcile and repeat all approvals. |
+| Uninstall did not flatten account | Uninstall is local only. Verify and manage broker orders/positions in MT5. |
+
+Logs are under `%LOCALAPPDATA%\AXIOM\logs`. Inspect before sharing. Never attach `axiom.env`, DPAPI secrets, passwords, full account credentials or unredacted screenshots.
+
+## 12. Non-claims and limits
+
+- No Vantage demo/live login or order is performed by the installer tests.
+- CI does not use real-money credentials and does not activate live trading.
+- A demo account must be explicitly supplied for any separate demo E2E; otherwise it is skipped and reported.
+- AXIOM does not discover instruments from a hard-coded Vantage product list; availability comes from the connected MT5 account.
+- Vantage automation and TradingView webhook execution are not enabled in this version.
+- Stop, Emergency stop, upgrade and uninstall do not prove broker flatness or cancellation.
+- Tests and demo fills establish neither profitability nor live readiness.

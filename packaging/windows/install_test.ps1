@@ -7,14 +7,15 @@
 
       1. the installer runs silently and places the application where asked,
       2. the installed executable starts and answers /health on loopback,
-      3. /chart returns 200 and shows the PAPER badge,
-      4. the chart's own static assets are inside the package (no CDN),
-      5. a data route still refuses to answer without a token,
-      6. the uninstaller removes the program files but keeps operator data.
+      3. /terminal and legacy /chart return 200 with honest mode labels,
+      4. both UIs' static assets and the manual are inside the package,
+      5. protected data routes refuse anonymous calls and startup is disarmed,
+      6. an upgrade preserves operator data and the local token,
+      7. the uninstaller removes program files but keeps operator data.
 
-    Paper only: the test uses a throw-away data directory under %TEMP%, the
+    Broker-safe: the test uses a throw-away data directory under %TEMP%, the
     bundled DEMO sample data and a locally generated token. No broker is
-    contacted and no credential is read or written.
+    contacted and no broker credential is read or written.
 
     Every phase is announced twice: as a line in the log file, and as a GitHub
     Actions notice annotation, so a failure is attributable even when the raw
@@ -217,7 +218,17 @@ try {
     Check $healthy 'the installed copy answered /health on loopback'
 
     # ---------------------------------------------------------------- phase 5
-    Step 'chart' 'checking the chart page, its assets and the token gate'
+    Step 'operator-and-chart' 'checking installed pages, assets and token gates'
+    $terminal = Invoke-WebRequest -UseBasicParsing ('{0}/terminal' -f $base) -TimeoutSec 20
+    Check ($terminal.StatusCode -eq 200) ('/terminal returns 200 (got {0})' -f $terminal.StatusCode)
+    Check ($terminal.Content -match 'AXIOM PAPER' -and $terminal.Content -match 'VANTAGE LIVE') '/terminal names all explicit execution modes'
+    $terminalJs = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.js' -f $base) -TimeoutSec 20
+    Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'submitVantageReview') 'operator JavaScript is served from the installed package'
+    $terminalCss = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.css' -f $base) -TimeoutSec 20
+    Check ($terminalCss.StatusCode -eq 200) 'operator CSS is served from the installed package'
+    $manual = Invoke-WebRequest -UseBasicParsing ('{0}/manual' -f $base) -TimeoutSec 20
+    Check ($manual.StatusCode -eq 200 -and $manual.Content -match 'Vantage' -and $manual.Content -match 'Activate') 'installed manual covers Vantage and Activate'
+
     $chart = Invoke-WebRequest -UseBasicParsing ('{0}/chart' -f $base) -TimeoutSec 20
     Check ($chart.StatusCode -eq 200) ('/chart returns 200 (got {0})' -f $chart.StatusCode)
     Check ($chart.Content -match 'PAPER') '/chart displays the PAPER badge'
@@ -237,6 +248,33 @@ try {
         if ($_.Exception.Response) { $anon = [int]$_.Exception.Response.StatusCode }
     }
     Check ($anon -eq 401) ('a chart data route still refuses to answer without a token (got {0})' -f $anon)
+    $anonTrading = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/api/trading/status' -f $base) -TimeoutSec 10
+        $anonTrading = 200
+    } catch {
+        if ($_.Exception.Response) { $anonTrading = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anonTrading -eq 401) ('Vantage status refuses anonymous access (got {0})' -f $anonTrading)
+
+    $privateConfig = Join-Path $dataDir 'axiom.env'
+    Check (Test-Path $privateConfig) 'the launcher created the private per-user configuration'
+    $configText = Get-Content $privateConfig -Raw
+    $token = (($configText -split "`n" | Where-Object { $_ -match '^API_TOKEN=' } | Select-Object -First 1) -replace '^API_TOKEN=', '').Trim()
+    Check ([bool]$token) 'a local API token was generated (value not logged)'
+    $headers = @{ Authorization = "Bearer $token" }
+    $trading = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
+    Check ($trading.mode -eq 'AXIOM_PAPER' -and -not $trading.armed -and -not $trading.active) 'installed app starts in PAPER and disarmed'
+    $capabilities = Invoke-RestMethod -Headers $headers ('{0}/api/trading/connection' -f $base) -TimeoutSec 15
+    Check ($capabilities.secret_store -match 'Windows DPAPI') 'installed app can use Windows DPAPI'
+    Check ($capabilities.mt5_package_available -eq $true) 'official MT5 module is present in installed app'
+    $demo = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ mode = 'VANTAGE_DEMO' } | ConvertTo-Json) ('{0}/api/trading/session' -f $base) -TimeoutSec 15
+    Check ($demo.mode -eq 'VANTAGE_DEMO' -and -not $demo.connected -and -not $demo.armed -and -not $demo.active) 'DEMO selection does not connect, Arm or Activate'
+    $disconnected = Invoke-RestMethod -Headers $headers ('{0}/api/trading/workspace' -f $base) -TimeoutSec 15
+    Check ($disconnected.broker_state_available -eq $false -and $null -eq $disconnected.reconciled_at) 'disconnected workspace is not presented as a flat account'
+    $null = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ mode = 'AXIOM_PAPER' } | ConvertTo-Json) ('{0}/api/trading/session' -f $base) -TimeoutSec 15
+    $launcherText = @((Get-Content $outLog -Raw -ErrorAction SilentlyContinue), (Get-Content $errLog -Raw -ErrorAction SilentlyContinue)) -join "`n"
+    Check (-not ($token -and $launcherText.Contains($token))) 'installed launcher does not print the local API token'
 
     $envFile = Join-Path $dataDir 'config.json'
     if (Test-Path $envFile) {
@@ -246,6 +284,38 @@ try {
     } else {
         Say 'no config.json was written; nothing to inspect for live credentials'
     }
+
+    # ------------------------------------------------------------- phase 5b
+    Step 'upgrade' 'reinstalling over the installed copy and verifying user-data preservation'
+    $stoppedForUpgrade = Stop-App
+    Check $stoppedForUpgrade 'application stopped before upgrade'
+    $sentinel = Join-Path $dataDir 'upgrade-preservation-sentinel.txt'
+    Set-Content -Path $sentinel -Value 'keep this benign operator-data sentinel' -Encoding utf8
+    $configBeforeUpgrade = Get-Content $privateConfig -Raw
+    $databasePath = Join-Path $dataDir 'axiom-paper.db'
+    Check (Test-Path $databasePath) 'operator SQLite database exists before upgrade'
+    $upgradeProc = Start-Process -FilePath $setup -ArgumentList $setupArgs -PassThru -Wait
+    Check ($upgradeProc.ExitCode -eq 0) ('silent upgrade installer reported success (exit {0})' -f $upgradeProc.ExitCode)
+    Check (Test-Path $installedExe) 'upgraded executable is present'
+    Check ((Get-Content $privateConfig -Raw) -eq $configBeforeUpgrade) 'upgrade preserved the complete private configuration and local token'
+    Check ((Get-Content $sentinel -Raw) -match 'keep this benign') 'upgrade preserved the operator-data sentinel'
+    Check (Test-Path $databasePath) 'upgrade preserved the operator SQLite database'
+    Remove-Item -Path $outLog, $errLog -ErrorAction SilentlyContinue
+    $app = Start-Process -FilePath $installedExe -ArgumentList '--no-browser' -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    $upgradeHealthy = $false
+    for ($i = 0; $i -lt 240; $i++) {
+        Start-Sleep -Milliseconds 500
+        if ($app.HasExited) { break }
+        try {
+            $null = Invoke-WebRequest -UseBasicParsing ('{0}/health' -f $base) -TimeoutSec 2
+            $upgradeHealthy = $true
+            break
+        } catch { }
+    }
+    Check $upgradeHealthy 'upgraded installed copy launches and answers /health'
+    if (-not $upgradeHealthy) { throw 'the upgraded installed copy did not launch' }
+    $upgradedTerminal = Invoke-WebRequest -UseBasicParsing ('{0}/terminal' -f $base) -TimeoutSec 20
+    Check ($upgradedTerminal.StatusCode -eq 200) 'upgraded installed copy serves the operator console'
 
     # ---------------------------------------------------------------- phase 6
     Step 'uninstall' 'stopping the application and removing it'
@@ -277,13 +347,16 @@ try {
     }
     Check (-not (Test-Path $installedExe)) 'the uninstaller removed AXIOM-Chart.exe'
     Check (Test-Path $dataDir) ('the uninstaller kept the operator data folder {0}' -f $dataDir)
+    Check (Test-Path $privateConfig) 'silent uninstall preserved the private configuration'
+    Check (Test-Path $databasePath) 'silent uninstall preserved the operator SQLite database'
+    Check (Test-Path $sentinel) 'silent uninstall preserved the upgrade sentinel'
 
     # ------------------------------------------------------------------ result
     Say ''
     if ($script:Failures.Count -gt 0) {
         throw ('{0} check(s) failed: {1}' -f $script:Failures.Count, ($script:Failures -join '; '))
     }
-    Note 'PASS - install, launch, /chart, static assets, token gate and uninstall verified on this machine'
+    Note 'PASS - install, operator/chart launch, token gates, safe Vantage default, upgrade preservation and uninstall verified on this machine'
     exit 0
 }
 catch {

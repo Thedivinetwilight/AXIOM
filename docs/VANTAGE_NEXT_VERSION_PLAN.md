@@ -1,7 +1,9 @@
 # AXIOM next version — implementation baseline and architecture
 
-Status: implementation plan recorded before the Vantage/UI changes. This is not a
-profitability claim or evidence of live readiness.
+Status: Vantage/UI implementation is present on the session branch; this document
+retains the original inventory and plan below. Final verification must be read
+from the exact commit's CI and release metadata. This is not a profitability
+claim or evidence of live readiness.
 
 ## Source and GitHub state checked first
 
@@ -12,9 +14,12 @@ Checked on 2026-10-23 before editing:
 - Session base: `0314db2c2d1473b0b63e04ce7c1455695f93a885`.
 - Current intended prior source branch: `arena/5ed3f6b6-axiom` at
   `418344798fd3c7f743a7fc7a6ac8fd98149c2940` (not merely the older release tag).
-- The session base is an ancestor of that head, so the session branch was
-  fast-forwarded to `418344798fd3c7f743a7fc7a6ac8fd98149c2940` without discarding
-  or rewriting work.
+- The initial handoff's claimed fast-forward was not present in actual ancestry.
+  Work was preserved in checkpoint `99d32bbd7b65bfd2e5062aa3c32defcccd7c4c26`,
+  then ours-tree merge `d3def71f2c760fb4fcf0f0731973d2232b275505` was created
+  with parents `99d32bb…` and `4183447…`. `git merge-base --is-ancestor` confirmed
+  the prior feature commit is an ancestor. No reset or repeated ancestry merge
+  is required; later packaging/manual edits build on that merge.
 - Existing draft PR: https://github.com/Thedivinetwilight/AXIOM/pull/7
 - Latest prerelease when checked: `v3.2.5-chart-us.1`, source
   `6c24ec3585a0b9d7933e8097f21943aef53c6f84`; its installer and portable assets
@@ -35,6 +40,28 @@ locked dependencies:
   ignored `.venv` was then created from `requirements-lock.txt`.
 
 No real broker account was accessed. No credentials were requested or used.
+
+## Latest pre-push local verification candidate
+
+After the Vantage implementation and the post-merge packaging/manual changes, on
+Linux/Python 3.11:
+
+- `python -m pytest -q`: **660 passed, 3 skipped in 41.24s**.
+- The three skips were two real-Windows DPAPI tests (not available on Linux) and
+  one public Upstox instrument-file test whose external TLS connection was
+  unreachable. They are not silently counted as passes.
+- `node tests/js/chart_smoke.mjs`: **passed**.
+- `node tests/js/terminal_smoke.mjs`: **passed — 57 authenticated fake API calls
+  and 125 candle/background draw calls**.
+- Python compileall, PyInstaller-spec compilation, workflow YAML parsing and
+  `git diff --check`: **passed**.
+- Earlier candidate runs found and fixed three failures (two stale dashboard
+  wording assertions and two silent cleanup handlers found by one static scan),
+  then two assertion-text mismatches. No failure is omitted from this history.
+
+These are source/fake-MT5 results, not Windows installer, real-terminal, demo or
+live evidence. The exact pushed commit must still pass the real-Windows workflow;
+its own metadata and uploaded files are authoritative.
 
 ## Current architecture map
 
@@ -67,7 +94,7 @@ No real broker account was accessed. No credentials were requested or used.
 - `.github/workflows/`: Linux paper checks and a Windows exact-commit build /
   packaging / prerelease workflow.
 
-## Target Vantage architecture
+## Implemented Vantage architecture (originally the target design)
 
 1. **Official MT5 gateway (Windows):** lazy import of the documented
    `MetaTrader5` Python module. Initialize with terminal path, login, password

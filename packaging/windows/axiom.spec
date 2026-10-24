@@ -33,6 +33,8 @@ datas = [
     (str(ROOT / "app" / "static"), "app/static"),
     (str(ROOT / "data"), "data"),
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
+    (str(ROOT / "USER_MANUAL.md"), "USER_MANUAL.md"),
+    (str(ROOT / "docs" / "VANTAGE_NEXT_VERSION_PLAN.md"), "docs/VANTAGE_NEXT_VERSION_PLAN.md"),
 ]
 
 # uvicorn resolves its loop and protocol implementations by name at runtime, so
@@ -64,7 +66,13 @@ hiddenimports = (
     ]
 )
 
-# Never ship research/analysis stacks the terminal does not use.
+if sys.platform.startswith("win"):
+    # The official package is a lazy runtime import and includes its own
+    # terminal IPC extension; NumPy is required for MT5 rate arrays.
+    hiddenimports.append("MetaTrader5")
+
+# Never ship research/analysis stacks the terminal does not use. NumPy is the
+# one numerical dependency retained because the official MT5 wheel needs it.
 excludes = [
     "tkinter",
     "PySide6",
@@ -72,7 +80,6 @@ excludes = [
     "PyQt6",
     "matplotlib",
     "pandas",
-    "numpy",
     "scipy",
     "pyarrow",
     "fastparquet",
@@ -112,8 +119,8 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # console=True on purpose: this application prints the local API token and
-    # the chart URL at start-up, and a windowed build could not show them.
+    # Console mode exposes startup/refusal messages and Ctrl+C. Secrets are
+    # deliberately not printed; the operator reads the private config locally.
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,

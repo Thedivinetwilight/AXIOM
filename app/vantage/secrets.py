@@ -10,9 +10,13 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 class SecretStoreUnavailable(RuntimeError):
@@ -85,7 +89,9 @@ class DpapiSecretStore:
             try:
                 path.chmod(0o600)
             except OSError:
-                pass
+                # DPAPI still protects the ciphertext. Keep the write atomic,
+                # but make a filesystem permission failure visible safely.
+                logger.warning("Could not apply restrictive mode to a DPAPI credential file")
         finally:
             if encrypted.pbData:
                 kernel32.LocalFree(encrypted.pbData)
