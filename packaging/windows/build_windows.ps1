@@ -34,7 +34,11 @@ Set-StrictMode -Version Latest
 $PSNativeCommandUseErrorActionPreference = $false
 
 function Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
-function Fail($text) { Write-Host "`nBUILD FAILED: $text" -ForegroundColor Red; exit 1 }
+function Fail($text) {
+    Write-Host "`nBUILD FAILED: $text" -ForegroundColor Red
+    Write-Host "::error title=AXIOM Windows build gate::$text"
+    exit 1
+}
 
 # The script lives in packaging/windows/; the repository root is two levels up.
 $Kit = $PSScriptRoot

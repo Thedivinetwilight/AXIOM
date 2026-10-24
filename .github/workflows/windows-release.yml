@@ -168,33 +168,40 @@ jobs:
           $sums | Set-Content dist\SHA256SUMS.txt -Encoding ascii
           foreach ($line in $sums) { Write-Host $line }
 
-      - name: Publish the installer test log on failure
-        # When the installer test fails, the hosted runner's raw log cannot be
-        # downloaded from every environment. The log is therefore committed to
-        # the packaging branch so the failure can be read directly. This step
-        # only runs on failure and never fails the job itself.
+      - name: Publish sanitized build and installer logs on failure
+        # Hosted log/artifact blob downloads are not reachable from every
+        # review environment. On failure only, publish the sanitized CI logs
+        # (dummy/local secrets only; no broker credentials exist on the runner)
+        # so the exact gate and test identities remain inspectable.
         if: failure()
         shell: pwsh
         continue-on-error: true
         run: |
           $ErrorActionPreference = 'Continue'
-          $log = 'src/packaging/windows/dist/installer-test-log.txt'
-          $err = 'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
-          if (-not (Test-Path $log) -and -not (Test-Path $err)) {
-            Write-Host 'no installer test log was produced'
+          $candidates = @(
+            'src/packaging/windows/pytest-focused.log',
+            'src/packaging/windows/pytest-full.log',
+            'src/packaging/windows/js-chart.log',
+            'src/packaging/windows/js-terminal.log',
+            'src/packaging/windows/dist/install-test-log.txt',
+            'src/packaging/windows/dist/installer-test-log.txt',
+            'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
+          )
+          $existing = @($candidates | Where-Object { Test-Path $_ })
+          if ($existing.Count -eq 0) {
+            Write-Host 'no sanitized build/installer log was produced; inspect the gate annotation'
             exit 0
           }
           $kit = Join-Path $env:GITHUB_WORKSPACE '_kit'
           $dest = Join-Path $kit 'packaging/windows/diagnostics'
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item $log $dest -Force -ErrorAction SilentlyContinue
-          Copy-Item $err $dest -Force -ErrorAction SilentlyContinue
+          foreach ($file in $existing) { Copy-Item $file $dest -Force -ErrorAction Continue }
           git -C $kit config user.name 'axiom-ci'
           git -C $kit config user.email 'axiom-ci@users.noreply.github.com'
           git -C $kit add -A packaging/windows/diagnostics
           git -C $kit diff --cached --quiet
-          if ($LASTEXITCODE -eq 0) { Write-Host 'the published log is unchanged'; exit 0 }
-          git -C $kit commit -m 'ci: record the installer test log for inspection'
+          if ($LASTEXITCODE -eq 0) { Write-Host 'the published diagnostics are unchanged'; exit 0 }
+          git -C $kit commit -m 'ci: record failed Windows build diagnostics'
           git -C $kit push origin ('HEAD:{0}' -f $env:GITHUB_REF_NAME)
 
       - name: Upload build artifacts
