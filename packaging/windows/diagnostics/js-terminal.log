@@ -1,0 +1,1 @@
+terminal harness: OK (57 authenticated fake API calls, 125 candle/background draw calls)
