@@ -88,7 +88,10 @@ def test_all_trading_apis_require_bearer_and_paper_is_default(client):
     capabilities = client.get("/api/trading/connection", headers=HEADERS).json()
     expected_package = os.name == "nt" and importlib.util.find_spec("MetaTrader5") is not None
     assert capabilities["mt5_package_available"] is expected_package
-    assert "plaintext fallback is disabled" in capabilities["secret_store"]
+    if os.name == "nt":
+        assert "Windows DPAPI" in capabilities["secret_store"]
+    else:
+        assert "plaintext fallback is disabled" in capabilities["secret_store"]
 
 
 def test_validation_and_credential_responses_never_echo_secrets(client):
