@@ -1,0 +1,38 @@
+.......................F................................................ [ 61%]
+.............................................                            [100%]
+================================== FAILURES ===================================
+__________ test_all_trading_apis_require_bearer_and_paper_is_default __________
+
+client = <starlette.testclient.TestClient object at 0x0000028EE73E0980>
+
+    def test_all_trading_apis_require_bearer_and_paper_is_default(client):
+        assert client.get("/api/trading/status").status_code == 401
+        assert client.get("/api/trading/overview").status_code == 401
+        status = client.get("/api/trading/status", headers=HEADERS)
+        assert status.status_code == 200
+        assert status.json()["mode"] == "AXIOM_PAPER"
+        overview = client.get("/api/trading/overview", headers=HEADERS).json()
+        assert overview["paper_only"] is True and overview["simulated"] is True
+        assert overview["status"]["automation_enabled"] is False
+        terminal = client.get("/terminal")
+        assert terminal.status_code == 200
+        assert 'id="page-connections"' in terminal.text
+        assert "VantageMarkets-Live 13" in terminal.text
+        assert client.get("/static/terminal/terminal.js").status_code == 200
+        assert client.get("/static/terminal/terminal.css").status_code == 200
+        capabilities = client.get("/api/trading/connection", headers=HEADERS).json()
+        expected_package = os.name == "nt" and importlib.util.find_spec("MetaTrader5") is not None
+        assert capabilities["mt5_package_available"] is expected_package
+>       assert "plaintext fallback is disabled" in capabilities["secret_store"]
+E       AssertionError: assert 'plaintext fallback is disabled' in 'Windows DPAPI � current Windows user'
+
+tests\test_vantage_api.py:91: AssertionError
+============================== warnings summary ===============================
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45
+  C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_vantage_api.py::test_all_trading_apis_require_bearer_and_paper_is_default - AssertionError: assert 'plaintext fallback is disabled' in 'Windows DPAPI � current Windows user'
+1 failed, 116 passed, 1 warning in 17.86s
