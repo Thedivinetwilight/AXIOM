@@ -43,6 +43,17 @@ function Fail($text) {
 # The script lives in packaging/windows/; the repository root is two levels up.
 $Kit = $PSScriptRoot
 $RepoRoot = (Resolve-Path (Join-Path $Kit '..\..')).Path
+
+trap {
+    # Named Fail gates already have annotations. Capture unexpected strict-mode,
+    # Cmdlet and HTTP failures too, otherwise a green test suite can hide the
+    # actual packaging/smoke error when hosted raw logs are unavailable.
+    $message = $_.Exception.Message
+    Set-Content -Path (Join-Path $Kit 'build-error.txt') -Value $message -Encoding utf8
+    Write-Host "::error title=AXIOM Windows build error::$message"
+    exit 1
+}
+
 Set-Location $RepoRoot
 
 $Clean = { param($p) if ($p) { ($p | Out-String).Trim() } }
