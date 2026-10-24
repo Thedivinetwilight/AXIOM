@@ -1,4 +1,0 @@
-Response status code does not indicate success: 500 (Internal Server Error).
-At D:\a\AXIOM\AXIOM\src\packaging\windows\build_windows.ps1:189 char:15
-+ …   $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -Timeou …
-+               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
