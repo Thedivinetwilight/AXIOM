@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import os
 import time
 
 import httpx
@@ -311,7 +312,19 @@ def test_store_token_writes_gitignored_env_atomically(tmp_path):
     assert "written" in outcome and "issued-token" not in outcome
     content = env_path.read_text()
     assert "API_TOKEN=local" in content and "UPSTOX_ACCESS_TOKEN=issued-token" in content
-    assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+    if os.name == "nt":
+        import subprocess
+        principal = subprocess.run(
+            ["whoami"], capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+        acl = subprocess.run(
+            ["icacls", str(env_path)], capture_output=True, text=True, check=True, timeout=10,
+        ).stdout
+        assert principal in acl and ":(F)" in acl
+        assert "BUILTIN\\Users" not in acl and "Everyone" not in acl
+        assert "NT AUTHORITY\\Authenticated Users" not in acl
+    else:
+        assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
 
 
 # ---------------------------------------------------------------- pipeline

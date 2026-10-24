@@ -1158,4 +1158,12 @@ def main(argv=None) -> None:
 
 
 if __name__ == "__main__":
+    # Windows runners can default to a legacy charmap code page. Reports and
+    # diagnostics contain Unicode arrows; use UTF-8 instead of crashing after
+    # the work completed. ``replace`` also avoids a secondary print failure for
+    # an unusual unencodable character.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     main()

@@ -1,0 +1,330 @@
+name: windows release
+
+# Builds, tests, install-tests and publishes the Windows x64 executable and
+# installer for one exact source commit.
+#
+# workflow_dispatch may repeat the exact workflow commit; any different target
+# is refused so application and packaging files cannot come from mixed commits.
+# BUILD_TARGET is retained only as a historical file, avoiding any
+# self-referential final-commit update.
+#
+# How the two trees are used:
+#   _kit/  the branch this workflow runs on -> packaging files only
+#   src/   the source commit being built    -> application code only
+# The kit is copied into src/packaging and excluded via src/.git/info/exclude,
+# so the build's "is the tree clean" guard still holds and the built code is
+# exactly the requested commit.
+#
+# Smoke tests use generated local tokens, bundled DEMO data, fake MT5 tests and
+# dummy DPAPI values. No Vantage terminal/account is contacted and no broker
+# credential is used. The default target is the exact workflow source commit.
+
+on:
+  push:
+    # Every commit on this dedicated release branch must produce fresh Windows
+    # evidence. Path filtering could otherwise leave app/test-only commits
+    # pointing at an older commit's binaries.
+    branches:
+      - arena/19f4cba3-axiom
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact workflow commit SHA (a different mixed-source target is refused)
+        required: false
+        default: ''
+        type: string
+      version:
+        description: Version label (blank = VERSION file)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build + install-test (windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the packaging kit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _kit
+          fetch-depth: 1
+
+      - name: Resolve the target commit and version
+        id: resolve
+        shell: pwsh
+        run: |
+          $target = '${{ inputs.commit }}'.Trim()
+          $version = '${{ inputs.version }}'.Trim()
+          $workflowCommit = (git -C _kit rev-parse HEAD).Trim()
+          if (-not $target) { $target = $workflowCommit }
+          if ($target -ne $workflowCommit) { throw "refusing mixed-source build: target $target differs from workflow commit $workflowCommit" }
+          if (-not $version) { $version = (Get-Content _kit/packaging/windows/VERSION -Raw).Trim() }
+          if ($target -notmatch '^[0-9a-f]{40}$') { throw "invalid commit '$target'" }
+          "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "target commit: $target"
+          Write-Host "version:       $version"
+
+      - name: Check out the exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.TARGET_COMMIT }}
+          path: src
+          fetch-depth: 0
+
+      - name: Stage the kit without dirtying the source tree
+        shell: pwsh
+        run: |
+          if (-not (Test-Path _kit/packaging/windows)) { throw 'the packaging kit is missing from the branch' }
+          Copy-Item -Recurse -Force _kit/packaging src/packaging
+          Add-Content -Path src/.git/info/exclude -Value 'packaging/'
+          Push-Location src
+          $sha = (git rev-parse HEAD).Trim()
+          $dirty = (git status --porcelain | Out-String).Trim()
+          Pop-Location
+          if ($sha -ne $env:TARGET_COMMIT) { throw "checked out $sha, expected $env:TARGET_COMMIT" }
+          if ($dirty) { throw "source tree is dirty after staging the kit:`n$dirty" }
+          Write-Host "source commit verified and clean: $sha"
+
+      - name: Build, test and package
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          & ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION" 2>&1 |
+            Tee-Object -FilePath build-windows.log
+
+      - name: Verify the produced artifacts
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:TARGET_COMMIT) { throw "metadata commit $($meta.commit) != $env:TARGET_COMMIT" }
+          foreach ($a in $meta.artifacts) {
+            $path = Join-Path dist $a.name
+            if (-not (Test-Path $path)) { throw "missing artifact $($a.name)" }
+            $hash = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
+            if ($hash -ne $a.sha256) { throw "hash mismatch for $($a.name)" }
+            Write-Host ("verified {0}  {1}" -f $a.name, $hash)
+          }
+          if ($meta.test_results.smoke_failed -ne 0) { throw "smoke failures: $($meta.test_results.smoke_failed)" }
+          Write-Host "smoke checks passed: $($meta.test_results.smoke_checks.Count)"
+
+      - name: Install the installer, launch the installed copy, then uninstall
+        shell: pwsh
+        working-directory: src/packaging/windows
+        # The whole test lives in install_test.ps1: it logs to
+        # dist\installer-test-log.txt and announces every phase as an Actions
+        # notice annotation, so a failure is attributable from the check-run
+        # annotations even when the hosted step log cannot be downloaded.
+        run: ./install_test.ps1 -DistDir dist
+
+      - name: Finalize install results and checksum every release asset
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installLog = Get-Content dist\installer-test-log.txt -Raw
+          $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          if ($installFailed -ne 0) { throw "installer checks failed: $installFailed" }
+          $metaPath = 'dist\BUILD_METADATA.json'
+          $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+          $meta.test_results | Add-Member -NotePropertyName installer_checks_passed -NotePropertyValue $installPassed -Force
+          $meta.test_results | Add-Member -NotePropertyName installer_checks_failed -NotePropertyValue $installFailed -Force
+          $meta.test_results | Add-Member -NotePropertyName upgrade_preservation -NotePropertyValue 'passed on this Windows runner' -Force
+          $meta | ConvertTo-Json -Depth 10 | Set-Content $metaPath -Encoding utf8
+          $files = @(
+            'dist\AXIOM-Chart.exe',
+            (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName,
+            'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
+            'dist\install-test-log.txt', 'dist\installer-test-log.txt',
+            'pytest-focused.log', 'pytest-full.log', 'js-chart.log', 'js-terminal.log',
+            'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md'
+          )
+          $sums = @()
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "missing release file $file" }
+            $sums += ('{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Split-Path $file -Leaf))
+          }
+          $sums | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+          foreach ($line in $sums) { Write-Host $line }
+
+      - name: Publish sanitized build and installer logs on failure
+        # Hosted log/artifact blob downloads are not reachable from every
+        # review environment. On failure only, publish the sanitized CI logs
+        # (dummy/local secrets only; no broker credentials exist on the runner)
+        # so the exact gate and test identities remain inspectable.
+        if: failure()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidates = @(
+            'src/packaging/windows/build-windows.log',
+            'src/packaging/windows/pytest-focused.log',
+            'src/packaging/windows/pytest-full.log',
+            'src/packaging/windows/js-chart.log',
+            'src/packaging/windows/js-terminal.log',
+            'src/packaging/windows/dist/install-test-log.txt',
+            'src/packaging/windows/dist/installer-test-log.txt',
+            'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
+          )
+          $existing = @($candidates | Where-Object { Test-Path $_ })
+          if ($existing.Count -eq 0) {
+            Write-Host 'no sanitized build/installer log was produced; inspect the gate annotation'
+            exit 0
+          }
+          $kit = Join-Path $env:GITHUB_WORKSPACE '_kit'
+          $dest = Join-Path $kit 'packaging/windows/diagnostics'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          foreach ($file in $existing) { Copy-Item $file $dest -Force -ErrorAction Continue }
+          git -C $kit config user.name 'axiom-ci'
+          git -C $kit config user.email 'axiom-ci@users.noreply.github.com'
+          git -C $kit add -A packaging/windows/diagnostics
+          git -C $kit diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { Write-Host 'the published diagnostics are unchanged'; exit 0 }
+          git -C $kit commit -m 'ci: record failed Windows build diagnostics'
+          git -C $kit push origin ('HEAD:{0}' -f $env:GITHUB_REF_NAME)
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axiom-vantage-operator-windows-x64-${{ steps.resolve.outputs.VERSION }}
+          path: |
+            src/packaging/windows/dist/*.exe
+            src/packaging/windows/dist/BUILD_METADATA.json
+            src/packaging/windows/dist/SHA256SUMS.txt
+            src/packaging/windows/dist/SOURCE_COMMIT.txt
+            src/packaging/windows/dist/install-test-log.txt
+            src/packaging/windows/dist/installer-test-log.txt
+            src/packaging/windows/dist/INSTALL_TEST_ERROR.txt
+            src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
+            src/packaging/windows/pytest-full.log
+            src/packaging/windows/pytest-focused.log
+            src/packaging/windows/js-chart.log
+            src/packaging/windows/js-terminal.log
+            src/USER_MANUAL.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish the prerelease
+        if: success()
+        shell: pwsh
+        working-directory: src/packaging/windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          $tag = "v$($env:VERSION)"
+          $passed = $meta.test_results.smoke_checks.Count - $meta.test_results.smoke_failed
+
+          # The checksums are printed in the release notes as well as shipped in
+          # SHA256SUMS.txt, so a downloader can check what they got without
+          # having to trust the asset listing.
+          $sums = @(Get-Content dist\SHA256SUMS.txt | Where-Object { $_.Trim() })
+          $sumBlock = ($sums | ForEach-Object { '    ' + $_.Trim() }) -join "`n"
+          $fullFailures = @($meta.test_results.full_failures | Where-Object { $_ })
+          if ($fullFailures.Count -eq 0) {
+            $failureBlock = 'none'
+          } else {
+            $failureBlock = ($fullFailures | ForEach-Object { '    ' + $_ }) -join "`n"
+          }
+          $installLog = Get-Content dist\installer-test-log.txt -Raw
+          $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+
+          $notes = @"
+          Windows x64 AXIOM Operator built from exact source commit ``$($meta.commit)``.
+
+          **Modes and safety.** AXIOM PAPER is independent and uses simulated fills. Vantage
+          DEMO/LIVE use the official terminal-hosted MetaTrader5 integration, account-specific
+          discovery, reviewed orders and broker reconciliation. Startup, credentials and recovery
+          never Arm or Activate. Live placement remains blocked until separate explicit operator
+          actions and every order guard succeed. CFDs are not represented as owned shares.
+
+          **Actual test results on this Windows runner**
+
+          * focused Python suites (hard gate): ``$($meta.test_results.focused_windows)``
+          * full Python suite (hard gate): ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
+          * JavaScript chart + operator interaction suites: ``$($meta.test_results.javascript)``
+          * DPAPI: ``$($meta.test_results.dpapi)``
+          * MT5 behavior: ``$($meta.test_results.fake_mt5)``
+          * on-machine frozen-app checks: $passed passed, $($meta.test_results.smoke_failed) failed
+          * installer/upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
+            launch, ``/terminal`` and legacy ``/chart``, static assets, token gates, safe disconnected
+            Vantage selection, upgrade user-data preservation, and uninstall. See the full logs.
+
+          **Not tested:** no real Vantage demo account was available, so no actual Vantage connection,
+          discovery or demo fill occurred. No live login or real-money order/cancel/modify was attempted.
+          The owner must follow the local demo verification procedure in ``USER_MANUAL.md``.
+
+          Full-suite failures: $failureBlock
+
+          **Signing:** ``$($meta.signing.status)`` - $($meta.signing.detail)
+
+          **SHA-256 of every released payload file** (identical to ``SHA256SUMS.txt``;
+          the checksum manifest cannot list itself)
+
+          $sumBlock
+
+          The per-user installer uses ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and preserves
+          ``%LOCALAPPDATA%\AXIOM`` on upgrade and silent uninstall. ``AXIOM-Chart.exe`` is retained
+          as the portable filename for upgrade compatibility; this is the new Operator release.
+
+          Tests and demo fills establish neither profitability nor live readiness. Read both manuals
+          and complete account-specific demo verification before considering any live action.
+          "@
+
+          $assets = @(
+            (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
+            (Join-Path (Get-Location) 'dist\AXIOM-Chart.exe')
+            (Join-Path (Get-Location) 'dist\BUILD_METADATA.json')
+            (Join-Path (Get-Location) 'dist\SHA256SUMS.txt')
+            (Join-Path (Get-Location) 'dist\SOURCE_COMMIT.txt')
+            (Join-Path (Get-Location) 'dist\install-test-log.txt')
+            (Join-Path (Get-Location) 'dist\installer-test-log.txt')
+            (Join-Path (Get-Location) 'pytest-focused.log')
+            (Join-Path (Get-Location) 'pytest-full.log')
+            (Join-Path (Get-Location) 'js-chart.log')
+            (Join-Path (Get-Location) 'js-terminal.log')
+            (Join-Path (Get-Location) 'WINDOWS_INSTALL_MANUAL.md')
+            (Join-Path (Get-Location) '..\..\USER_MANUAL.md')
+          )
+          foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "tag $tag exists; replacing that prerelease"
+            gh release delete $tag --yes --cleanup-tag
+          }
+          gh release create $tag --prerelease --target $meta.commit `
+            --title "AXIOM Vantage MT5 Operator $($env:VERSION) (Windows x64)" `
+            --notes $notes @assets
+          $published = gh release view $tag --json targetCommitish,assets,url | ConvertFrom-Json
+          if ($published.targetCommitish -ne $meta.commit) { throw "release target $($published.targetCommitish) != $($meta.commit)" }
+          $verifyDir = Join-Path $env:TEMP ('axiom-release-verify-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $verifyDir | Out-Null
+          gh release download $tag --dir $verifyDir
+          foreach ($line in $sums) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "invalid checksum line $line" }
+            $expectedHash = $Matches[1]; $name = $Matches[2]
+            $downloaded = Join-Path $verifyDir $name
+            if (-not (Test-Path $downloaded)) { throw "uploaded asset missing after download: $name" }
+            $actualHash = (Get-FileHash -Algorithm SHA256 $downloaded).Hash.ToLower()
+            if ($actualHash -ne $expectedHash) { throw "uploaded asset hash mismatch: $name" }
+          }
+          Write-Host "published and download-verified $tag"
+          Write-Host $published.url

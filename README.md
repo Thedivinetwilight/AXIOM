@@ -1,11 +1,43 @@
-# Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
+# AXIOM — Quantitative Research & Operator Trading Platform
 
-**Arena is a working, modular Python research and paper-trading platform,
-identified as `arena` version `3.0.5`. Real-money order routing does not exist
-in this project.** Sections below keep the full release history (V0.1 → V0.6 →
-V1 → V2.1 → FINAL 3.0.0); each historical section describes its own release.
+**Current source version: `3.3.0a1`.** AXIOM now provides an eight-page Operator
+console with mutually exclusive **AXIOM PAPER**, **VANTAGE DEMO**, and
+**VANTAGE LIVE** modes. Vantage connectivity and execution use the official
+`MetaTrader5` Python package through a local MT5 terminal—never website scraping
+or coordinate automation. Only instruments exposed by the connected account are
+discovered; share/ETF CFDs are not represented as owned underlying assets.
 
-**Current release (FINAL 3.0.5) highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
+Vantage startup is disconnected/disarmed, automation is unavailable/off, and
+credentials never authorize activation. Server-enforced readiness, separate Arm
+and Activate challenges, reviewed orders, durable intents, one submission attempt,
+broker reconciliation and persistent emergency stop guard the order path. AXIOM
+PAPER remains an independent simulator with explicitly simulated fills.
+
+> **No profitability or live-readiness claim.** Fake tests, demo fills and a
+> successful connection establish neither profitability nor real-money readiness.
+> No live login/order is permitted in CI. Read the exact release's build metadata
+> for real-Windows, demo, live, skipped and failed verification evidence.
+
+- **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
+- **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
+- **Architecture and verification plan:** [`docs/VANTAGE_NEXT_VERSION_PLAN.md`](docs/VANTAGE_NEXT_VERSION_PLAN.md)
+- **US-paper feed/risk evidence:** [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md)
+
+Launch the frozen Windows app and open `/terminal`. From source, use the existing
+virtual environment and run `python -m uvicorn app.main:create_app --factory
+--host 127.0.0.1 --port 8000`; read `API_TOKEN` from your private local config.
+Do not paste local tokens, broker credentials or DPAPI files into issues or chat.
+
+---
+
+# Historical Arena 3.0.5 documentation
+
+The remainder preserves earlier release history (V0.1 → V0.6 → V1 → V2.1 →
+FINAL 3.0.5). Statements such as “real-money order routing does not exist” describe
+those historical paper/sandbox releases, not the current Vantage-capable Operator.
+The read-only Alpaca US-equities feed with local simulated fills remains paper-only.
+
+**Historical Arena 3.0.5 highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
 
 **FINAL 3.0.5 (additive — Market Event Listener):** internet news ingestion (public sources, wars/escalations/ceasefires, sanctions/relief, tariffs/trade incl. US-China, policy/central-bank, oil/gas, shipping, regulatory, geopolitical) with relevance detection, source validation, normalization/dedup (fingerprint, multi-source merge, conflict reduces confidence, preserves conflict), impact assessment via transmission paths, decision IGNORE/MONITOR/EVALUATE/NO_TRADE with context to Strategy Router + hard-risk gate; never directly trades, never bypasses Router/lifecycle/portfolio-risk/hard-risk/STOP/broker/auth/LIVE; persisted event_id/timestamp/source/headline/summary/type/countries/markets/assets/sectors/confidence/relevance/effect/response/action/strategy/instruments/result; reputable→primary sources, dedup, unavailable→Arena continues; timeout/retry/backoff/rate-limit/cache/dedup/isolation; no eval/exec/shell; learning memory records price/vol/volume/sector response per 5m/30m/1h/1d/3d/5d via existing market-data infra (observational); dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, escaped, no secrets) — additive, no external live dependency; 20 deterministic tests.
 
@@ -227,6 +259,15 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
+- **Chart terminal + manual paper ticket** (`/chart`, linked from the
+  dashboard): a self-contained canvas chart — candles, volume, SMA 20/50,
+  EMA 200, RSI, zoom/pan, trade markers from real paper fills, working-limit
+  lines and entry/stop/target levels — plus a ticket that places **simulated**
+  market or limit orders in the local paper broker. Aggregation is honest:
+  intraday timeframes are built only from complete, contiguous source bars and
+  daily bars are never synthesised. Shorting is refused (no borrow model);
+  every configured hard limit applies; the page cannot reach a broker.
+  Documented in USER_MANUAL §5.1.
 - **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
   (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth
