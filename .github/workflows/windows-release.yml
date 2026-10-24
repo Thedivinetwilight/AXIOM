@@ -101,7 +101,9 @@ jobs:
       - name: Build, test and package
         shell: pwsh
         working-directory: src/packaging/windows
-        run: ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION"
+        run: |
+          & ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION" 2>&1 |
+            Tee-Object -FilePath build-windows.log
 
       - name: Verify the produced artifacts
         shell: pwsh
@@ -170,6 +172,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $candidates = @(
+            'src/packaging/windows/build-windows.log',
             'src/packaging/windows/pytest-focused.log',
             'src/packaging/windows/pytest-full.log',
             'src/packaging/windows/js-chart.log',
