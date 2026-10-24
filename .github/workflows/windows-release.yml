@@ -21,20 +21,11 @@ name: windows release
 
 on:
   push:
+    # Every commit on this dedicated release branch must produce fresh Windows
+    # evidence. Path filtering could otherwise leave app/test-only commits
+    # pointing at an older commit's binaries.
     branches:
       - arena/19f4cba3-axiom
-    paths:
-      - 'packaging/windows/BUILD_TARGET'
-      - 'packaging/windows/VERSION'
-      - 'packaging/windows/axiom.spec'
-      - 'packaging/windows/axiom.iss'
-      - 'packaging/windows/axiom_launcher.py'
-      - 'packaging/windows/build_windows.ps1'
-      - 'packaging/windows/install_test.ps1'
-      - 'packaging/windows/requirements-build.txt'
-      - 'packaging/windows/version_info.txt'
-      - 'packaging/windows/WINDOWS_INSTALL_MANUAL.md'
-      - '.github/workflows/windows-release.yml'
   workflow_dispatch:
     inputs:
       commit:
