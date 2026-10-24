@@ -1,4 +1,6 @@
+import importlib.util
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -84,7 +86,8 @@ def test_all_trading_apis_require_bearer_and_paper_is_default(client):
     assert client.get("/static/terminal/terminal.js").status_code == 200
     assert client.get("/static/terminal/terminal.css").status_code == 200
     capabilities = client.get("/api/trading/connection", headers=HEADERS).json()
-    assert capabilities["mt5_package_available"] is False  # Linux fake/test host
+    expected_package = os.name == "nt" and importlib.util.find_spec("MetaTrader5") is not None
+    assert capabilities["mt5_package_available"] is expected_package
     assert "plaintext fallback is disabled" in capabilities["secret_store"]
 
 
