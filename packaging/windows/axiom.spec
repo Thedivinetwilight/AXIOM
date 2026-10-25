@@ -41,6 +41,7 @@ datas = [
     (str(ROOT / "docs" / "TERMINAL_REDESIGN_PLAN.md"), "docs"),
     (str(ROOT / "docs" / "TERMINAL_PERFORMANCE.md"), "docs"),
     (str(ROOT / "docs" / "LISTED_ASSETS.md"), "docs"),
+    (str(ROOT / "docs" / "RESEARCH_CANDIDATES.md"), "docs"),
     (str(ROOT / "docs" / "WINDOWS_APP_CONTROL.md"), "docs"),
 ]
 

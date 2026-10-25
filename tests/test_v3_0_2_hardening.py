@@ -660,18 +660,33 @@ class TestHonestCancellation:
 
 class TestFullPromotionGate:
     def _evaluate(self, env, *, evidence, validation_better=True):
+        from unittest.mock import patch
         from app.backtesting.costs import ExecutionConfig
         from app.backtesting.engine import BacktestEngine
         from app.learning.evaluator import evaluate_and_maybe_promote
 
         base = [candle(i % 60, 100.0 + (0.4 if i % 3 else -0.2) * (1 + i * 0.01))
                 for i in range(60)]
-        # on this series period 2 beats period 4 on the validation leg
-        return evaluate_and_maybe_promote(
-            env, base, "momentum", {"period": 4, "threshold": 0.0},
-            BacktestEngine(ExecutionConfig()), "1m",
-            candidate_parameters={"period": 2, "threshold": 0.0},
-            evidence=evidence)
+
+        def validation(candles, strategy_name, parameters, engine, timeframe, **kwargs):
+            is_candidate = parameters["period"] == 2
+            return {
+                "valid": True,
+                "leg": "validation",
+                "oos_trades": 5,
+                "oos_expectancy": ((1.0 if validation_better else -0.25)
+                                   if is_candidate else 0.5),
+                "split": {"chronological": True},
+            }
+
+        # Isolate the evidence gate from indicator warm-up behavior. Actual
+        # chronological warm-up is covered separately by engine regression tests.
+        with patch("app.learning.evaluator.out_of_sample_expectancy", new=validation):
+            return evaluate_and_maybe_promote(
+                env, base, "momentum", {"period": 4, "threshold": 0.0},
+                BacktestEngine(ExecutionConfig()), "1m",
+                candidate_parameters={"period": 2, "threshold": 0.0},
+                evidence=evidence)
 
     def _full_evidence(self, **overrides):
         evidence = {"robustness_score": 0.8,
@@ -696,6 +711,13 @@ class TestFullPromotionGate:
         decision = self._evaluate(env, evidence=self._full_evidence())
         assert decision["promoted"] is True
         assert all(c["passed"] for c in decision["gate"]["checks"].values())
+
+    def test_negative_validation_candidate_never_promotes(self, env):
+        self._approve_lifecycle(env)
+        decision = self._evaluate(env, evidence=self._full_evidence(), validation_better=False)
+        assert decision["promoted"] is False
+        assert decision["gate"]["checks"]["positive_validation_expectancy"]["passed"] is False
+        assert decision["gate"]["checks"]["strict_validation_improvement"]["passed"] is False
 
     def test_missing_robustness_blocks_despite_better_validation(self, env):
         """THE integration proof: validation looks great, another gate fails."""

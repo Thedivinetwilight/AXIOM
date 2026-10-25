@@ -94,7 +94,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -413,7 +413,8 @@ foreach ($part in $SetupParts) { Copy-Item $part $InstallStage }
 Copy-Item -Recurse $OnedirRoot $PortableApp
 $Docs = @(
     'US_EQUITIES_PAPER.md', 'VANTAGE_NEXT_VERSION_PLAN.md', 'TERMINAL_REDESIGN_PLAN.md',
-    'TERMINAL_PERFORMANCE.md', 'LISTED_ASSETS.md', 'WINDOWS_APP_CONTROL.md'
+    'TERMINAL_PERFORMANCE.md', 'LISTED_ASSETS.md', 'WINDOWS_APP_CONTROL.md',
+    'RESEARCH_CANDIDATES.md'
 )
 foreach ($destination in @($InstallStage, $PortableApp)) {
     Copy-Item (Join-Path $Dist 'SOURCE_COMMIT.txt') $destination
@@ -503,7 +504,7 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         performance_benchmarks = 'python scripts/benchmark_terminal.py; AXIOM_UI_BENCHMARK_OUTPUT=TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs'
@@ -521,6 +522,7 @@ $Meta = [ordered]@{
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
+        research_candidates = 'chronological warmup, promotion gates and per-instrument CLI regressions passed on local/synthetic fixtures; no real-market profitability or execution evidence'
         performance     = 'exact-commit Windows fake-provider backend + fake-canvas UI benchmarks passed; see TERMINAL_BENCHMARK.json and TERMINAL_UI_BENCHMARK.json; no real DEMO/LIVE latency measured'
         listed_assets   = 'authenticated listed identity/policy tests passed; no listed execution provider and no MT5/CFD substitution'
         app_control_workaround = 'loaderless installer and onedir ZIPs built; portable ZIP acceptance runs in the workflow; enforced on-device Smart App Control remains unverified'

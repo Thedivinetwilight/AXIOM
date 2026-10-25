@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.5.0a2**
+**Current source version: 3.6.0a1**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -476,3 +476,19 @@ No agent or CI process may log into LIVE, Arm/Activate LIVE, or place a real-mon
 - [ ] The owner accepts that losses, gaps, slippage, rejection, disconnection and broker/contract changes can exceed estimates.
 
 Software tests, benchmarks, paper fills and DEMO executions do not establish profitability or LIVE readiness. Activation is an explicit owner decision, not a certification by AXIOM.
+
+---
+
+## 20. Research candidate generation — source CLI
+
+The repaired source CLI can generate historical research candidates from local history. Read `docs/RESEARCH_CANDIDATES.md` (also staged as `docs/RESEARCH_CANDIDATES.md` in Windows artifacts) for commands and full limitations.
+
+```bash
+python -m app discover --instruments 'NSE_EQ|INE002A01018' --unit days --interval 1 --timeframe 1D --max-candidates 12 --output results/discovery.json
+python -m app research run --instruments 'NSE_EQ|INE002A01018' --unit days --interval 1 --timeframe 1D --periods 2,3,5
+python run.py --mode validate --csv data/sample.csv --symbol DEMO --timeframe 1D --output results/validation-sample
+```
+
+Instruments are evaluated separately; at least 60 candles are required per key. Validation/locked-test warmup uses only earlier candles. A baseline is never promoted merely because it is the baseline, and validation promotion requires positive expectancy and strict baseline improvement in addition to the other gates.
+
+The bundled sample CSV is synthetic. Qualified candidates, positive backtests and paper results are not guarantees of profit or LIVE readiness. Generic OHLCV research does not verify Vantage lot/tick/margin/session/CFD financing rules and never becomes an order instruction automatically. These commands do not change execution mode, Arm/Activate, automation or emergency stop. All reviewed-order and reconciliation controls remain separate.

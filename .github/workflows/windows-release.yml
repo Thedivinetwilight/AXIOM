@@ -179,7 +179,8 @@ jobs:
             'benchmark-python.log', 'js-terminal-benchmark.log',
             'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
             'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
-            '..\..\docs\LISTED_ASSETS.md', '..\..\docs\TERMINAL_PERFORMANCE.md',
+            '..\..\docs\LISTED_ASSETS.md', '..\..\docs\RESEARCH_CANDIDATES.md',
+            '..\..\docs\TERMINAL_PERFORMANCE.md',
             '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md'
           )
           $sums = @()
@@ -262,6 +263,7 @@ jobs:
             src/packaging/windows/TERMINAL_UI_BENCHMARK.json
             src/USER_MANUAL.md
             src/docs/LISTED_ASSETS.md
+            src/docs/RESEARCH_CANDIDATES.md
             src/docs/TERMINAL_PERFORMANCE.md
             src/docs/TERMINAL_REDESIGN_PLAN.md
             src/docs/WINDOWS_APP_CONTROL.md
@@ -310,6 +312,13 @@ jobs:
           All packages are UNSIGNED: no Windows policy is disabled or bypassed, and acceptance by an
           enforced on-device Smart App Control/WDAC policy is NOT claimed. See ``WINDOWS_APP_CONTROL.md``.
 
+          **Research candidate repairs.** Discovery now evaluates instruments separately, supports
+          integer parameter grids and JSON reports, and uses stable scheduling seeds. Validation and
+          locked-test warmup use only prior candles. Promotion requires positive validation expectancy
+          and strict baseline improvement in addition to trade, robustness and drawdown gates. Read
+          ``docs/RESEARCH_CANDIDATES.md``. Research tests use local/synthetic fixtures only: historical
+          qualification is NOT a profit guarantee, Vantage contract verification or order authorization.
+
           **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
           uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
           selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an
@@ -335,6 +344,7 @@ jobs:
           * DPAPI: ``$($meta.test_results.dpapi)``
           * MT5 behavior: ``$($meta.test_results.fake_mt5)``
           * Independent read-only market-data tests: ``$($meta.test_results.read_only_mt5)``
+          * Research candidates: ``$($meta.test_results.research_candidates)``
           * Performance: ``$($meta.test_results.performance)``
           * Listed assets: ``$($meta.test_results.listed_assets)``
           * Real demo terminal/feed verification: ``$($meta.test_results.demo_market_data)``
@@ -392,6 +402,7 @@ jobs:
             (Join-Path (Get-Location) 'WINDOWS_INSTALL_MANUAL.md')
             (Join-Path (Get-Location) '..\..\USER_MANUAL.md')
             (Join-Path (Get-Location) '..\..\docs\LISTED_ASSETS.md')
+            (Join-Path (Get-Location) '..\..\docs\RESEARCH_CANDIDATES.md')
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_PERFORMANCE.md')
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
             (Join-Path (Get-Location) '..\..\docs\WINDOWS_APP_CONTROL.md')

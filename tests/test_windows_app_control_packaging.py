@@ -16,7 +16,7 @@ def read(path: Path) -> str:
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.5.0a2"
+    assert version == "3.6.0a1"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f"StringStruct('ProductVersion', '{version}')" in read(KIT / "version_info.txt")
     assert f"**Version:** {version}" in read(KIT / "WINDOWS_INSTALL_MANUAL.md")
@@ -31,6 +31,7 @@ def test_inno_uses_loaderless_mode_and_complete_onedir_sources():
     assert "recursesubdirs createallsubdirs" in script
     assert "-windows-x64-no-temp-setup" in script
     assert "WINDOWS_APP_CONTROL.md" in script
+    assert "RESEARCH_CANDIDATES.md" in script
 
 
 def test_spec_retains_legacy_onefile_and_has_explicit_onedir_branch():
@@ -38,6 +39,7 @@ def test_spec_retains_legacy_onefile_and_has_explicit_onedir_branch():
     assert 'os.environ.get("AXIOM_ONEDIR") == "1"' in spec
     assert "exclude_binaries=True" in spec
     assert 'COLLECT(' in spec and 'name="AXIOM-Operator"' in spec
+    assert "RESEARCH_CANDIDATES.md" in spec
     # The default EXE still contains binaries directly for upgrade compatibility.
     default = spec.rsplit("else:", 1)[-1]
     assert "a.binaries" in default and "runtime_tmpdir=None" in default
@@ -55,6 +57,8 @@ def test_build_packages_sidecars_and_both_zip_alternatives():
     assert "foreach ($f in @($Exe, $InstallZip, $PortableZip))" in build
     assert "app_control_device_verification" not in build  # added only after real portable gate
     assert "UNSIGNED workaround only" in build
+    assert "RESEARCH_CANDIDATES.md" in build
+    assert "tests/test_research_candidate_cli.py" in build
 
 
 def test_install_and_portable_acceptance_are_separate_hard_gates():
@@ -67,6 +71,7 @@ def test_install_and_portable_acceptance_are_separate_hard_gates():
     assert "*-no-temp-install.zip" in workflow
     assert "*-portable.zip" in workflow
     assert "(Get-ChildItem dist -Filter '*-setup.exe'" not in workflow
+    assert workflow.count("RESEARCH_CANDIDATES.md") >= 3
 
     install = read(KIT / "install_test.ps1")
     assert "refusing to run an incomplete loaderless installer" in install
