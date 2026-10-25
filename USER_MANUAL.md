@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.6.0a2**
+**Current source version: 3.7.0a1**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -17,6 +17,8 @@ AXIOM now has three mutually exclusive execution modes:
 The Vantage integration uses the official `MetaTrader5` Python package through a local MetaTrader 5 terminal. It does not scrape the Vantage website or automate the terminal with screen coordinates. In a Vantage execution session, quotes, contract metadata, account state and execution come from the same terminal/account connection. In LOCAL PAPER, the optional MT5 feed is a different service with a read-only gateway: it can discover contracts and read ticks/closed bars, but it has no order, position, history, margin-precheck or execution methods. Connecting it never changes the execution mode.
 
 For Windows download, installation and upgrade steps, read `packaging/windows/WINDOWS_INSTALL_MANUAL.md` or the copy installed beside the application. Historical Arena research and paper/sandbox material remains in `README.md`; it does not describe the Vantage order path.
+
+Version 3.7.0a1 also includes a **separate Daily Upstox Autonomy** boundary at `/autonomy`. Its live-market local PAPER, default-disabled UPSTOX_LIVE real-money path, exact listed-equity/currency-derivative catalog, unattended daily-session rules, three-leg GTT protection, reconciliation, Kronos artifacts and paired-ablation research are documented in `docs/AUTONOMY.md` (also served at `/autonomy/manual`). It does not alter the Vantage rules above. No Upstox account-specific or external DEMO/LIVE verification is implied.
 
 ---
 

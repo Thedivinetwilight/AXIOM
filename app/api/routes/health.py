@@ -1,23 +1,34 @@
 from app import __version__
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 router = APIRouter()
 
 
 @router.get("/health")
-def health():
-    """Public process health, never current account or activation state.
-
-    The legacy engine remains configured as local paper. Vantage is a separate
-    authenticated in-app session and always starts disconnected/disarmed.
-    """
+def health(request: Request):
+    """Process health with separate legacy and autonomy execution scopes."""
+    autonomy = getattr(request.app.state, "autonomy", None)
+    runtimes = list(getattr(autonomy, "runtimes", {}).values()) if autonomy else []
+    live_capable = any(runtime.mode == "UPSTOX_LIVE" and runtime.executor is not None
+                       for runtime in runtimes)
+    live_active = any(runtime.mode == "UPSTOX_LIVE" and runtime.state == "ACTIVE"
+                      for runtime in runtimes)
     return {
         "status": "ok",
         "version": __version__,
-        "mode": "PAPER",
-        "live_trading": False,
-        "real_order_routing": "VANTAGE_MT5_GUARDED",
+        "mode": "UPSTOX_LIVE" if live_capable else "PAPER",
+        "live_trading": live_active,
+        "real_order_routing": "UPSTOX_AUTONOMY_GUARDED" if live_capable else "VANTAGE_MT5_GUARDED",
         "vantage_startup": "DISCONNECTED_DISARMED",
+        "legacy_mode": "PAPER",
+        "autonomy": {
+            "available": autonomy is not None,
+            "live_capable": live_capable,
+            "live_active": live_active,
+            "sessions": len(runtimes),
+            "paper_only": not live_capable,
+            "initialization_error": getattr(request.app.state, "autonomy_error", ""),
+        },
         "profitability_claim": "none",
     }
 

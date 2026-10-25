@@ -34,6 +34,8 @@ datas = [
     (str(ROOT / "app" / "static"), "app/static"),
     (str(ROOT / "data"), "data"),
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
+    (str(ROOT / "app" / "autonomy" / "vendor" / "kronos"), "app/autonomy/vendor/kronos"),
+    (str(ROOT / "config" / "kronos-small.json"), "config"),
     # PyInstaller data destinations are directories, not target filenames.
     # /manual reads USER_MANUAL.md at the frozen resource root.
     (str(ROOT / "USER_MANUAL.md"), "."),
@@ -43,6 +45,8 @@ datas = [
     (str(ROOT / "docs" / "LISTED_ASSETS.md"), "docs"),
     (str(ROOT / "docs" / "RESEARCH_CANDIDATES.md"), "docs"),
     (str(ROOT / "docs" / "WINDOWS_APP_CONTROL.md"), "docs"),
+    (str(ROOT / "docs" / "AUTONOMY.md"), "docs"),
+    (str(ROOT / "docs" / "autonomy-shakedown.template.json"), "docs"),
 ]
 
 # uvicorn resolves its loop and protocol implementations by name at runtime, so

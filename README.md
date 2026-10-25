@@ -1,6 +1,6 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.6.0a2`.** AXIOM provides an eight-page Operator
+**Current source version: `3.7.0a1`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
@@ -27,7 +27,17 @@ feed/chart/submission/broker-acknowledgement measurements. A fail-closed
 `listed-assets-v1` interface requires exact listed identity and a separate provider;
 it does not route listed instruments to Vantage CFDs or claim listed execution.
 
-Version 3.6.0a2 repairs and hardens local research candidate generation:
+Version 3.7.0a1 adds a separately gated **Daily Upstox Autonomy** boundary at
+`/autonomy`: exact BOD-listed NSE/BSE equities and NCD/BCD currency derivatives
+(never spot forex), local live-market PAPER with no broker mutation route, and
+default-disabled UPSTOX_LIVE requiring fresh daily authorization/risk plus
+explicit Arm and Activate. It includes intent-before-write journals, three-leg
+GTT protection, reconciliation, confirmed-swing/non-loosening stops, dynamic
+portfolio sizing, paired-ablation research, and pinned/hash-checked optional
+Kronos integration. No Upstox account, external DEMO/LIVE order, Kronos inference,
+or complete-session shakedown has been verified by the development tests.
+
+Version 3.6.0a2's research candidate repairs are retained:
 independent instrument runs, chronological prior-only warmup,
 positive-and-improved validation promotion gates, mandatory positive
 walk-forward-proxy evidence, baseline-relative robustness, correct zero-PF
@@ -47,6 +57,7 @@ cannot guarantee acceptance by an enforced on-device policy.
 > for real-Windows, demo, live, skipped and failed verification evidence.
 
 - **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
+- **Daily Upstox autonomy:** [`docs/AUTONOMY.md`](docs/AUTONOMY.md)
 - **Research candidates and evidence limits:** [`docs/RESEARCH_CANDIDATES.md`](docs/RESEARCH_CANDIDATES.md)
 - **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
 - **Error 4551 / App Control boundary:** [`docs/WINDOWS_APP_CONTROL.md`](docs/WINDOWS_APP_CONTROL.md)

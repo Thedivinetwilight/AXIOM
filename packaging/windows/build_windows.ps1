@@ -94,7 +94,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -108,6 +108,10 @@ if ($LASTEXITCODE -ne 0) { Fail 'npm ci failed' }
 if ($LASTEXITCODE -ne 0) { Fail 'legacy chart JavaScript syntax failed' }
 & node --check app/static/terminal/terminal.js
 if ($LASTEXITCODE -ne 0) { Fail 'operator JavaScript syntax failed' }
+& node --check app/static/autonomy/autonomy.js
+if ($LASTEXITCODE -ne 0) { Fail 'autonomy JavaScript syntax failed' }
+& node tests/js/autonomy_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-autonomy.log')
+if ($LASTEXITCODE -ne 0) { Fail 'autonomy JavaScript interaction harness failed' }
 & node tests/js/chart_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-chart.log')
 if ($LASTEXITCODE -ne 0) { Fail 'legacy chart JavaScript harness failed' }
 & node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal.log')
@@ -224,6 +228,14 @@ try {
     $Ok = (Check ($TerminalCss.StatusCode -eq 200) 'operator terminal.css served from the bundle') -and $Ok
     $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 10
     $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Vantage' -and $Manual.Content -match 'Arm' -and $Manual.Content -match 'Owner-run Vantage DEMO execution rehearsal' -and $Manual.Content -match 'LIVE-readiness checklist') 'bundled user manual covers lifecycle, owner DEMO verification and LIVE checklist') -and $Ok
+    $Autonomy = Invoke-WebRequest -UseBasicParsing "$Base/autonomy" -TimeoutSec 10
+    $Ok = (Check ($Autonomy.StatusCode -eq 200 -and $Autonomy.Content -match 'PAPER' -and $Autonomy.Content -match 'UPSTOX_LIVE' -and $Autonomy.Content -match 'static/autonomy/autonomy.js') 'autonomy page and explicit execution boundaries are bundled') -and $Ok
+    $AutonomyJs = Invoke-WebRequest -UseBasicParsing "$Base/static/autonomy/autonomy.js" -TimeoutSec 10
+    $Ok = (Check ($AutonomyJs.StatusCode -eq 200 -and $AutonomyJs.Content -match 'reconcile' -and $AutonomyJs.Content -match 'activate') 'autonomy JavaScript served from the bundle') -and $Ok
+    $ChartRuntime = Invoke-WebRequest -UseBasicParsing "$Base/static/vendor/lightweight-charts/lightweight-charts.standalone.production.js" -TimeoutSec 10
+    $Ok = (Check ($ChartRuntime.StatusCode -eq 200) 'pinned display-only Lightweight Charts runtime is bundled') -and $Ok
+    $AutonomyManual = Invoke-WebRequest -UseBasicParsing "$Base/autonomy/manual" -TimeoutSec 10
+    $Ok = (Check ($AutonomyManual.StatusCode -eq 200 -and $AutonomyManual.Content -match 'not a live-readiness certificate') 'autonomy operator manual is bundled with honest limitations') -and $Ok
 
     $Js = Invoke-WebRequest -UseBasicParsing "$Base/static/chart/chart.js" -TimeoutSec 10
     $Ok = (Check ($Js.StatusCode -eq 200 -and $Js.Content -match 'markerPoint') 'chart.js served from the bundle') -and $Ok
@@ -251,10 +263,16 @@ try {
     try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/listed-assets/status" -TimeoutSec 5 }
     catch { $AnonListed = [int]$_.Exception.Response.StatusCode }
     $Ok = (Check ($AnonListed -eq 401) "listed-asset status refuses anonymous request ($AnonListed)") -and $Ok
+    $AnonAutonomy = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/autonomy/status" -TimeoutSec 5 }
+    catch { $AnonAutonomy = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($AnonAutonomy -eq 401) "autonomy status refuses anonymous request ($AnonAutonomy)") -and $Ok
 
     $Cfg = Get-Content (Join-Path $SmokeHome 'axiom.env')
     $Token = (($Cfg | Select-String '^API_TOKEN=').Line) -replace '^API_TOKEN=', ''
     $Headers = @{ Authorization = "Bearer $Token" }
+    $AutonomyStatus = Invoke-RestMethod -Headers $Headers "$Base/api/autonomy/status"
+    $Ok = (Check ($AutonomyStatus.automatic_arm_or_activate -eq $false -and $AutonomyStatus.sessions.Count -eq 0 -and $AutonomyStatus.kronos.weights_bundled -eq $false) 'autonomy starts with no sessions, no automatic approval and no bundled Kronos weights') -and $Ok
 
     $Trading = Invoke-RestMethod -Headers $Headers "$Base/api/trading/status"
     $Ok = (Check ($Trading.mode -eq 'AXIOM_PAPER' -and -not $Trading.armed -and -not $Trading.active) 'operator starts in independent PAPER, disarmed') -and $Ok

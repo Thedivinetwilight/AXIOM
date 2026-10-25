@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "mode": "PAPER",
+  "trading_day": "REPLACE_WITH_EXCHANGE_TRADING_DAY",
+  "market_timings_source": "UPSTOX_MARKET_TIMINGS",
+  "session_open": "REPLACE_WITH_UPSTOX_SESSION_OPEN_ISO_TIMESTAMP",
+  "session_close": "REPLACE_WITH_UPSTOX_SESSION_CLOSE_ISO_TIMESTAMP",
+  "observation_started_at": "REPLACE_WITH_ACTUAL_OBSERVATION_START_ISO_TIMESTAMP",
+  "observation_ended_at": "REPLACE_WITH_ACTUAL_OBSERVATION_END_ISO_TIMESTAMP",
+  "scan_count": 0,
+  "completed_bar_count": 0,
+  "broker_mutations_reachable": false,
+  "broker_order_requests": 0,
+  "audit_hash_chain_valid": false,
+  "unresolved_intents": 0,
+  "unresolved_faults": [],
+  "operational_checks": {
+    "fresh_daily_access_and_risk": false,
+    "explicit_paper_arm_and_activate": false,
+    "authoritative_upstox_data": false,
+    "exact_instrument_metadata": false,
+    "completed_bar_processing": false,
+    "no_duplicate_orders": false,
+    "daily_loss_entry_block_with_exit_management": false,
+    "stale_data_fail_closed": false,
+    "disconnect_fail_closed": false,
+    "ambiguous_outcome_reconciled_without_blind_retry": false,
+    "protection_continuous_and_confirmed": false,
+    "reconciliation_and_audit_reviewed": false,
+    "restart_remains_disarmed": false
+  }
+}

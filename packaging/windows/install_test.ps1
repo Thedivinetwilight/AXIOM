@@ -243,6 +243,12 @@ try {
     Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'submitVantageReview' -and $terminalJs.Content -match 'bindChartCanvas' -and $terminalJs.Content -match 'renderTicketEstimate') 'operator JavaScript and chart/ticket interactions are served from the installed package'
     $terminalCss = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.css' -f $base) -TimeoutSec 20
     Check ($terminalCss.StatusCode -eq 200) 'operator CSS is served from the installed package'
+    $autonomy = Invoke-WebRequest -UseBasicParsing ('{0}/autonomy' -f $base) -TimeoutSec 20
+    Check ($autonomy.StatusCode -eq 200 -and $autonomy.Content -match 'UPSTOX_LIVE') 'installed autonomy page names its explicit LIVE boundary'
+    $autonomyJs = Invoke-WebRequest -UseBasicParsing ('{0}/static/autonomy/autonomy.js' -f $base) -TimeoutSec 20
+    Check ($autonomyJs.StatusCode -eq 200) 'installed autonomy JavaScript is present'
+    $autonomyManual = Invoke-WebRequest -UseBasicParsing ('{0}/autonomy/manual' -f $base) -TimeoutSec 20
+    Check ($autonomyManual.StatusCode -eq 200 -and $autonomyManual.Content -match 'not a live-readiness certificate') 'installed autonomy manual preserves limitations'
     $manual = Invoke-WebRequest -UseBasicParsing ('{0}/manual' -f $base) -TimeoutSec 20
     Check ($manual.StatusCode -eq 200 -and $manual.Content -match 'Vantage' -and $manual.Content -match 'Activate') 'installed manual covers Vantage and Activate'
 

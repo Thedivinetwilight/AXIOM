@@ -107,6 +107,10 @@ try {
     Check ($Terminal.Content -match 'execution-boundary' -and $Terminal.Content -match 'drawing-tool' -and $Terminal.Content -match 'performance-summary') 'portable serves the redesigned terminal controls'
     $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 20
     Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Owner-run Vantage DEMO execution rehearsal') 'portable serves the bundled operator manual'
+    $Autonomy = Invoke-WebRequest -UseBasicParsing "$Base/autonomy" -TimeoutSec 20
+    Check ($Autonomy.StatusCode -eq 200 -and $Autonomy.Content -match 'UPSTOX_LIVE') 'portable serves the daily autonomy boundary'
+    $AutonomyManual = Invoke-WebRequest -UseBasicParsing "$Base/autonomy/manual" -TimeoutSec 20
+    Check ($AutonomyManual.StatusCode -eq 200 -and $AutonomyManual.Content -match 'not a live-readiness certificate') 'portable serves autonomy limitations'
     $Anonymous = -1
     try {
         $null = Invoke-WebRequest -UseBasicParsing "$Base/api/trading/status" -TimeoutSec 10
@@ -129,6 +133,8 @@ try {
         Check ($Status.mode -eq 'AXIOM_PAPER' -and -not $Status.connected -and -not $Status.armed -and -not $Status.active) 'portable starts LOCAL PAPER, disconnected and disarmed'
         $Capabilities = Invoke-RestMethod -Headers $Headers "$Base/api/trading/connection" -TimeoutSec 15
         Check ($Capabilities.secret_store -match 'Windows DPAPI' -and $Capabilities.mt5_package_available) 'portable includes Windows DPAPI and the official MT5 module'
+        $AutonomyStatus = Invoke-RestMethod -Headers $Headers "$Base/api/autonomy/status" -TimeoutSec 15
+        Check (-not $AutonomyStatus.automatic_arm_or_activate -and $AutonomyStatus.sessions.Count -eq 0) 'portable autonomy starts without sessions or automatic approval'
     }
     Stop-Portable
     Start-Sleep -Milliseconds 500

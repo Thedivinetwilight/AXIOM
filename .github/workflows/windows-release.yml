@@ -175,13 +175,14 @@ jobs:
             (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName,
             'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
             'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
-            'pytest-focused.log', 'pytest-full.log', 'js-chart.log', 'js-terminal.log',
+            'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log',
             'benchmark-python.log', 'js-terminal-benchmark.log',
             'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
             'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
             '..\..\docs\LISTED_ASSETS.md', '..\..\docs\RESEARCH_CANDIDATES.md',
             '..\..\docs\TERMINAL_PERFORMANCE.md',
-            '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md'
+            '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md',
+            '..\..\docs\AUTONOMY.md', '..\..\docs\autonomy-shakedown.template.json'
           )
           $sums = @()
           foreach ($file in $files) {
@@ -208,6 +209,7 @@ jobs:
             'src/packaging/windows/frozen-launcher-stderr.log',
             'src/packaging/windows/pytest-focused.log',
             'src/packaging/windows/pytest-full.log',
+            'src/packaging/windows/js-autonomy.log',
             'src/packaging/windows/js-chart.log',
             'src/packaging/windows/js-terminal.log',
             'src/packaging/windows/benchmark-python.log',
@@ -255,6 +257,7 @@ jobs:
             src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
             src/packaging/windows/pytest-full.log
             src/packaging/windows/pytest-focused.log
+            src/packaging/windows/js-autonomy.log
             src/packaging/windows/js-chart.log
             src/packaging/windows/js-terminal.log
             src/packaging/windows/benchmark-python.log
@@ -267,6 +270,8 @@ jobs:
             src/docs/TERMINAL_PERFORMANCE.md
             src/docs/TERMINAL_REDESIGN_PLAN.md
             src/docs/WINDOWS_APP_CONTROL.md
+            src/docs/AUTONOMY.md
+            src/docs/autonomy-shakedown.template.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -321,6 +326,17 @@ jobs:
           ``docs/RESEARCH_CANDIDATES.md``. Research tests use local/synthetic fixtures only: historical
           qualification is NOT a profit guarantee, Vantage contract verification or order authorization.
 
+          **Daily Upstox autonomy.** A separate ``/autonomy`` operator boundary supports exact BOD
+          NSE/BSE equities and NCD/BCD exchange-listed currency futures/options (never spot forex).
+          Live-market PAPER has no broker mutation route. UPSTOX_LIVE is disabled by default and needs
+          fresh daily read-only authorization/risk, account/margin/static-IP/session/evidence preflights,
+          and separate operator Arm + Activate. Intent-before-write journals, three-leg GTT protection,
+          non-loosening stops, reconciliation, daily-loss entry blocking, and fail-closed recovery are
+          included. Kronos weights are not bundled; hash verification and real inference are not claimed.
+          Read ``docs/AUTONOMY.md``. No external Upstox DEMO/LIVE account or complete-session shakedown
+          was available to CI, so account eligibility, compliance, production protection and live readiness
+          remain unverified.
+
           **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
           uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
           selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an
@@ -361,6 +377,8 @@ jobs:
           **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
           account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
           No Vantage demo execution fill, live login or real-money order/cancel/modify was attempted.
+          No Upstox account login, external sandbox/DEMO order, real-money order/cancel/modify, Kronos
+          weight download/inference, or complete market-session autonomy shakedown was attempted.
           Benchmark reports measure fake in-process provider and fake canvas paths only; no real DEMO/LIVE
           terminal, network, broker or GPU latency was measured. The owner must follow the local demo
           market-data and separate DEMO execution procedures in ``USER_MANUAL.md`` before external claims.
@@ -395,6 +413,7 @@ jobs:
             (Join-Path (Get-Location) 'dist\portable-test-log.txt')
             (Join-Path (Get-Location) 'pytest-focused.log')
             (Join-Path (Get-Location) 'pytest-full.log')
+            (Join-Path (Get-Location) 'js-autonomy.log')
             (Join-Path (Get-Location) 'js-chart.log')
             (Join-Path (Get-Location) 'js-terminal.log')
             (Join-Path (Get-Location) 'benchmark-python.log')
@@ -408,6 +427,8 @@ jobs:
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_PERFORMANCE.md')
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
             (Join-Path (Get-Location) '..\..\docs\WINDOWS_APP_CONTROL.md')
+            (Join-Path (Get-Location) '..\..\docs\AUTONOMY.md')
+            (Join-Path (Get-Location) '..\..\docs\autonomy-shakedown.template.json')
           )
           foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
           gh release view $tag 2>$null | Out-Null

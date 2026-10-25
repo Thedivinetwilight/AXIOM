@@ -29,6 +29,12 @@ from app.vantage.store import VantageStore
 from app.market_data.mt5 import MarketDataError, MT5MarketDataService
 from app.performance import LatencyTracker
 from app.listed_assets import ListedAssetService, ListedProviderUnavailable
+from app.autonomy.config import AutonomySettings
+from app.autonomy.service import AutonomyService
+from app.autonomy.store import AutonomyStore
+from app.autonomy.upstox import InstrumentCatalog
+from app.autonomy.runner import AutonomyRunner
+from app.api.routes import autonomy
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -72,7 +78,52 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 audit=repository.record_system_event,
                 metrics=app.state.performance,
             )
+            # Autonomy is an isolated boundary.  Startup may load public BOD
+            # metadata and a halted journal, but never creates/Arms/Activates
+            # a session and never starts with an execution permit.
+            app.state.autonomy = None
+            app.state.autonomy_runner = None
+            app.state.autonomy_error = ""
+            autonomy_store = None
+            try:
+                autonomy_settings = AutonomySettings.from_env()
+                autonomy_base = Path(app.state.data_dir)
+                if not app.state.explicit_data_dir and database_path != ":memory:":
+                    # Frozen/production settings already point the legacy DB at
+                    # the per-user writable directory; keep autonomy state next
+                    # to it rather than inside the read-only bundle.
+                    autonomy_base = Path(database_path).parent
+                autonomy_dir = autonomy_base / "autonomy"
+                autonomy_catalog = InstrumentCatalog(
+                    autonomy_settings, autonomy_dir / "instrument-catalog.json"
+                )
+                autonomy_catalog.load_cache(require_current_day=False)
+                autonomy_store = AutonomyStore(autonomy_dir / "journal.sqlite3")
+                app.state.autonomy = AutonomyService(
+                    autonomy_settings, autonomy_store, autonomy_catalog,
+                    data_dir=autonomy_dir,
+                )
+                if autonomy_settings.worker_enabled:
+                    app.state.autonomy_runner = AutonomyRunner(
+                        app.state.autonomy, autonomy_settings.scan_interval_seconds
+                    )
+                    await app.state.autonomy_runner.start()
+            except Exception as exc:
+                # Legacy research/paper remains available, while autonomy is
+                # explicitly unavailable rather than silently falling back.
+                app.state.autonomy_error = f"Autonomy initialization failed: {type(exc).__name__}"
+                logging.getLogger("bot.autonomy").error(
+                    "autonomy_initialization_failed", extra={"error": type(exc).__name__}
+                )
+                if autonomy_store is not None:
+                    autonomy_store.close()
             yield
+            if app.state.autonomy_runner is not None:
+                await app.state.autonomy_runner.stop()
+            if app.state.autonomy is not None:
+                app.state.autonomy.close()
+            if autonomy_store is not None:
+                autonomy_store.close()
             await app.state.simulator.stop()
             app.state.market_data.disconnect("Application shutdown")
             if app.state.vantage.connector:
@@ -112,6 +163,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         return response
     app.state.settings = settings
     app.state.data_dir = Path(data_dir or ROOT / "data")
+    app.state.explicit_data_dir = data_dir is not None
     app.state.research_lock = Lock()
     app.state.listed_assets = ListedAssetService()
 
@@ -171,6 +223,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         )
 
     app.include_router(health.router)
+    app.include_router(autonomy.page)
+    app.include_router(autonomy.api)
     app.include_router(terminal.router)
     # Dashboard router applies its own per-route dependencies: the HTML PAGE
     # is readable by local (loopback) browsers without a Bearer header, while

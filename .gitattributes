@@ -1,0 +1,3 @@
+# Keep pinned upstream Kronos source byte-for-byte; its original files contain
+# CRLF/trailing whitespace that is intentionally not rewritten by this project.
+app/autonomy/vendor/kronos/model/*.py whitespace=-trailing-space
