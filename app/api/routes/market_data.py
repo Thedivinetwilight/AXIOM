@@ -1,5 +1,6 @@
 """Authenticated read-only MT5 market-data API. No order routes exist here."""
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, Request
@@ -91,8 +92,11 @@ def chart(
         )
     # This request is explicitly an MT5 request. Failure raises; it never
     # falls through to charting.source, CSV, DEMO, replay, or cached bars.
-    quote = svc.ensure_advancing(symbol)
-    candles, warnings = svc.copy_bars(symbol, timeframe, limit)
+    tracker = getattr(request.app.state, "performance", None)
+    timer = tracker.measure("market_data.chart.backend") if tracker else nullcontext()
+    with timer:
+        quote = svc.ensure_advancing(symbol)
+        candles, warnings = svc.copy_bars(symbol, timeframe, limit)
     instrument = svc.instrument(symbol)
     quote_view = instrument["quote"]
     generated_at = datetime.now(timezone.utc).isoformat()

@@ -172,6 +172,9 @@ try {
     Check (Test-Path $installedExe) ('the installer placed AXIOM-Chart.exe in {0}' -f $installDir)
     Check (Test-Path (Join-Path $installDir 'WINDOWS_INSTALL_MANUAL.md')) 'the user manual was installed next to the executable'
     Check (Test-Path (Join-Path $installDir 'SOURCE_COMMIT.txt')) 'the source commit record was installed'
+    foreach ($doc in @('docs\LISTED_ASSETS.md', 'docs\TERMINAL_PERFORMANCE.md', 'docs\TERMINAL_BENCHMARK.json', 'docs\TERMINAL_UI_BENCHMARK.json')) {
+        Check (Test-Path (Join-Path $installDir $doc)) ('installer included ' + $doc)
+    }
     $uninstaller = Join-Path $installDir 'unins000.exe'
     Check (Test-Path $uninstaller) 'the uninstaller was installed'
 
@@ -221,9 +224,10 @@ try {
     Step 'operator-and-chart' 'checking installed pages, assets and token gates'
     $terminal = Invoke-WebRequest -UseBasicParsing ('{0}/terminal' -f $base) -TimeoutSec 20
     Check ($terminal.StatusCode -eq 200) ('/terminal returns 200 (got {0})' -f $terminal.StatusCode)
-    Check ($terminal.Content -match 'AXIOM PAPER' -and $terminal.Content -match 'VANTAGE LIVE') '/terminal names all explicit execution modes'
+    Check ($terminal.Content -match 'LOCAL PAPER' -and $terminal.Content -match 'VANTAGE LIVE') '/terminal names all explicit execution modes'
+    Check ($terminal.Content -match 'execution-boundary' -and $terminal.Content -match 'watchlist-only' -and $terminal.Content -match 'drawing-tool' -and $terminal.Content -match 'performance-summary') 'installed terminal includes boundary, watchlist, drawing and diagnostics controls'
     $terminalJs = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.js' -f $base) -TimeoutSec 20
-    Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'submitVantageReview') 'operator JavaScript is served from the installed package'
+    Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'submitVantageReview' -and $terminalJs.Content -match 'bindChartCanvas' -and $terminalJs.Content -match 'renderTicketEstimate') 'operator JavaScript and chart/ticket interactions are served from the installed package'
     $terminalCss = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.css' -f $base) -TimeoutSec 20
     Check ($terminalCss.StatusCode -eq 200) 'operator CSS is served from the installed package'
     $manual = Invoke-WebRequest -UseBasicParsing ('{0}/manual' -f $base) -TimeoutSec 20
@@ -264,6 +268,22 @@ try {
         if ($_.Exception.Response) { $anonMarketData = [int]$_.Exception.Response.StatusCode }
     }
     Check ($anonMarketData -eq 401) ('independent market-data status refuses anonymous access (got {0})' -f $anonMarketData)
+    $anonPerformance = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/api/trading/performance' -f $base) -TimeoutSec 10
+        $anonPerformance = 200
+    } catch {
+        if ($_.Exception.Response) { $anonPerformance = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anonPerformance -eq 401) ('performance diagnostics refuse anonymous access (got {0})' -f $anonPerformance)
+    $anonListed = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/api/listed-assets/status' -f $base) -TimeoutSec 10
+        $anonListed = 200
+    } catch {
+        if ($_.Exception.Response) { $anonListed = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anonListed -eq 401) ('listed-asset status refuses anonymous access (got {0})' -f $anonListed)
 
     $privateConfig = Join-Path $dataDir 'axiom.env'
     Check (Test-Path $privateConfig) 'the launcher created the private per-user configuration'
@@ -273,6 +293,10 @@ try {
     $headers = @{ Authorization = "Bearer $token" }
     $trading = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
     Check ($trading.mode -eq 'AXIOM_PAPER' -and -not $trading.armed -and -not $trading.active) 'installed app starts in PAPER and disarmed'
+    $performance = Invoke-RestMethod -Headers $headers ('{0}/api/trading/performance' -f $base) -TimeoutSec 15
+    Check ($performance.sample_capacity_per_metric -eq 512 -and $performance.note -match 'zero-latency') 'installed diagnostics are bounded and disclaim zero latency'
+    $listed = Invoke-RestMethod -Headers $headers ('{0}/api/listed-assets/status' -f $base) -TimeoutSec 15
+    Check (-not $listed.execution_supported -and -not $listed.mt5_routing_allowed -and -not $listed.cfd_substitution_allowed) 'installed listed execution and MT5/CFD substitution are disabled'
     $capabilities = Invoke-RestMethod -Headers $headers ('{0}/api/trading/connection' -f $base) -TimeoutSec 15
     Check ($capabilities.secret_store -match 'Windows DPAPI') 'installed app can use Windows DPAPI'
     Check ($capabilities.mt5_package_available -eq $true) 'official MT5 module is present in installed app'
@@ -287,7 +311,7 @@ try {
     }
     Check ($marketConnect -eq 409) ('installed market-data connect without DEMO credentials fails closed (got {0})' -f $marketConnect)
     $afterMarketRefusal = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
-    Check ($afterMarketRefusal.mode -eq 'AXIOM_PAPER' -and -not $afterMarketRefusal.active) 'installed feed refusal preserves AXIOM PAPER and never activates'
+    Check ($afterMarketRefusal.mode -eq 'AXIOM_PAPER' -and -not $afterMarketRefusal.active) 'installed feed refusal preserves LOCAL PAPER and never activates'
     $demo = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ mode = 'VANTAGE_DEMO' } | ConvertTo-Json) ('{0}/api/trading/session' -f $base) -TimeoutSec 15
     Check ($demo.mode -eq 'VANTAGE_DEMO' -and -not $demo.connected -and -not $demo.armed -and -not $demo.active) 'DEMO selection does not connect, Arm or Activate'
     $disconnected = Invoke-RestMethod -Headers $headers ('{0}/api/trading/workspace' -f $base) -TimeoutSec 15

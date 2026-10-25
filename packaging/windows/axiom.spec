@@ -37,6 +37,9 @@ datas = [
     # /manual reads USER_MANUAL.md at the frozen resource root.
     (str(ROOT / "USER_MANUAL.md"), "."),
     (str(ROOT / "docs" / "VANTAGE_NEXT_VERSION_PLAN.md"), "docs"),
+    (str(ROOT / "docs" / "TERMINAL_REDESIGN_PLAN.md"), "docs"),
+    (str(ROOT / "docs" / "TERMINAL_PERFORMANCE.md"), "docs"),
+    (str(ROOT / "docs" / "LISTED_ASSETS.md"), "docs"),
 ]
 
 # uvicorn resolves its loop and protocol implementations by name at runtime, so

@@ -94,7 +94,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -129,6 +129,21 @@ if ($FullExit -ne 0) {
     Fail "full Python suite failed on Windows: $FullSummary"
 }
 Write-Host "full suite passed ($FullSummary)"
+
+Step '3c. Exact-commit fake-provider performance benchmarks (hard gate)'
+& python scripts/benchmark_terminal.py --output (Join-Path $Kit 'TERMINAL_BENCHMARK.json') 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'benchmark-python.log')
+if ($LASTEXITCODE -ne 0) { Fail 'fake-provider backend benchmark failed on Windows' }
+$env:AXIOM_UI_BENCHMARK_OUTPUT = Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json'
+& node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal-benchmark.log')
+$BenchmarkUiExit = $LASTEXITCODE
+Remove-Item Env:AXIOM_UI_BENCHMARK_OUTPUT -ErrorAction SilentlyContinue
+if ($BenchmarkUiExit -ne 0) { Fail 'operator UI benchmark harness failed on Windows' }
+$Benchmark = Get-Content (Join-Path $Kit 'TERMINAL_BENCHMARK.json') -Raw | ConvertFrom-Json
+$UiBenchmark = Get-Content (Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json') -Raw | ConvertFrom-Json
+if ($Benchmark.commit -ne $Head -or $UiBenchmark.commit -ne $Head) { Fail 'benchmark source commit does not match the requested build' }
+if ($Benchmark.working_tree_dirty_at_measurement -or $UiBenchmark.working_tree_dirty_at_measurement) { Fail 'benchmarks must run from the exact clean source tree' }
+if ($Benchmark.assertions.order_send_calls -ne $Benchmark.assertions.expected_order_send_calls) { Fail 'benchmark order_send count mismatch' }
+Write-Host 'exact-commit fake-only backend and UI benchmarks passed; no real DEMO/LIVE latency measured'
 
 # ------------------------------------------------------------------ 4. freeze
 Step '4. Freeze with PyInstaller'
@@ -181,13 +196,14 @@ try {
     $Ok = (Check ($Chart.Content -match 'PAPER') 'chart page displays the PAPER badge') -and $Ok
 
     $Terminal = Invoke-WebRequest -UseBasicParsing "$Base/terminal" -TimeoutSec 10
-    $Ok = (Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'VANTAGE LIVE' -and $Terminal.Content -match 'AXIOM PAPER') '/terminal returns all explicit execution modes') -and $Ok
+    $Ok = (Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'VANTAGE LIVE' -and $Terminal.Content -match 'LOCAL PAPER') '/terminal returns all explicit execution modes') -and $Ok
+    $Ok = (Check ($Terminal.Content -match 'execution-boundary' -and $Terminal.Content -match 'watchlist-only' -and $Terminal.Content -match 'chart-indicator' -and $Terminal.Content -match 'drawing-tool' -and $Terminal.Content -match 'performance-summary') 'redesigned boundary, watchlist, chart tools and diagnostics are bundled') -and $Ok
     $TerminalJs = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.js" -TimeoutSec 10
-    $Ok = (Check ($TerminalJs.StatusCode -eq 200 -and $TerminalJs.Content -match 'submitVantageReview') 'operator terminal.js served from the bundle') -and $Ok
+    $Ok = (Check ($TerminalJs.StatusCode -eq 200 -and $TerminalJs.Content -match 'submitVantageReview' -and $TerminalJs.Content -match 'bindChartCanvas' -and $TerminalJs.Content -match 'renderTicketEstimate') 'operator terminal.js and reviewed ticket/chart interactions served from the bundle') -and $Ok
     $TerminalCss = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.css" -TimeoutSec 10
     $Ok = (Check ($TerminalCss.StatusCode -eq 200) 'operator terminal.css served from the bundle') -and $Ok
     $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 10
-    $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Vantage' -and $Manual.Content -match 'Arm') 'bundled user manual covers Vantage lifecycle') -and $Ok
+    $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Vantage' -and $Manual.Content -match 'Arm' -and $Manual.Content -match 'Owner-run Vantage DEMO execution rehearsal' -and $Manual.Content -match 'LIVE-readiness checklist') 'bundled user manual covers lifecycle, owner DEMO verification and LIVE checklist') -and $Ok
 
     $Js = Invoke-WebRequest -UseBasicParsing "$Base/static/chart/chart.js" -TimeoutSec 10
     $Ok = (Check ($Js.StatusCode -eq 200 -and $Js.Content -match 'markerPoint') 'chart.js served from the bundle') -and $Ok
@@ -207,6 +223,14 @@ try {
     try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/market-data/status" -TimeoutSec 5 }
     catch { $AnonMarketData = [int]$_.Exception.Response.StatusCode }
     $Ok = (Check ($AnonMarketData -eq 401) "independent market-data status refuses anonymous request ($AnonMarketData)") -and $Ok
+    $AnonPerformance = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/trading/performance" -TimeoutSec 5 }
+    catch { $AnonPerformance = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($AnonPerformance -eq 401) "performance diagnostics refuse anonymous request ($AnonPerformance)") -and $Ok
+    $AnonListed = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/listed-assets/status" -TimeoutSec 5 }
+    catch { $AnonListed = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($AnonListed -eq 401) "listed-asset status refuses anonymous request ($AnonListed)") -and $Ok
 
     $Cfg = Get-Content (Join-Path $SmokeHome 'axiom.env')
     $Token = (($Cfg | Select-String '^API_TOKEN=').Line) -replace '^API_TOKEN=', ''
@@ -214,6 +238,13 @@ try {
 
     $Trading = Invoke-RestMethod -Headers $Headers "$Base/api/trading/status"
     $Ok = (Check ($Trading.mode -eq 'AXIOM_PAPER' -and -not $Trading.armed -and -not $Trading.active) 'operator starts in independent PAPER, disarmed') -and $Ok
+    $Performance = Invoke-RestMethod -Headers $Headers "$Base/api/trading/performance"
+    $Ok = (Check ($Performance.sample_capacity_per_metric -eq 512 -and $Performance.note -match 'no universal or zero-latency') 'performance diagnostics are bounded and make no zero-latency claim') -and $Ok
+    $Listed = Invoke-RestMethod -Headers $Headers "$Base/api/listed-assets/status"
+    $Ok = (Check (-not $Listed.execution_supported -and -not $Listed.mt5_routing_allowed -and -not $Listed.cfd_substitution_allowed) 'listed execution and MT5/CFD substitution are disabled') -and $Ok
+    $ListedBody = @{ symbol = 'AAPL'; exchange = 'NASDAQ'; currency = 'USD'; product_type = 'LISTED_SHARE' } | ConvertTo-Json
+    $ListedPolicy = Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/json' -Body $ListedBody "$Base/api/listed-assets/routing-policy"
+    $Ok = (Check (-not $ListedPolicy.order_created -and -not $ListedPolicy.vantage_mt5_allowed -and -not $ListedPolicy.execution.allowed) 'listed policy check is read-only and never routes to MT5') -and $Ok
     $Capabilities = Invoke-RestMethod -Headers $Headers "$Base/api/trading/connection"
     $Ok = (Check ($Capabilities.secret_store -match 'Windows DPAPI') 'Windows DPAPI protected storage is available') -and $Ok
     $Ok = (Check ($Capabilities.mt5_package_available -eq $true) 'official MetaTrader5 module is present in the frozen build') -and $Ok
@@ -374,9 +405,10 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
+        performance_benchmarks = 'python scripts/benchmark_terminal.py; AXIOM_UI_BENCHMARK_OUTPUT=TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs'
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
         installer     = "ISCC.exe /DMyAppVersion=$Version axiom.iss"
     }
@@ -389,6 +421,8 @@ $Meta = [ordered]@{
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
+        performance     = 'exact-commit Windows fake-provider backend + fake-canvas UI benchmarks passed; see TERMINAL_BENCHMARK.json and TERMINAL_UI_BENCHMARK.json; no real DEMO/LIVE latency measured'
+        listed_assets   = 'authenticated listed identity/policy tests passed; no listed execution provider and no MT5/CFD substitution'
         vantage_demo    = 'NOT TESTED - no Vantage demo account available to CI'
         demo_market_data = 'NOT TESTED with a real terminal/account; no real quote, bar or local paper fill was observed'
         vantage_live    = 'NOT TESTED - live login/orders prohibited in CI'

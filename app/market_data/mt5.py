@@ -8,6 +8,8 @@ time is reported separately and never makes an old tick look new.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from datetime import datetime, timedelta, timezone
 import logging
 from math import isfinite
@@ -87,6 +89,7 @@ class MT5MarketDataService:
         poll_seconds: float = 0.1,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        metrics=None,
     ):
         if not 0 < max_quote_age_seconds <= 300:
             raise ValueError("Market-data quote age bound must be in (0, 300]")
@@ -96,6 +99,7 @@ class MT5MarketDataService:
         self.execution_mode = execution_mode
         self.gateway_factory = gateway_factory
         self.audit = audit
+        self.metrics = metrics
         self.max_quote_age_seconds = float(max_quote_age_seconds)
         self.stall_after_seconds = float(stall_after_seconds)
         self.advance_timeout_seconds = float(advance_timeout_seconds)
@@ -337,7 +341,9 @@ class MT5MarketDataService:
                     "Instrument metadata is incomplete or unsupported; select a supported discovered symbol"
                 )
             try:
-                raw = gateway.symbol_info_tick(symbol)
+                timer = self.metrics.measure("market_data.feed.gateway_receipt") if self.metrics else nullcontext()
+                with timer:
+                    raw = gateway.symbol_info_tick(symbol)
             except Exception as exc:
                 self._degraded("MT5 tick read failed; new paper entries are blocked")
                 raise MarketDataUnavailable("MT5 tick read failed") from exc
@@ -362,6 +368,8 @@ class MT5MarketDataService:
             if age < -5:
                 self._degraded("MT5 tick timestamp is in the future; new paper entries are blocked")
                 raise MarketDataInvalid("MT5 tick timestamp is in the future")
+            if self.metrics and age >= 0:
+                self.metrics.observe("market_data.feed.observed_source_age", age * 1000.0)
             if age > self.max_quote_age_seconds:
                 self._degraded("MT5 quote is stale; new paper entries are blocked")
                 raise MarketDataStale(

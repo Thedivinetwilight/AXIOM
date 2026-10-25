@@ -60,8 +60,10 @@ class VantageService:
         secret_store=None,
         gateway_factory: Callable = OfficialMT5Gateway,
         lock_check: Callable[[], bool] | None = None,
+        metrics=None,
     ):
         self.store = store
+        self.metrics = metrics
         self.secret_store = secret_store  # packaged server supplies DPAPI explicitly
         self.gateway_factory = gateway_factory
         self.lock_check = lock_check or (lambda: False)
@@ -243,7 +245,7 @@ class VantageService:
                 raise ServiceError("Protected Vantage credential is missing") from exc
             if self.connector:
                 self.connector.disconnect()
-            self.connector = MT5Connector(self.gateway_factory())
+            self.connector = MT5Connector(self.gateway_factory(), metrics=self.metrics)
             account = self.connector.connect(credentials, self.mode)
             instruments = self.connector.discover()
             snapshot = self.reconcile(reason="read-only connection test")
@@ -406,6 +408,12 @@ class VantageService:
         return status
 
     def reconcile(self, reason="operator/reconnect reconciliation") -> dict:
+        if self.metrics is None:
+            return self._reconcile(reason)
+        with self.metrics.measure("vantage.reconciliation"):
+            return self._reconcile(reason)
+
+    def _reconcile(self, reason="operator/reconnect reconciliation") -> dict:
         connector = self._connector()
         snapshot = connector.snapshot()
         self.store.upsert_deals(self.mode.value, snapshot["deals"])

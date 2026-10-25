@@ -1,13 +1,13 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.4.0a1`.** AXIOM provides an eight-page Operator
-console with mutually exclusive **AXIOM PAPER**, **VANTAGE DEMO**, and
+**Current source version: `3.5.0a1`.** AXIOM provides an eight-page Operator
+console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
 or coordinate automation. Only instruments exposed by the connected account are
 discovered; share/ETF CFDs are not represented as owned underlying assets.
 
-AXIOM PAPER can now use an independent authenticated **VANTAGE DEMO MT5 read-only
+LOCAL PAPER can now use an independent authenticated **VANTAGE DEMO MT5 read-only
 market-data service** for fresh prices while retaining local simulated fills. Its
 isolated gateway has no broker order/position/history functions; connecting never
 changes execution mode or creates an order. Exact account-discovered symbols,
@@ -20,6 +20,13 @@ and credentials never authorize activation. Server-enforced readiness, separate 
 and Activate challenges, reviewed orders, durable intents, one submission attempt,
 broker reconciliation and persistent emergency stop guard that separate order path.
 
+The responsive Operator redesign adds an always-visible execution/data/authorization
+boundary, editable non-execution watchlists, bounded zoom/pan/crosshair charts with
+EMA/SMA and drawings, a docked units-versus-lots ticket, and separate bounded
+feed/chart/submission/broker-acknowledgement measurements. A fail-closed
+`listed-assets-v1` interface requires exact listed identity and a separate provider;
+it does not route listed instruments to Vantage CFDs or claim listed execution.
+
 > **No profitability or live-readiness claim.** Fake tests, demo fills and a
 > successful connection establish neither profitability nor real-money readiness.
 > No live login/order is permitted in CI. Read the exact release's build metadata
@@ -28,6 +35,9 @@ broker reconciliation and persistent emergency stop guard that separate order pa
 - **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
 - **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
 - **Architecture and verification plan:** [`docs/VANTAGE_NEXT_VERSION_PLAN.md`](docs/VANTAGE_NEXT_VERSION_PLAN.md)
+- **Redesign audit/acceptance:** [`docs/TERMINAL_REDESIGN_PLAN.md`](docs/TERMINAL_REDESIGN_PLAN.md)
+- **Performance definitions and benchmark conditions:** [`docs/TERMINAL_PERFORMANCE.md`](docs/TERMINAL_PERFORMANCE.md)
+- **Listed-share/ETF provider boundary:** [`docs/LISTED_ASSETS.md`](docs/LISTED_ASSETS.md)
 - **US-paper feed/risk evidence:** [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md)
 
 Launch the frozen Windows app and open `/terminal`. From source, use the existing

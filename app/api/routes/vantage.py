@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.vantage.gateway import mt5_package_available
 from app.vantage.models import OrderInput, SessionMode
+from app.performance import LatencyTracker
 
 
 router = APIRouter(prefix="/api/trading")
@@ -114,6 +115,14 @@ def service(request: Request):
     if value is None:
         raise HTTPException(503, "Vantage runtime is unavailable")
     return value
+
+
+def metrics(request: Request) -> LatencyTracker:
+    tracker = getattr(request.app.state, "performance", None)
+    if tracker is None:
+        tracker = LatencyTracker()
+        request.app.state.performance = tracker
+    return tracker
 
 
 def paper_workspace(request: Request) -> dict:
@@ -241,7 +250,8 @@ def select_instruments(body: InstrumentRequest, request: Request):
 
 @router.get("/quotes")
 def quotes(request: Request):
-    return service(request).quotes()
+    with metrics(request).measure("vantage.quotes.api"):
+        return service(request).quotes()
 
 
 @router.get("/chart")
@@ -249,7 +259,8 @@ def chart(
     request: Request, symbol: str = Query(min_length=1, max_length=64),
     timeframe: str = "1m", limit: int = Query(default=300, ge=30, le=2000),
 ):
-    return service(request).chart(symbol, timeframe, limit)
+    with metrics(request).measure("vantage.chart.backend"):
+        return service(request).chart(symbol, timeframe, limit)
 
 
 @router.put("/risk")
@@ -331,14 +342,34 @@ def activity(request: Request, limit: int = Query(default=200, ge=1, le=1000)):
     return result
 
 
+@router.get("/performance")
+def performance(request: Request):
+    return {
+        **metrics(request).summary(),
+        "boundaries": {
+            "vantage.feed.gateway_receipt": "Local duration of symbol_info_tick; not source-to-AXIOM network latency.",
+            "vantage.feed.observed_source_age": "Broker timestamp to local observation, including clock skew and quote age.",
+            "vantage.chart.backend": "Authenticated chart handler, including broker bars and quote.",
+            "vantage.order.review_api": "Read-only review, reconciliation, contract/risk checks and MT5 precheck.",
+            "vantage.order.submit_api": "Full reviewed submit request, including one broker attempt and reconciliation when possible.",
+            "vantage.broker.submission_ack": "One order_send call only; acknowledgement is not a fill confirmation.",
+            "vantage.reconciliation": "Broker account/order/position/history read and local intent reconciliation.",
+        },
+        "browser_note": "Chart render and browser round trips are measured separately in the terminal and are not included here.",
+        "evidence": "No real DEMO or LIVE latency is established by fake-provider tests.",
+    }
+
+
 @router.post("/orders/review")
 def review_order(body: ReviewRequest, request: Request):
-    return service(request).review(body.to_order())
+    with metrics(request).measure("vantage.order.review_api"):
+        return service(request).review(body.to_order())
 
 
 @router.post("/orders/submit")
 def submit_order(body: SubmitRequest, request: Request):
-    return service(request).submit(body.to_order(), body.review_id, body.confirmation)
+    with metrics(request).measure("vantage.order.submit_api"):
+        return service(request).submit(body.to_order(), body.review_id, body.confirmation)
 
 
 @router.post("/orders/{intent_id}/cancel")

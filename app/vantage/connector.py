@@ -6,6 +6,7 @@ This module performs no order retries and has no live/demo auto-selection logic.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -294,8 +295,9 @@ def normalize_deal(raw: dict) -> dict:
 
 
 class MT5Connector:
-    def __init__(self, gateway):
+    def __init__(self, gateway, metrics=None):
         self.gateway = gateway
+        self.metrics = metrics
         self.state = ConnectionState.DISCONNECTED
         self.state_detail = "Not connected"
         self.connected = False
@@ -486,7 +488,9 @@ class MT5Connector:
     def quote(self, symbol: str) -> Quote:
         self._require_connected()
         try:
-            raw = self.gateway.symbol_info_tick(symbol)
+            timer = self.metrics.measure("vantage.feed.gateway_receipt") if self.metrics else nullcontext()
+            with timer:
+                raw = self.gateway.symbol_info_tick(symbol)
         except Exception as exc:
             self.connected = False
             self.state = ConnectionState.DISCONNECTED
@@ -513,6 +517,11 @@ class MT5Connector:
             timestamp=timestamp, time_msc=time_msc, received_at=iso_now(),
         )
         self.quotes[symbol] = quote
+        if self.metrics:
+            observed_age_ms = (utcnow() - quote_time).total_seconds() * 1000.0
+            # This includes source age/clock skew; it is not one-way network latency.
+            if observed_age_ms >= 0:
+                self.metrics.observe("vantage.feed.observed_source_age", observed_age_ms)
         return quote
 
     def rates(self, symbol: str, timeframe: str, count: int) -> list[dict]:
@@ -667,7 +676,9 @@ class MT5Connector:
     def send(self, request: dict) -> dict:
         """One submission attempt only. Ambiguity is for the journal/reconciler."""
         self._require_connected()
-        result = self.gateway.order_send(request)  # exceptions deliberately propagate
+        timer = self.metrics.measure("vantage.broker.submission_ack") if self.metrics else nullcontext()
+        with timer:
+            result = self.gateway.order_send(request)  # exceptions deliberately propagate
         if not result:
             raise BrokerUnavailable("MT5 returned no submission result; outcome is unresolved")
         return self.map_result(result)

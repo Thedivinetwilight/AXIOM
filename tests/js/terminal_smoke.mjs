@@ -2,11 +2,15 @@
  * jsdom supplies the DOM; all HTTP and canvas interfaces are local fakes.
  * No MetaTrader5 package, broker account, credential, or external network is used. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { arch, cpus, platform } from "node:os";
 import { JSDOM } from "jsdom";
 
 const root = resolve(import.meta.dirname, "../..");
+const benchmarkOutput = process.env.AXIOM_UI_BENCHMARK_OUTPUT || "";
+const benchmarkRenderIterations = 120;
 const html = readFileSync(resolve(root, "app/static/terminal/index.html"), "utf8");
 const code = readFileSync(resolve(root, "app/static/terminal/terminal.js"), "utf8");
 const TOKEN = "ui-local-test-token";
@@ -29,7 +33,7 @@ let selected = [];
 let current;
 function emptyMarketData() {
   return {
-    provider: "VANTAGE_DEMO_MT5", state: "DISCONNECTED", detail: "Not connected; execution remains AXIOM PAPER",
+    provider: "VANTAGE_DEMO_MT5", state: "DISCONNECTED", detail: "Not connected; execution remains LOCAL PAPER",
     connected: false, authenticated: false, account: null, credential_profile: "VANTAGE_DEMO",
     execution_mode: "AXIOM_PAPER", read_only: true, orders_modified: false, automation_enabled: false,
     instrument_count: 0, supported_instrument_count: 0, selected_symbol: null, quote: null,
@@ -127,6 +131,18 @@ async function fetchFake(url, options = {}) {
   const body = options.body ? JSON.parse(options.body) : null;
   calls.push({ path, method, body, headers: options.headers || {} });
   if (path === "/api/trading/status") return response(current.status);
+  if (path === "/api/trading/performance") return response({
+    unit: "milliseconds", sample_capacity_per_metric: 512,
+    metrics: { "vantage.feed.gateway_receipt": { samples: 3, window_samples: 3, p50_ms: 1.2, p95_ms: 2.4, p99_ms: 2.8, max_ms: 3, last_ms: 1.1 } },
+    boundaries: { "vantage.feed.gateway_receipt": "Fake local receipt measurement" },
+    note: "Observed local-process timing only; no universal or zero-latency claim.",
+    evidence: "No real DEMO or LIVE latency is established by fake-provider tests.",
+  });
+  if (path === "/api/listed-assets/status") return response({
+    interface: "listed-assets-v1", identity_contract: "symbol + explicit exchange/MIC + currency",
+    data_configured: false, execution_supported: false, mt5_routing_allowed: false,
+    cfd_substitution_allowed: false, note: "No listed execution adapter is available.",
+  });
   if (path === "/api/trading/workspace") return response(current);
   if (path === "/api/trading/activity?limit=300") return response({ events: [{ ts: now(), environment: current.status.mode, kind: "FAKE_AUDIT", payload: { safe: true } }] });
   if (path === "/api/trading/connection") return response({ status: current.status, profiles, secret_store: "Windows DPAPI · current Windows user", test_is_read_only: true });
@@ -301,19 +317,75 @@ const click = async (id) => { assert.equal(element(id).disabled, false, `${id} m
 const navigate = async (page) => { window.document.querySelector(`[data-page="${page}"]`).click(); await settle(); };
 const submit = async (id) => { element(id).dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })); await settle(); };
 const phraseAndConfirm = async (phrase) => { element("modal-phrase").value = phrase; await click("modal-confirm"); };
+const percentile = (values, q) => {
+  const ordered = [...values].sort((a, b) => a - b); const position = (ordered.length - 1) * q;
+  const lower = Math.floor(position), upper = Math.min(lower + 1, ordered.length - 1);
+  return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower);
+};
+const metricSummary = (values) => ({
+  samples: values.length, p50_ms: Number(percentile(values, .5).toFixed(3)),
+  p95_ms: Number(percentile(values, .95).toFixed(3)), p99_ms: Number(percentile(values, .99).toFixed(3)),
+  max_ms: Number(Math.max(...values).toFixed(3)),
+});
 
 try {
-  window.eval(code);
+  window.eval(`${code}\n;globalThis.__axiomTerminalTest = { state, drawChart, ticketSignature, orderFormValues, renderTicketEstimate };`);
   await settle(40);
   assert.equal(element("auth-gate").hidden, true, "saved local token unlocks the shell");
   assert.equal(element("app").hidden, false);
-  assert.equal(element("global-mode").textContent, "AXIOM PAPER");
+  assert.equal(element("global-mode").textContent, "LOCAL PAPER");
   assert.ok(calls.length > 0 && calls.every((call) => call.headers.Authorization === `Bearer ${TOKEN}`), "every API call uses the local bearer token");
 
   await navigate("charts");
   assert.equal(element("order-symbol").value, "AAPL");
   assert.match(element("chart-source").textContent, /NOT MARKET DATA/);
   assert.ok(draws.fillRect > 40 && draws.stroke > 40, "paper candles were drawn");
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /40 of 40 candles/);
+  const chartOnlyCallCount = calls.length;
+  await click("zoom-in");
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /32 of 40 candles/, "zoom changes only the visible chart window");
+  await click("zoom-out");
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /40 of 40 candles/);
+  await click("zoom-in");
+  element("terminal-chart").dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })); await settle();
+  assert.ok(window.eval("globalThis.__axiomTerminalTest.state.chartView.endOffset") > 0, "keyboard pans the visible chart window");
+  await click("reset-chart-view");
+  assert.equal(window.eval("globalThis.__axiomTerminalTest.state.chartView.endOffset"), 0);
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /40 of 40 candles/);
+  element("chart-indicator").value = "SMA50";
+  element("chart-indicator").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /SMA50/);
+  element("drawing-tool").value = "HORIZONTAL";
+  element("drawing-tool").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  element("terminal-chart").dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, clientX: 100, clientY: 100 })); await settle();
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /1 drawings/, "canvas click creates a drawing, not an order");
+  await click("clear-drawings");
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /0 drawings/);
+  element("drawing-tool").value = "TREND";
+  element("drawing-tool").dispatchEvent(new window.Event("change", { bubbles: true }));
+  element("terminal-chart").dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, clientX: 80, clientY: 90 })); await settle();
+  element("terminal-chart").dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, clientX: 140, clientY: 120 })); await settle();
+  assert.match(element("terminal-chart").getAttribute("aria-label"), /1 drawings/, "two clicks create one trend drawing");
+  await click("clear-drawings");
+  element("drawing-tool").value = "NONE";
+  element("drawing-tool").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await click("crosshair-toggle");
+  assert.equal(element("crosshair-toggle").getAttribute("aria-pressed"), "false");
+  element("terminal-chart").dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 100 })); await settle();
+  assert.equal(element("chart-cursor").textContent, "");
+  await click("crosshair-toggle");
+  element("terminal-chart").dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 100 })); await settle();
+  assert.match(element("chart-cursor").textContent, /O .* H .* L .* C /, "crosshair exposes OHLC readout");
+  assert.equal(calls.length, chartOnlyCallCount, "zoom, indicator, drawing and crosshair emit no API or order requests");
+  if (benchmarkOutput) {
+    window.eval(`const { state, drawChart } = globalThis.__axiomTerminalTest;
+    for (let index = 0; index < ${benchmarkRenderIterations}; index += 1) {
+      state.chartView.pointer = { x: 30 + (index % 120), y: 45 + (index % 80) };
+      state.chartView.endOffset = index % 9;
+      drawChart();
+    }`);
+    assert.equal(calls.length, chartOnlyCallCount, "render benchmark remains local and creates no API/order requests");
+  }
   element("order-volume").value = "2";
   await submit("order-form");
   assert.equal(element("modal").hidden, false, "paper order has a review dialog");
@@ -335,10 +407,12 @@ try {
   assert.equal(element("mt5-password").value, "", "password field clears after save");
   assert.equal(window.document.documentElement.innerHTML.includes(FAKE_PASSWORD), false, "password is never rendered");
   assert.equal(element("mt5-login").value, "", "full login is not retained in the form");
-  assert.equal(element("global-mode").textContent, "AXIOM PAPER", "saving DEMO credentials never changes execution");
+  assert.equal(element("global-mode").textContent, "LOCAL PAPER", "saving DEMO credentials never changes execution");
   await click("connect-market-data");
   assert.equal(marketData.authenticated, true);
-  assert.equal(element("global-mode").textContent, "AXIOM PAPER", "quote connection never changes execution");
+  assert.equal(element("global-mode").textContent, "LOCAL PAPER", "quote connection never changes execution");
+  assert.match(element("boundary-execution").textContent, /LOCAL PAPER/);
+  assert.match(element("boundary-data").textContent, /VANTAGE DEMO · READ-ONLY/);
   assert.equal(current.status.active, false);
   assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
 
@@ -384,6 +458,22 @@ try {
   assert.match(element("instrument-rows").textContent, /Apple share CFD/);
   assert.match(element("instrument-rows").textContent, /CFD, not underlying ownership/);
   assert.match(element("instrument-rows").textContent, /untradable/i);
+  const watchCallCount = calls.length;
+  window.document.querySelector('[data-watch-symbol="AAPL"]').click(); await settle();
+  assert.equal(window.document.querySelector('[data-watch-symbol="AAPL"]').getAttribute("aria-pressed"), "true");
+  assert.equal(window.document.querySelector('[data-select-symbol="AAPL"]').checked, false, "watching never selects execution");
+  assert.match(element("watchlist-status").textContent, /1 watched symbol/);
+  element("watchlist-only").checked = true;
+  element("watchlist-only").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  assert.match(element("instrument-rows").textContent, /AAPL/);
+  assert.doesNotMatch(element("instrument-rows").textContent, /Euro vs US Dollar/);
+  element("watchlist-only").checked = false;
+  element("watchlist-only").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
+  await click("watch-visible");
+  assert.match(element("watchlist-status").textContent, /3 watched symbol/);
+  await click("clear-watchlist");
+  assert.match(element("watchlist-status").textContent, /0 watched symbol/);
+  assert.equal(calls.length, watchCallCount, "watchlist edits and filters emit no selection, feed or order request");
   const select = window.document.querySelector('[data-select-symbol="EURUSD"]');
   select.checked = true; select.dispatchEvent(new window.Event("change", { bubbles: true }));
   await click("save-instruments");
@@ -406,11 +496,21 @@ try {
   element("order-volume").value = "0.1";
   await submit("order-form");
   assert.match(element("modal-body").textContent, /VANTAGE_DEMO/);
+  assert.equal(window.eval("globalThis.__axiomTerminalTest.ticketSignature(globalThis.__axiomTerminalTest.orderFormValues())"), window.eval("globalThis.__axiomTerminalTest.state.ticketReview?.signature"), "docked ticket must match the reviewed values");
+  assert.match(element("ticket-estimate").textContent, /Server review passed/);
+  assert.match(element("ticket-estimate").textContent, /10\.00 USD/, "docked ticket uses actual MT5 review margin");
   await phraseAndConfirm("SUBMIT DEMO ORDER");
   const submissions = calls.filter((call) => call.path === "/api/trading/orders/submit");
   assert.equal(submissions.length, 1);
   assert.equal(submissions[0].body.volume, 0.1);
   assert.equal(submissions[0].body.confirmation, "SUBMIT DEMO ORDER");
+  window.eval(`const test = globalThis.__axiomTerminalTest;
+    test.state.ticketReview.review.expires_at = new Date(Date.now() - 1000).toISOString();
+    test.renderTicketEstimate();`);
+  assert.match(element("ticket-estimate").textContent, /Not reviewed · no submission/, "expired review is not presented as current");
+  window.eval(`const test = globalThis.__axiomTerminalTest;
+    test.state.ticketReview.review.expires_at = new Date(Date.now() + 30000).toISOString();
+    test.renderTicketEstimate();`);
 
   await navigate("orders");
   await click("reconcile-now");
@@ -444,13 +544,45 @@ try {
   element("session-mode").value = "VANTAGE_LIVE";
   await click("apply-mode");
   assert.equal(element("global-mode").textContent, "VANTAGE LIVE");
+  assert.equal(window.document.body.dataset.mode, "VANTAGE_LIVE");
+  assert.match(element("boundary-execution").textContent, /VANTAGE LIVE · DISCONNECTED/);
   assert.equal(current.status.active, false, "selecting LIVE never infers activation");
   assert.equal(current.status.connected, false, "selecting LIVE never auto-connects");
   await navigate("activity");
   await navigate("settings");
+  await click("reload-performance");
+  assert.match(element("performance-summary").textContent, /vantage.feed.gateway_receipt/);
+  assert.match(element("performance-summary").textContent, /p50/);
+  assert.match(element("listed-asset-status").textContent, /execution supported: no/);
+  assert.match(element("listed-asset-status").textContent, /substitution: prohibited/);
   await navigate("overview");
   assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 2, "no hidden order submission occurred");
   assert.equal(calls.some((call) => /^https?:/i.test(call.path)), false, "browser code makes only relative local API requests");
+  if (benchmarkOutput) {
+    const browser = window.eval("JSON.parse(JSON.stringify(globalThis.__axiomTerminalTest.state.performance.browser))");
+    const report = {
+      schema: "axiom-terminal-ui-benchmark-v1", generated_at: now(),
+      commit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      working_tree_dirty_at_measurement: Boolean(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }).trim()),
+      conditions: {
+        evidence_class: "FAKE DOM / FAKE CANVAS COMMANDS ONLY", node: process.version,
+        platform: platform(), arch: arch(), logical_cpu_count: cpus().length, cpu_model: cpus()[0]?.model || "unknown",
+        dom: "jsdom", canvas: "local command-counting fake 2D context", real_browser: false,
+        gpu_or_raster_measured: false, external_demo_account: false, live_account_or_orders: false,
+        render_iterations: benchmarkRenderIterations,
+      },
+      browser_metrics_ms: Object.fromEntries(Object.entries(browser).filter(([, values]) => values.length).map(([name, values]) => [name, metricSummary(values)])),
+      functional_evidence: { authenticated_fake_api_calls: calls.length, canvas_calls: draws, expected_reviewed_order_submissions: 2, unexpected_order_submissions: 0 },
+      limitations: [
+        "This measures JavaScript and fake canvas command execution, not GPU/raster or human-perceived frame latency.",
+        "The terminal's performance panel measures real browser canvas duration when an owner runs it locally.",
+        "p50/p95/p99 apply only to this run; no universal or zero-latency claim is made.",
+        "Fake DOM/canvas and any later DEMO results establish neither profitability nor LIVE readiness.",
+      ],
+    };
+    writeFileSync(resolve(root, benchmarkOutput), `${JSON.stringify(report, null, 2)}\n`);
+    console.log(`terminal UI benchmark: ${benchmarkOutput}`);
+  }
   console.log(`terminal harness: OK (${calls.length} authenticated fake API calls, ${draws.fillRect} candle/background draw calls)`);
 } catch (error) {
   console.error(`terminal harness: FAIL: ${error?.stack || error}`);

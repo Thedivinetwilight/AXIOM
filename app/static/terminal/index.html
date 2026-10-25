@@ -64,7 +64,7 @@
       <div class="environment-select">
         <label for="session-mode">Execution session</label>
         <select id="session-mode">
-          <option value="AXIOM_PAPER">AXIOM PAPER · local simulated fills</option>
+          <option value="AXIOM_PAPER">LOCAL PAPER · local simulated fills</option>
           <option value="VANTAGE_DEMO">VANTAGE DEMO · MT5 demo account</option>
           <option value="VANTAGE_LIVE">VANTAGE LIVE · real account, locked by default</option>
         </select>
@@ -74,6 +74,11 @@
     </div>
 
     <main id="main-content" tabindex="-1">
+      <section class="execution-boundary" id="execution-boundary" aria-label="Execution, market-data and authorization boundaries">
+        <div><span>EXECUTION SESSION</span><strong id="boundary-execution">LOCAL PAPER</strong><small id="boundary-execution-note">Simulated fills only</small></div>
+        <div><span>MARKET DATA</span><strong id="boundary-data">LOCAL / DISCONNECTED</strong><small id="boundary-data-note">Connectivity does not grant trading permission</small></div>
+        <div><span>ORDER AUTHORIZATION</span><strong id="boundary-auth">DISARMED</strong><small id="boundary-auth-note">Review and explicit lifecycle required</small></div>
+      </section>
       <section class="page active" id="page-overview" aria-labelledby="overview-title">
         <div class="page-intro"><div><p class="eyebrow">ACCOUNT AT A GLANCE</p><h2 id="overview-title">Good decisions start with known state.</h2><p>Account identity, broker truth, data freshness and risk blockers—before any order control.</p></div><span class="mode-badge paper" id="overview-mode">PAPER</span></div>
         <div class="metric-grid">
@@ -114,12 +119,16 @@
           <div class="toolbar">
             <div class="field grow"><label for="instrument-search">Search broker symbol, name or path</label><input id="instrument-search" type="search" placeholder="e.g. EURUSD or Apple"></div>
             <div class="field"><label for="product-filter">Product</label><select id="product-filter"><option value="">All product types</option></select></div>
-            <label class="check-label"><input type="checkbox" id="selected-only"> Selected only</label>
+            <label class="check-label"><input type="checkbox" id="selected-only"> Execution selection only</label>
+            <label class="check-label"><input type="checkbox" id="watchlist-only"> Watchlist only</label>
+            <button type="button" class="button secondary" id="watch-visible">Watch visible</button>
+            <button type="button" class="button secondary" id="clear-watchlist">Clear watchlist</button>
             <button type="button" class="button secondary" id="reload-instruments">Reload discovered</button>
-            <button type="button" class="button primary" id="save-instruments">Save selection</button>
+            <button type="button" class="button primary" id="save-instruments">Save execution selection</button>
           </div>
           <div class="inline-status" id="instrument-status" role="status"></div>
-          <div class="table-wrap tall"><table><thead><tr><th>Select</th><th>Symbol / name</th><th>Product</th><th>Trade mode</th><th>Min / step</th><th>Tick / digits</th><th>Freshness</th><th>Contract</th></tr></thead><tbody id="instrument-rows"></tbody></table></div>
+          <p class="muted small" id="watchlist-status">Watchlist is local to this browser tab. Watching a symbol never selects it for execution, connects a feed, or changes Arm/Activate.</p>
+          <div class="table-wrap tall"><table><thead><tr><th>Watch</th><th>Select</th><th>Symbol / name</th><th>Product</th><th>Trade mode</th><th>Min / step</th><th>Tick / digits</th><th>Freshness</th><th>Contract</th></tr></thead><tbody id="instrument-rows"></tbody></table></div>
         </article>
         <article class="panel" id="contract-panel">
           <div class="panel-head"><div><p class="eyebrow">CONTRACT INSPECTOR</p><h3 id="contract-title">Choose an instrument</h3></div><span class="status-pill" id="contract-tradable">—</span></div>
@@ -137,9 +146,22 @@
               <button type="button" class="button secondary" id="reload-chart">Reload chart</button>
               <button type="button" class="button secondary" id="start-paper">Start paper session</button>
             </div>
+            <div class="chart-tool-row" aria-label="Chart view and analysis tools">
+              <div class="timeframe-shortcuts" aria-label="Quick timeframe">
+                <button type="button" data-chart-timeframe="1m">1m</button><button type="button" data-chart-timeframe="5m">5m</button><button type="button" data-chart-timeframe="15m">15m</button><button type="button" data-chart-timeframe="1h">1h</button><button type="button" data-chart-timeframe="1D">1D</button>
+              </div>
+              <div class="field compact-field"><label for="chart-indicator">Indicator</label><select id="chart-indicator"><option value="NONE">None</option><option value="EMA20" selected>EMA 20</option><option value="SMA50">SMA 50</option><option value="BOTH">EMA 20 + SMA 50</option></select></div>
+              <div class="field compact-field"><label for="drawing-tool">Drawing</label><select id="drawing-tool"><option value="NONE">Pan / crosshair</option><option value="HORIZONTAL">Horizontal line</option><option value="TREND">Trend line · 2 clicks</option></select></div>
+              <button type="button" class="icon-button" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+              <button type="button" class="icon-button" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+              <button type="button" class="button secondary" id="reset-chart-view">Reset view</button>
+              <button type="button" class="button secondary" id="crosshair-toggle" aria-pressed="true">Crosshair on</button>
+              <button type="button" class="button secondary" id="clear-drawings">Clear drawings</button>
+            </div>
             <div class="inline-status" id="chart-feed-context">Replay is sample data. Connect the separate read-only VANTAGE DEMO feed on Connections for fresh MT5 prices.</div>
             <div class="chart-quote" id="chart-quote"></div>
-            <div class="canvas-wrap"><canvas id="terminal-chart" role="img" aria-label="No chart data loaded"></canvas><div class="chart-empty" id="chart-empty">Choose an instrument and load its real session data.</div></div>
+            <div class="canvas-wrap"><canvas id="terminal-chart" role="img" tabindex="0" aria-label="No chart data loaded" aria-describedby="chart-keyboard"></canvas><div class="chart-empty" id="chart-empty">Choose an instrument and load its real session data.</div><div class="chart-cursor" id="chart-cursor" aria-live="off"></div></div>
+            <p class="muted small" id="chart-keyboard">Mouse/touch: drag to pan; wheel or +/− to zoom. Keyboard on the focused chart: Left/Right pan, +/− zoom, Home resets. Drawing tools never create orders.</p>
             <div class="chart-legend" id="chart-legend">No bars loaded. AXIOM does not invent chart data.</div>
             <div class="contract-grid" id="chart-contract"><p class="empty-state">MT5 contract metadata appears here after an account-discovered chart is loaded.</p></div>
           </article>
@@ -158,6 +180,7 @@
                 <div class="field"><label for="order-tp">Take-profit (optional)</label><input id="order-tp" type="number" min="0" step="any"></div>
               </div>
               <div class="inline-status" id="order-context">Review uses the selected session’s current data and guards.</div>
+              <div class="ticket-estimate" id="ticket-estimate" aria-label="Indicative order ticket values"><p class="empty-state">Select an instrument and enter a quantity for indicative values. Server review remains authoritative.</p></div>
               <button type="submit" class="button primary full" id="review-order">Review order — no submission</button>
             </form>
             <p class="muted small" id="order-disclaimer">Paper fills are simulated locally. Short selling is not modelled in paper.</p>
@@ -245,9 +268,9 @@
           </article>
         </div>
         <article class="panel">
-          <div class="panel-head"><div><p class="eyebrow">INDEPENDENT READ-ONLY MARKET DATA</p><h3>VANTAGE DEMO quotes for AXIOM PAPER</h3></div><span class="status-pill" id="market-data-state">DISCONNECTED</span></div>
+          <div class="panel-head"><div><p class="eyebrow">INDEPENDENT READ-ONLY MARKET DATA</p><h3>VANTAGE DEMO quotes for LOCAL PAPER</h3></div><span class="status-pill" id="market-data-state">DISCONNECTED</span></div>
           <p>This is a second, market-data-only MT5 interface. It reads only the protected VANTAGE_DEMO profile and cannot place, modify, cancel or close broker orders. Connecting never changes the execution selector, starts a strategy, Arms, or Activates.</p>
-          <div class="inline-status" id="market-data-detail" role="status">Save the DEMO credential locally, then connect. Execution remains AXIOM PAPER.</div>
+          <div class="inline-status" id="market-data-detail" role="status">Save the DEMO credential locally, then connect. Execution remains LOCAL PAPER.</div>
           <dl class="detail-list" id="market-data-account"></dl>
           <div class="button-row">
             <button type="button" class="button primary" id="connect-market-data">Connect demo market data — read-only</button>
@@ -255,7 +278,7 @@
           </div>
           <p class="muted small">Only instruments returned by this account are shown. CFDs are labeled as CFDs, not owned shares. Fresh advancing ticks are required; stale, missing or degraded data fails closed with no replay fallback. Manual-only paper startup still requires a reviewed order for every fill.</p>
         </article>
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SEPARATE IDENTITIES</p><h3>What belongs where</h3></div></div><div class="help-grid"><div><strong>AXIOM API_TOKEN</strong><p>Unlocks this local operator API. Not sent to Vantage or MT5.</p></div><div><strong>Vantage MT5 login/password</strong><p>Used only by the official terminal integration. Protected with DPAPI. In AXIOM PAPER this form edits VANTAGE_DEMO only.</p></div><div><strong>Data-provider keys</strong><p>Legacy Alpaca/Upstox settings remain separate and are never used for Vantage execution quotes.</p></div></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SEPARATE IDENTITIES</p><h3>What belongs where</h3></div></div><div class="help-grid"><div><strong>AXIOM API_TOKEN</strong><p>Unlocks this local operator API. Not sent to Vantage or MT5.</p></div><div><strong>Vantage MT5 login/password</strong><p>Used only by the official terminal integration. Protected with DPAPI. In LOCAL PAPER this form edits VANTAGE_DEMO only.</p></div><div><strong>Data-provider keys</strong><p>Legacy Alpaca/Upstox settings remain separate and are never used for Vantage execution quotes.</p></div></div></article>
       </section>
 
       <section class="page" id="page-activity" aria-labelledby="activity-title" hidden>
@@ -269,6 +292,8 @@
           <article class="panel"><div class="panel-head"><div><p class="eyebrow">OPERATOR ACCESS</p><h3>Local API token</h3></div></div><form id="token-form"><div class="field"><label for="settings-token">Replace token for this browser tab</label><input id="settings-token" type="password" autocomplete="off" required></div><button type="submit" class="button primary">Save &amp; test token</button></form><div class="button-row top-space"><button type="button" class="button secondary" id="lock-app">Lock this tab</button></div><p class="muted small">This does not change the server’s configured API_TOKEN and does not affect Vantage credentials.</p></article>
           <article class="panel"><div class="panel-head"><div><p class="eyebrow">DISPLAY</p><h3>Refresh &amp; diagnostics</h3></div></div><div class="field"><label for="refresh-interval">Background refresh</label><select id="refresh-interval"><option value="5000">Every 5 seconds</option><option value="10000">Every 10 seconds</option><option value="30000">Every 30 seconds</option><option value="0">Off</option></select></div><div class="button-row top-space"><button type="button" class="button secondary" id="download-diagnostics">Download redacted diagnostics</button></div><p class="muted small">Exports contain no password, API token, ciphertext or full account login. Review any file before sharing it.</p></article>
         </div>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">MEASURED, NOT PROMISED</p><h3>Latency &amp; render diagnostics</h3></div><button type="button" class="button secondary" id="reload-performance">Refresh measurements</button></div><p class="muted small">Backend samples are bounded to 512 per metric. Feed receipt, quote age, chart backend, browser load/render, review, full submission, broker acknowledgement and reconciliation remain separate. Broker acknowledgement is not a fill.</p><div id="performance-summary" class="performance-grid"><p class="empty-state">Unlock the workspace to load measured samples. Empty means not measured, not zero.</p></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">PRODUCT SCOPE</p><h3>Listed shares &amp; ETFs</h3></div><span class="status-pill warn" id="listed-scope-badge">SEPARATE PROVIDER REQUIRED</span></div><p>Owned listed instruments require an explicit symbol + exchange/MIC + currency identity and a separately entitled provider. A same-named Vantage share/ETF CFD is never a substitute. This build exposes a read-only routing-policy boundary, not listed execution.</p><div id="listed-asset-status" class="inline-status">Loading provider boundary…</div><p class="muted small">Setup and provider acceptance requirements: <code>docs/LISTED_ASSETS.md</code>. Existing Alpaca support is read-only US market data for local paper fills, not owned-share execution.</p></article>
         <article class="panel"><div class="panel-head"><div><p class="eyebrow">MANUAL &amp; LIMITATIONS</p><h3>Read before demo or live use</h3></div><div class="button-row"><a class="button secondary" href="/manual" target="_blank" rel="noopener">User manual</a><a class="button secondary" href="/docs" target="_blank" rel="noopener">API documentation</a></div></div><div class="help-grid"><div><strong>Verified here</strong><p>Paper regressions and fake-MT5 unit/API/integration behavior. Windows artifacts carry their own actual test logs.</p></div><div><strong>Not thereby verified</strong><p>A real Vantage connection, account-specific instrument availability, demo fills, live execution, or profitability. These require explicit local verification.</p></div><div><strong>Live remains locked</strong><p>Real order placement needs exact identity, risk bounds, fresh data, reconciliation, Arm, Activate and final confirmation. No startup or credential auto-activation.</p></div><div><strong>TradingView later</strong><p>No restricted chart library or webhook relay is bundled. Future alerts require a secure public HTTPS relay, authentication, dedupe, timestamps and audit. Never include broker credentials.</p></div></div></article>
         <article class="panel"><div class="panel-head"><div><p class="eyebrow">COMPATIBILITY</p><h3>Legacy research &amp; paper tools</h3></div></div><p>The original chart and research APIs remain for regression compatibility. They are paper/research views, not Vantage execution controls.</p><div class="button-row"><a class="button secondary" href="/chart">Legacy paper chart</a><a class="button secondary" href="/dashboard">Legacy research dashboard</a></div></article>
       </section>

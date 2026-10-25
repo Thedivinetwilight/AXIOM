@@ -17,7 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
-    market_data,
+    market_data, listed_assets,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -27,6 +27,8 @@ from app.vantage.secrets import DpapiSecretStore, SecretStoreUnavailable
 from app.vantage.service import OrderBlocked, ServiceError, VantageService
 from app.vantage.store import VantageStore
 from app.market_data.mt5 import MarketDataError, MT5MarketDataService
+from app.performance import LatencyTracker
+from app.listed_assets import ListedAssetService, ListedProviderUnavailable
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -62,11 +64,13 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             app.state.vantage = VantageService(
                 vantage_store, secret_store,
                 lock_check=lambda: bool(repository._writer_file or repository._memory_writer),
+                metrics=app.state.performance,
             )
             app.state.market_data = MT5MarketDataService(
                 secret_store,
                 execution_mode=lambda: app.state.vantage.mode,
                 audit=repository.record_system_event,
+                metrics=app.state.performance,
             )
             yield
             await app.state.simulator.stop()
@@ -87,7 +91,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         redoc_url=None,
     )
 
-    app.state.api_latencies = []  # rolling last-100 request latencies (ms)
+    app.state.api_latencies = []  # legacy rolling last-100 request latencies (ms)
+    app.state.performance = LatencyTracker(capacity=512)
 
     @app.middleware("http")
     async def record_latency(request, call_next):
@@ -100,6 +105,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             latencies = request.app.state.api_latencies
             latencies.append(round(elapsed_ms, 2))
             del latencies[:-100]  # bounded memory
+            request.app.state.performance.observe("http.request", elapsed_ms)
         except Exception:
             pass  # metrics must never break a request
         response.headers["x-api-latency-ms"] = f"{elapsed_ms:.2f}"
@@ -107,6 +113,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     app.state.settings = settings
     app.state.data_dir = Path(data_dir or ROOT / "data")
     app.state.research_lock = Lock()
+    app.state.listed_assets = ListedAssetService()
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
@@ -148,6 +155,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     async def mt5_unavailable(request, exc):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+    @app.exception_handler(ListedProviderUnavailable)
+    async def listed_unavailable(request, exc):
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
     @app.exception_handler(ValueError)
     async def invalid_input(request, exc):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -169,7 +180,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
     # every data route declares its own bearer dependency.
     app.include_router(chart.router)
-    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data):
+    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
     # remote script, and nothing secret is ever placed here.

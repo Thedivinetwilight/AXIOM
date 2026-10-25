@@ -4,7 +4,7 @@
  * by an API response, logged, exported, or persisted outside tab sessionStorage. */
 const $ = (id) => document.getElementById(id);
 const MODE_LABELS = {
-  AXIOM_PAPER: "AXIOM PAPER",
+  AXIOM_PAPER: "LOCAL PAPER",
   VANTAGE_DEMO: "VANTAGE DEMO",
   VANTAGE_LIVE: "VANTAGE LIVE",
 };
@@ -22,8 +22,11 @@ const state = {
   token: "", workspace: null, activity: [], connectionInfo: null, marketData: null,
   page: "overview", mode: null, side: "BUY", readiness: null, activation: null,
   instruments: [], selected: new Set(), productTypes: new Set(), instrumentLoading: false,
+  watchlist: new Set(), watchlistKey: "",
   contracts: {}, chart: { mode: null, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null },
-  chartSymbolsLoaded: false, riskDirty: false, credentialMode: null,
+  chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
+  chartSymbolsLoaded: false, chartRequest: 0, riskDirty: false, credentialMode: null,
+  performance: { backend: null, browser: {} }, listedAssets: null, ticketReview: null,
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -135,6 +138,38 @@ function newKey(prefix) {
 function isVantage() { return state.workspace?.status?.mode !== "AXIOM_PAPER"; }
 function currentStatus() { return state.workspace?.status || {}; }
 function uncertainError(error) { return error?.network || error?.status >= 500; }
+function observeBrowser(name, milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return;
+  const samples = state.performance.browser[name] || [];
+  samples.push(milliseconds);
+  if (samples.length > 128) samples.splice(0, samples.length - 128);
+  state.performance.browser[name] = samples;
+}
+function percentile(values, quantile) {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const position = (ordered.length - 1) * quantile;
+  const lower = Math.floor(position), upper = Math.min(lower + 1, ordered.length - 1);
+  return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower);
+}
+function watchlistStorageKey() {
+  const status = currentStatus();
+  const identity = String(status.identity_fingerprint || "no-verified-account").slice(0, 24);
+  return `axiom-watchlist-v1:${status.mode || "UNKNOWN"}:${identity}`;
+}
+function loadWatchlist() {
+  const key = watchlistStorageKey();
+  if (state.watchlistKey === key) return;
+  state.watchlistKey = key; state.watchlist = new Set();
+  try {
+    const saved = JSON.parse(storageGet(key) || "[]");
+    if (Array.isArray(saved)) state.watchlist = new Set(saved.filter((item) => typeof item === "string" && item.length <= 64).slice(0, 200));
+  } catch (_) { state.watchlist = new Set(); }
+}
+function saveWatchlist() {
+  storageSet(state.watchlistKey || watchlistStorageKey(), JSON.stringify([...state.watchlist].slice(0, 200)));
+  renderInstruments();
+}
 
 function showAuth(message = "") {
   closeDialog();
@@ -250,17 +285,29 @@ async function loadMarketData() {
     renderMarketData();
   }
 }
+async function loadPerformance() {
+  try { state.performance.backend = await api("/api/trading/performance"); }
+  catch (error) { state.performance.backend = { error: error.message, metrics: {} }; }
+  renderPerformance();
+}
+async function loadListedAssets() {
+  try { state.listedAssets = await api("/api/listed-assets/status"); }
+  catch (error) { state.listedAssets = { error: error.message, execution_supported: false }; }
+  renderListedAssets();
+}
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets()]);
   if (state.page === "instruments" && currentStatus().connected) await loadInstruments();
   if (state.page === "charts") await loadChartSymbols();
 }
 function resetModeLocalState() {
-  state.readiness = null; state.activation = null; state.riskDirty = false;
+  state.readiness = null; state.activation = null; state.riskDirty = false; state.ticketReview = null;
   state.instruments = []; state.selected = new Set(); state.contracts = {};
+  state.watchlist = new Set(); state.watchlistKey = "";
   state.chart = { mode: state.mode, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
-  state.chartSymbolsLoaded = false; state.submissionUncertain = false;
+  state.chartView.endOffset = 0; state.chartView.pending = null; state.chartView.pointer = null; state.chartView.drag = null;
+  state.chartSymbolsLoaded = false; state.submissionUncertain = false; state.chartRequest += 1;
   drawChart();
 }
 function configureRefresh() {
@@ -273,7 +320,7 @@ function configureRefresh() {
 
 function renderAll() {
   if (!state.workspace) return;
-  renderMode(); renderOverview(); renderOrders(); renderRisk(); renderConnections(); renderMarketData(); renderChartContext(); renderActivity();
+  renderMode(); renderBoundary(); renderOverview(); renderOrders(); renderRisk(); renderConnections(); renderMarketData(); renderChartContext(); renderActivity();
 }
 function badgeClass(mode) { return mode === "VANTAGE_LIVE" ? "live" : mode === "VANTAGE_DEMO" ? "demo" : "paper"; }
 function renderMode() {
@@ -298,7 +345,25 @@ function renderMode() {
       : mode === "VANTAGE_DEMO" ? "Demo orders only; demo results do not prove live readiness." : "Independent local paper; no Vantage order routing.";
   $("ticket-mode").textContent = label; $("ticket-mode").className = `status-pill ${status.active ? "ok" : "warn"}`;
   $("deals-label").textContent = mode === "AXIOM_PAPER" ? "LOCAL SIMULATED FILLS" : mode === "VANTAGE_DEMO" ? "MT5 DEMO DEALS" : "MT5 LIVE DEALS";
-  renderFreshness();
+  document.body.dataset.mode = mode || "AXIOM_PAPER";
+  renderFreshness(); renderBoundary();
+}
+function renderBoundary() {
+  if (!state.workspace) return;
+  const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  $("boundary-execution").textContent = paper ? "LOCAL PAPER · SIMULATED" : `${MODE_LABELS[status.mode]} · ${status.connected ? "MT5 CONNECTED" : "DISCONNECTED"}`;
+  $("boundary-execution-note").textContent = paper ? "Local reviewed fills only; no Vantage order routing" : status.mode === "VANTAGE_LIVE" ? "Real-money capability remains separately locked" : "Demo orders only; no live-readiness inference";
+  if (paper) {
+    const connected = Boolean(state.marketData?.authenticated);
+    $("boundary-data").textContent = connected ? "VANTAGE DEMO · READ-ONLY" : "LOCAL REPLAY / DISCONNECTED";
+    $("boundary-data-note").textContent = connected ? "Independent data interface; execution remains LOCAL PAPER" : "Replay is labeled sample data, never silent fallback";
+  } else {
+    $("boundary-data").textContent = status.connected ? "SAME VANTAGE MT5 ACCOUNT" : "NO CURRENT BROKER FEED";
+    $("boundary-data-note").textContent = "Quote connectivity alone never grants order permission";
+  }
+  const lifecycle = status.emergency_stop ? "EMERGENCY STOP" : status.lifecycle || "DISARMED";
+  $("boundary-auth").textContent = paper ? (status.emergency_stop ? "EMERGENCY STOP" : "LOCAL REVIEW · AUTOMATION OFF") : lifecycle;
+  $("boundary-auth-note").textContent = paper ? "Every simulated fill requires manual review" : status.active ? "Explicitly active; every order still requires review + final phrase" : "Readiness → Arm → Activate → reviewed order required";
 }
 function renderFreshness() {
   if (!state.workspace) return;
@@ -381,7 +446,7 @@ function operatorChecklist() {
       "If the feed degrades, new BUY entries block; existing local paper records remain available.",
     ];
     return [
-      "For fresh MT5 prices, save VANTAGE_DEMO locally and connect independent market data on Connections; execution stays AXIOM PAPER.",
+      "For fresh MT5 prices, save VANTAGE_DEMO locally and connect independent market data on Connections; execution stays LOCAL PAPER.",
       "Or start/load the legacy local paper session. Replay data is sample data, not market data.",
       "Use a reviewed manual ticket; no Vantage order is routed and fills are always simulated.",
     ];
@@ -484,7 +549,7 @@ function renderConnections() {
   const info = state.connectionInfo; const secretStatus = info?.secret_store || "Checking protected storage…";
   $("secret-store-status").textContent = secretStatus.startsWith("Windows") ? "DPAPI PROTECTED" : "PROTECTED STORE UNAVAILABLE";
   $("secret-store-status").className = `status-pill ${secretStatus.startsWith("Windows") ? "ok" : "err"}`;
-  $("credential-environment").textContent = paper ? "VANTAGE_DEMO market-data credential · execution stays AXIOM PAPER" : `${MODE_LABELS[status.mode]} credential`;
+  $("credential-environment").textContent = paper ? "VANTAGE_DEMO market-data credential · execution stays LOCAL PAPER" : `${MODE_LABELS[status.mode]} credential`;
   const profile = info?.profiles?.[credentialMode] || (paper ? null : status.credential);
   if (state.credentialMode !== credentialMode) {
     state.credentialMode = credentialMode;
@@ -496,7 +561,7 @@ function renderConnections() {
   const storeUnavailable = !secretStatus.startsWith("Windows") && Boolean(info);
   document.querySelectorAll("#credential-form input").forEach((input) => {
     input.disabled = storeUnavailable;
-    input.title = paper ? "AXIOM PAPER edits only the protected VANTAGE_DEMO profile; execution does not change." : storeUnavailable ? "OS-protected storage is unavailable; credentials cannot be entered safely." : "";
+    input.title = paper ? "LOCAL PAPER edits only the protected VANTAGE_DEMO profile; execution does not change." : storeUnavailable ? "OS-protected storage is unavailable; credentials cannot be entered safely." : "";
   });
   setDisabled("save-credential", storeUnavailable || Boolean(profile), storeUnavailable ? "DPAPI is unavailable; no plaintext fallback exists." : "Credential exists; use explicit Replace.");
   setDisabled("replace-credential", storeUnavailable || !profile, !profile ? "No existing credential to replace." : storeUnavailable ? "DPAPI is unavailable." : "");
@@ -507,7 +572,7 @@ function renderConnections() {
   $("connection-state").textContent = paper ? "LOCAL PAPER ONLY" : status.connection?.state || "NOT CONFIGURED";
   $("connection-state-dot").className = `connection-dot ${status.connected ? "ok" : paper ? "" : "warn"}`;
   $("connection-detail").className = `inline-status ${status.connected ? "ok" : paper ? "" : "warn"}`;
-  $("connection-detail").textContent = paper ? "Execution is local AXIOM PAPER. The credential above is DEMO-only; use the independent read-only market-data panel below. The execution connection test remains disabled." : status.connection?.detail || "No credential configured.";
+  $("connection-detail").textContent = paper ? "Execution is local LOCAL PAPER. The credential above is DEMO-only; use the independent read-only market-data panel below. The execution connection test remains disabled." : status.connection?.detail || "No credential configured.";
   const account = status.account || {};
   const rows = [
     ["Masked login", status.account_login_masked || profile?.login_masked || "Not configured"],
@@ -531,7 +596,7 @@ function renderMarketData() {
   $("market-data-detail").className = `inline-status ${data.state === "DEGRADED" || data.state === "UNAVAILABLE" ? "err" : fresh ? "ok" : "warn"}`;
   $("market-data-detail").textContent = data.detail || "Independent read-only market data is not connected.";
   const rows = [
-    ["Execution", "AXIOM PAPER · local simulated fills only"],
+    ["Execution", "LOCAL PAPER · local simulated fills only"],
     ["Credential profile", "VANTAGE_DEMO · Windows DPAPI"],
     ["Masked account", data.account?.login_masked || "Not verified"],
     ["MT5 server", data.account?.server || "Not verified"],
@@ -546,8 +611,37 @@ function renderMarketData() {
   $("market-data-account").innerHTML = rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
   const demoProfile = state.connectionInfo?.profiles?.VANTAGE_DEMO;
   const storeUnavailable = state.connectionInfo && !String(state.connectionInfo.secret_store || "").startsWith("Windows");
-  setDisabled("connect-market-data", !paper || !demoProfile || storeUnavailable || data.state === "CONNECTING", !paper ? "This update's independent quote feed is restricted to AXIOM PAPER execution." : !demoProfile ? "Save the VANTAGE_DEMO credential locally first." : storeUnavailable ? "Windows DPAPI is unavailable." : "");
+  setDisabled("connect-market-data", !paper || !demoProfile || storeUnavailable || data.state === "CONNECTING", !paper ? "This update's independent quote feed is restricted to LOCAL PAPER execution." : !demoProfile ? "Save the VANTAGE_DEMO credential locally first." : storeUnavailable ? "Windows DPAPI is unavailable." : "");
   setDisabled("disconnect-market-data", !data.authenticated, "Market data is already disconnected.");
+  renderBoundary();
+}
+
+function renderPerformance() {
+  const panel = $("performance-summary"); if (!panel) return;
+  const backend = state.performance.backend || { metrics: {} };
+  const backendRows = Object.entries(backend.metrics || {}).map(([name, row]) => ({
+    name, ...row, source: "backend", note: backend.boundaries?.[name] || "Local server observation",
+  }));
+  const browserRows = Object.entries(state.performance.browser).filter(([, values]) => values.length).map(([name, values]) => ({
+    name, samples: values.length, p50_ms: percentile(values, .5), p95_ms: percentile(values, .95), p99_ms: percentile(values, .99),
+    source: "browser", note: name === "browser.chart.render" ? "Canvas command/render duration in this tab" : "Browser fetch + response handling; includes local API and scheduling",
+  }));
+  const rows = [...backendRows, ...browserRows].sort((a, b) => a.name.localeCompare(b.name)).slice(0, 18);
+  if (!rows.length) {
+    panel.innerHTML = `<p class="empty-state">${escapeHtml(backend.error || "No samples yet. Empty means not measured—not zero latency. Load a chart or perform a read-only review to generate relevant measurements.")}</p>`;
+    return;
+  }
+  panel.innerHTML = rows.map((row) => `<article class="performance-card"><strong>${escapeHtml(row.name)}</strong><dl><div><dt>p50</dt><dd>${fmt(row.p50_ms, 2)}</dd></div><div><dt>p95</dt><dd>${fmt(row.p95_ms, 2)}</dd></div><div><dt>p99</dt><dd>${fmt(row.p99_ms, 2)}</dd></div><div><dt>n</dt><dd>${row.samples}</dd></div></dl><small>${escapeHtml(row.source)} · ${escapeHtml(row.note)}</small></article>`).join("");
+}
+function renderListedAssets() {
+  const panel = $("listed-asset-status"); if (!panel) return;
+  const info = state.listedAssets;
+  if (!info) { panel.textContent = "Provider boundary has not been loaded."; return; }
+  panel.className = `inline-status ${info.error ? "err" : "warn"}`;
+  panel.textContent = info.error
+    ? `Boundary status unavailable: ${info.error}. No fallback routing is enabled.`
+    : `${info.identity_contract}. Data configured: ${info.data_configured ? "yes" : "no"}; execution supported: ${info.execution_supported ? "yes" : "no"}; MT5/CFD substitution: prohibited. ${info.note || ""}`;
+  $("listed-scope-badge").textContent = info.execution_supported ? "PROVIDER VERIFICATION REQUIRED" : "NO LISTED EXECUTION";
 }
 
 function renderChartContract() {
@@ -594,7 +688,7 @@ function renderChartContext() {
   if (feedContext) {
     const mt5Payload = state.chart.feed === "vantage_mt5" && state.chart.payload;
     feedContext.className = `inline-status ${mt5Payload ? (state.chart.payload.market_data ? "ok" : "err") : "warn"}`;
-    feedContext.textContent = !paper ? "This chart belongs to the selected Vantage execution session; it is separate from AXIOM PAPER market data."
+    feedContext.textContent = !paper ? "This chart belongs to the selected Vantage execution session; it is separate from LOCAL PAPER market data."
       : mt5Payload ? `${state.chart.payload.note || "Read-only MT5 closed bars and current tick."} Automation OFF; local reviewed fills only.`
       : state.marketData?.authenticated ? "Choose an account-discovered symbol and reload the MT5 chart. No DEMO/replay symbol is substituted."
       : "Replay/CSV is sample data, not market data. Connect the separate VANTAGE DEMO read-only feed on Connections for fresh MT5 prices.";
@@ -609,6 +703,14 @@ function renderChartContext() {
     : status.emergency_stop ? "Durable emergency stop blocks new entries. Risk-reducing exits remain subject to review."
     : paper ? "Review shows local price/headroom. Final result is explicitly simulated."
     : status.active ? "Active session. Review is read-only; submission repeats every server check." : "Review is available but will show lifecycle blockers until readiness, Arm and Activate complete.";
+  $("order-buy").setAttribute("aria-pressed", String(state.side === "BUY"));
+  $("order-sell").setAttribute("aria-pressed", String(state.side === "SELL"));
+  document.querySelectorAll("[data-chart-timeframe]").forEach((button) => {
+    const active = button.dataset.chartTimeframe === state.chart.timeframe;
+    button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
+  });
+  for (const id of ["zoom-out", "zoom-in", "reset-chart-view", "clear-drawings"]) setDisabled(id, !(state.chart.bars || []).length, "Load valid chart bars first.");
+  renderTicketEstimate();
 }
 
 async function selectMode() {
@@ -634,12 +736,12 @@ async function loadInstruments() {
     state.instruments = result.instruments || [];
     state.selected = new Set(result.selected || []);
     state.instruments.forEach((item) => { state.productTypes.add(item.product_type); state.contracts[item.symbol] = item; });
-    renderProductFilter(); renderInstruments();
+    loadWatchlist(); renderProductFilter(); renderInstruments();
     $("instrument-status").className = "inline-status ok";
     $("instrument-status").textContent = `${result.total_matching} account-specific instrument(s) matched. Only the connected MT5 symbols_get universe is shown.`;
   } catch (error) {
     $("instrument-status").className = "inline-status err"; $("instrument-status").textContent = error.message;
-    emptyRow("instrument-rows", 8, "Instrument discovery failed; no substitute universe is used.");
+    emptyRow("instrument-rows", 9, "Instrument discovery failed; no substitute universe is used.");
   } finally { state.instrumentLoading = false; }
 }
 function renderProductFilter() {
@@ -648,7 +750,7 @@ function renderProductFilter() {
   select.value = current;
 }
 function productLabel(type) {
-  return ({ SHARE_CFD: "Share CFD · no share ownership", ETF_CFD: "ETF CFD · no ETF ownership", FOREX: "Forex", INDEX_CFD: "Index CFD", COMMODITY_CFD: "Commodity CFD", ETF: "ETF", UNKNOWN: "Unknown · untradable" })[type] || String(type || "UNKNOWN").replaceAll("_", " ");
+  return ({ SHARE_CFD: "Share CFD · no share ownership", ETF_CFD: "ETF CFD · no ETF ownership", FOREX: "Forex", INDEX_CFD: "Index CFD", COMMODITY_CFD: "Commodity CFD", METAL_CFD: "Metal CFD", CRYPTO_CFD: "Crypto CFD", LISTED_SHARE: "Listed share · separate provider", LISTED_ETF: "Listed ETF · separate provider", ETF: "ETF", UNKNOWN: "Unknown · untradable" })[type] || String(type || "UNKNOWN").replaceAll("_", " ");
 }
 function quoteFreshness(quote) {
   if (!quote) return ["No quote", "err"];
@@ -658,19 +760,28 @@ function quoteFreshness(quote) {
 }
 function renderInstruments() {
   const status = currentStatus();
+  if (status.connected) loadWatchlist();
+  const watchOnly = Boolean($("watchlist-only")?.checked);
+  const rows = watchOnly ? state.instruments.filter((item) => state.watchlist.has(item.symbol)) : state.instruments;
   if (!status.connected) {
     $("instrument-status").className = "inline-status warn";
     $("instrument-status").textContent = "Connect with the read-only test on Connections. No hard-coded or website instrument universe is displayed.";
-    emptyRow("instrument-rows", 8, "No account-discovered instruments while disconnected.");
-  } else if (!state.instruments.length) emptyRow("instrument-rows", 8, "No instruments match the current filters.");
-  else $("instrument-rows").innerHTML = state.instruments.map((item) => {
+    emptyRow("instrument-rows", 9, "No account-discovered instruments while disconnected.");
+  } else if (!rows.length) emptyRow("instrument-rows", 9, watchOnly ? "No watched symbols match the current account/search filters. Watching never selects execution." : "No instruments match the current filters.");
+  else $("instrument-rows").innerHTML = rows.map((item) => {
     const [fresh, freshKind] = quoteFreshness(item.quote);
     const spread = item.quote ? Number(item.quote.ask) - Number(item.quote.bid) : null;
-    return `<tr><td><input type="checkbox" data-select-symbol="${escapeHtml(item.symbol)}" ${state.selected.has(item.symbol) ? "checked" : ""} aria-label="Select ${escapeHtml(item.symbol)}"></td><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.display_name || item.description)}</small></td><td>${statusPill(productLabel(item.product_type), item.tradable ? "" : "err")}${item.is_cfd ? "<small>CFD, not underlying ownership</small>" : ""}</td><td>${escapeHtml(item.trade_mode_label)}<small>${item.tradable ? "Metadata understood" : escapeHtml((item.metadata_issues || []).join("; "))}</small></td><td>${fmt(item.volume_min, 8)} / ${fmt(item.volume_step, 8)}</td><td>${fmt(item.tick_size, 8)} / ${escapeHtml(item.digits)}</td><td>${statusPill(fresh, freshKind)}<small>Spread ${spread === null ? "—" : fmt(spread, 8)}</small></td><td><button class="button secondary" data-inspect="${escapeHtml(item.symbol)}">Inspect</button></td></tr>`;
+    const watched = state.watchlist.has(item.symbol);
+    return `<tr><td><button type="button" class="watch-button" data-watch-symbol="${escapeHtml(item.symbol)}" aria-pressed="${watched}" aria-label="${watched ? "Remove" : "Add"} ${escapeHtml(item.symbol)} ${watched ? "from" : "to"} watchlist" title="Watchlist only; does not select execution">${watched ? "★" : "☆"}</button></td><td><input type="checkbox" data-select-symbol="${escapeHtml(item.symbol)}" ${state.selected.has(item.symbol) ? "checked" : ""} aria-label="Select ${escapeHtml(item.symbol)} for execution"></td><td><strong>${escapeHtml(item.symbol)}</strong><small>${escapeHtml(item.display_name || item.description)}</small></td><td>${statusPill(productLabel(item.product_type), item.tradable ? "" : "err")}${item.is_cfd ? "<small>CFD, not underlying ownership</small>" : ""}</td><td>${escapeHtml(item.trade_mode_label)}<small>${item.tradable ? "Metadata understood" : escapeHtml((item.metadata_issues || []).join("; "))}</small></td><td>${fmt(item.volume_min, 8)} / ${fmt(item.volume_step, 8)}</td><td>${fmt(item.tick_size, 8)} / ${escapeHtml(item.digits)}</td><td>${statusPill(fresh, freshKind)}<small>Spread ${spread === null ? "—" : fmt(spread, 8)}</small></td><td><button class="button secondary" data-inspect="${escapeHtml(item.symbol)}">Inspect</button></td></tr>`;
   }).join("");
+  $("watchlist-status").textContent = status.connected
+    ? `${state.watchlist.size} watched symbol(s) in this tab · ${rows.length} visible · ${state.selected.size} selected for execution. Watchlist edits never change selection, connection, Arm or Activate.`
+    : "Watchlists are local to this tab and scoped to an opaque account fingerprint. Connect to edit an account-discovered watchlist.";
   setDisabled("reload-instruments", !status.connected, "Run the read-only MT5 connection first.");
   setDisabled("save-instruments", !status.connected || state.selected.size === 0, !status.connected ? "Connect before saving an account selection." : "Select at least one instrument; the API rejects an empty selection.");
-  for (const id of ["instrument-search", "product-filter", "selected-only"]) setDisabled(id, !status.connected, "Connect to discover this account's instruments.");
+  setDisabled("watch-visible", !status.connected || !state.instruments.length, "Load account-discovered rows first.");
+  setDisabled("clear-watchlist", !status.connected || state.watchlist.size === 0, "The current scoped watchlist is empty.");
+  for (const id of ["instrument-search", "product-filter", "selected-only", "watchlist-only"]) setDisabled(id, !status.connected, "Connect to discover this account's instruments.");
 }
 function inspectInstrument(symbol) {
   const item = state.contracts[symbol] || state.instruments.find((row) => row.symbol === symbol);
@@ -778,25 +889,36 @@ async function loadChart() {
   const independentMT5 = paper && Boolean(state.marketData?.authenticated);
   const symbol = $("chart-symbol").value; const timeframe = $("chart-timeframe").value;
   if (!symbol) return;
+  const requestId = ++state.chartRequest;
   setDisabled("reload-chart", true, "Loading chart…");
   $("chart-source").textContent = "LOADING REAL SESSION DATA"; $("chart-source").className = "status-pill warn";
   try {
     const query = new URLSearchParams({ symbol, timeframe, limit: "500" });
     if (paper && !independentMT5) query.set("indicators", "");
     const endpoint = independentMT5 ? "/api/market-data/chart" : paper ? "/chart/data" : "/api/trading/chart";
-    const payload = await api(`${endpoint}?${query}`);
+    const started = performance.now(); let payload;
+    try { payload = await api(`${endpoint}?${query}`); }
+    finally { observeBrowser("browser.chart.load", performance.now() - started); }
+    if (requestId !== state.chartRequest) return;
     const bars = normalizeBars(payload.bars);
+    const previousKey = chartKey();
     state.chart = { mode: status.mode, feed: independentMT5 ? "vantage_mt5" : "legacy", symbol, timeframe, bars, quote: payload.quote || null, payload };
+    if (previousKey !== chartKey()) {
+      state.chartView.endOffset = 0; state.chartView.pending = null; state.chartView.pointer = null;
+      state.chartView.visible = Math.min(160, Math.max(20, bars.length || 20));
+    }
     if (independentMT5) {
       state.marketData = await api("/api/market-data/status");
       renderMarketData(); renderFreshness();
     }
+    if (requestId !== state.chartRequest) return;
     $("order-symbol").value = symbol;
     $("chart-source").textContent = payload.data_feed_label || payload.source_label || (paper ? "LOCAL PAPER DATA" : "VANTAGE MT5");
     $("chart-source").className = `status-pill ${payload.market_data ? "ok" : "warn"}`;
     $("chart-legend").textContent = `${bars.length} bars · ${payload.note || payload.data_feed_label || payload.source_label || "Confirmed source"} · generated ${timeText(payload.generated_at)}`;
     renderChartQuote(); drawChart(); renderChartContext(); updateOrderContract();
   } catch (error) {
+    if (requestId !== state.chartRequest) return;
     if (independentMT5 || state.chart.symbol !== symbol || state.chart.mode !== status.mode) {
       state.chart.bars = []; state.chart.payload = null; state.chart.quote = null;
       if (independentMT5) state.chart.feed = "vantage_mt5";
@@ -807,7 +929,7 @@ async function loadChart() {
     $("chart-empty").hidden = false; $("chart-empty").textContent = error.message;
     renderChartContext();
     toast("Chart load failed", error.message, "err");
-  } finally { setDisabled("reload-chart", false); }
+  } finally { if (requestId === state.chartRequest) setDisabled("reload-chart", false); }
 }
 function renderChartQuote() {
   const chart = state.chart; const payload = chart.payload || {}; const quote = chart.quote;
@@ -821,47 +943,294 @@ function renderChartQuote() {
     $("chart-quote").innerHTML = `<span><strong>${escapeHtml(chart.symbol)}</strong></span><span>Last closed bar <strong>${fmt(last?.close)}</strong></span><span>${escapeHtml(payload.data_feed_label || "Local paper data")}</span><span>${last ? escapeHtml(timeText(last.timestamp)) : "No bar timestamp"}</span>`;
   }
 }
+function chartKey() {
+  return `${state.chart.mode}|${state.chart.feed}|${state.chart.symbol}|${state.chart.timeframe}`;
+}
+function chartWindow() {
+  const bars = state.chart.bars || [];
+  if (!bars.length) return { bars: [], start: 0, end: 0, visible: 0, offset: 0 };
+  const minimum = Math.min(20, bars.length);
+  const visible = Math.max(minimum, Math.min(bars.length, Math.round(state.chartView.visible || 160)));
+  const maxOffset = Math.max(0, bars.length - visible);
+  const offset = Math.max(0, Math.min(maxOffset, Math.round(state.chartView.endOffset || 0)));
+  const end = bars.length - offset; const start = Math.max(0, end - visible);
+  state.chartView.visible = visible; state.chartView.endOffset = offset;
+  return { bars: bars.slice(start, end), start, end, visible, offset };
+}
+function resetChartView() {
+  const count = (state.chart.bars || []).length;
+  state.chartView.visible = Math.min(160, Math.max(20, count || 20));
+  state.chartView.endOffset = 0; state.chartView.pending = null; state.chartView.pointer = null;
+  $("chart-cursor").textContent = ""; drawChart();
+}
+function zoomChart(factor, anchor = .5) {
+  const bars = state.chart.bars || []; if (!bars.length) return;
+  const view = chartWindow(); const minimum = Math.min(20, bars.length);
+  const nextVisible = Math.max(minimum, Math.min(bars.length, Math.round(view.visible * factor)));
+  const anchorIndex = view.start + view.visible * Math.max(0, Math.min(1, anchor));
+  const nextStart = anchorIndex - nextVisible * Math.max(0, Math.min(1, anchor));
+  state.chartView.visible = nextVisible;
+  state.chartView.endOffset = Math.round(bars.length - (nextStart + nextVisible));
+  chartWindow(); drawChart();
+}
+function panChart(offsetDelta) {
+  if (!(state.chart.bars || []).length) return;
+  state.chartView.endOffset = Math.round(state.chartView.endOffset + offsetDelta);
+  chartWindow(); drawChart();
+}
+function indicatorSeries(kind, period) {
+  const bars = state.chart.bars || []; const closes = bars.map((bar) => Number(bar.close));
+  if (kind === "SMA") {
+    let sum = 0;
+    return closes.map((value, index) => {
+      sum += value; if (index >= period) sum -= closes[index - period];
+      return index >= period - 1 ? sum / period : null;
+    });
+  }
+  const alpha = 2 / (period + 1); let previous = closes[0];
+  return closes.map((value, index) => {
+    previous = index === 0 ? value : alpha * value + (1 - alpha) * previous;
+    return previous;
+  });
+}
+function currentDrawings() {
+  return state.chartView.drawings[chartKey()] || [];
+}
+function scheduleChartDraw() {
+  if (state.chartView.frame !== null) return;
+  const raf = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 16));
+  state.chartView.frame = raf(() => { state.chartView.frame = null; drawChart(); });
+}
+function drawIndicator(ctx, series, view, geometry, color) {
+  const { left, top, plotW, plotH, max, min, start, end } = geometry;
+  const step = plotW / Math.max(1, end - start);
+  const y = (price) => top + (max - price) / (max - min || 1) * plotH;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.25; ctx.beginPath(); let open = false;
+  for (let index = start; index < end; index += 1) {
+    const value = series[index];
+    if (!Number.isFinite(value)) { open = false; continue; }
+    const x = left + (index - start + .5) * step;
+    if (!open) { ctx.moveTo(x, y(value)); open = true; } else ctx.lineTo(x, y(value));
+  }
+  ctx.stroke();
+}
 function drawChart() {
+  const startedAt = performance.now();
   const canvas = $("terminal-chart"); if (!canvas) return;
   const rect = canvas.getBoundingClientRect(); const width = Math.max(300, rect.width); const height = Math.max(250, rect.height);
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#09131d"; ctx.fillRect(0, 0, width, height);
+  ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#080f17"; ctx.fillRect(0, 0, width, height);
   const bars = state.chart.bars || [];
   $("chart-empty").hidden = bars.length > 0;
-  if (!bars.length) { canvas.setAttribute("aria-label", "No chart data loaded"); return; }
+  canvas.dataset.tool = $("drawing-tool")?.value || "NONE";
+  if (!bars.length) {
+    canvas.setAttribute("aria-label", "No chart data loaded"); state.chartView.geometry = null;
+    observeBrowser("browser.chart.render", performance.now() - startedAt); return;
+  }
   const valid = bars.every((bar) => [bar.open, bar.high, bar.low, bar.close].every((value) => Number.isFinite(Number(value)) && Number(value) > 0));
-  if (!valid) { $("chart-empty").hidden = false; $("chart-empty").textContent = "Invalid OHLC data refused; no chart drawn."; return; }
-  const left = 12, right = 74, top = 20, bottom = 30;
-  const plotW = width - left - right, plotH = height - top - bottom;
-  const high = Math.max(...bars.map((bar) => Number(bar.high))); const low = Math.min(...bars.map((bar) => Number(bar.low)));
-  const padding = Math.max((high - low) * 0.08, high * 0.0001); const max = high + padding, min = low - padding;
+  if (!valid) {
+    $("chart-empty").hidden = false; $("chart-empty").textContent = "Invalid OHLC data refused; no chart drawn.";
+    observeBrowser("browser.chart.render", performance.now() - startedAt); return;
+  }
+  const view = chartWindow(); const visible = view.bars;
+  const left = 12, right = 76, top = 20, bottom = 31;
+  const plotW = Math.max(1, width - left - right), plotH = Math.max(1, height - top - bottom);
+  const high = Math.max(...visible.map((bar) => Number(bar.high))); const low = Math.min(...visible.map((bar) => Number(bar.low)));
+  const padding = Math.max((high - low) * .08, high * .0001); const max = high + padding, min = low - padding;
+  const step = plotW / visible.length; const bodyW = Math.max(1, Math.min(12, step * .68));
   const y = (price) => top + (max - Number(price)) / (max - min || 1) * plotH;
-  const step = plotW / bars.length; const bodyW = Math.max(1, Math.min(12, step * 0.68));
+  const xForIndex = (index) => left + (index - view.start + .5) * step;
+  const geometry = { left, right, top, bottom, plotW, plotH, max, min, start: view.start, end: view.end, step, width, height };
+  state.chartView.geometry = geometry;
   ctx.font = "10px ui-sans-serif, system-ui"; ctx.textBaseline = "middle";
   for (let index = 0; index <= 5; index += 1) {
     const gy = top + plotH * index / 5; const price = max - (max - min) * index / 5;
-    ctx.strokeStyle = "#1c2c3c"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(left, gy); ctx.lineTo(left + plotW, gy); ctx.stroke();
-    ctx.fillStyle = "#71899f"; ctx.fillText(fmt(price, 6), left + plotW + 8, gy);
+    ctx.strokeStyle = "#1b2a39"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(left, gy); ctx.lineTo(left + plotW, gy); ctx.stroke();
+    ctx.fillStyle = "#8298ac"; ctx.fillText(fmt(price, 6), left + plotW + 8, gy);
   }
-  bars.forEach((bar, index) => {
-    const x = left + step * index + step / 2; const up = Number(bar.close) >= Number(bar.open);
-    ctx.strokeStyle = up ? "#65d6a5" : "#ff7d8c"; ctx.fillStyle = up ? "#65d6a5" : "#ff7d8c";
+  visible.forEach((bar, localIndex) => {
+    const x = left + step * localIndex + step / 2; const up = Number(bar.close) >= Number(bar.open);
+    ctx.strokeStyle = up ? "#70dfad" : "#ff8999"; ctx.fillStyle = up ? "#70dfad" : "#ff8999";
     ctx.beginPath(); ctx.moveTo(x, y(bar.high)); ctx.lineTo(x, y(bar.low)); ctx.stroke();
     const bodyTop = y(Math.max(Number(bar.open), Number(bar.close)));
     const bodyBottom = y(Math.min(Number(bar.open), Number(bar.close)));
     ctx.fillRect(x - bodyW / 2, bodyTop, bodyW, Math.max(1, bodyBottom - bodyTop));
   });
-  ctx.fillStyle = "#71899f";
+  const indicator = $("chart-indicator")?.value || "NONE";
+  if (["EMA20", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("EMA", 20), view, geometry, "#85b5ff");
+  if (["SMA50", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("SMA", 50), view, geometry, "#f4c676");
+  const drawings = currentDrawings();
+  drawings.forEach((drawing) => {
+    ctx.strokeStyle = "#c49aff"; ctx.fillStyle = "#c49aff"; ctx.lineWidth = 1.25; ctx.beginPath();
+    if (drawing.type === "HORIZONTAL") {
+      if (drawing.price < min || drawing.price > max) return;
+      ctx.moveTo(left, y(drawing.price)); ctx.lineTo(left + plotW, y(drawing.price)); ctx.stroke();
+      ctx.fillText(fmt(drawing.price, 6), left + 4, Math.max(top + 7, y(drawing.price) - 7));
+    } else if (drawing.type === "TREND") {
+      if (Math.max(drawing.a.index, drawing.b.index) < view.start || Math.min(drawing.a.index, drawing.b.index) >= view.end) return;
+      ctx.moveTo(xForIndex(drawing.a.index), y(drawing.a.price)); ctx.lineTo(xForIndex(drawing.b.index), y(drawing.b.price)); ctx.stroke();
+    }
+  });
+  const pending = state.chartView.pending;
+  if (pending && pending.key === chartKey() && state.chartView.pointer) {
+    const point = state.chartView.pointer;
+    if (point.x >= left && point.x <= left + plotW && point.y >= top && point.y <= top + plotH) {
+      const price = max - (point.y - top) / plotH * (max - min);
+      ctx.strokeStyle = "#c49aff"; ctx.beginPath(); ctx.moveTo(xForIndex(pending.index), y(pending.price)); ctx.lineTo(point.x, y(price)); ctx.stroke();
+    }
+  }
+  ctx.fillStyle = "#8298ac";
   for (let index = 0; index <= 4; index += 1) {
-    const barIndex = Math.min(bars.length - 1, Math.floor((bars.length - 1) * index / 4));
-    const date = new Date(bars[barIndex].timestamp); const label = Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const localIndex = Math.min(visible.length - 1, Math.floor((visible.length - 1) * index / 4));
+    const date = new Date(visible[localIndex].timestamp); const label = Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const x = left + plotW * index / 4; ctx.textAlign = index === 0 ? "left" : index === 4 ? "right" : "center"; ctx.fillText(label, x, height - 12);
   }
   ctx.textAlign = "left";
-  canvas.setAttribute("aria-label", `${state.chart.symbol} ${state.chart.timeframe}: ${bars.length} candles, high ${high}, low ${low}, last close ${bars.at(-1).close}`);
+  const pointer = state.chartView.pointer;
+  if (state.chartView.crosshair && pointer && pointer.x >= left && pointer.x <= left + plotW && pointer.y >= top && pointer.y <= top + plotH) {
+    const localIndex = Math.max(0, Math.min(visible.length - 1, Math.floor((pointer.x - left) / step)));
+    const bar = visible[localIndex]; const globalIndex = view.start + localIndex; const x = xForIndex(globalIndex);
+    const price = max - (pointer.y - top) / plotH * (max - min);
+    if (ctx.setLineDash) ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = "#718ba3"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + plotH); ctx.moveTo(left, pointer.y); ctx.lineTo(left + plotW, pointer.y); ctx.stroke();
+    if (ctx.setLineDash) ctx.setLineDash([]);
+    ctx.fillStyle = "#dbe8f2"; ctx.fillText(fmt(price, 6), left + plotW + 8, Math.max(top + 5, Math.min(top + plotH - 5, pointer.y)));
+    $("chart-cursor").textContent = `${timeText(bar.timestamp)} · O ${fmt(bar.open, 6)} H ${fmt(bar.high, 6)} L ${fmt(bar.low, 6)} C ${fmt(bar.close, 6)}`;
+  } else if (!pending) $("chart-cursor").textContent = "";
+  canvas.setAttribute("aria-label", `${state.chart.symbol} ${state.chart.timeframe}: ${visible.length} of ${bars.length} candles, visible high ${high}, low ${low}, last visible close ${visible.at(-1).close}. ${indicator === "NONE" ? "No indicator" : indicator.replace("BOTH", "EMA 20 and SMA 50")}; ${drawings.length} drawings.`);
+  observeBrowser("browser.chart.render", performance.now() - startedAt);
 }
+function chartPoint(event) {
+  const canvas = $("terminal-chart"); const rect = canvas.getBoundingClientRect(); const geometry = state.chartView.geometry;
+  const scaleX = geometry && rect.width ? geometry.width / rect.width : 1;
+  const scaleY = geometry && rect.height ? geometry.height / rect.height : 1;
+  return { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY };
+}
+function addDrawingPoint(point) {
+  const geometry = state.chartView.geometry; if (!geometry) return;
+  const { left, top, plotW, plotH, max, min, start, end, step } = geometry;
+  if (point.x < left || point.x > left + plotW || point.y < top || point.y > top + plotH) return;
+  const index = Math.max(start, Math.min(end - 1, start + Math.floor((point.x - left) / step)));
+  const price = max - (point.y - top) / plotH * (max - min);
+  const tool = $("drawing-tool").value; const key = chartKey();
+  const drawings = state.chartView.drawings[key] || [];
+  if (tool === "HORIZONTAL") {
+    drawings.push({ type: "HORIZONTAL", price });
+    state.chartView.drawings[key] = drawings.slice(-50); drawChart();
+  } else if (tool === "TREND") {
+    if (!state.chartView.pending || state.chartView.pending.key !== key) {
+      state.chartView.pending = { key, index, price };
+      $("chart-cursor").textContent = "Trend first point set. Choose the second point; Escape cancels.";
+    } else {
+      const first = state.chartView.pending;
+      if (first.index !== index || Math.abs(first.price - price) > 1e-12) drawings.push({ type: "TREND", a: { index: first.index, price: first.price }, b: { index, price } });
+      state.chartView.drawings[key] = drawings.slice(-50); state.chartView.pending = null;
+    }
+    drawChart();
+  }
+}
+function clearDrawings() {
+  delete state.chartView.drawings[chartKey()]; state.chartView.pending = null;
+  $("chart-cursor").textContent = ""; drawChart();
+}
+function bindChartCanvas() {
+  const canvas = $("terminal-chart");
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!(state.chart.bars || []).length) return;
+    canvas.focus(); const point = chartPoint(event); state.chartView.pointer = point;
+    if (($("drawing-tool").value || "NONE") === "NONE") {
+      state.chartView.drag = { x: point.x, offset: state.chartView.endOffset };
+      canvas.dataset.dragging = "true"; canvas.setPointerCapture?.(event.pointerId);
+    } else addDrawingPoint(point);
+    drawChart(); event.preventDefault();
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    const point = chartPoint(event); state.chartView.pointer = point;
+    if (state.chartView.drag) {
+      const step = state.chartView.geometry?.step || 10;
+      state.chartView.endOffset = state.chartView.drag.offset + Math.round((point.x - state.chartView.drag.x) / step);
+      chartWindow();
+    }
+    scheduleChartDraw();
+  });
+  const finishDrag = (event) => {
+    if (state.chartView.drag) {
+      state.chartView.drag = null; canvas.dataset.dragging = "false";
+      if (event?.pointerId !== undefined && canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    }
+    scheduleChartDraw();
+  };
+  canvas.addEventListener("pointerup", finishDrag); canvas.addEventListener("pointercancel", finishDrag);
+  canvas.addEventListener("pointerleave", () => {
+    if (!state.chartView.drag) { state.chartView.pointer = null; $("chart-cursor").textContent = ""; scheduleChartDraw(); }
+  });
+  canvas.addEventListener("wheel", (event) => {
+    if (!(state.chart.bars || []).length) return;
+    const point = chartPoint(event); const geometry = state.chartView.geometry;
+    const anchor = geometry ? (point.x - geometry.left) / geometry.plotW : .5;
+    zoomChart(event.deltaY > 0 ? 1.25 : .8, anchor); event.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener("keydown", (event) => {
+    const view = chartWindow(); const amount = Math.max(1, Math.round(view.visible * .1));
+    if (event.key === "ArrowLeft") { panChart(amount); event.preventDefault(); }
+    else if (event.key === "ArrowRight") { panChart(-amount); event.preventDefault(); }
+    else if (["+", "="].includes(event.key)) { zoomChart(.8); event.preventDefault(); }
+    else if (event.key === "-") { zoomChart(1.25); event.preventDefault(); }
+    else if (event.key === "Home") { resetChartView(); event.preventDefault(); }
+    else if (event.key === "Escape" && state.chartView.pending) {
+      state.chartView.pending = null; $("chart-cursor").textContent = ""; drawChart(); event.stopPropagation(); event.preventDefault();
+    }
+  });
+}
+function ticketSignature(values) {
+  return JSON.stringify({
+    symbol: values.symbol, side: values.side, order_type: values.order_type,
+    volume: Number(values.volume), limit_price: values.limit_price ?? null,
+    stop_loss: values.stop_loss ?? null, take_profit: values.take_profit ?? null,
+  });
+}
+function renderTicketEstimate() {
+  const panel = $("ticket-estimate"); if (!panel || !state.workspace) return;
+  const paper = currentStatus().mode === "AXIOM_PAPER";
+  const symbol = $("order-symbol").value; const volume = Number($("order-volume").value);
+  const contract = state.contracts[symbol] || state.chart.payload?.instrument || {};
+  const quote = state.chart.symbol === symbol ? state.chart.quote : contract.quote;
+  const side = state.side; const type = $("order-type").value;
+  const limit = type === "LIMIT" ? Number($("order-limit").value) : null;
+  const lastClose = Number(state.chart.bars?.at(-1)?.close);
+  const quotePrice = side === "BUY" ? Number(quote?.ask) : Number(quote?.bid);
+  const price = Number.isFinite(limit) && limit > 0 ? limit : Number.isFinite(quotePrice) && quotePrice > 0 ? quotePrice : lastClose;
+  const contractSize = paper ? 1 : Number(contract.contract_size);
+  const hasSize = Number.isFinite(contractSize) && contractSize > 0;
+  const notional = Number.isFinite(volume) && volume > 0 && Number.isFinite(price) && price > 0 && hasSize ? volume * contractSize * price : null;
+  const spread = Number.isFinite(Number(quote?.ask)) && Number.isFinite(Number(quote?.bid)) ? Number(quote.ask) - Number(quote.bid) : null;
+  const spreadValue = spread !== null && spread >= 0 && notional !== null && Number.isFinite(price) && price > 0 ? spread * volume * contractSize : null;
+  const currency = contract.currency_profit || state.workspace.account?.currency || "";
+  const accountCurrency = contract.account_currency || state.workspace.account?.currency || "";
+  let reviewed = null;
+  if (state.ticketReview && symbol && Number.isFinite(volume) && volume > 0) {
+    try {
+      const values = orderFormValues();
+      const reviewAge = ageSeconds(state.ticketReview.review.expires_at);
+      if (ticketSignature(values) === state.ticketReview.signature && Number.isFinite(reviewAge) && reviewAge < 0) reviewed = state.ticketReview.review;
+    } catch (_) { reviewed = null; }
+  }
+  const risk = reviewed?.risk;
+  const values = [
+    ["Product", productLabel(contract.product_type || state.chart.payload?.product_type || (paper ? "LOCAL PAPER" : "UNKNOWN"))],
+    ["Quantity", Number.isFinite(volume) && volume > 0 ? `${fmt(volume, 8)} ${paper ? "units" : "MT5 lots"}` : "Enter quantity"],
+    ["Indicative value", notional === null ? "Unavailable until price + contract metadata" : `${money(notional, currency)}${paper ? " · units × price" : " · lots × contract size × price"}`],
+    ["Bid / ask", quote ? `${fmt(quote.bid, 8)} / ${fmt(quote.ask, 8)}` : "No current bid/ask"],
+    ["Spread", spread === null ? "Unavailable" : `${fmt(spread, 8)} price${spreadValue === null ? "" : ` · ${money(spreadValue, currency)} indicative`}`],
+    ["Costs", reviewed?.precheck ? "Precheck shown in review; broker deals authoritative" : paper ? "Local review shows simulation context; configured costs apply" : "Commission/fees not invented; review + broker deals"],
+    ["Margin", paper ? "No MT5 margin conversion; local cash/position bounds" : reviewed ? money(risk?.estimated_margin, accountCurrency) : "Calculated by MT5 in read-only review"],
+    ["Risk", reviewed ? (risk?.allowed ? "Server review passed; final submit rechecks" : `Blocked: ${(risk?.issues || []).join("; ") || "see review"}`) : "Not reviewed · no submission"],
+  ];
+  panel.innerHTML = values.map(([key, value], index) => `<div class="ticket-value ${index >= 5 ? "wide" : ""}"><span>${escapeHtml(key)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
 function updateOrderContract() {
   const contract = state.contracts[$("order-symbol").value];
   const paper = currentStatus().mode === "AXIOM_PAPER";
@@ -878,6 +1247,7 @@ function updateOrderContract() {
   } else if (paper) {
     $("order-volume").min = 0; $("order-volume").step = "any";
   }
+  renderTicketEstimate();
 }
 
 function orderFormValues() {
@@ -909,6 +1279,11 @@ async function reviewPaper(values) {
   const status = currentStatus(); const blocked = status.emergency_stop && values.side === "BUY";
   const entryBlocked = values.side === "BUY" && Boolean(ticket.entry_blocked);
   const idempotencyKey = newKey("paper-order");
+  state.ticketReview = {
+    signature: ticketSignature(values),
+    review: { mode: "AXIOM_PAPER", expires_at: new Date(Date.now() + 30000).toISOString(), risk: { allowed: !((values.side === "BUY" && ticket.blocked) || entryBlocked || blocked), issues: [ticket.blocked, ticket.entry_blocked, blocked ? "Durable emergency stop" : null].filter(Boolean) } },
+  };
+  renderTicketEstimate();
   const body = `<p><strong>LOCAL PAPER ONLY.</strong> This review and any result are simulated; no Vantage order is routed. One idempotency key is bound to this reviewed request.</p>${reviewGrid([
     ["Symbol", values.symbol], ["Side / type", `${values.side} / ${values.order_type}`],
     ["Quantity", values.volume], ["Limit price", values.limit_price ?? "Market"],
@@ -916,14 +1291,16 @@ async function reviewPaper(values) {
     ["Quote provider", ticket.quote_source || ticket.price_source], ["Quote source timestamp", timeText(ticket.quote_timestamp || ticket.priced_at)],
     ["Quote received", timeText(ticket.quote_received_at)], ["Quote / bar ID", ticket.quote_id || "Not supplied by this feed"],
     ["Cash", money(ticket.cash, state.workspace.account?.currency)], ["Held quantity", ticket.position?.quantity ?? 0],
-    ["Max buy / sell", `${fmt(ticket.max_buy_quantity, 8)} / ${fmt(ticket.max_sell_quantity, 8)}`], ["Execution", "AXIOM PAPER · local simulation"],
+    ["Max buy / sell", `${fmt(ticket.max_buy_quantity, 8)} / ${fmt(ticket.max_sell_quantity, 8)}`], ["Execution", "LOCAL PAPER · local simulation"],
   ])}${values.side === "BUY" && ticket.blocked ? `<div class="review-issues">${escapeHtml(ticket.blocked)}</div>` : ""}${entryBlocked ? `<div class="review-issues">${escapeHtml(ticket.entry_blocked)}</div>` : ""}${blocked ? `<div class="review-issues">Durable emergency stop blocks a new paper entry.</div>` : ""}`;
   openDialog({
     title: "Review simulated paper order", body, confirmLabel: "Place simulated paper order", confirmClass: "primary",
     confirmDisabled: Boolean((values.side === "BUY" && ticket.blocked) || entryBlocked || blocked || ticket.last_price === null),
     onConfirm: async () => {
       const payload = { symbol: values.symbol, side: values.side, quantity: values.volume, order_type: values.order_type, limit_price: values.limit_price, idempotency_key: idempotencyKey };
-      const result = await api("/paper/order", { body: payload });
+      const started = performance.now(); let result;
+      try { result = await api("/paper/order", { body: payload }); }
+      finally { observeBrowser("browser.paper.submit_roundtrip", performance.now() - started); }
       closeDialog(); await loadWorkspace(); await loadActivity();
       const order = result.order || {};
       toast("Local simulated order result", `${order.symbol || values.symbol} ${order.status || result.status || "recorded"} · no broker order`, "ok");
@@ -936,6 +1313,10 @@ function reviewGrid(items) {
 }
 function showVantageReview(review, payload, kind) {
   const order = review.order || payload; const quote = review.quote || {}; const risk = review.risk || {};
+  if (kind === "order") {
+    state.ticketReview = { review, signature: ticketSignature(order) };
+    renderTicketEstimate();
+  }
   const live = review.mode === "VANTAGE_LIVE";
   const body = `<p><strong>${escapeHtml(review.mode)} · ${live ? "REAL-MONEY ORDER CAPABILITY" : review.mode === "VANTAGE_DEMO" ? "DEMO ORDER" : "ORDER"}.</strong> ${escapeHtml(review.note || "Review every field.")}</p>${reviewGrid([
     ["Server / account", `${review.server} · ${review.account?.login_masked}`], ["Lifecycle", review.lifecycle],
@@ -956,7 +1337,9 @@ function showVantageReview(review, payload, kind) {
 }
 async function submitVantageReview(review, payload) {
   try {
-    const result = await api("/api/trading/orders/submit", { body: { ...payload, review_id: review.review_id, confirmation: review.confirmation_phrase } });
+    const started = performance.now(); let result;
+    try { result = await api("/api/trading/orders/submit", { body: { ...payload, review_id: review.review_id, confirmation: review.confirmation_phrase } }); }
+    finally { observeBrowser("browser.order.submit_roundtrip", performance.now() - started); }
     closeDialog(); await loadWorkspace(); await loadActivity();
     const order = result.order || {};
     const kind = UNRESOLVED.has(order.status) ? "warn" : "ok";
@@ -1171,7 +1554,7 @@ async function disconnectConnection() {
 
 async function connectMarketData() {
   if (currentStatus().mode !== "AXIOM_PAPER") {
-    toast("Market-data connection blocked", "Keep execution in AXIOM PAPER for this independent read-only feed.", "err"); return;
+    toast("Market-data connection blocked", "Keep execution in LOCAL PAPER for this independent read-only feed.", "err"); return;
   }
   setDisabled("connect-market-data", true, "Authenticating read-only demo market data…");
   $("market-data-detail").className = "inline-status warn";
@@ -1180,7 +1563,7 @@ async function connectMarketData() {
     const result = await api("/api/market-data/connect", { body: {} });
     state.marketData = result; state.chartSymbolsLoaded = false;
     await loadWorkspace(); await loadMarketData();
-    toast("Read-only demo market data connected", `${result.instrument_count} account-returned instruments. Execution remains AXIOM PAPER; no session, strategy, Arm, Activate, or order was automatic.`, "ok", 10000);
+    toast("Read-only demo market data connected", `${result.instrument_count} account-returned instruments. Execution remains LOCAL PAPER; no session, strategy, Arm, Activate, or order was automatic.`, "ok", 10000);
   } catch (error) {
     if (state.chart.feed === "vantage_mt5") { state.chart.bars = []; state.chart.payload = null; state.chart.quote = null; drawChart(); }
     await loadMarketData();
@@ -1198,7 +1581,7 @@ async function disconnectMarketData() {
     await loadWorkspace(); await loadMarketData();
     if (state.page === "charts") await loadChartSymbols();
     drawChart();
-    toast("Independent market data disconnected", "New MT5-feed entries are blocked. Local paper records are preserved; execution remains AXIOM PAPER.", "warn");
+    toast("Independent market data disconnected", "New MT5-feed entries are blocked. Local paper records are preserved; execution remains LOCAL PAPER.", "warn");
   } catch (error) { toast("Market-data disconnect failed", error.message, "err"); }
 }
 
@@ -1214,8 +1597,13 @@ async function goPage(page) {
   if (!PAGE_TITLES[page]) return;
   state.page = page;
   document.querySelectorAll(".page").forEach((element) => { element.hidden = element.id !== `page-${page}`; });
-  document.querySelectorAll(".nav-item").forEach((element) => element.classList.toggle("active", element.dataset.page === page));
+  document.querySelectorAll(".nav-item").forEach((element) => {
+    const active = element.dataset.page === page;
+    element.classList.toggle("active", active);
+    if (active) element.setAttribute("aria-current", "page"); else element.removeAttribute("aria-current");
+  });
   $("page-eyebrow").textContent = PAGE_TITLES[page][0]; $("page-title").textContent = PAGE_TITLES[page][1];
+  document.title = `${PAGE_TITLES[page][1]} · AXIOM Operator`;
   $("sidebar").classList.remove("open"); $("mobile-menu").setAttribute("aria-expanded", "false");
   if (page === "instruments") { renderInstruments(); if (currentStatus().connected && !state.instruments.length) await loadInstruments(); }
   if (page === "charts") await loadChartSymbols();
@@ -1251,26 +1639,74 @@ function bindEvents() {
   document.querySelectorAll("[data-page]").forEach((button) => button.addEventListener("click", () => goPage(button.dataset.page).catch((error) => toast("Page load failed", error.message, "err"))));
   document.querySelectorAll("[data-go]").forEach((button) => button.addEventListener("click", () => goPage(button.dataset.go)));
   $("mobile-menu").addEventListener("click", () => { const open = $("sidebar").classList.toggle("open"); $("mobile-menu").setAttribute("aria-expanded", String(open)); });
-  $("refresh-all").addEventListener("click", () => refreshAll().then(() => toast("Workspace refreshed", "Latest available state loaded.", "ok")).catch(() => {}));
+  $("refresh-all").addEventListener("click", async () => {
+    setDisabled("refresh-all", true, "Refreshing workspace…");
+    try { await refreshAll(); toast("Workspace refreshed", "Latest available state loaded. No order action was triggered.", "ok"); }
+    catch (_) { /* individual loaders already show a safe error */ }
+    finally { setDisabled("refresh-all", false); }
+  });
   $("apply-mode").addEventListener("click", selectMode);
   $("emergency-stop").addEventListener("click", emergencyStop);
   $("modal-close").addEventListener("click", closeDialog); $("modal-cancel").addEventListener("click", closeDialog); $("modal-confirm").addEventListener("click", confirmDialog);
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("modal").hidden) closeDialog(); });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("modal").hidden) { closeDialog(); return; }
+    if (event.key === "Escape" && $("sidebar").classList.contains("open")) {
+      $("sidebar").classList.remove("open"); $("mobile-menu").setAttribute("aria-expanded", "false"); $("mobile-menu").focus(); return;
+    }
+    if (event.key === "Tab" && !$("modal").hidden) {
+      const focusable = [...$("modal").querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])")].filter((element) => !element.closest("[hidden]"));
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { last.focus(); event.preventDefault(); }
+      else if (!event.shiftKey && document.activeElement === last) { first.focus(); event.preventDefault(); }
+    }
+  });
   let searchTimer;
   $("instrument-search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadInstruments, 300); });
   $("product-filter").addEventListener("change", loadInstruments); $("selected-only").addEventListener("change", loadInstruments);
+  $("watchlist-only").addEventListener("change", renderInstruments);
+  $("watch-visible").addEventListener("click", () => {
+    state.watchlist = new Set([...state.watchlist, ...state.instruments.map((item) => item.symbol)].slice(0, 200)); saveWatchlist();
+  });
+  $("clear-watchlist").addEventListener("click", () => { state.watchlist = new Set(); saveWatchlist(); });
   $("reload-instruments").addEventListener("click", loadInstruments); $("save-instruments").addEventListener("click", saveInstruments);
   $("instrument-rows").addEventListener("change", (event) => {
     const symbol = event.target.dataset.selectSymbol; if (!symbol) return;
     if (event.target.checked) state.selected.add(symbol); else state.selected.delete(symbol);
     setDisabled("save-instruments", state.selected.size === 0, "Select at least one instrument.");
   });
-  $("instrument-rows").addEventListener("click", (event) => { const symbol = event.target.dataset.inspect; if (symbol) inspectInstrument(symbol); });
-  $("chart-symbol").addEventListener("change", () => { $("order-symbol").value = $("chart-symbol").value; loadChart(); });
-  $("chart-timeframe").addEventListener("change", loadChart); $("reload-chart").addEventListener("click", loadChart); $("start-paper").addEventListener("click", paperSessionControl);
-  $("order-buy").addEventListener("click", () => { state.side = "BUY"; $("order-buy").classList.add("active"); $("order-sell").classList.remove("active"); });
-  $("order-sell").addEventListener("click", () => { state.side = "SELL"; $("order-sell").classList.add("active"); $("order-buy").classList.remove("active"); });
-  $("order-type").addEventListener("change", () => { $("limit-field").hidden = $("order-type").value !== "LIMIT"; });
+  $("instrument-rows").addEventListener("click", (event) => {
+    const watched = event.target.dataset.watchSymbol;
+    if (watched) {
+      if (state.watchlist.has(watched)) state.watchlist.delete(watched); else if (state.watchlist.size < 200) state.watchlist.add(watched);
+      saveWatchlist(); return;
+    }
+    const symbol = event.target.dataset.inspect; if (symbol) inspectInstrument(symbol);
+  });
+  $("chart-symbol").addEventListener("change", () => { state.ticketReview = null; $("order-symbol").value = $("chart-symbol").value; loadChart(); });
+  $("chart-timeframe").addEventListener("change", () => { state.ticketReview = null; loadChart(); });
+  document.querySelectorAll("[data-chart-timeframe]").forEach((button) => button.addEventListener("click", () => {
+    const timeframe = button.dataset.chartTimeframe;
+    if (![...$("chart-timeframe").options].some((option) => option.value === timeframe)) { toast("Timeframe unavailable", "The active data provider does not expose this timeframe for the selected instrument.", "warn"); return; }
+    $("chart-timeframe").value = timeframe; state.ticketReview = null; loadChart();
+  }));
+  $("zoom-in").addEventListener("click", () => zoomChart(.8)); $("zoom-out").addEventListener("click", () => zoomChart(1.25));
+  $("reset-chart-view").addEventListener("click", resetChartView); $("clear-drawings").addEventListener("click", clearDrawings);
+  $("chart-indicator").addEventListener("change", drawChart);
+  $("drawing-tool").addEventListener("change", () => { state.chartView.pending = null; $("chart-cursor").textContent = ""; drawChart(); });
+  $("crosshair-toggle").addEventListener("click", () => {
+    state.chartView.crosshair = !state.chartView.crosshair;
+    $("crosshair-toggle").textContent = state.chartView.crosshair ? "Crosshair on" : "Crosshair off";
+    $("crosshair-toggle").setAttribute("aria-pressed", String(state.chartView.crosshair));
+    if (!state.chartView.crosshair) $("chart-cursor").textContent = "";
+    drawChart();
+  });
+  bindChartCanvas();
+  $("reload-chart").addEventListener("click", loadChart); $("start-paper").addEventListener("click", paperSessionControl);
+  $("order-buy").addEventListener("click", () => { state.side = "BUY"; state.ticketReview = null; $("order-buy").classList.add("active"); $("order-sell").classList.remove("active"); renderChartContext(); });
+  $("order-sell").addEventListener("click", () => { state.side = "SELL"; state.ticketReview = null; $("order-sell").classList.add("active"); $("order-buy").classList.remove("active"); renderChartContext(); });
+  $("order-type").addEventListener("change", () => { state.ticketReview = null; $("limit-field").hidden = $("order-type").value !== "LIMIT"; renderTicketEstimate(); });
+  $("order-form").addEventListener("input", () => { state.ticketReview = null; renderTicketEstimate(); });
   $("order-form").addEventListener("submit", reviewOrder);
   $("reconcile-now").addEventListener("click", reconcileNow);
   $("position-rows").addEventListener("click", (event) => {
@@ -1311,9 +1747,14 @@ function bindEvents() {
   });
   $("lock-app").addEventListener("click", () => { clearInterval(state.refreshTimer); state.workspace = null; showAuth("Tab locked. Broker/session state was not activated or changed."); });
   $("refresh-interval").addEventListener("change", configureRefresh);
+  $("reload-performance").addEventListener("click", async () => {
+    setDisabled("reload-performance", true, "Loading measurements…");
+    await loadPerformance(); setDisabled("reload-performance", false);
+  });
   $("download-diagnostics").addEventListener("click", () => downloadJson(`axiom-redacted-diagnostics-${new Date().toISOString().slice(0, 10)}.json`, {
     generated_at: new Date().toISOString(), note: "No API token, password, ciphertext, or full account login included. Review before sharing.",
-    workspace: state.workspace, readiness: state.readiness, connection: state.connectionInfo ? { secret_store: state.connectionInfo.secret_store, profiles: state.connectionInfo.profiles, test_is_read_only: state.connectionInfo.test_is_read_only, mt5_package_available: state.connectionInfo.mt5_package_available, mt5_integration: state.connectionInfo.mt5_integration } : null,
+    workspace: state.workspace, readiness: state.readiness, performance: state.performance, listed_assets: state.listedAssets,
+    connection: state.connectionInfo ? { secret_store: state.connectionInfo.secret_store, profiles: state.connectionInfo.profiles, test_is_read_only: state.connectionInfo.test_is_read_only, mt5_package_available: state.connectionInfo.mt5_package_available, mt5_integration: state.connectionInfo.mt5_integration } : null,
   }));
   if (globalThis.ResizeObserver) new ResizeObserver(() => drawChart()).observe($("terminal-chart"));
 }

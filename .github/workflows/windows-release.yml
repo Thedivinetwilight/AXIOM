@@ -154,7 +154,11 @@ jobs:
             'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
             'dist\install-test-log.txt', 'dist\installer-test-log.txt',
             'pytest-focused.log', 'pytest-full.log', 'js-chart.log', 'js-terminal.log',
-            'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md'
+            'benchmark-python.log', 'js-terminal-benchmark.log',
+            'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
+            'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
+            '..\..\docs\LISTED_ASSETS.md', '..\..\docs\TERMINAL_PERFORMANCE.md',
+            '..\..\docs\TERMINAL_REDESIGN_PLAN.md'
           )
           $sums = @()
           foreach ($file in $files) {
@@ -183,6 +187,8 @@ jobs:
             'src/packaging/windows/pytest-full.log',
             'src/packaging/windows/js-chart.log',
             'src/packaging/windows/js-terminal.log',
+            'src/packaging/windows/benchmark-python.log',
+            'src/packaging/windows/js-terminal-benchmark.log',
             'src/packaging/windows/dist/install-test-log.txt',
             'src/packaging/windows/dist/installer-test-log.txt',
             'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
@@ -222,7 +228,14 @@ jobs:
             src/packaging/windows/pytest-focused.log
             src/packaging/windows/js-chart.log
             src/packaging/windows/js-terminal.log
+            src/packaging/windows/benchmark-python.log
+            src/packaging/windows/js-terminal-benchmark.log
+            src/packaging/windows/TERMINAL_BENCHMARK.json
+            src/packaging/windows/TERMINAL_UI_BENCHMARK.json
             src/USER_MANUAL.md
+            src/docs/LISTED_ASSETS.md
+            src/docs/TERMINAL_PERFORMANCE.md
+            src/docs/TERMINAL_REDESIGN_PLAN.md
           if-no-files-found: warn
           retention-days: 30
 
@@ -256,13 +269,22 @@ jobs:
           $notes = @"
           Windows x64 AXIOM Operator built from exact source commit ``$($meta.commit)``.
 
-          **Modes and safety.** AXIOM PAPER uses simulated fills. Its optional fresh-price workflow
+          **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
           uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
           selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an
           order on connection/startup. Only exact account-discovered instruments and validated closed
           bars are used, with explicit freshness and no replay fallback. MT5 paper sizing is in units,
           not broker lots, and every fill is local. Vantage DEMO/LIVE execution modes retain their
           separate review, reconciliation, Arm and Activate gates. CFDs are not owned shares.
+
+          **Terminal redesign.** All eight pages use the responsive accessible operator shell with an
+          always-visible execution/data/authorization boundary. Instruments have separate editable
+          watchlists and execution selection. Charts include timeframe shortcuts, bounded zoom/pan,
+          crosshair/OHLC, EMA/SMA and local drawings. The docked ticket distinguishes units from MT5
+          lots and shows indicative values versus actual review margin/risk. Settings separates feed,
+          chart, submission, broker acknowledgement and reconciliation timing. Listed shares/ETFs use
+          a fail-closed separate-provider identity boundary with no MT5/CFD substitution or listed
+          execution claim.
 
           **Actual test results on this Windows runner**
 
@@ -272,6 +294,8 @@ jobs:
           * DPAPI: ``$($meta.test_results.dpapi)``
           * MT5 behavior: ``$($meta.test_results.fake_mt5)``
           * Independent read-only market-data tests: ``$($meta.test_results.read_only_mt5)``
+          * Performance: ``$($meta.test_results.performance)``
+          * Listed assets: ``$($meta.test_results.listed_assets)``
           * Real demo terminal/feed verification: ``$($meta.test_results.demo_market_data)``
           * on-machine frozen-app checks: $passed passed, $($meta.test_results.smoke_failed) failed
           * installer/upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
@@ -281,7 +305,9 @@ jobs:
           **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
           account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
           No Vantage demo execution fill, live login or real-money order/cancel/modify was attempted.
-          The owner must follow the local demo market-data verification procedure in ``USER_MANUAL.md``.
+          Benchmark reports measure fake in-process provider and fake canvas paths only; no real DEMO/LIVE
+          terminal, network, broker or GPU latency was measured. The owner must follow the local demo
+          market-data and separate DEMO execution procedures in ``USER_MANUAL.md`` before external claims.
 
           Full-suite failures: $failureBlock
 
@@ -312,8 +338,15 @@ jobs:
             (Join-Path (Get-Location) 'pytest-full.log')
             (Join-Path (Get-Location) 'js-chart.log')
             (Join-Path (Get-Location) 'js-terminal.log')
+            (Join-Path (Get-Location) 'benchmark-python.log')
+            (Join-Path (Get-Location) 'js-terminal-benchmark.log')
+            (Join-Path (Get-Location) 'TERMINAL_BENCHMARK.json')
+            (Join-Path (Get-Location) 'TERMINAL_UI_BENCHMARK.json')
             (Join-Path (Get-Location) 'WINDOWS_INSTALL_MANUAL.md')
             (Join-Path (Get-Location) '..\..\USER_MANUAL.md')
+            (Join-Path (Get-Location) '..\..\docs\LISTED_ASSETS.md')
+            (Join-Path (Get-Location) '..\..\docs\TERMINAL_PERFORMANCE.md')
+            (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
           )
           foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
           gh release view $tag 2>$null | Out-Null

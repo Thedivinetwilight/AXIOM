@@ -11,3 +11,12 @@ data/cache/
 results/*
 !results/.gitkeep
 *.paper.lock
+
+# Windows build outputs are generated from the exact source commit. Keep them
+# out of Git so post-build benchmark clean-tree checks do not see themselves.
+packaging/windows/build/
+packaging/windows/dist/
+packaging/windows/*.log
+packaging/windows/build-error.txt
+packaging/windows/TERMINAL_BENCHMARK.json
+packaging/windows/TERMINAL_UI_BENCHMARK.json
