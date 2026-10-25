@@ -1,0 +1,42 @@
+PASS  launch: API answered /health on loopback
+PASS  /chart returns 200
+PASS  chart page displays the PAPER badge
+PASS  /terminal returns all explicit execution modes
+PASS  redesigned boundary, watchlist, chart tools and diagnostics are bundled
+PASS  operator terminal.js and reviewed ticket/chart interactions served from the bundle
+PASS  operator terminal.css served from the bundle
+PASS  bundled user manual covers lifecycle, owner DEMO verification and LIVE checklist
+PASS  chart.js served from the bundle
+PASS  chart.css served from the bundle
+PASS  data route refuses anonymous request (401)
+PASS  Vantage status refuses anonymous request (401)
+PASS  independent market-data status refuses anonymous request (401)
+PASS  performance diagnostics refuse anonymous request (401)
+PASS  listed-asset status refuses anonymous request (401)
+PASS  operator starts in independent PAPER, disarmed
+PASS  performance diagnostics are bounded and make no zero-latency claim
+PASS  listed execution and MT5/CFD substitution are disabled
+PASS  listed policy check is read-only and never routes to MT5
+PASS  Windows DPAPI protected storage is available
+PASS  official MetaTrader5 module is present in the frozen build
+PASS  independent MT5 market data starts disconnected, read-only and paper-only
+PASS  market-data connect without a DEMO profile fails closed (409)
+PASS  failed market-data connect never changes execution or activates
+PASS  selecting DEMO never auto-connects or activates
+PASS  disconnected workspace is explicitly not a flat-account snapshot
+PASS  symbols listed (2)
+PASS  DEMO preview drew 60 bars from bundled data
+PASS  DEMO bars labelled 'DEMO REPLAY SAMPLE DATA · NOT MARKET DATA'
+PASS  paper session start reported PAPER / live_trading=false
+PASS  session RUNNING, 106 bars processed, paper_mode=true
+PASS  chart then drew bars the engine processed (source=engine)
+PASS  paper session stopped
+PASS  ticket reports paper_only=true, live_trading=false
+PASS  unknown symbol refused with an explanation (422)
+PASS  launcher output does not expose the local API token
+PASS  refused MODE=LIVE (exit 2)
+PASS  refused LIVE_TRADING=true (exit 2)
+PASS  refused BROKER=UPSTOX_SANDBOX (exit 2)
+PASS  refused alpaca without credentials (exit 2)
+PASS  refused alpaca without limits (exit 2)
+PASS  refused empty API_TOKEN (exit 2)

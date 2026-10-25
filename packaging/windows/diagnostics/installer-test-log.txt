@@ -1,0 +1,94 @@
+AXIOM installer test  2026-10-25T08:33:05.6953904+00:00
+[install] locating the installer
+installer: C:\Users\runneradmin\AppData\Local\Temp\axiom-installer-bcbf4939f1f14d6eb456a978a20318fd\AXIOM-Operator-3.5.0a2-windows-x64-no-temp-setup.exe (4.2 MB)
+PASS  acceptance uses the loaderless no-TEMP installer
+PASS  required installer sidecar exists: AXIOM-Operator-3.5.0a2-windows-x64-no-temp-setup-0.bin
+PASS  required installer sidecar exists: AXIOM-Operator-3.5.0a2-windows-x64-no-temp-setup-1.bin
+PASS  legacy onefile remains available but is not the installed runtime
+install dir: C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart
+install log: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-install.log
+[install] running the installer silently
+arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart" /LOG="C:\Users\RUNNER~1\AppData\Local\Temp\axiom-install.log"
+installer exit code: 0
+PASS  silent install reported success
+[installed files] verifying what the installer placed on disk
+  inno| 2026-10-25 08:33:10.324   Dest filename: C:\Users\runneradmin\Desktop\AXIOM Operator.lnk
+  inno| 2026-10-25 08:33:10.324   Creating the icon.
+  inno| 2026-10-25 08:33:10.331   Successfully created the icon.
+  inno| 2026-10-25 08:33:10.342   Saving uninstall information.
+  inno| 2026-10-25 08:33:10.342   Creating new uninstall key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1E4A52-9F3B-4E6C-9A18-2B5D7E0C4F31}_is1
+  inno| 2026-10-25 08:33:10.342   Writing uninstall key values.
+  inno| 2026-10-25 08:33:10.342   Detected previous administrative 64-bit install? No
+  inno| 2026-10-25 08:33:10.342   Detected previous administrative 32-bit install? No
+  inno| 2026-10-25 08:33:10.366   Installation process succeeded.
+  inno| 2026-10-25 08:33:10.366   Need to restart Windows? No
+  inno| 2026-10-25 08:33:10.368   Deinitializing Setup.
+  inno| 2026-10-25 08:33:10.384   Log closed.
+PASS  the installer placed AXIOM-Chart.exe in C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart
+PASS  the user manual was installed next to the executable
+PASS  the source commit record was installed
+PASS  loaderless installer deployed the onedir _internal runtime beside the executable
+PASS  installer included docs\LISTED_ASSETS.md
+PASS  installer included docs\TERMINAL_PERFORMANCE.md
+PASS  installer included docs\TERMINAL_BENCHMARK.json
+PASS  installer included docs\TERMINAL_UI_BENCHMARK.json
+PASS  installer included docs\WINDOWS_APP_CONTROL.md
+PASS  the uninstaller was installed
+[launch] starting the installed copy and waiting for /health
+data dir: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-6052361d2332491596e8486a8af7deab
+port:     52015
+PASS  the installed copy answered /health on loopback
+[operator-and-chart] checking installed pages, assets and token gates
+PASS  /terminal returns 200 (got 200)
+PASS  /terminal names all explicit execution modes
+PASS  installed terminal includes boundary, watchlist, drawing and diagnostics controls
+PASS  operator JavaScript and chart/ticket interactions are served from the installed package
+PASS  operator CSS is served from the installed package
+PASS  installed manual covers Vantage and Activate
+PASS  /chart returns 200 (got 200)
+PASS  /chart displays the PAPER badge
+PASS  /chart makes no live-money claim
+PASS  chart.js is served from the installed package
+PASS  the served chart.js is the real renderer
+PASS  chart.css is served from the installed package
+PASS  a chart data route still refuses to answer without a token (got 401)
+PASS  Vantage status refuses anonymous access (got 401)
+PASS  independent market-data status refuses anonymous access (got 401)
+PASS  performance diagnostics refuse anonymous access (got 401)
+PASS  listed-asset status refuses anonymous access (got 401)
+PASS  the launcher created the private per-user configuration
+PASS  a local API token was generated (value not logged)
+PASS  installed app starts in PAPER and disarmed
+PASS  installed diagnostics are bounded and disclaim zero latency
+PASS  installed listed execution and MT5/CFD substitution are disabled
+PASS  installed app can use Windows DPAPI
+PASS  official MT5 module is present in installed app
+PASS  installed independent MT5 feed starts disconnected, read-only and paper-only
+PASS  installed market-data connect without DEMO credentials fails closed (got 409)
+PASS  installed feed refusal preserves LOCAL PAPER and never activates
+PASS  DEMO selection does not connect, Arm or Activate
+PASS  disconnected workspace is not presented as a flat account
+PASS  installed launcher does not print the local API token
+no config.json was written; nothing to inspect for live credentials
+[upgrade] reinstalling over the installed copy and verifying user-data preservation
+PASS  application stopped before upgrade
+PASS  operator SQLite database exists before upgrade
+PASS  silent upgrade installer reported success (exit 0)
+PASS  upgraded executable is present
+PASS  upgrade preserved the complete private configuration and local token
+PASS  upgrade preserved the operator-data sentinel
+PASS  upgrade preserved the operator SQLite database
+PASS  upgraded installed copy launches and answers /health
+PASS  upgraded installed copy serves the operator console
+[uninstall] stopping the application and removing it
+AXIOM-Chart processes before shutdown: 1
+PASS  every AXIOM-Chart process stopped before uninstalling
+uninstaller exit code: 0
+PASS  the uninstaller reported success
+PASS  the uninstaller removed AXIOM-Chart.exe
+PASS  the uninstaller kept the operator data folder C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-6052361d2332491596e8486a8af7deab
+PASS  silent uninstall preserved the private configuration
+PASS  silent uninstall preserved the operator SQLite database
+PASS  silent uninstall preserved the upgrade sentinel
+
+PASS - install, operator/chart launch, token gates, safe Vantage default, upgrade preservation and uninstall verified on this machine
