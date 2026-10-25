@@ -77,4 +77,5 @@ def test_signals():
         )
         == Signal.BUY
     )
-    assert len(catalog()) == 7
+    assert len(catalog()) == 8
+    assert create_strategy("manual_only").generate_signal(bars) == Signal.HOLD

@@ -1,7 +1,8 @@
 """V1 dashboard: clean local HTML view + engine/emergency controls.
 
-Clearly displays PAPER / SANDBOX mode and that LIVE trading is not enabled.
-All data endpoints sit behind the existing bearer-token dependency; the HTML
+Clearly displays that this is the LEGACY PAPER / SANDBOX view. Vantage lives
+only in the separate operator console. All data endpoints sit behind the
+existing bearer-token dependency; the HTML
 page fetches /dashboard/data with the same token supplied at load time via a
 one-time inline bootstrap (no credentials in logs; the token is provided by
 the operator, never stored server-side beyond the running process settings).
@@ -168,10 +169,15 @@ async def engine_stop(request: Request):
 
 @router.post("/engine/resume", dependencies=[Depends(authenticate)])
 async def engine_resume(request: Request):
+    """Clear only the legacy halt; never clear or activate a Vantage session."""
     repository = request.app.state.repository
     repository.set_engine_state("emergency_stop", {"stopped": False})
     repository.record_system_event("ENGINE_RESUME_REQUESTED", {"source": "dashboard"})
-    return {"stopped": False}
+    simulator = getattr(request.app.state, "simulator", None)
+    simulator_status = None
+    if simulator is not None and simulator.status().get("state") == "PAUSED":
+        simulator_status = await simulator.resume()
+    return {"stopped": False, "scope": "LEGACY_PAPER_SANDBOX", "simulator": simulator_status}
 
 
 @router.get("/dashboard", response_class=HTMLResponse, include_in_schema=False,
@@ -187,7 +193,7 @@ async def dashboard(request: Request):
 
     return HTMLResponse("""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Arena 3.0.5 — Paper/Sandbox Dashboard</title><style>
+<title>AXIOM — Legacy Paper/Sandbox Dashboard</title><style>
 body{margin:0;background:#0d1622;color:#e8f1fb;font:15px/1.5 system-ui,sans-serif}
 header{padding:14px 20px;border-bottom:1px solid #263549;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .badge{border:1px solid #3b735e;color:#75e7b2;padding:4px 10px;border-radius:16px;font-size:13px}
@@ -203,12 +209,17 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 border-radius:8px;cursor:pointer;font-size:14px}
 .stop:disabled{opacity:.5}
 .pos{color:#75e7b2}.neg{color:#ff9aa5}
+.chartlink{background:#12506f;border:1px solid #2b7ba8;color:#cfeeff;padding:8px 14px;
+border-radius:8px;font-size:14px;text-decoration:none}
 #err{color:#ff9aa5;font-size:13px}
 </style><header>
-<strong>Arena 3.0.5</strong><span class="badge" id="mode">…</span>
-<span class="badge warn">LIVE: NOT ENABLED IN V1</span>
+<strong>AXIOM legacy research</strong><span class="badge" id="mode">…</span>
+<span class="badge warn">LEGACY PAPER/SANDBOX ONLY</span>
 <span id="conn" class="badge">…</span>
-<button class="stop" id="stop">EMERGENCY STOP</button><span id="err"></span>
+<a class="chartlink" href="/terminal">VANTAGE OPERATOR</a>
+<a class="chartlink" href="/chart" title="Legacy chart and local paper ticket">CHARTS + PAPER</a>
+<button class="chartlink" id="resume">RESUME LEGACY PAPER</button>
+<button class="stop" id="stop">LEGACY EMERGENCY STOP</button><span id="err"></span>
 </header><main>
 <section><h2>Account</h2><table id="account"></table></section>
 <section><h2>Feed / Market</h2><table id="feed"></table></section>
@@ -287,9 +298,16 @@ document.getElementById('err').onclick = () => {
   const t = prompt('API token:');
   if (t) { sessionStorage.setItem('arena_token', t); tick(); }
 };
+document.getElementById('resume').onclick = async () => {
+  if(!confirm('Resume only the legacy paper engine? Vantage remains unchanged and disarmed.'))return;
+  const r = await fetch('/engine/resume',{method:'POST',headers:H});
+  document.getElementById('err').textContent = r.ok ? 'legacy resume confirmed' : 'legacy resume failed ('+r.status+')';
+  tick();
+};
 document.getElementById('stop').onclick = async () => {
-  if(!confirm('EMERGENCY STOP: halt trading and cancel open sandbox orders?'))return;
-  await fetch('/engine/stop',{method:'POST',headers:H});
+  if(!confirm('LEGACY EMERGENCY STOP: halt legacy paper/sandbox work? Use the operator console for Vantage.'))return;
+  const r = await fetch('/engine/stop',{method:'POST',headers:H});
+  document.getElementById('err').textContent = r.ok ? 'legacy stop recorded' : 'legacy stop failed ('+r.status+')';
   tick();
 };
 tick(); setInterval(tick, 5000);

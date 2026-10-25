@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AXIOM Operator</title>
+  <link rel="stylesheet" href="/static/terminal/terminal.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
+<div class="auth-gate" id="auth-gate" role="dialog" aria-labelledby="auth-title" aria-modal="true">
+  <form class="auth-card" id="auth-form">
+    <div class="brand-mark" aria-hidden="true">A</div>
+    <p class="eyebrow">LOCAL OPERATOR ACCESS</p>
+    <h1 id="auth-title">Unlock AXIOM</h1>
+    <p>Enter AXIOM’s local <strong>API_TOKEN</strong>. This is not your Vantage login or trading password. It is kept only in this browser tab’s session storage.</p>
+    <label for="auth-token">AXIOM API token</label>
+    <input id="auth-token" type="password" autocomplete="current-password" required>
+    <button class="button primary" type="submit">Unlock operator console</button>
+    <p class="form-error" id="auth-error" role="alert"></p>
+    <p class="muted small">Protected APIs stay disabled if no local token is configured. Broker credentials are entered separately on Connections.</p>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
+  <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+    <div class="brand"><span class="brand-mark">A</span><span>AXIOM<small>OPERATOR CONSOLE</small></span></div>
+    <div class="mode-card">
+      <span class="mode-badge paper" id="global-mode">PAPER</span>
+      <span class="connection-dot" id="global-connection-dot"></span>
+      <span id="global-connection">Local only</span>
+    </div>
+    <nav class="nav-list">
+      <button type="button" class="nav-item active" data-page="overview"><span>01</span>Overview</button>
+      <button type="button" class="nav-item" data-page="instruments"><span>02</span>Instruments</button>
+      <button type="button" class="nav-item" data-page="charts"><span>03</span>Charts &amp; order</button>
+      <button type="button" class="nav-item" data-page="orders"><span>04</span>Orders &amp; positions</button>
+      <button type="button" class="nav-item" data-page="risk"><span>05</span>Risk &amp; lifecycle</button>
+      <button type="button" class="nav-item" data-page="connections"><span>06</span>Connections</button>
+      <button type="button" class="nav-item" data-page="activity"><span>07</span>Activity &amp; audit</button>
+      <button type="button" class="nav-item" data-page="settings"><span>08</span>Settings &amp; help</button>
+    </nav>
+    <div class="sidebar-foot">
+      <span class="status-pill" id="global-lifecycle">DISARMED</span>
+      <p id="global-lock-note">No broker session is active.</p>
+      <p class="small muted">Automation <strong>OFF</strong><br>No profitability claim.</p>
+    </div>
+  </aside>
+
+  <div class="workspace-shell">
+    <header class="topbar">
+      <button type="button" class="icon-button mobile-menu" id="mobile-menu" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+      <div class="page-heading"><p class="eyebrow" id="page-eyebrow">WORKSPACE</p><h1 id="page-title">Overview</h1></div>
+      <div class="topbar-identity">
+        <span id="global-server">No MT5 server</span>
+        <strong id="global-account">Local paper</strong>
+      </div>
+      <button type="button" class="button secondary" id="refresh-all">Refresh</button>
+      <button type="button" class="button danger" id="emergency-stop">Emergency stop</button>
+    </header>
+
+    <div class="environment-bar">
+      <div class="environment-select">
+        <label for="session-mode">Execution session</label>
+        <select id="session-mode">
+          <option value="AXIOM_PAPER">AXIOM PAPER · local simulated fills</option>
+          <option value="VANTAGE_DEMO">VANTAGE DEMO · MT5 demo account</option>
+          <option value="VANTAGE_LIVE">VANTAGE LIVE · real account, locked by default</option>
+        </select>
+        <button type="button" class="button secondary" id="apply-mode">Apply mode</button>
+      </div>
+      <div class="freshness" id="global-freshness"><span class="status-pill">NO BROKER DATA</span></div>
+    </div>
+
+    <main id="main-content" tabindex="-1">
+      <section class="page active" id="page-overview" aria-labelledby="overview-title">
+        <div class="page-intro"><div><p class="eyebrow">ACCOUNT AT A GLANCE</p><h2 id="overview-title">Good decisions start with known state.</h2><p>Account identity, broker truth, data freshness and risk blockers—before any order control.</p></div><span class="mode-badge paper" id="overview-mode">PAPER</span></div>
+        <div class="metric-grid">
+          <article class="metric-card"><span>Equity</span><strong id="metric-equity">—</strong><small id="metric-currency">account currency</small></article>
+          <article class="metric-card"><span>Unrealized P&amp;L</span><strong id="metric-unrealized">—</strong><small>broker/local confirmed view</small></article>
+          <article class="metric-card"><span>Realized P&amp;L</span><strong id="metric-realized">—</strong><small id="realized-window">visible history</small></article>
+          <article class="metric-card"><span>Available margin</span><strong id="metric-margin">—</strong><small id="metric-margin-note">paper cash / MT5 free margin</small></article>
+        </div>
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">SESSION</p><h3>Connection &amp; identity</h3></div><button type="button" class="text-button" data-go="connections">Manage</button></div>
+            <dl class="detail-list" id="overview-connection"></dl>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">RISK</p><h3>Current guard state</h3></div><button type="button" class="text-button" data-go="risk">Open risk</button></div>
+            <div id="overview-risk"></div>
+          </article>
+        </div>
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">MARKET DATA</p><h3>Selected instruments</h3></div><button type="button" class="text-button" data-go="charts">Open charts</button></div>
+            <div id="overview-quotes" class="quote-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">NEXT STEPS</p><h3>Operator checklist</h3></div></div>
+            <ol class="checklist" id="overview-checklist"></ol>
+          </article>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">RECENT ACTIVITY</p><h3>Latest audit events</h3></div><button type="button" class="text-button" data-go="activity">View audit</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody id="overview-activity"></tbody></table></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-instruments" aria-labelledby="instruments-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">ACCOUNT-SPECIFIC UNIVERSE</p><h2 id="instruments-title">Discover. Understand. Select.</h2><p>Only symbols returned by the connected account appear here. Unknown or incomplete products remain visible but cannot be traded.</p></div></div>
+        <article class="panel">
+          <div class="toolbar">
+            <div class="field grow"><label for="instrument-search">Search broker symbol, name or path</label><input id="instrument-search" type="search" placeholder="e.g. EURUSD or Apple"></div>
+            <div class="field"><label for="product-filter">Product</label><select id="product-filter"><option value="">All product types</option></select></div>
+            <label class="check-label"><input type="checkbox" id="selected-only"> Selected only</label>
+            <button type="button" class="button secondary" id="reload-instruments">Reload discovered</button>
+            <button type="button" class="button primary" id="save-instruments">Save selection</button>
+          </div>
+          <div class="inline-status" id="instrument-status" role="status"></div>
+          <div class="table-wrap tall"><table><thead><tr><th>Select</th><th>Symbol / name</th><th>Product</th><th>Trade mode</th><th>Min / step</th><th>Tick / digits</th><th>Freshness</th><th>Contract</th></tr></thead><tbody id="instrument-rows"></tbody></table></div>
+        </article>
+        <article class="panel" id="contract-panel">
+          <div class="panel-head"><div><p class="eyebrow">CONTRACT INSPECTOR</p><h3 id="contract-title">Choose an instrument</h3></div><span class="status-pill" id="contract-tradable">—</span></div>
+          <div id="contract-details" class="contract-grid"><p class="empty-state">Broker metadata and limitations will appear here.</p></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-charts" aria-labelledby="charts-title" hidden>
+        <div class="page-intro compact"><div><p class="eyebrow">MARKET &amp; EXECUTION</p><h2 id="charts-title">Chart terminal</h2></div><span class="status-pill" id="chart-source">NO DATA</span></div>
+        <div class="chart-layout">
+          <article class="panel chart-panel">
+            <div class="toolbar chart-controls">
+              <div class="field"><label for="chart-symbol">Instrument</label><select id="chart-symbol"></select></div>
+              <div class="field"><label for="chart-timeframe">Timeframe</label><select id="chart-timeframe"><option>1m</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>4h</option><option>1D</option></select></div>
+              <button type="button" class="button secondary" id="reload-chart">Reload chart</button>
+              <button type="button" class="button secondary" id="start-paper">Start paper session</button>
+            </div>
+            <div class="inline-status" id="chart-feed-context">Replay is sample data. Connect the separate read-only VANTAGE DEMO feed on Connections for fresh MT5 prices.</div>
+            <div class="chart-quote" id="chart-quote"></div>
+            <div class="canvas-wrap"><canvas id="terminal-chart" role="img" aria-label="No chart data loaded"></canvas><div class="chart-empty" id="chart-empty">Choose an instrument and load its real session data.</div></div>
+            <div class="chart-legend" id="chart-legend">No bars loaded. AXIOM does not invent chart data.</div>
+            <div class="contract-grid" id="chart-contract"><p class="empty-state">MT5 contract metadata appears here after an account-discovered chart is loaded.</p></div>
+          </article>
+          <aside class="panel order-panel">
+            <div class="panel-head"><div><p class="eyebrow">MANUAL ORDER</p><h3 id="ticket-title">Paper ticket · simulated</h3></div><span class="status-pill" id="ticket-mode">PAPER</span></div>
+            <form id="order-form">
+              <div class="segmented" aria-label="Order side"><button type="button" class="buy active" id="order-buy">BUY</button><button type="button" class="sell" id="order-sell">SELL</button></div>
+              <div class="field"><label for="order-symbol">Broker symbol</label><input id="order-symbol" readonly></div>
+              <div class="form-grid">
+                <div class="field"><label for="order-volume" id="volume-label">Quantity / lots</label><input id="order-volume" type="number" min="0" step="any" required></div>
+                <div class="field"><label for="order-type">Order type</label><select id="order-type"><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select></div>
+              </div>
+              <div class="field" id="limit-field" hidden><label for="order-limit">Limit price</label><input id="order-limit" type="number" min="0" step="any"></div>
+              <div class="form-grid" id="protection-fields">
+                <div class="field"><label for="order-sl">Stop-loss (optional)</label><input id="order-sl" type="number" min="0" step="any"></div>
+                <div class="field"><label for="order-tp">Take-profit (optional)</label><input id="order-tp" type="number" min="0" step="any"></div>
+              </div>
+              <div class="inline-status" id="order-context">Review uses the selected session’s current data and guards.</div>
+              <button type="submit" class="button primary full" id="review-order">Review order — no submission</button>
+            </form>
+            <p class="muted small" id="order-disclaimer">Paper fills are simulated locally. Short selling is not modelled in paper.</p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="page" id="page-orders" aria-labelledby="orders-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">BROKER-CONFIRMED STATE</p><h2 id="orders-title">Orders, deals &amp; positions</h2><p>Reconciliation drives these views. A click response alone never proves a fill, cancel, close or flat account.</p></div><button type="button" class="button secondary" id="reconcile-now">Reconcile now</button></div>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">OPEN RISK</p><h3>Positions</h3></div><span id="position-count" class="status-pill">0</span></div><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Open / current</th><th>Unrealized</th><th>SL / TP</th><th>Ownership</th><th>Action</th></tr></thead><tbody id="position-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">INTENTS &amp; WORKING ORDERS</p><h3>Order state</h3></div></div><div class="table-wrap tall"><table><thead><tr><th>Created</th><th>Instrument</th><th>Side / type</th><th>Volume</th><th>Status</th><th>Broker order</th><th>Last confirmation</th><th>Action</th></tr></thead><tbody id="order-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">FILLS / DEALS</p><h3>Execution history</h3></div><span class="status-pill" id="deals-label">SIMULATED</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Instrument</th><th>Side / entry</th><th>Volume</th><th>Price</th><th>P&amp;L</th><th>Commission / swap / fee</th></tr></thead><tbody id="deal-rows"></tbody></table></div></article>
+      </section>
+
+      <section class="page" id="page-risk" aria-labelledby="risk-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">FAIL-CLOSED CONTROLS</p><h2 id="risk-title">Risk &amp; live lifecycle</h2><p>Unknown checks fail. Arm and Activate are separate, fresh operator actions. Restart always returns to disarmed.</p></div><span class="status-pill" id="risk-emergency">STOP CLEAR</span></div>
+        <div class="content-grid lifecycle-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">READINESS</p><h3>Every blocker, in plain language</h3></div><button type="button" class="button secondary" id="run-readiness">Run readiness</button></div>
+            <div id="readiness-summary" class="inline-status">Readiness has not been run in this browser session.</div>
+            <div class="readiness-list" id="readiness-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">OPERATOR LIFECYCLE</p><h3 id="lifecycle-current">DISARMED</h3></div></div>
+            <div class="lifecycle-actions">
+              <button type="button" class="button warning" id="arm-session">1. Arm — no orders</button>
+              <button type="button" class="button danger" id="activate-session">2. Activate — separate confirmation</button>
+              <button type="button" class="button secondary" id="pause-session">Pause new entries</button>
+              <button type="button" class="button secondary" id="stop-session">Stop &amp; reconcile</button>
+              <button type="button" class="button danger-outline" id="clear-emergency">Clear emergency stop</button>
+            </div>
+            <p class="muted small" id="lifecycle-help">Select Vantage and pass readiness before Arm. Credentials alone never authorize activation.</p>
+          </article>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">HARD BOUNDS</p><h3>Server-side risk limits</h3></div><button type="button" class="button primary" id="save-risk">Save risk limits</button></div>
+          <p class="muted">Zero means unconfigured—not unlimited—and blocks Vantage entries. Monetary exposure uses MT5 account-currency margin estimates; deals remain authoritative for costs.</p>
+          <form id="risk-form" class="risk-grid">
+            <div class="field"><label for="risk-max_order_volume">Max order volume (lots)</label><input id="risk-max_order_volume" name="max_order_volume" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_symbol_volume">Max symbol volume (lots)</label><input id="risk-max_symbol_volume" name="max_symbol_volume" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_order_margin">Max order margin</label><input id="risk-max_order_margin" name="max_order_margin" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_total_margin">Max aggregate margin exposure</label><input id="risk-max_total_margin" name="max_total_margin" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_open_positions">Max open positions</label><input id="risk-max_open_positions" name="max_open_positions" type="number" min="0" step="1"></div>
+            <div class="field"><label for="risk-max_daily_loss">Max daily loss</label><input id="risk-max_daily_loss" name="max_daily_loss" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_drawdown_pct">Max drawdown (%)</label><input id="risk-max_drawdown_pct" name="max_drawdown_pct" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_trades_per_day">Max order attempts / day</label><input id="risk-max_trades_per_day" name="max_trades_per_day" type="number" min="0" step="1"></div>
+            <div class="field"><label for="risk-max_margin_usage_pct">Max margin usage (%)</label><input id="risk-max_margin_usage_pct" name="max_margin_usage_pct" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_spread_bps">Max spread (bps)</label><input id="risk-max_spread_bps" name="max_spread_bps" type="number" min="0" step="any"></div>
+            <div class="field"><label for="risk-max_slippage_points">Max slippage (points)</label><input id="risk-max_slippage_points" name="max_slippage_points" type="number" min="0" step="1"></div>
+            <div class="field"><label for="risk-max_quote_age_seconds">Max quote age (seconds)</label><input id="risk-max_quote_age_seconds" name="max_quote_age_seconds" type="number" min="0" step="1"></div>
+          </form>
+        </article>
+      </section>
+
+      <section class="page" id="page-connections" aria-labelledby="connections-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">MT5 CONNECTIONS</p><h2 id="connections-title">Credentials &amp; account diagnostics</h2><p>Secrets use Windows DPAPI for the current OS user. They are never returned by an API or included in audit exports.</p></div><span class="status-pill" id="secret-store-status">STORE —</span></div>
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">PROTECTED PROFILE</p><h3 id="credential-environment">Vantage credential</h3></div><button type="button" class="text-button" id="edit-credential">Edit / replace</button></div>
+            <form id="credential-form">
+              <div class="form-grid">
+                <div class="field"><label for="mt5-login">MT5 account login</label><input id="mt5-login" inputmode="numeric" autocomplete="off" required></div>
+                <div class="field"><label for="mt5-password">Trading password</label><input id="mt5-password" type="password" autocomplete="new-password" required></div>
+              </div>
+              <div class="field"><label for="mt5-server">Exact MT5 server</label><input id="mt5-server" list="mt5-servers" autocomplete="off" required><datalist id="mt5-servers"><option value="VantageMarkets-Live 13"></option></datalist></div>
+              <div class="field"><label for="mt5-path">MT5 terminal64.exe path (optional if auto-detected)</label><input id="mt5-path" autocomplete="off" placeholder="C:\Program Files\MetaTrader 5\terminal64.exe"></div>
+              <div class="field"><label for="mt5-label">Optional account label</label><input id="mt5-label" maxlength="80" autocomplete="off"></div>
+              <p class="muted small">Password fields always remain blank after save and when editing. Replace requires the full credential again. Never enter credentials in chat, GitHub or CI.</p>
+              <div class="button-row">
+                <button type="submit" class="button primary" id="save-credential">Save new credential</button>
+                <button type="button" class="button warning" id="replace-credential">Replace credential</button>
+                <button type="button" class="button danger-outline" id="delete-credential">Delete</button>
+              </div>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">CONNECTION</p><h3 id="connection-state">NOT CONFIGURED</h3></div><span class="connection-dot" id="connection-state-dot"></span></div>
+            <p id="connection-detail" class="inline-status">Select VANTAGE DEMO or VANTAGE LIVE to configure a profile.</p>
+            <dl class="detail-list" id="connection-account"></dl>
+            <div class="button-row">
+              <button type="button" class="button primary" id="test-connection">Test connection — read-only</button>
+              <button type="button" class="button secondary" id="disconnect-connection">Disconnect</button>
+            </div>
+            <p class="muted small">Read-only means initialize, authenticate, identify, discover instruments and reconcile. It does not place, modify or cancel orders. Connecting never arms or activates.</p>
+          </article>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">INDEPENDENT READ-ONLY MARKET DATA</p><h3>VANTAGE DEMO quotes for AXIOM PAPER</h3></div><span class="status-pill" id="market-data-state">DISCONNECTED</span></div>
+          <p>This is a second, market-data-only MT5 interface. It reads only the protected VANTAGE_DEMO profile and cannot place, modify, cancel or close broker orders. Connecting never changes the execution selector, starts a strategy, Arms, or Activates.</p>
+          <div class="inline-status" id="market-data-detail" role="status">Save the DEMO credential locally, then connect. Execution remains AXIOM PAPER.</div>
+          <dl class="detail-list" id="market-data-account"></dl>
+          <div class="button-row">
+            <button type="button" class="button primary" id="connect-market-data">Connect demo market data — read-only</button>
+            <button type="button" class="button secondary" id="disconnect-market-data">Disconnect market data</button>
+          </div>
+          <p class="muted small">Only instruments returned by this account are shown. CFDs are labeled as CFDs, not owned shares. Fresh advancing ticks are required; stale, missing or degraded data fails closed with no replay fallback. Manual-only paper startup still requires a reviewed order for every fill.</p>
+        </article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SEPARATE IDENTITIES</p><h3>What belongs where</h3></div></div><div class="help-grid"><div><strong>AXIOM API_TOKEN</strong><p>Unlocks this local operator API. Not sent to Vantage or MT5.</p></div><div><strong>Vantage MT5 login/password</strong><p>Used only by the official terminal integration. Protected with DPAPI. In AXIOM PAPER this form edits VANTAGE_DEMO only.</p></div><div><strong>Data-provider keys</strong><p>Legacy Alpaca/Upstox settings remain separate and are never used for Vantage execution quotes.</p></div></div></article>
+      </section>
+
+      <section class="page" id="page-activity" aria-labelledby="activity-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">REDACTED LOCAL AUDIT</p><h2 id="activity-title">Activity &amp; accountability</h2><p>Signals, reviews, intents, risk decisions, broker responses, fills, rejects and reconciliation. No secrets or full account logins.</p></div><div class="button-row"><button type="button" class="button secondary" id="reload-activity">Refresh</button><button type="button" class="button secondary" id="export-activity">Export redacted JSON</button></div></div>
+        <article class="panel"><div class="toolbar"><div class="field grow"><label for="activity-filter">Filter event type or detail</label><input id="activity-filter" type="search" placeholder="e.g. ORDER or RECONCILED"></div></div><div class="table-wrap tall"><table><thead><tr><th>Timestamp</th><th>Environment</th><th>Event</th><th>Redacted detail</th></tr></thead><tbody id="activity-rows"></tbody></table></div></article>
+      </section>
+
+      <section class="page" id="page-settings" aria-labelledby="settings-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">LOCAL PREFERENCES &amp; HELP</p><h2 id="settings-title">Settings, verification &amp; support</h2><p>Understand what is verified before relying on any workflow.</p></div></div>
+        <div class="content-grid two">
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">OPERATOR ACCESS</p><h3>Local API token</h3></div></div><form id="token-form"><div class="field"><label for="settings-token">Replace token for this browser tab</label><input id="settings-token" type="password" autocomplete="off" required></div><button type="submit" class="button primary">Save &amp; test token</button></form><div class="button-row top-space"><button type="button" class="button secondary" id="lock-app">Lock this tab</button></div><p class="muted small">This does not change the server’s configured API_TOKEN and does not affect Vantage credentials.</p></article>
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">DISPLAY</p><h3>Refresh &amp; diagnostics</h3></div></div><div class="field"><label for="refresh-interval">Background refresh</label><select id="refresh-interval"><option value="5000">Every 5 seconds</option><option value="10000">Every 10 seconds</option><option value="30000">Every 30 seconds</option><option value="0">Off</option></select></div><div class="button-row top-space"><button type="button" class="button secondary" id="download-diagnostics">Download redacted diagnostics</button></div><p class="muted small">Exports contain no password, API token, ciphertext or full account login. Review any file before sharing it.</p></article>
+        </div>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">MANUAL &amp; LIMITATIONS</p><h3>Read before demo or live use</h3></div><div class="button-row"><a class="button secondary" href="/manual" target="_blank" rel="noopener">User manual</a><a class="button secondary" href="/docs" target="_blank" rel="noopener">API documentation</a></div></div><div class="help-grid"><div><strong>Verified here</strong><p>Paper regressions and fake-MT5 unit/API/integration behavior. Windows artifacts carry their own actual test logs.</p></div><div><strong>Not thereby verified</strong><p>A real Vantage connection, account-specific instrument availability, demo fills, live execution, or profitability. These require explicit local verification.</p></div><div><strong>Live remains locked</strong><p>Real order placement needs exact identity, risk bounds, fresh data, reconciliation, Arm, Activate and final confirmation. No startup or credential auto-activation.</p></div><div><strong>TradingView later</strong><p>No restricted chart library or webhook relay is bundled. Future alerts require a secure public HTTPS relay, authentication, dedupe, timestamps and audit. Never include broker credentials.</p></div></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">COMPATIBILITY</p><h3>Legacy research &amp; paper tools</h3></div></div><p>The original chart and research APIs remain for regression compatibility. They are paper/research views, not Vantage execution controls.</p><div class="button-row"><a class="button secondary" href="/chart">Legacy paper chart</a><a class="button secondary" href="/dashboard">Legacy research dashboard</a></div></article>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-body">
+    <div class="panel-head"><h2 id="modal-title">Confirm action</h2><button type="button" class="icon-button" id="modal-close" aria-label="Close confirmation">×</button></div>
+    <div id="modal-body" class="modal-body"></div>
+    <div class="field" id="modal-phrase-field" hidden><label for="modal-phrase" id="modal-phrase-label">Confirmation phrase</label><input id="modal-phrase" autocomplete="off"></div>
+    <p class="form-error" id="modal-error" role="alert"></p>
+    <div class="button-row end"><button type="button" class="button secondary" id="modal-cancel">Cancel</button><button type="button" class="button danger" id="modal-confirm">Confirm</button></div>
+  </section>
+</div>
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<script src="/static/terminal/terminal.js"></script>
+</body>
+</html>
