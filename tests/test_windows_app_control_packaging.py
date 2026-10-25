@@ -77,6 +77,8 @@ def test_install_and_portable_acceptance_are_separate_hard_gates():
     assert "LOCAL PAPER" in portable
     assert '"$Base/api/trading/connect"' not in portable
     assert '"$Base/api/trading/arm"' not in portable
+    assert "if ($script:ExitCode -ne 0) { exit 1 }" in portable
+    assert portable.rstrip().endswith("exit 0")
     assert "-UseBasicRequest" not in portable
 
 

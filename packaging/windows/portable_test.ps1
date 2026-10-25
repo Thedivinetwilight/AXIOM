@@ -21,6 +21,7 @@ $DistDir = Split-Path $Package -Parent
 $LogPath = Join-Path $DistDir 'portable-test-log.txt'
 $ErrorPath = Join-Path $DistDir 'PORTABLE_TEST_ERROR.txt'
 $script:Failures = New-Object System.Collections.Generic.List[string]
+$script:ExitCode = 0
 $script:App = $null
 $script:Exe = $null
 
@@ -142,8 +143,14 @@ catch {
     $message = $_.Exception.Message
     Set-Content -Path $ErrorPath -Value @($message, $_.InvocationInfo.PositionMessage) -Encoding utf8
     Write-Host "::error title=AXIOM portable gate::$message"
-    throw
+    $script:ExitCode = 1
 }
 finally {
     Stop-Portable
 }
+
+# Do not infer success from the last cleanup cmdlet: Get-Process returns a
+# non-terminating no-match status after the portable app has already stopped.
+# Explicit status makes the GitHub hard gate match the logged acceptance result.
+if ($script:ExitCode -ne 0) { exit 1 }
+exit 0
