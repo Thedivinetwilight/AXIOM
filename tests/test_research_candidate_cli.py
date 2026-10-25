@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app import __main__ as cli
 from app.backtesting.costs import ExecutionConfig
 from app.backtesting.engine import BacktestEngine
@@ -14,7 +16,9 @@ from app.database.database import Database
 from app.database.repository import Repository
 from app.history.store import CandleStore
 from app.learning.evaluator import out_of_sample_expectancy
-from app.research.discovery import Spec, StrategyDiscoveryEngine
+from app.research.discovery import (
+    Spec, StrategyDiscoveryEngine, evaluate_spec, generate_specs,
+)
 from tests.conftest import candle
 from tests.test_final_discovery import series
 
@@ -172,3 +176,98 @@ def test_director_schedule_seed_is_stable_across_calls(tmp_path):
         assert first["seed"] == second["seed"] == expected
     finally:
         database.close()
+
+
+def test_zero_profit_factor_is_penalized_not_treated_as_undefined():
+    from app.tournament.scoring import ScoringConfig, score
+
+    metrics = {
+        "total_return": -0.1, "sharpe": -1.0, "sortino": -1.0,
+        "profit_factor": 0.0, "max_drawdown": 0.2, "number_of_trades": 20,
+        "instability": 0.1, "volatility": 0.2, "cost_ratio": 0.01,
+    }
+    weights = {key: 0.0 for key in ScoringConfig().weights}
+    weights["profit_factor"] = 1.0
+    config = ScoringConfig(weights=weights)
+    all_losses = score(metrics, config)
+    undefined = score({**metrics, "profit_factor": None}, config)
+    assert all_losses["components"]["profit_factor"] < 0
+    assert undefined["components"]["profit_factor"] == 0
+    assert all_losses["score"] < undefined["score"]
+
+
+def test_discovery_missing_walk_forward_evidence_fails_closed():
+    result = evaluate_spec(
+        series(60), "1m", Spec("momentum", {"period": 2, "threshold": 0.0})
+    )
+    assert result["wf_expectancy"] is None
+    assert result["gates"]["wf_expectancy>0"] is False
+    assert result["tradable"] is False
+
+
+def test_robustness_score_rejects_large_drop_from_positive_baseline(monkeypatch):
+    import app.research.discovery as discovery
+
+    report = {
+        "baseline": {"total_return": 0.5},
+        "trials": [
+            {"metrics": {"total_return": 0.39}},
+            {"metrics": {"total_return": 0.41}},
+        ],
+    }
+    monkeypatch.setattr("app.validation.robustness.robustness", lambda *a, **k: report)
+    value, _ = discovery._robustness_score(
+        None, [], "1m", Spec("momentum", {"period": 2, "threshold": 0.0})
+    )
+    assert value == 0.5
+
+
+@pytest.mark.parametrize("limit", [0, -1, 1.5, True, "2"])
+def test_generate_specs_rejects_invalid_limits(limit):
+    with pytest.raises(ValueError, match="positive integer"):
+        generate_specs(limit)
+
+
+def test_router_hard_blocks_weak_robustness_even_with_positive_oos():
+    from app.learning.router import StrategyRouter
+
+    candidate = {
+        "strategy": "momentum", "parameters": {"period": 2, "threshold": 0.0},
+        "oos": {"oos_expectancy": 0.02, "oos_trades": 10},
+        "metrics": {"max_drawdown": 0.1}, "robustness_score": 0.249,
+    }
+    router = StrategyRouter()
+    assert router.score(candidate) is None
+    assert router.score({**candidate, "robustness_score": 0.25}) is not None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("expectancy", float("nan")), ("expectancy", float("inf")),
+    ("drawdown", float("nan")), ("robustness", float("nan")),
+    ("robustness", 1.1), ("robustness", -0.1),
+])
+def test_router_rejects_nonfinite_or_out_of_range_evidence(field, value):
+    from app.learning.router import StrategyRouter
+
+    candidate = {
+        "strategy": "momentum", "parameters": {"period": 2, "threshold": 0.0},
+        "oos": {"oos_expectancy": 0.02, "oos_trades": 10},
+        "metrics": {"max_drawdown": 0.1}, "robustness_score": 0.8,
+    }
+    if field == "expectancy":
+        candidate["oos"]["oos_expectancy"] = value
+    elif field == "drawdown":
+        candidate["metrics"]["max_drawdown"] = value
+    else:
+        candidate["robustness_score"] = value
+    router = StrategyRouter()
+    assert router.score(candidate) is None
+    assert router.select("range_low_vol", [candidate])["selected"] is False
+
+
+@pytest.mark.parametrize("minimum", [0, -1, 1.5, True, "10", float("nan")])
+def test_scoring_rejects_invalid_minimum_trade_threshold(minimum):
+    from app.tournament.scoring import ScoringConfig
+
+    with pytest.raises(ValueError, match="positive integer"):
+        ScoringConfig(minimum_trades=minimum)

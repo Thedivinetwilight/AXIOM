@@ -1,6 +1,6 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.6.0a1`.** AXIOM provides an eight-page Operator
+**Current source version: `3.6.0a2`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
@@ -27,11 +27,13 @@ feed/chart/submission/broker-acknowledgement measurements. A fail-closed
 `listed-assets-v1` interface requires exact listed identity and a separate provider;
 it does not route listed instruments to Vantage CFDs or claim listed execution.
 
-Version 3.6.0a1 repairs local research candidate generation: independent
-instrument runs, chronological prior-only warmup, positive-and-improved
-validation promotion gates, optional discovery JSON reports, integer parameter
-grids and stable research scheduling. Historical qualification is not a profit
-guarantee and never authorizes an order or unattended trading.
+Version 3.6.0a2 repairs and hardens local research candidate generation:
+independent instrument runs, chronological prior-only warmup,
+positive-and-improved validation promotion gates, mandatory positive
+walk-forward-proxy evidence, baseline-relative robustness, correct zero-PF
+scoring, finite router checks, optional discovery JSON reports, integer
+parameter grids and stable research scheduling. Historical qualification is not
+a profit guarantee and never authorizes an order or unattended trading.
 
 Version 3.5.0a2's packaging-only workaround for the reported Windows Error
 4551 is retained: a loaderless Inno installer ZIP with required BIN sidecars and

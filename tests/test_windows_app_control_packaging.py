@@ -16,7 +16,7 @@ def read(path: Path) -> str:
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.6.0a1"
+    assert version == "3.6.0a2"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f"StringStruct('ProductVersion', '{version}')" in read(KIT / "version_info.txt")
     assert f"**Version:** {version}" in read(KIT / "WINDOWS_INSTALL_MANUAL.md")

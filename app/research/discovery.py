@@ -5,7 +5,7 @@ Every candidate is evaluated with chronological splits only:
   score (parameter/cost perturbations on the OOS leg) → walk-forward
   stability proxy. Gates (documented, never bypassed):
     oos_trades >= 3  AND  oos_expectancy > 0  AND  robustness_score >= 0.25
-    AND  oos max_drawdown <= 0.5  AND  wf_expectancy > -0.5
+    AND  oos max_drawdown <= 0.5  AND  present wf_expectancy > 0
 In-sample return is NEVER part of promotion. Candidates with zero trades or
 negative OOS expectancy are recorded honestly as not tradable.
 """
@@ -22,7 +22,7 @@ from app.learning.evaluator import out_of_sample_expectancy
 MIN_OOS_TRADES = 3
 MIN_ROBUSTNESS = 0.25
 MAX_OOS_DRAWDOWN = 0.5
-MIN_WF_EXPECTANCY = -0.5
+MIN_WF_EXPECTANCY = 0.0
 
 # Small, documented grids over the 7 V1 strategy families (controlled search).
 FAMILIES: dict[str, list[dict]] = {
@@ -70,16 +70,19 @@ class Spec:
 
 def generate_specs(max_candidates: int = 12) -> list[Spec]:
     """Deterministic, capped candidate list across all 7 families."""
+    if (isinstance(max_candidates, bool) or not isinstance(max_candidates, int)
+            or max_candidates < 1):
+        raise ValueError("max_candidates must be a positive integer")
     specs: list[Spec] = []
     for strategy, grid in FAMILIES.items():
         for parameters in grid:
             specs.append(Spec(strategy, dict(parameters), "grid"))
-    return specs[: max(1, int(max_candidates))]
+    return specs[:max_candidates]
 
 
 def _robustness_score(engine, candles, timeframe, spec, *, warmup=None) -> tuple[float, dict]:
-    """Documented score: fraction of parameter/cost perturbations whose OOS-leg
-    total return stays above −10% of the baseline (diagnostic, never tuned)."""
+    """Documented score: fraction of perturbations/subperiods whose total
+    return is no more than 10 percentage points below the baseline return."""
     from app.validation.robustness import robustness
 
     candidate = {"strategy": spec.strategy, "parameters": dict(spec.parameters)}
@@ -90,7 +93,7 @@ def _robustness_score(engine, candles, timeframe, spec, *, warmup=None) -> tuple
     if not trials:
         return 0.0, report
     baseline_return = float(report["baseline"]["total_return"] or 0.0)
-    floor = min(-0.10, baseline_return - 0.10)
+    floor = baseline_return - 0.10
     passed = sum(1 for trial in trials
                  if float(trial["metrics"]["total_return"] or 0.0) >= floor)
     return round(passed / len(trials), 4), report
@@ -141,7 +144,7 @@ def evaluate_spec(candles, timeframe: str, spec: Spec,
         "oos_expectancy>0": float(oos_eval["oos_expectancy"]) > 0,
         "robustness>=0.25": score >= MIN_ROBUSTNESS,
         "drawdown<=0.5": oos_drawdown <= MAX_OOS_DRAWDOWN,
-        "wf>-0.5": wf_expectancy is None or wf_expectancy > MIN_WF_EXPECTANCY,
+        "wf_expectancy>0": wf_expectancy is not None and wf_expectancy > MIN_WF_EXPECTANCY,
     }
     tradable = all(gates.values())
     return {

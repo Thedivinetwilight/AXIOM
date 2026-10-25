@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.6.0a1**
+**Current source version: 3.6.0a2**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -489,6 +489,6 @@ python -m app research run --instruments 'NSE_EQ|INE002A01018' --unit days --int
 python run.py --mode validate --csv data/sample.csv --symbol DEMO --timeframe 1D --output results/validation-sample
 ```
 
-Instruments are evaluated separately; at least 60 candles are required per key. Validation/locked-test warmup uses only earlier candles. A baseline is never promoted merely because it is the baseline, and validation promotion requires positive expectancy and strict baseline improvement in addition to the other gates.
+Instruments are evaluated separately; at least 60 candles are required per key. Validation/locked-test warmup uses only earlier candles. A baseline is never promoted merely because it is the baseline, and validation promotion requires positive expectancy and strict baseline improvement in addition to the other gates. Discovery also requires present, positive walk-forward-proxy expectancy; missing evidence cannot pass. Zero profit factor is penalized, robustness is measured against each baseline return, and invalid/non-finite router evidence fails closed.
 
 The bundled sample CSV is synthetic. Qualified candidates, positive backtests and paper results are not guarantees of profit or LIVE readiness. Generic OHLCV research does not verify Vantage lot/tick/margin/session/CFD financing rules and never becomes an order instruction automatically. These commands do not change execution mode, Arm/Activate, automation or emergency stop. All reviewed-order and reconciliation controls remain separate.

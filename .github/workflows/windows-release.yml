@@ -312,10 +312,12 @@ jobs:
           All packages are UNSIGNED: no Windows policy is disabled or bypassed, and acceptance by an
           enforced on-device Smart App Control/WDAC policy is NOT claimed. See ``WINDOWS_APP_CONTROL.md``.
 
-          **Research candidate repairs.** Discovery now evaluates instruments separately, supports
+          **Research candidate repairs.** Discovery evaluates instruments separately, supports
           integer parameter grids and JSON reports, and uses stable scheduling seeds. Validation and
           locked-test warmup use only prior candles. Promotion requires positive validation expectancy
-          and strict baseline improvement in addition to trade, robustness and drawdown gates. Read
+          and strict baseline improvement in addition to trade, robustness and drawdown gates. Missing
+          or nonpositive walk-forward-proxy evidence fails closed; zero-PF scoring, baseline-relative
+          robustness and finite router checks are enforced. Read
           ``docs/RESEARCH_CANDIDATES.md``. Research tests use local/synthetic fixtures only: historical
           qualification is NOT a profit guarantee, Vantage contract verification or order authorization.
 

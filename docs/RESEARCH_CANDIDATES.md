@@ -1,6 +1,6 @@
 # Research candidate generation — evidence, not a profit promise
 
-AXIOM 3.6.0a1 repairs the local research candidate path. It does **not** create a
+AXIOM 3.6.0a2 repairs and hardens the local research candidate path. It does **not** create a
 guaranteed profit generator, enable unattended trading, or authorize DEMO/LIVE
 orders. Candidate output is historical research evidence with
 `execution_authorized: false` and `profitability_claim: none`.
@@ -21,6 +21,13 @@ orders. Candidate output is historical research evidence with
   baseline, minimum trade evidence, robustness and drawdown checks. It does not
   bypass the separate execution lifecycle.
 - Research Director seeds are SHA-256-derived and stable across processes.
+- Discovery requires present, positive walk-forward-proxy expectancy; missing or
+  nonpositive evidence fails closed. Robustness trials must remain within 10
+  percentage points of their own baseline return to pass that trial.
+- Zero profit factor is penalized as all-loss evidence; only an undefined (`None`)
+  profit factor receives neutral scoring. Invalid discovery/scoring limits are
+  rejected, and the router rejects non-finite, out-of-range or weak robustness,
+  expectancy and drawdown evidence.
 
 ## Discovery from local history
 
@@ -74,14 +81,25 @@ out-of-sample data rather than repeatedly tuning to the same holdout.
 
 ## Synthetic development smoke result
 
-One local `run.py --mode validate` smoke run over the bundled synthetic CSV
-completed with 960 training, 320 validation and 320 locked-test bars. It selected
+The 1,600-row bundled `data/sample.csv` used below has SHA-256
+`fd959a7e2346ceebe9d9f42242a4b7292e76a518ed9aa3759c1ebd340e42d57f`.
+It is generated sample data, not a market dataset.
+
+One local `run.py --mode validate` smoke run over that CSV completed with 960
+training, 320 validation and 320 locked-test bars. It selected
 `momentum` with `period=10` and `threshold=0.01`. The report-only locked-test leg
 showed a simulated total return of 15.414%, maximum drawdown of 1.960%, 11 closed
 trades and INR 692.90 modeled transaction costs on the synthetic INR 100,000
 initial account. An open position remained marked at the final close rather than
 being artificially liquidated. The run also emitted `Large training/test return
 gap; sample lengths also affect this comparison`.
+
+A separate hardened walk-forward smoke run completed nine disjoint test folds;
+eight had positive simulated returns. Its linked marked research statistic was
+66.872%, with 2.893% maximum drawdown, 36 closed trades and INR 2,794.18 modeled
+transaction costs. The folds start flat and are not an executable continuous
+portfolio; linked marks can include open-position valuation and must not be read
+as realized income.
 
 These numbers describe only that generated sample and its cost model. They are
 not actual DEMO/exchange performance, a statistically validated edge, a forecast,
