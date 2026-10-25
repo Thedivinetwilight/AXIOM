@@ -19,10 +19,10 @@ const UNRESOLVED = new Set([
   "UNRESOLVED", "ACCEPTED_UNRECONCILED", "CANCEL_ATTEMPTED", "CANCEL_UNKNOWN",
 ]);
 const state = {
-  token: "", workspace: null, activity: [], connectionInfo: null,
+  token: "", workspace: null, activity: [], connectionInfo: null, marketData: null,
   page: "overview", mode: null, side: "BUY", readiness: null, activation: null,
   instruments: [], selected: new Set(), productTypes: new Set(), instrumentLoading: false,
-  contracts: {}, chart: { mode: null, symbol: "", timeframe: "1m", bars: [], quote: null, payload: null },
+  contracts: {}, chart: { mode: null, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null },
   chartSymbolsLoaded: false, riskDirty: false, credentialMode: null,
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
@@ -215,6 +215,7 @@ async function loadWorkspace({ background = false } = {}) {
     const workspace = await api("/api/trading/workspace");
     const previousMode = state.mode;
     state.workspace = workspace; state.mode = workspace.status.mode; state.lastError = null;
+    if (workspace.market_data) state.marketData = workspace.market_data;
     if (previousMode && previousMode !== state.mode) resetModeLocalState();
     if (state.submissionUncertain) {
       const unresolved = (workspace.intents || []).some((item) => UNRESOLVED.has(item.status));
@@ -239,16 +240,26 @@ async function loadConnectionInfo() {
   try { state.connectionInfo = await api("/api/trading/connection"); renderConnections(); }
   catch (error) { toast("Connection details unavailable", error.message, "err"); }
 }
+async function loadMarketData() {
+  try {
+    state.marketData = await api("/api/market-data/status");
+    if (state.workspace?.paper_session) state.workspace.market_data = state.marketData;
+    renderMarketData();
+  } catch (error) {
+    state.marketData = { state: "UNAVAILABLE", connected: false, authenticated: false, detail: error.message };
+    renderMarketData();
+  }
+}
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData()]);
   if (state.page === "instruments" && currentStatus().connected) await loadInstruments();
   if (state.page === "charts") await loadChartSymbols();
 }
 function resetModeLocalState() {
   state.readiness = null; state.activation = null; state.riskDirty = false;
   state.instruments = []; state.selected = new Set(); state.contracts = {};
-  state.chart = { mode: state.mode, symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
+  state.chart = { mode: state.mode, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
   state.chartSymbolsLoaded = false; state.submissionUncertain = false;
   drawChart();
 }
@@ -262,7 +273,7 @@ function configureRefresh() {
 
 function renderAll() {
   if (!state.workspace) return;
-  renderMode(); renderOverview(); renderOrders(); renderRisk(); renderConnections(); renderChartContext(); renderActivity();
+  renderMode(); renderOverview(); renderOrders(); renderRisk(); renderConnections(); renderMarketData(); renderChartContext(); renderActivity();
 }
 function badgeClass(mode) { return mode === "VANTAGE_LIVE" ? "live" : mode === "VANTAGE_DEMO" ? "demo" : "paper"; }
 function renderMode() {
@@ -297,6 +308,18 @@ function renderFreshness() {
     $("global-freshness").title = state.lastError; return;
   }
   if (status.mode === "AXIOM_PAPER") {
+    const marketData = state.marketData || state.workspace.market_data;
+    if (marketData?.authenticated) {
+      const quote = marketData.quote;
+      const fresh = marketData.state === "CONNECTED" && quote?.fresh;
+      const age = ageSeconds(quote?.timestamp);
+      $("global-freshness").innerHTML = statusPill(
+        fresh ? `MT5 DEMO QUOTE ${Number.isFinite(age) ? `${Math.max(0, age).toFixed(1)}s OLD` : "TIME UNKNOWN"}` : "MT5 FEED DEGRADED · ENTRIES BLOCKED",
+        fresh ? "ok" : "err",
+      );
+      $("global-freshness").title = fresh ? `Source ${timeText(quote.timestamp)} · received ${timeText(quote.received_at)}` : marketData.detail || "Feed is not fresh";
+      return;
+    }
     $("global-freshness").innerHTML = statusPill("LOCAL PAPER · SIMULATED", "warn"); return;
   }
   if (!status.connected || state.workspace.broker_state_available === false) {
@@ -350,11 +373,19 @@ function renderOverview() {
 }
 function operatorChecklist() {
   const status = currentStatus();
-  if (status.mode === "AXIOM_PAPER") return [
-    "Start or load the independent local paper session on Charts.",
-    "Review the feed label: replay data is not market data; fills are always simulated.",
-    "Use a reviewed manual ticket or the legacy strategy controls; no Vantage order is routed.",
-  ];
+  if (status.mode === "AXIOM_PAPER") {
+    if (state.marketData?.authenticated) return [
+      "Open Charts and choose an exact symbol discovered from the connected VANTAGE DEMO account.",
+      "Verify fresh advancing tick timestamps and the READ-ONLY MARKET DATA label; CFDs are not owned shares.",
+      "Start the manual-only live-price paper session. Automation stays OFF; every fill requires reviewed local submission.",
+      "If the feed degrades, new BUY entries block; existing local paper records remain available.",
+    ];
+    return [
+      "For fresh MT5 prices, save VANTAGE_DEMO locally and connect independent market data on Connections; execution stays AXIOM PAPER.",
+      "Or start/load the legacy local paper session. Replay data is sample data, not market data.",
+      "Use a reviewed manual ticket; no Vantage order is routed and fills are always simulated.",
+    ];
+  }
   const steps = [];
   if (!status.credential) steps.push("Enter the MT5 credential locally on Connections; never send it to chat or CI.");
   if (!status.connected) steps.push("Run the read-only connection test and verify the exact server and masked account identity.");
@@ -444,15 +475,19 @@ function renderReadiness() {
   $("readiness-list").innerHTML = (readiness.checks || []).map((check) => `<div class="readiness-item ${check.passed ? "pass" : "fail"}"><span class="check-icon">${check.passed ? "✓" : "×"}</span><strong>${escapeHtml(check.label)}</strong><span>${escapeHtml(check.detail)}</span></div>`).join("");
 }
 
+function credentialEnvironment() {
+  return currentStatus().mode === "AXIOM_PAPER" ? "VANTAGE_DEMO" : currentStatus().mode;
+}
 function renderConnections() {
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  const credentialMode = credentialEnvironment();
   const info = state.connectionInfo; const secretStatus = info?.secret_store || "Checking protected storage…";
   $("secret-store-status").textContent = secretStatus.startsWith("Windows") ? "DPAPI PROTECTED" : "PROTECTED STORE UNAVAILABLE";
   $("secret-store-status").className = `status-pill ${secretStatus.startsWith("Windows") ? "ok" : "err"}`;
-  $("credential-environment").textContent = paper ? "Select a Vantage environment" : `${MODE_LABELS[status.mode]} credential`;
-  const profile = info?.profiles?.[status.mode] || status.credential;
-  if (state.credentialMode !== status.mode) {
-    state.credentialMode = status.mode;
+  $("credential-environment").textContent = paper ? "VANTAGE_DEMO market-data credential · execution stays AXIOM PAPER" : `${MODE_LABELS[status.mode]} credential`;
+  const profile = info?.profiles?.[credentialMode] || (paper ? null : status.credential);
+  if (state.credentialMode !== credentialMode) {
+    state.credentialMode = credentialMode;
     for (const id of ["mt5-login", "mt5-password", "mt5-server", "mt5-path", "mt5-label"]) $(id).value = "";
     if (profile) {
       $("mt5-server").value = profile.server || ""; $("mt5-path").value = profile.terminal_path || ""; $("mt5-label").value = profile.label || "";
@@ -460,19 +495,19 @@ function renderConnections() {
   }
   const storeUnavailable = !secretStatus.startsWith("Windows") && Boolean(info);
   document.querySelectorAll("#credential-form input").forEach((input) => {
-    input.disabled = paper || storeUnavailable;
-    input.title = paper ? "Select VANTAGE DEMO or VANTAGE LIVE first." : storeUnavailable ? "OS-protected storage is unavailable; credentials cannot be entered safely." : "";
+    input.disabled = storeUnavailable;
+    input.title = paper ? "AXIOM PAPER edits only the protected VANTAGE_DEMO profile; execution does not change." : storeUnavailable ? "OS-protected storage is unavailable; credentials cannot be entered safely." : "";
   });
-  setDisabled("save-credential", paper || storeUnavailable || Boolean(profile), paper ? "Select a Vantage environment." : storeUnavailable ? "DPAPI is unavailable; no plaintext fallback exists." : "Credential exists; use explicit Replace.");
-  setDisabled("replace-credential", paper || storeUnavailable || !profile, paper ? "Select a Vantage environment." : !profile ? "No existing credential to replace." : storeUnavailable ? "DPAPI is unavailable." : "");
-  setDisabled("edit-credential", paper || storeUnavailable || !profile, paper ? "Select a Vantage environment." : !profile ? "Save a credential first." : "Protected storage is unavailable.");
-  setDisabled("delete-credential", paper || !profile, paper ? "Select a Vantage environment." : "No saved credential to delete.");
+  setDisabled("save-credential", storeUnavailable || Boolean(profile), storeUnavailable ? "DPAPI is unavailable; no plaintext fallback exists." : "Credential exists; use explicit Replace.");
+  setDisabled("replace-credential", storeUnavailable || !profile, !profile ? "No existing credential to replace." : storeUnavailable ? "DPAPI is unavailable." : "");
+  setDisabled("edit-credential", storeUnavailable || !profile, !profile ? "Save a credential first." : "Protected storage is unavailable.");
+  setDisabled("delete-credential", !profile, "No saved credential to delete.");
   setDisabled("test-connection", paper || !profile || storeUnavailable, paper ? "Select a Vantage environment." : !profile ? "Save a credential first." : "Protected storage is unavailable.");
   setDisabled("disconnect-connection", paper || (!status.connected && status.lifecycle === "DISARMED"), paper ? "No MT5 connection in local paper mode." : "Already disconnected and disarmed.");
   $("connection-state").textContent = paper ? "LOCAL PAPER ONLY" : status.connection?.state || "NOT CONFIGURED";
   $("connection-state-dot").className = `connection-dot ${status.connected ? "ok" : paper ? "" : "warn"}`;
   $("connection-detail").className = `inline-status ${status.connected ? "ok" : paper ? "" : "warn"}`;
-  $("connection-detail").textContent = paper ? "Vantage credential controls are disabled. Select a Vantage mode explicitly; this never connects or activates automatically." : status.connection?.detail || "No credential configured.";
+  $("connection-detail").textContent = paper ? "Execution is local AXIOM PAPER. The credential above is DEMO-only; use the independent read-only market-data panel below. The execution connection test remains disabled." : status.connection?.detail || "No credential configured.";
   const account = status.account || {};
   const rows = [
     ["Masked login", status.account_login_masked || profile?.login_masked || "Not configured"],
@@ -486,18 +521,83 @@ function renderConnections() {
   $("connection-account").innerHTML = rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
 }
 
-function renderChartContext() {
+function renderMarketData() {
+  if (!$("market-data-state")) return;
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  const data = state.marketData || state.workspace?.market_data || {};
+  const quote = data.quote || null; const fresh = data.state === "CONNECTED" && quote?.fresh;
+  $("market-data-state").textContent = data.state || "DISCONNECTED";
+  $("market-data-state").className = `status-pill ${fresh ? "ok" : data.authenticated ? "warn" : ""}`;
+  $("market-data-detail").className = `inline-status ${data.state === "DEGRADED" || data.state === "UNAVAILABLE" ? "err" : fresh ? "ok" : "warn"}`;
+  $("market-data-detail").textContent = data.detail || "Independent read-only market data is not connected.";
+  const rows = [
+    ["Execution", "AXIOM PAPER · local simulated fills only"],
+    ["Credential profile", "VANTAGE_DEMO · Windows DPAPI"],
+    ["Masked account", data.account?.login_masked || "Not verified"],
+    ["MT5 server", data.account?.server || "Not verified"],
+    ["Account type / currency", `${data.account?.account_trade_mode || "Not verified"} / ${data.account?.currency || "Not verified"}`],
+    ["Discovered instruments", `${data.supported_instrument_count ?? 0} supported / ${data.instrument_count ?? 0} returned`],
+    ["Selected exact symbol", data.selected_symbol || "Load an MT5 chart to subscribe"],
+    ["Quote source time", quote ? timeText(quote.timestamp) : "No current quote"],
+    ["Local receive time", quote ? timeText(quote.received_at) : "No current quote"],
+    ["Freshness", quote ? (fresh ? `Fresh · ${Number(quote.age_seconds || 0).toFixed(1)}s source age` : "Stale/not advancing · new entries blocked") : "Not ready"],
+    ["Automation / broker orders", "OFF / no order methods in this interface"],
+  ];
+  $("market-data-account").innerHTML = rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  const demoProfile = state.connectionInfo?.profiles?.VANTAGE_DEMO;
+  const storeUnavailable = state.connectionInfo && !String(state.connectionInfo.secret_store || "").startsWith("Windows");
+  setDisabled("connect-market-data", !paper || !demoProfile || storeUnavailable || data.state === "CONNECTING", !paper ? "This update's independent quote feed is restricted to AXIOM PAPER execution." : !demoProfile ? "Save the VANTAGE_DEMO credential locally first." : storeUnavailable ? "Windows DPAPI is unavailable." : "");
+  setDisabled("disconnect-market-data", !data.authenticated, "Market data is already disconnected.");
+}
+
+function renderChartContract() {
+  const panel = $("chart-contract"); if (!panel) return;
+  const payload = state.chart.payload || {}; const item = payload.instrument;
+  if (state.chart.feed !== "vantage_mt5" || !item) {
+    panel.innerHTML = `<p class="empty-state">${state.marketData?.authenticated ? "Load a valid MT5 chart to inspect its exact broker contract." : "No independent MT5 contract loaded. Replay/CSV metadata is not presented as broker metadata."}</p>`;
+    return;
+  }
+  const fields = [
+    ["Exact broker symbol", item.symbol], ["Product", productLabel(item.product_type)],
+    ["CFD / ownership", item.is_cfd ? "CFD · no underlying share/ETF ownership" : "Not identified as a CFD by broker metadata"],
+    ["Description / broker path", `${item.description || item.display_name || "Unavailable"} · ${item.path || "Unavailable"}`],
+    ["Base / profit currency", `${item.currency_base || "Unavailable"} / ${item.currency_profit || "Unavailable"}`],
+    ["Demo account currency", item.account_currency || "Unavailable"],
+    ["Contract size", item.contract_size ?? "Unavailable"],
+    ["MT5 volume min / max / step (lots; metadata only)", `${fmt(item.volume_min, 8)} / ${fmt(item.volume_max, 8)} / ${fmt(item.volume_step, 8)}`],
+    ["Tick size / value", `${fmt(item.tick_size, 8)} / ${fmt(item.tick_value, 8)}`],
+    ["Digits / point", `${item.digits ?? "Unavailable"} / ${fmt(item.point, 8)}`],
+    ["Chart volume", payload.volume_kind || "Broker-supplied volume"],
+    ["Metadata issues", (item.metadata_issues || []).join("; ") || "None"],
+    ["Paper sizing", "Explicit units, not MT5 lots; no contract-size or FX conversion is implied"],
+  ];
+  panel.innerHTML = fields.map(([key, value]) => `<div class="contract-item"><span>${escapeHtml(key)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
+function renderChartContext() {
+  renderChartContract();
+  const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  const mt5Paper = paper && state.chart.feed === "vantage_mt5";
   $("ticket-title").textContent = paper ? "Paper ticket · simulated" : `${MODE_LABELS[status.mode]} reviewed ticket`;
-  $("volume-label").textContent = paper ? "Quantity" : "Volume (lots)";
+  $("volume-label").textContent = mt5Paper ? "Paper quantity (units, not MT5 lots)" : paper ? "Quantity" : "Volume (lots)";
   $("protection-fields").hidden = paper;
   $("order-disclaimer").textContent = paper
-    ? "Paper fills are simulated locally. SELL exits an existing position; short selling is not modelled."
+    ? mt5Paper ? "Paper uses explicit units, not MT5 lots or contract-size conversion. Fills are local simulations; SELL exits an existing position and short selling is not modelled." : "Paper fills are simulated locally. SELL exits an existing position; short selling is not modelled."
     : status.mode === "VANTAGE_DEMO" ? "MT5 demo order only. Review/precheck and demo fills do not establish live readiness or profitability." : "Real-money capability. Submission requires fresh ACTIVE lifecycle, server guards, review and exact final confirmation.";
   $("start-paper").hidden = !paper;
   if (paper) {
     const paperState = state.workspace.paper_session?.state;
-    $("start-paper").textContent = paperState === "RUNNING" ? "Stop paper session" : paperState === "PAUSED" ? "Resume paper session" : "Start paper session";
+    const mt5 = state.chart.feed === "vantage_mt5" && state.marketData?.authenticated;
+    $("start-paper").textContent = paperState === "RUNNING" ? "Stop paper session" : paperState === "PAUSED" ? "Resume paper session" : mt5 ? "Start manual-only MT5 paper" : "Start configured paper session";
+  }
+  const feedContext = $("chart-feed-context");
+  if (feedContext) {
+    const mt5Payload = state.chart.feed === "vantage_mt5" && state.chart.payload;
+    feedContext.className = `inline-status ${mt5Payload ? (state.chart.payload.market_data ? "ok" : "err") : "warn"}`;
+    feedContext.textContent = !paper ? "This chart belongs to the selected Vantage execution session; it is separate from AXIOM PAPER market data."
+      : mt5Payload ? `${state.chart.payload.note || "Read-only MT5 closed bars and current tick."} Automation OFF; local reviewed fills only.`
+      : state.marketData?.authenticated ? "Choose an account-discovered symbol and reload the MT5 chart. No DEMO/replay symbol is substituted."
+      : "Replay/CSV is sample data, not market data. Connect the separate VANTAGE DEMO read-only feed on Connections for fresh MT5 prices.";
   }
   const noSymbol = !$("order-symbol").value;
   const disabledReason = state.submissionUncertain ? "An action outcome is uncertain. Reconcile before another order." : noSymbol ? "Load/select an instrument first." : !paper && !status.connected ? "Connect to the selected MT5 account first." : "";
@@ -612,7 +712,17 @@ async function loadChartSymbols() {
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
   try {
     let symbols = []; let defaultSymbol = ""; let timeframes = null;
-    if (paper) {
+    const independentMT5 = paper && Boolean(state.marketData?.authenticated);
+    if (independentMT5) {
+      const result = await api("/api/market-data/instruments?supported_only=true");
+      symbols = (result.instruments || []).map((item) => ({ symbol: item.symbol, timeframes: result.timeframes || [] }));
+      symbols.forEach((item) => {
+        const contract = result.instruments.find((row) => row.symbol === item.symbol);
+        state.contracts[item.symbol] = contract;
+      });
+      defaultSymbol = result.selected || symbols[0]?.symbol || "";
+      timeframes = result.timeframes;
+    } else if (paper) {
       const result = await api("/chart/symbols"); symbols = result.symbols || []; defaultSymbol = result.default || "";
       timeframes = result.timeframes;
     } else if (status.connected) {
@@ -634,13 +744,23 @@ async function loadChartSymbols() {
       }
     }
     state.chartSymbolsLoaded = true;
-    if (chosen && (!state.chart.payload || state.chart.symbol !== chosen || state.chart.mode !== status.mode)) await loadChart();
+    const wantedFeed = independentMT5 ? "vantage_mt5" : "legacy";
+    if (chosen && (!state.chart.payload || state.chart.symbol !== chosen || state.chart.mode !== status.mode || state.chart.feed !== wantedFeed)) await loadChart();
     else {
       $("order-symbol").value = chosen || "";
-      if (!chosen) { state.chart.bars = []; drawChart(); $("chart-empty").textContent = paper ? "Start the paper session or load a configured dataset." : "Select at least one account instrument, then reload the chart."; }
+      state.chart.feed = wantedFeed;
+      if (!chosen) {
+        state.chart.bars = []; state.chart.payload = null; state.chart.quote = null; drawChart();
+        $("chart-empty").textContent = independentMT5 ? "No supported account-discovered MT5 instrument is available; no substitute symbol is used." : paper ? "Start the paper session or load a configured dataset." : "Select at least one account instrument, then reload the chart.";
+      }
       renderChartContext();
     }
   } catch (error) {
+    if (paper && state.marketData?.authenticated) {
+      $("chart-symbol").innerHTML = `<option value="">MT5 instruments unavailable</option>`;
+      state.chart.bars = []; state.chart.payload = null; state.chart.quote = null; state.chart.feed = "vantage_mt5";
+      $("order-symbol").value = ""; drawChart();
+    }
     $("chart-source").textContent = "SYMBOLS UNAVAILABLE"; $("chart-source").className = "status-pill err";
     $("chart-empty").hidden = false; $("chart-empty").textContent = error.message;
     toast("Chart instruments unavailable", error.message, "err");
@@ -655,25 +775,37 @@ function normalizeBars(raw) {
 }
 async function loadChart() {
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  const independentMT5 = paper && Boolean(state.marketData?.authenticated);
   const symbol = $("chart-symbol").value; const timeframe = $("chart-timeframe").value;
   if (!symbol) return;
   setDisabled("reload-chart", true, "Loading chart…");
   $("chart-source").textContent = "LOADING REAL SESSION DATA"; $("chart-source").className = "status-pill warn";
   try {
     const query = new URLSearchParams({ symbol, timeframe, limit: "500" });
-    if (paper) query.set("indicators", "");
-    const payload = await api(paper ? `/chart/data?${query}` : `/api/trading/chart?${query}`);
+    if (paper && !independentMT5) query.set("indicators", "");
+    const endpoint = independentMT5 ? "/api/market-data/chart" : paper ? "/chart/data" : "/api/trading/chart";
+    const payload = await api(`${endpoint}?${query}`);
     const bars = normalizeBars(payload.bars);
-    state.chart = { mode: status.mode, symbol, timeframe, bars, quote: payload.quote || null, payload };
+    state.chart = { mode: status.mode, feed: independentMT5 ? "vantage_mt5" : "legacy", symbol, timeframe, bars, quote: payload.quote || null, payload };
+    if (independentMT5) {
+      state.marketData = await api("/api/market-data/status");
+      renderMarketData(); renderFreshness();
+    }
     $("order-symbol").value = symbol;
     $("chart-source").textContent = payload.data_feed_label || payload.source_label || (paper ? "LOCAL PAPER DATA" : "VANTAGE MT5");
     $("chart-source").className = `status-pill ${payload.market_data ? "ok" : "warn"}`;
     $("chart-legend").textContent = `${bars.length} bars · ${payload.note || payload.data_feed_label || payload.source_label || "Confirmed source"} · generated ${timeText(payload.generated_at)}`;
     renderChartQuote(); drawChart(); renderChartContext(); updateOrderContract();
   } catch (error) {
-    if (state.chart.symbol !== symbol || state.chart.mode !== status.mode) { state.chart.bars = []; state.chart.payload = null; drawChart(); }
-    $("chart-source").textContent = "CHART LOAD FAILED"; $("chart-source").className = "status-pill err";
+    if (independentMT5 || state.chart.symbol !== symbol || state.chart.mode !== status.mode) {
+      state.chart.bars = []; state.chart.payload = null; state.chart.quote = null;
+      if (independentMT5) state.chart.feed = "vantage_mt5";
+      drawChart();
+    }
+    $("chart-source").textContent = independentMT5 ? "MT5 DATA UNAVAILABLE · NO REPLAY FALLBACK" : "CHART LOAD FAILED";
+    $("chart-source").className = "status-pill err";
     $("chart-empty").hidden = false; $("chart-empty").textContent = error.message;
+    renderChartContext();
     toast("Chart load failed", error.message, "err");
   } finally { setDisabled("reload-chart", false); }
 }
@@ -681,7 +813,9 @@ function renderChartQuote() {
   const chart = state.chart; const payload = chart.payload || {}; const quote = chart.quote;
   if (quote) {
     const age = ageSeconds(quote.timestamp);
-    $("chart-quote").innerHTML = `<span><strong>${escapeHtml(chart.symbol)}</strong> ${escapeHtml(productLabel(payload.product_type))}</span><span>Bid <strong>${fmt(quote.bid)}</strong></span><span>Ask <strong>${fmt(quote.ask)}</strong></span><span>Spread ${fmt(Number(quote.ask) - Number(quote.bid), 8)}</span><span class="${age > Number(currentStatus().risk_limits?.max_quote_age_seconds || 30) ? "status-pill err" : "status-pill ok"}">Quote ${Number.isFinite(age) ? `${age.toFixed(1)}s old` : "age unknown"}</span>`;
+    const maxAge = Number(state.chart.payload?.max_quote_age_seconds || state.marketData?.max_quote_age_seconds || currentStatus().risk_limits?.max_quote_age_seconds || 30);
+    const fresh = quote.fresh !== false && quote.advancing !== false && age >= 0 && age <= maxAge;
+    $("chart-quote").innerHTML = `<span><strong>${escapeHtml(chart.symbol)}</strong> ${escapeHtml(productLabel(payload.product_type))}</span><span>Bid <strong>${fmt(quote.bid)}</strong></span><span>Ask <strong>${fmt(quote.ask)}</strong></span><span>Spread ${fmt(Number(quote.ask) - Number(quote.bid), 8)}</span><span class="${fresh ? "status-pill ok" : "status-pill err"}">${fresh ? "Fresh quote" : "STALE / NOT ADVANCING"} ${Number.isFinite(age) ? `${age.toFixed(1)}s old` : "age unknown"}</span><span>Source ${escapeHtml(timeText(quote.timestamp))}</span><span>Received ${escapeHtml(timeText(quote.received_at))}</span>`;
   } else {
     const last = chart.bars.at(-1);
     $("chart-quote").innerHTML = `<span><strong>${escapeHtml(chart.symbol)}</strong></span><span>Last closed bar <strong>${fmt(last?.close)}</strong></span><span>${escapeHtml(payload.data_feed_label || "Local paper data")}</span><span>${last ? escapeHtml(timeText(last.timestamp)) : "No bar timestamp"}</span>`;
@@ -738,9 +872,11 @@ function updateOrderContract() {
     $(id).disabled = !paper && Boolean(contract) && !supported;
     $(id).title = $(id).disabled ? "Broker contract does not support this protection field." : "";
   }
-  if (contract) {
+  if (contract && !paper) {
     $("order-volume").min = contract.volume_min ?? 0; $("order-volume").step = contract.volume_step ?? "any";
     if (!$("order-volume").value) $("order-volume").value = contract.volume_min ?? "";
+  } else if (paper) {
+    $("order-volume").min = 0; $("order-volume").step = "any";
   }
 }
 
@@ -771,18 +907,22 @@ async function reviewOrder(event) {
 async function reviewPaper(values) {
   const ticket = await api(`/paper/ticket?symbol=${encodeURIComponent(values.symbol)}`);
   const status = currentStatus(); const blocked = status.emergency_stop && values.side === "BUY";
-  const body = `<p><strong>LOCAL PAPER ONLY.</strong> This review and any result are simulated; no Vantage order is routed.</p>${reviewGrid([
+  const entryBlocked = values.side === "BUY" && Boolean(ticket.entry_blocked);
+  const idempotencyKey = newKey("paper-order");
+  const body = `<p><strong>LOCAL PAPER ONLY.</strong> This review and any result are simulated; no Vantage order is routed. One idempotency key is bound to this reviewed request.</p>${reviewGrid([
     ["Symbol", values.symbol], ["Side / type", `${values.side} / ${values.order_type}`],
     ["Quantity", values.volume], ["Limit price", values.limit_price ?? "Market"],
-    ["Last closed-bar price", ticket.last_price ?? "Unavailable"], ["Price timestamp", timeText(ticket.priced_at)],
+    ["Last closed-bar price", ticket.last_price ?? "Unavailable"], ["Bar timestamp", timeText(ticket.priced_at)],
+    ["Quote provider", ticket.quote_source || ticket.price_source], ["Quote source timestamp", timeText(ticket.quote_timestamp || ticket.priced_at)],
+    ["Quote received", timeText(ticket.quote_received_at)], ["Quote / bar ID", ticket.quote_id || "Not supplied by this feed"],
     ["Cash", money(ticket.cash, state.workspace.account?.currency)], ["Held quantity", ticket.position?.quantity ?? 0],
-    ["Max buy / sell", `${fmt(ticket.max_buy_quantity, 8)} / ${fmt(ticket.max_sell_quantity, 8)}`], ["Feed", ticket.price_source],
-  ])}${ticket.blocked ? `<div class="review-issues">${escapeHtml(ticket.blocked)}</div>` : ""}${blocked ? `<div class="review-issues">Durable emergency stop blocks a new paper entry.</div>` : ""}`;
+    ["Max buy / sell", `${fmt(ticket.max_buy_quantity, 8)} / ${fmt(ticket.max_sell_quantity, 8)}`], ["Execution", "AXIOM PAPER · local simulation"],
+  ])}${values.side === "BUY" && ticket.blocked ? `<div class="review-issues">${escapeHtml(ticket.blocked)}</div>` : ""}${entryBlocked ? `<div class="review-issues">${escapeHtml(ticket.entry_blocked)}</div>` : ""}${blocked ? `<div class="review-issues">Durable emergency stop blocks a new paper entry.</div>` : ""}`;
   openDialog({
     title: "Review simulated paper order", body, confirmLabel: "Place simulated paper order", confirmClass: "primary",
-    confirmDisabled: Boolean(ticket.blocked || blocked || ticket.last_price === null),
+    confirmDisabled: Boolean((values.side === "BUY" && ticket.blocked) || entryBlocked || blocked || ticket.last_price === null),
     onConfirm: async () => {
-      const payload = { symbol: values.symbol, side: values.side, quantity: values.volume, order_type: values.order_type, limit_price: values.limit_price };
+      const payload = { symbol: values.symbol, side: values.side, quantity: values.volume, order_type: values.order_type, limit_price: values.limit_price, idempotency_key: idempotencyKey };
       const result = await api("/paper/order", { body: payload });
       closeDialog(); await loadWorkspace(); await loadActivity();
       const order = result.order || {};
@@ -981,9 +1121,8 @@ function clearEmergency() {
 }
 
 async function saveCredential(replace) {
-  const status = currentStatus();
   const payload = {
-    environment: status.mode, login: $("mt5-login").value.trim(), password: $("mt5-password").value,
+    environment: credentialEnvironment(), login: $("mt5-login").value.trim(), password: $("mt5-password").value,
     server: $("mt5-server").value.trim(), terminal_path: $("mt5-path").value.trim(),
     label: $("mt5-label").value.trim(), replace_existing: replace,
   };
@@ -999,7 +1138,7 @@ async function saveCredential(replace) {
   }
 }
 function deleteCredential() {
-  const mode = currentStatus().mode;
+  const mode = credentialEnvironment();
   openDialog({
     title: "Delete protected Vantage credential",
     body: `<p>Delete the protected ${escapeHtml(MODE_LABELS[mode])} credential and masked metadata for this environment. Any matching connection is disconnected and disarmed. This does not delete broker orders or positions.</p>`,
@@ -1007,7 +1146,7 @@ function deleteCredential() {
     onConfirm: async () => {
       await api(`/api/trading/credentials/${encodeURIComponent(mode)}`, { method: "DELETE" });
       closeDialog(); state.credentialMode = null; state.connectionInfo = null;
-      await loadConnectionInfo(); await loadWorkspace(); toast("Credential deleted", "No protected password or full login remains in AXIOM's metadata.", "ok");
+      await loadConnectionInfo(); await loadWorkspace(); await loadMarketData(); toast("Credential deleted", "No protected password or full login remains in AXIOM's metadata. Matching market data was disconnected.", "ok");
     },
   });
 }
@@ -1025,9 +1164,42 @@ async function testConnection() {
 async function disconnectConnection() {
   try {
     await api("/api/trading/connection/disconnect", { body: {} });
-    state.readiness = null; state.activation = null; state.instruments = []; state.chart = { mode: state.mode, symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
+    state.readiness = null; state.activation = null; state.instruments = []; state.chart = { mode: state.mode, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
     await loadWorkspace(); drawChart(); toast("MT5 disconnected", "Session disarmed. Broker state is no longer current; empty views do not prove a flat account.", "warn");
   } catch (error) { toast("Disconnect failed", error.message, "err"); }
+}
+
+async function connectMarketData() {
+  if (currentStatus().mode !== "AXIOM_PAPER") {
+    toast("Market-data connection blocked", "Keep execution in AXIOM PAPER for this independent read-only feed.", "err"); return;
+  }
+  setDisabled("connect-market-data", true, "Authenticating read-only demo market data…");
+  $("market-data-detail").className = "inline-status warn";
+  $("market-data-detail").textContent = "Authenticating VANTAGE_DEMO through the separate read-only interface. Execution mode and lifecycle are not changed.";
+  try {
+    const result = await api("/api/market-data/connect", { body: {} });
+    state.marketData = result; state.chartSymbolsLoaded = false;
+    await loadWorkspace(); await loadMarketData();
+    toast("Read-only demo market data connected", `${result.instrument_count} account-returned instruments. Execution remains AXIOM PAPER; no session, strategy, Arm, Activate, or order was automatic.`, "ok", 10000);
+  } catch (error) {
+    if (state.chart.feed === "vantage_mt5") { state.chart.bars = []; state.chart.payload = null; state.chart.quote = null; drawChart(); }
+    await loadMarketData();
+    toast("Market-data connection failed", `${error.message}. No replay fallback or execution change occurred.`, "err", 10000);
+  } finally { renderConnections(); renderMarketData(); }
+}
+async function disconnectMarketData() {
+  try {
+    const result = await api("/api/market-data/disconnect", { body: {} });
+    state.marketData = result;
+    // Explicit operator disconnect ends the MT5 chart context. A subsequent
+    // configured chart is intentionally loaded, never an implicit fallback.
+    state.chart = { mode: state.mode, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null };
+    state.chartSymbolsLoaded = false;
+    await loadWorkspace(); await loadMarketData();
+    if (state.page === "charts") await loadChartSymbols();
+    drawChart();
+    toast("Independent market data disconnected", "New MT5-feed entries are blocked. Local paper records are preserved; execution remains AXIOM PAPER.", "warn");
+  } catch (error) { toast("Market-data disconnect failed", error.message, "err"); }
 }
 
 function renderActivity() {
@@ -1055,9 +1227,19 @@ async function paperSessionControl() {
   const paperState = state.workspace.paper_session?.state;
   if (paperState === "RUNNING") { stopSession(); return; }
   try {
-    const result = await api(paperState === "PAUSED" ? "/paper/resume" : "/api/paper/start-default", { body: {} });
-    await loadWorkspace(); await loadChartSymbols();
-    toast("Paper session updated", `${result.state || "RUNNING"} · local simulated execution only`, "ok");
+    let result;
+    if (paperState === "PAUSED") result = await api("/paper/resume", { body: {} });
+    else if (state.chart.feed === "vantage_mt5") {
+      if (!state.marketData?.authenticated || !state.chart.payload?.market_data) throw new ApiError("Reconnect and reload a fresh advancing MT5 chart before starting paper");
+      const symbol = $("chart-symbol").value;
+      const timeframe = state.workspace.paper_session?.timeframe || state.chart.timeframe;
+      result = await api("/paper/start", { body: {
+        source: "vantage_mt5", symbol, timeframe, strategy: "manual_only", parameters: {},
+        dataset: "sample.csv", replay_delay: 0,
+      } });
+    } else result = await api("/api/paper/start-default", { body: {} });
+    await loadWorkspace(); await loadMarketData(); await loadChartSymbols();
+    toast("Paper session updated", `${result.state || "RUNNING"} · ${result.strategy === "manual_only" ? "manual-only · automation OFF · " : ""}local simulated execution only`, "ok");
   } catch (error) { toast("Paper session failed", error.message, "err"); }
 }
 
@@ -1117,6 +1299,7 @@ function bindEvents() {
   $("replace-credential").addEventListener("click", () => saveCredential(true));
   $("edit-credential").addEventListener("click", () => { $("mt5-login").focus(); toast("Explicit credential replacement", "Enter the full login and password again, then choose Replace credential. Password fields are never repopulated.", "warn"); });
   $("delete-credential").addEventListener("click", deleteCredential); $("test-connection").addEventListener("click", testConnection); $("disconnect-connection").addEventListener("click", disconnectConnection);
+  $("connect-market-data").addEventListener("click", connectMarketData); $("disconnect-market-data").addEventListener("click", disconnectMarketData);
   $("activity-filter").addEventListener("input", renderActivity); $("reload-activity").addEventListener("click", loadActivity);
   $("export-activity").addEventListener("click", () => downloadJson(`axiom-redacted-activity-${new Date().toISOString().slice(0, 10)}.json`, { generated_at: new Date().toISOString(), note: "Redacted local audit; no credentials or API token.", events: state.activity }));
   $("token-form").addEventListener("submit", async (event) => {

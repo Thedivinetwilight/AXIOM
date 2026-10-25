@@ -239,11 +239,17 @@ def ticket(broker, symbol: str, limits: ManualLimits) -> dict:
         if blocked:
             max_buy_quantity = 0.0
 
+    provenance = getattr(broker, "market_provenance", {}).get(symbol, {})
     return {
         "symbol": symbol,
         "last_price": None if price_info is None else round(price_info[0], 6),
         "priced_at": None if price_info is None else price_info[1],
         "price_source": "last_closed_bar" if price_info else "none",
+        "quote_source": provenance.get("source"),
+        "quote_timestamp": provenance.get("timestamp"),
+        "quote_received_at": provenance.get("received_at"),
+        "quote_id": provenance.get("id"),
+        "entry_blocked": None,
         "cash": round(account["cash"], 6),
         "equity": round(account["equity"], 6),
         "daily_pnl": round(account["daily_pnl"], 6),
@@ -345,6 +351,8 @@ def place_order(
     limit_price: float | None = None,
     limits: ManualLimits | None = None,
     timestamp: datetime | None = None,
+    idempotency_key: str | None = None,
+    request_fingerprint: str | None = None,
 ) -> dict:
     """Place one simulated manual order. Returns the order, fill and account."""
     limits = limits or ManualLimits()
@@ -408,6 +416,8 @@ def place_order(
         None if limit_price is None else float(limit_price),
         reason="manual",
     )
+    if hasattr(broker, "_apply_provenance"):
+        broker._apply_provenance(order)
     broker.orders[order.id] = order
 
     filled_now = False
@@ -422,6 +432,7 @@ def place_order(
             filled_now = True
 
     fill = None
+    snapshot = None
     if filled_now:
         price = fill_price
         if order_type == "LIMIT":
@@ -431,11 +442,8 @@ def place_order(
         broker._fill(order, quantity, price, placed_at.isoformat(), "manual", reference)
         fill = broker.fills[-1]
         snapshot = broker.portfolio.snapshot(placed_at.isoformat(), broker.currency)
-        broker._persist(snapshot)
-    else:
-        broker._persist()
 
-    return {
+    result = {
         "order": order.to_dict(),
         "fill": None
         if fill is None
@@ -446,6 +454,10 @@ def place_order(
             "quantity": round(fill.quantity, 8),
             "fee": round(fill.fee, 6),
             "reason": fill.reason,
+            "quote_source": fill.quote_source,
+            "quote_timestamp": fill.quote_timestamp,
+            "quote_received_at": fill.quote_received_at,
+            "quote_id": fill.quote_id,
         },
         "status": order.status,
         "simulated": True,
@@ -461,3 +473,14 @@ def place_order(
         },
         "ticket": ticket(broker, symbol, limits),
     }
+    if idempotency_key:
+        cache = broker.context.setdefault("manual_idempotency", {})
+        cache[idempotency_key] = {
+            "fingerprint": request_fingerprint or "",
+            "result": result,
+        }
+        while len(cache) > 128:
+            cache.pop(next(iter(cache)))
+    # Order, fill, account state and idempotency record commit together.
+    broker._persist(snapshot)
+    return result

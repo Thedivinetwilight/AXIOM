@@ -121,6 +121,9 @@ def paper_workspace(request: Request) -> dict:
     simulator = request.app.state.simulator
     account = broker.get_balance()
     positions = broker.get_positions()
+    market_data = request.app.state.market_data.status()
+    selected = market_data.get("selected_symbol")
+    quote = market_data.get("quote")
     return {
         "status": service(request).status(),
         "paper_session": simulator.status(),
@@ -134,6 +137,8 @@ def paper_workspace(request: Request) -> dict:
         "orders": broker.get_orders(),
         "intents": [],
         "deals": [asdict(fill) for fill in broker.fills],
+        "quotes": {selected: quote} if selected and quote else {},
+        "market_data": market_data,
         "pnl": {
             "realized_visible_history": account.get("realized_pnl"),
             "unrealized": sum(float(item.get("unrealized_pnl") or 0) for item in positions),
@@ -157,6 +162,11 @@ async def select_session(body: ModeRequest, request: Request):
     # selected. Stop it first, then switch the one execution session identity.
     if mode != SessionMode.PAPER:
         await simulator.stop()
+        # The independent demo quote terminal is not shared with an execution
+        # session. Selecting another execution mode tears down only this feed.
+        request.app.state.market_data.disconnect(
+            "Execution session changed; independent market data disconnected"
+        )
     return service(request).select_mode(mode)
 
 
@@ -193,7 +203,12 @@ def delete_credentials(environment: str, request: Request):
         mode = SessionMode(environment)
     except ValueError as exc:
         raise HTTPException(422, "Unknown credential environment") from exc
-    return service(request).delete_credentials(mode)
+    result = service(request).delete_credentials(mode)
+    if mode == SessionMode.DEMO:
+        request.app.state.market_data.disconnect(
+            "VANTAGE_DEMO credential deleted; independent market data disconnected"
+        )
+    return result
 
 
 @router.post("/connection/test")

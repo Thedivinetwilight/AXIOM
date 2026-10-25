@@ -1,17 +1,24 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.3.0a1`.** AXIOM now provides an eight-page Operator
+**Current source version: `3.4.0a1`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **AXIOM PAPER**, **VANTAGE DEMO**, and
-**VANTAGE LIVE** modes. Vantage connectivity and execution use the official
+**VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
 or coordinate automation. Only instruments exposed by the connected account are
 discovered; share/ETF CFDs are not represented as owned underlying assets.
 
-Vantage startup is disconnected/disarmed, automation is unavailable/off, and
-credentials never authorize activation. Server-enforced readiness, separate Arm
+AXIOM PAPER can now use an independent authenticated **VANTAGE DEMO MT5 read-only
+market-data service** for fresh prices while retaining local simulated fills. Its
+isolated gateway has no broker order/position/history functions; connecting never
+changes execution mode or creates an order. Exact account-discovered symbols,
+fresh advancing ticks, validated newly closed bars, explicit degradation and
+no-replay behavior gate the always-`manual_only` workflow. Paper quantities are
+units, not MT5 lots, and orders/fills retain market-data provenance.
+
+Vantage execution startup remains disconnected/disarmed, automation unavailable/off,
+and credentials never authorize activation. Server-enforced readiness, separate Arm
 and Activate challenges, reviewed orders, durable intents, one submission attempt,
-broker reconciliation and persistent emergency stop guard the order path. AXIOM
-PAPER remains an independent simulator with explicitly simulated fills.
+broker reconciliation and persistent emergency stop guard that separate order path.
 
 > **No profitability or live-readiness claim.** Fake tests, demo fills and a
 > successful connection establish neither profitability nor real-money readiness.

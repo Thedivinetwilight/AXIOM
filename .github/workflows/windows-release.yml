@@ -256,11 +256,13 @@ jobs:
           $notes = @"
           Windows x64 AXIOM Operator built from exact source commit ``$($meta.commit)``.
 
-          **Modes and safety.** AXIOM PAPER is independent and uses simulated fills. Vantage
-          DEMO/LIVE use the official terminal-hosted MetaTrader5 integration, account-specific
-          discovery, reviewed orders and broker reconciliation. Startup, credentials and recovery
-          never Arm or Activate. Live placement remains blocked until separate explicit operator
-          actions and every order guard succeed. CFDs are not represented as owned shares.
+          **Modes and safety.** AXIOM PAPER uses simulated fills. Its optional fresh-price workflow
+          uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
+          selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an
+          order on connection/startup. Only exact account-discovered instruments and validated closed
+          bars are used, with explicit freshness and no replay fallback. MT5 paper sizing is in units,
+          not broker lots, and every fill is local. Vantage DEMO/LIVE execution modes retain their
+          separate review, reconciliation, Arm and Activate gates. CFDs are not owned shares.
 
           **Actual test results on this Windows runner**
 
@@ -269,14 +271,17 @@ jobs:
           * JavaScript chart + operator interaction suites: ``$($meta.test_results.javascript)``
           * DPAPI: ``$($meta.test_results.dpapi)``
           * MT5 behavior: ``$($meta.test_results.fake_mt5)``
+          * Independent read-only market-data tests: ``$($meta.test_results.read_only_mt5)``
+          * Real demo terminal/feed verification: ``$($meta.test_results.demo_market_data)``
           * on-machine frozen-app checks: $passed passed, $($meta.test_results.smoke_failed) failed
           * installer/upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
             launch, ``/terminal`` and legacy ``/chart``, static assets, token gates, safe disconnected
             Vantage selection, upgrade user-data preservation, and uninstall. See the full logs.
 
-          **Not tested:** no real Vantage demo account was available, so no actual Vantage connection,
-          discovery or demo fill occurred. No live login or real-money order/cancel/modify was attempted.
-          The owner must follow the local demo verification procedure in ``USER_MANUAL.md``.
+          **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
+          account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
+          No Vantage demo execution fill, live login or real-money order/cancel/modify was attempted.
+          The owner must follow the local demo market-data verification procedure in ``USER_MANUAL.md``.
 
           Full-suite failures: $failureBlock
 

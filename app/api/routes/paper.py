@@ -1,3 +1,6 @@
+from copy import deepcopy
+import json
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.schemas import ManualOrderRequest, PaperStartRequest
@@ -97,14 +100,35 @@ async def start(body: PaperStartRequest, request: Request):
         validate_us_symbol(body.symbol)
     strategy = body.build_strategy()
     bars = load_dataset(request.app, body) if body.source == "replay" else None
-    provider = stream_provider(
-        settings,
-        body.source,
-        bars=bars,
-        delay=body.replay_delay,
-        symbol=body.symbol,
-        timeframe=body.timeframe if body.source in {"upstox", "alpaca"} else None,
-    )
+    if body.source == "vantage_mt5":
+        from app.market_data.paper_provider import MT5PaperProvider
+
+        market_data = getattr(request.app.state, "market_data", None)
+        if market_data is None:
+            raise HTTPException(409, "Independent MT5 market data is unavailable")
+        account = market_data.account or {}
+        if (
+            account.get("currency")
+            and str(account["currency"]).upper() != str(request.app.state.broker.currency).upper()
+        ):
+            raise HTTPException(
+                409,
+                "Paper currency does not match the authenticated demo account currency; "
+                "configure the same CURRENCY and use a separate paper database before starting",
+            )
+        try:
+            provider = MT5PaperProvider(market_data, body.symbol, body.timeframe)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    else:
+        provider = stream_provider(
+            settings,
+            body.source,
+            bars=bars,
+            delay=body.replay_delay,
+            symbol=body.symbol,
+            timeframe=body.timeframe if body.source in {"upstox", "alpaca"} else None,
+        )
     if body.source == "alpaca" and getattr(provider, "supported_timeframes", None) != frozenset({"1m"}):
         raise ValueError("Alpaca paper provider timeframe contract mismatch")
     # Live adapters expose the exact symbols they subscribe to; keep controller,
@@ -112,7 +136,27 @@ async def start(body: PaperStartRequest, request: Request):
     symbols = list(getattr(provider, "symbols", None) or [body.symbol])
     if body.symbol not in symbols:
         raise ValueError("Requested symbol is not in the configured market-data instrument list")
-    return await request.app.state.simulator.start(provider, strategy, symbols)
+    try:
+        if body.source == "vantage_mt5":
+            # Readiness completes before STARTING is returned. Failure closes
+            # only this new provider; it never calls simulator.stop/cancel_all.
+            provider.prepare()
+        result = await request.app.state.simulator.start(provider, strategy, symbols)
+    except Exception:
+        if body.source == "vantage_mt5":
+            await provider.close()
+        raise
+    if body.source == "vantage_mt5":
+        repository = getattr(request.app.state, "repository", None)
+        if repository is not None:
+            repository.record_system_event("PAPER_MARKET_DATA_STARTED", {
+                "provider": "VANTAGE_DEMO_MT5", "symbol": body.symbol,
+                "timeframe": body.timeframe, "strategy": "manual_only",
+                "execution_mode": "AXIOM_PAPER", "automation_enabled": False,
+            })
+        result["execution_mode"] = "AXIOM_PAPER"
+        result["automation_enabled"] = False
+    return result
 
 
 @router.post("/paper/stop")
@@ -165,15 +209,73 @@ def _require_local_paper(request: Request, *, allow_during_emergency: bool = Fal
     return broker
 
 
+def _requires_mt5_fresh_feed(request: Request) -> bool:
+    broker = request.app.state.broker
+    return bool(broker.context.get("market_data", {}).get("requires_fresh_live"))
+
+
+def _paper_symbol(request: Request, value: str) -> str:
+    symbol = value.strip()
+    if _requires_mt5_fresh_feed(request):
+        # Never uppercase or otherwise substitute an exact MT5 broker symbol.
+        return symbol
+    return symbol.upper()
+
+
+def _mt5_entry_block(request: Request, symbol: str) -> str | None:
+    if not _requires_mt5_fresh_feed(request):
+        return None
+    market_data = getattr(request.app.state, "market_data", None)
+    if market_data is not None:
+        reason = market_data.entry_block_reason(symbol)
+        if reason:
+            return reason
+    simulator = request.app.state.simulator
+    state = getattr(simulator.state, "value", str(simulator.state))
+    if state != "RUNNING":
+        return (
+            f"Fresh MT5 paper session is {state}; new entries require a running, "
+            "authenticated fresh-feed session"
+        )
+    provider = simulator.provider
+    guard = getattr(provider, "entry_block_reason", None)
+    if not callable(guard) or not getattr(provider, "requires_fresh_live", False):
+        return "The active provider is not the authenticated MT5 fresh-feed provider"
+    return guard(symbol)
+
+
+def _manual_fingerprint(body: ManualOrderRequest, symbol: str) -> str:
+    values = body.model_dump(exclude={"idempotency_key"})
+    values["symbol"] = symbol
+    return json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _duplicate_manual_result(broker, key: str | None, fingerprint: str):
+    if not key:
+        return None
+    saved = broker.context.get("manual_idempotency", {}).get(key)
+    if saved is None:
+        return None
+    if saved.get("fingerprint") != fingerprint:
+        raise HTTPException(409, "Idempotency key was already used for a different paper order")
+    result = deepcopy(saved["result"])
+    result["duplicate"] = True
+    return result
+
+
 @router.get("/paper/ticket")
 async def paper_ticket(request: Request, symbol: str = Query(min_length=1, max_length=40)):
     """Price, headroom and blockers the ticket should show for `symbol`."""
     broker = _require_local_paper(request, allow_during_emergency=True)
-    return ticket(
+    resolved_symbol = _paper_symbol(request, symbol)
+    result = ticket(
         broker,
-        symbol.strip().upper(),
+        resolved_symbol,
         ManualLimits.from_settings(request.app.state.settings),
     )
+    result["entry_blocked"] = _mt5_entry_block(request, resolved_symbol)
+    result["market_data_required"] = _requires_mt5_fresh_feed(request)
+    return result
 
 
 @router.post("/paper/orders/{order_id}/cancel")
@@ -204,16 +306,29 @@ async def paper_order(body: ManualOrderRequest, request: Request):
     # remains blocked by the default guard above.
     broker = _require_local_paper(request, allow_during_emergency=body.side == "SELL")
     limits = ManualLimits.from_settings(request.app.state.settings)
+    symbol = _paper_symbol(request, body.symbol)
+    fingerprint = _manual_fingerprint(body, symbol)
+    duplicate = _duplicate_manual_result(broker, body.idempotency_key, fingerprint)
+    if duplicate is not None:
+        return duplicate
+    if _requires_mt5_fresh_feed(request) and not body.idempotency_key:
+        raise HTTPException(409, "Fresh-MT5 manual paper orders require an idempotency key")
     try:
+        if body.side == "BUY":
+            feed_block = _mt5_entry_block(request, symbol)
+            if feed_block:
+                raise ManualOrderRejected("market_data_unavailable", feed_block)
         result = place_order(
             broker,
-            symbol=body.symbol,
+            symbol=symbol,
             side=body.side,
             quantity=body.quantity,
             notional=body.notional,
             order_type=body.order_type,
             limit_price=body.limit_price,
             limits=limits,
+            idempotency_key=body.idempotency_key,
+            request_fingerprint=fingerprint,
         )
     except ManualOrderRejected as exc:
         repository = getattr(request.app.state, "repository", None)
@@ -222,7 +337,7 @@ async def paper_order(body: ManualOrderRequest, request: Request):
             repository.record_system_event(
                 "MANUAL_ORDER_REJECTED",
                 {
-                    "symbol": body.symbol,
+                    "symbol": symbol,
                     "side": body.side,
                     "reason": exc.reason,
                     "quantity": body.quantity,
@@ -239,6 +354,10 @@ async def paper_order(body: ManualOrderRequest, request: Request):
                 "side": result["order"]["side"],
                 "status": result["status"],
                 "quantity": result["order"]["quantity"],
+                "idempotency_key": body.idempotency_key,
+                "quote_source": result["order"].get("quote_source"),
+                "quote_timestamp": result["order"].get("quote_timestamp"),
+                "quote_id": result["order"].get("quote_id"),
             },
         )
     return result

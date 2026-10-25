@@ -1,6 +1,6 @@
 # AXIOM Operator — Windows x64 Install Guide
 
-**Version:** 3.3.0a1
+**Version:** 3.4.0a1
 
 **Applies to:** the AXIOM Operator installer and portable executable built from the exact commit named in `BUILD_METADATA.json`.
 
@@ -16,7 +16,7 @@ This guide covers installation and Windows-specific operation. Read the bundled 
 - A current Edge, Chrome or Firefox browser.
 - No separate Python installation for the frozen executable.
 - Per-user installation; administrator rights are not normally required.
-- For Vantage modes: the Vantage MetaTrader 5 desktop terminal and an account/server explicitly supplied by Vantage. The official `MetaTrader5` Python package is bundled, but the desktop terminal is a separate prerequisite.
+- For Vantage execution modes or the optional MT5 paper-price feed: the Vantage MetaTrader 5 desktop terminal and an account/server explicitly supplied by Vantage. The official `MetaTrader5` Python package is bundled, but the desktop terminal is a separate prerequisite. The independent paper feed accepts DEMO credentials only.
 
 AXIOM binds to loopback and opens a local browser page. Do not expose its API to a network or the internet.
 
@@ -37,7 +37,7 @@ The release may also include test logs/manuals. Read `BUILD_METADATA.json` for t
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AXIOM-Operator-3.3.0a1-windows-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.4.0a1-windows-x64-setup.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -110,6 +110,14 @@ The **MT5 package available** indicator is only a module-capability check. It is
 
 A read-only test does not place, cancel or modify orders. To enable reviewed manual orders, complete instrument selection, all risk limits, readiness, Arm and separate Activate, then review and confirm each order. See the main User Manual.
 
+### 6.1 Fresh DEMO prices with AXIOM PAPER
+
+This is separate from selecting the VANTAGE DEMO execution mode. Keep the global mode **AXIOM PAPER**, save the DEMO-only profile on **Connections**, and choose **Connect demo market data — read-only**. The isolated gateway cannot place, check, modify, cancel or close broker orders and cannot read broker positions/orders/history. Connecting never Arms, Activates or changes execution.
+
+On **Charts**, select only an exact symbol returned by that demo account. Inspect its contract/CFD metadata and the fresh-quote label. **Start manual-only MT5 paper** requires fresh advancing ticks and validated closed bars; it creates no order and keeps automation off. Reviewed paper fills are local simulations in explicit units, not MT5 lots. Feed loss blocks new BUY entries, preserves paper state, and never falls back to replay.
+
+Use the full **Local real-demo market-data verification procedure** in `USER_MANUAL.md`, including its isolated data-directory and account-currency/timeframe setup. CI does not perform this real-terminal check.
+
 ## 7. Configuration and ports
 
 Legacy process/feed settings remain in `%LOCALAPPDATA%\AXIOM\axiom.env`. The launcher still enforces the legacy engine's safe process configuration:
@@ -160,7 +168,7 @@ Maintainers can reproduce the build on a real Windows x64 machine with the pinne
 ```powershell
 cd packaging\windows
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
-  -SourceDir ..\.. -ExpectedCommit <full-source-commit>
+  -ExpectedCommit <full-source-commit> -Version 3.4.0a1
 ```
 
 The script requires a clean source tree, runs focused and full Python tests, both pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller frozen-app smoke/fail-closed checks, and Inno Setup packaging. It refuses to produce a success result when a hard gate fails.
@@ -186,6 +194,9 @@ A source checkout, Linux test, fake-MT5 test or script is not a substitute for t
 | `database is locked` / writer lock fails | Close duplicate writers. Do not bypass the lock or copy a live database as a running backup. |
 | MT5 package unavailable | Confirm you are using the current frozen Windows build and inspect its metadata. |
 | MT5 terminal/login unavailable | Verify the separate Vantage terminal, executable path, numeric login/password and exact server. Never send credentials for support. |
+| Demo feed stale/not advancing | Check terminal connection, exact symbol subscription and market hours. New paper BUY entries fail closed; replay is not substituted. |
+| MT5 paper currency/timeframe refused | Use a separate new data directory configured for the demo account currency and intended timeframe; never delete a saved database to bypass the guard. |
+| MT5 paper quantity seems different from MT5 | AXIOM PAPER uses explicit units, not MT5 lots; no contract-size or FX conversion is implied. |
 | DPAPI credential cannot be read | Re-enter it as the same intended Windows user; DPAPI data is not a portable plaintext backup. |
 | Vantage controls blocked | This is expected until connection, selection, risk, readiness, Arm, Activate and final review all pass. Read the specific blocker. |
 | Upgrade preserved data but trading is disarmed | Required behavior. Reconnect/reconcile and repeat all approvals. |
@@ -196,6 +207,7 @@ Logs are under `%LOCALAPPDATA%\AXIOM\logs`. Inspect before sharing. Never attach
 ## 12. Non-claims and limits
 
 - No Vantage demo/live login or order is performed by the installer tests.
+- Installer/frozen tests do not connect a real demo feed; without a locally saved DEMO profile, market-data connect must fail closed without changing AXIOM PAPER.
 - CI does not use real-money credentials and does not activate live trading.
 - A demo account must be explicitly supplied for any separate demo E2E; otherwise it is skipped and reported.
 - AXIOM does not discover instruments from a hard-coded Vantage product list; availability comes from the connected MT5 account.

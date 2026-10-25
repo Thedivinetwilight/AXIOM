@@ -256,6 +256,14 @@ try {
         if ($_.Exception.Response) { $anonTrading = [int]$_.Exception.Response.StatusCode }
     }
     Check ($anonTrading -eq 401) ('Vantage status refuses anonymous access (got {0})' -f $anonTrading)
+    $anonMarketData = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/api/market-data/status' -f $base) -TimeoutSec 10
+        $anonMarketData = 200
+    } catch {
+        if ($_.Exception.Response) { $anonMarketData = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anonMarketData -eq 401) ('independent market-data status refuses anonymous access (got {0})' -f $anonMarketData)
 
     $privateConfig = Join-Path $dataDir 'axiom.env'
     Check (Test-Path $privateConfig) 'the launcher created the private per-user configuration'
@@ -268,6 +276,18 @@ try {
     $capabilities = Invoke-RestMethod -Headers $headers ('{0}/api/trading/connection' -f $base) -TimeoutSec 15
     Check ($capabilities.secret_store -match 'Windows DPAPI') 'installed app can use Windows DPAPI'
     Check ($capabilities.mt5_package_available -eq $true) 'official MT5 module is present in installed app'
+    $marketData = Invoke-RestMethod -Headers $headers ('{0}/api/market-data/status' -f $base) -TimeoutSec 15
+    Check ($marketData.execution_mode -eq 'AXIOM_PAPER' -and $marketData.read_only -eq $true -and -not $marketData.connected -and -not $marketData.orders_modified -and -not $marketData.live_trading) 'installed independent MT5 feed starts disconnected, read-only and paper-only'
+    $marketConnect = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing -Method Post -Headers $headers ('{0}/api/market-data/connect' -f $base) -TimeoutSec 10
+        $marketConnect = 200
+    } catch {
+        if ($_.Exception.Response) { $marketConnect = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($marketConnect -eq 409) ('installed market-data connect without DEMO credentials fails closed (got {0})' -f $marketConnect)
+    $afterMarketRefusal = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
+    Check ($afterMarketRefusal.mode -eq 'AXIOM_PAPER' -and -not $afterMarketRefusal.active) 'installed feed refusal preserves AXIOM PAPER and never activates'
     $demo = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ mode = 'VANTAGE_DEMO' } | ConvertTo-Json) ('{0}/api/trading/session' -f $base) -TimeoutSec 15
     Check ($demo.mode -eq 'VANTAGE_DEMO' -and -not $demo.connected -and -not $demo.armed -and -not $demo.active) 'DEMO selection does not connect, Arm or Activate'
     $disconnected = Invoke-RestMethod -Headers $headers ('{0}/api/trading/workspace' -f $base) -TimeoutSec 15

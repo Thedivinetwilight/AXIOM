@@ -94,7 +94,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -203,6 +203,10 @@ try {
     try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/trading/status" -TimeoutSec 5 }
     catch { $AnonTrading = [int]$_.Exception.Response.StatusCode }
     $Ok = (Check ($AnonTrading -eq 401) "Vantage status refuses anonymous request ($AnonTrading)") -and $Ok
+    $AnonMarketData = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing "$Base/api/market-data/status" -TimeoutSec 5 }
+    catch { $AnonMarketData = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($AnonMarketData -eq 401) "independent market-data status refuses anonymous request ($AnonMarketData)") -and $Ok
 
     $Cfg = Get-Content (Join-Path $SmokeHome 'axiom.env')
     $Token = (($Cfg | Select-String '^API_TOKEN=').Line) -replace '^API_TOKEN=', ''
@@ -213,6 +217,14 @@ try {
     $Capabilities = Invoke-RestMethod -Headers $Headers "$Base/api/trading/connection"
     $Ok = (Check ($Capabilities.secret_store -match 'Windows DPAPI') 'Windows DPAPI protected storage is available') -and $Ok
     $Ok = (Check ($Capabilities.mt5_package_available -eq $true) 'official MetaTrader5 module is present in the frozen build') -and $Ok
+    $MarketData = Invoke-RestMethod -Headers $Headers "$Base/api/market-data/status"
+    $Ok = (Check ($MarketData.execution_mode -eq 'AXIOM_PAPER' -and $MarketData.read_only -eq $true -and -not $MarketData.connected -and -not $MarketData.orders_modified -and -not $MarketData.live_trading) 'independent MT5 market data starts disconnected, read-only and paper-only') -and $Ok
+    $MarketConnect = 0
+    try { $null = Invoke-WebRequest -UseBasicParsing -Method Post -Headers $Headers "$Base/api/market-data/connect" -TimeoutSec 5 }
+    catch { $MarketConnect = [int]$_.Exception.Response.StatusCode }
+    $Ok = (Check ($MarketConnect -eq 409) "market-data connect without a DEMO profile fails closed ($MarketConnect)") -and $Ok
+    $AfterMarketRefusal = Invoke-RestMethod -Headers $Headers "$Base/api/trading/status"
+    $Ok = (Check ($AfterMarketRefusal.mode -eq 'AXIOM_PAPER' -and -not $AfterMarketRefusal.active) 'failed market-data connect never changes execution or activates') -and $Ok
     $DemoBody = @{ mode = 'VANTAGE_DEMO' } | ConvertTo-Json
     $Demo = Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/json' -Body $DemoBody "$Base/api/trading/session"
     $Ok = (Check ($Demo.mode -eq 'VANTAGE_DEMO' -and -not $Demo.connected -and -not $Demo.armed -and -not $Demo.active) 'selecting DEMO never auto-connects or activates') -and $Ok
@@ -362,7 +374,7 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
@@ -376,7 +388,9 @@ $Meta = [ordered]@{
         javascript      = 'chart smoke + operator interaction passed'
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
+        read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
         vantage_demo    = 'NOT TESTED - no Vantage demo account available to CI'
+        demo_market_data = 'NOT TESTED with a real terminal/account; no real quote, bar or local paper fill was observed'
         vantage_live    = 'NOT TESTED - live login/orders prohibited in CI'
         smoke_checks    = @($Log | Where-Object { $_ -match '^(PASS|FAIL)' })
         smoke_failed    = @($Log | Where-Object { $_ -match '^FAIL' }).Count
@@ -385,6 +399,8 @@ $Meta = [ordered]@{
         default_mode      = 'AXIOM_PAPER; Vantage disconnected and disarmed'
         legacy_process    = 'MODE=PAPER, LIVE_TRADING=false, BROKER=LOCAL_PAPER enforced for the legacy engine'
         paper_order_path  = 'POST /paper/order -> _require_local_paper() -> in-process PaperBroker (simulated fills)'
+        market_data_path  = 'VANTAGE_DEMO DPAPI credential -> isolated read-only MT5 gateway -> fresh validated quotes/closed bars; no execution gateway'
+        mt5_paper_scope   = 'manual_only; exact account-discovered symbols; configured timeframe; explicit units, not MT5 lots; local fills only'
         vantage_order_path = 'authenticated review -> durable intent -> one official MT5 request -> broker reconciliation'
         live_routing      = 'present but blocked until exact identity, readiness, Arm, separate Activate and final review'
         automation        = 'Vantage automation unavailable and OFF'

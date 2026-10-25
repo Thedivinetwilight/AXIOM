@@ -40,6 +40,8 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
       - name: Vantage connector, service and authenticated API (fake MT5)
         run: python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py
+      - name: Independent read-only MT5 market data and local paper (fake provider)
+        run: python -m pytest -q tests/test_mt5_market_data.py
       - name: US market data, New York calendar and paper limits
         run: python -m pytest -q tests/test_us_equities_paper.py tests/test_us_chart_integration.py
       - name: chart terminal contract tests

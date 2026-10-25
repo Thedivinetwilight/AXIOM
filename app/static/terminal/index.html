@@ -137,9 +137,11 @@
               <button type="button" class="button secondary" id="reload-chart">Reload chart</button>
               <button type="button" class="button secondary" id="start-paper">Start paper session</button>
             </div>
+            <div class="inline-status" id="chart-feed-context">Replay is sample data. Connect the separate read-only VANTAGE DEMO feed on Connections for fresh MT5 prices.</div>
             <div class="chart-quote" id="chart-quote"></div>
             <div class="canvas-wrap"><canvas id="terminal-chart" role="img" aria-label="No chart data loaded"></canvas><div class="chart-empty" id="chart-empty">Choose an instrument and load its real session data.</div></div>
             <div class="chart-legend" id="chart-legend">No bars loaded. AXIOM does not invent chart data.</div>
+            <div class="contract-grid" id="chart-contract"><p class="empty-state">MT5 contract metadata appears here after an account-discovered chart is loaded.</p></div>
           </article>
           <aside class="panel order-panel">
             <div class="panel-head"><div><p class="eyebrow">MANUAL ORDER</p><h3 id="ticket-title">Paper ticket · simulated</h3></div><span class="status-pill" id="ticket-mode">PAPER</span></div>
@@ -242,7 +244,18 @@
             <p class="muted small">Read-only means initialize, authenticate, identify, discover instruments and reconcile. It does not place, modify or cancel orders. Connecting never arms or activates.</p>
           </article>
         </div>
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SEPARATE IDENTITIES</p><h3>What belongs where</h3></div></div><div class="help-grid"><div><strong>AXIOM API_TOKEN</strong><p>Unlocks this local operator API. Not sent to Vantage or MT5.</p></div><div><strong>Vantage MT5 login/password</strong><p>Used only by the official terminal integration. Protected with DPAPI.</p></div><div><strong>Data-provider keys</strong><p>Legacy Alpaca/Upstox settings remain separate and are never used for Vantage execution quotes.</p></div></div></article>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">INDEPENDENT READ-ONLY MARKET DATA</p><h3>VANTAGE DEMO quotes for AXIOM PAPER</h3></div><span class="status-pill" id="market-data-state">DISCONNECTED</span></div>
+          <p>This is a second, market-data-only MT5 interface. It reads only the protected VANTAGE_DEMO profile and cannot place, modify, cancel or close broker orders. Connecting never changes the execution selector, starts a strategy, Arms, or Activates.</p>
+          <div class="inline-status" id="market-data-detail" role="status">Save the DEMO credential locally, then connect. Execution remains AXIOM PAPER.</div>
+          <dl class="detail-list" id="market-data-account"></dl>
+          <div class="button-row">
+            <button type="button" class="button primary" id="connect-market-data">Connect demo market data — read-only</button>
+            <button type="button" class="button secondary" id="disconnect-market-data">Disconnect market data</button>
+          </div>
+          <p class="muted small">Only instruments returned by this account are shown. CFDs are labeled as CFDs, not owned shares. Fresh advancing ticks are required; stale, missing or degraded data fails closed with no replay fallback. Manual-only paper startup still requires a reviewed order for every fill.</p>
+        </article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SEPARATE IDENTITIES</p><h3>What belongs where</h3></div></div><div class="help-grid"><div><strong>AXIOM API_TOKEN</strong><p>Unlocks this local operator API. Not sent to Vantage or MT5.</p></div><div><strong>Vantage MT5 login/password</strong><p>Used only by the official terminal integration. Protected with DPAPI. In AXIOM PAPER this form edits VANTAGE_DEMO only.</p></div><div><strong>Data-provider keys</strong><p>Legacy Alpaca/Upstox settings remain separate and are never used for Vantage execution quotes.</p></div></div></article>
       </section>
 
       <section class="page" id="page-activity" aria-labelledby="activity-title" hidden>

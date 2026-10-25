@@ -59,6 +59,7 @@ class PaperSimulator:
             "last_message": self.provider.last_message if self.provider else None,
             "strategy": self.strategy.name if self.strategy else None,
             "parameters": self.strategy.parameters if self.strategy else None,
+            "timeframe": self.broker.timeframe,
             "symbols": self.symbols,
             "signals": self.signals,
             "processed_bars": self.processed,
@@ -119,6 +120,17 @@ class PaperSimulator:
             "symbols": symbols,
             "provider": type(provider).__name__,
         }
+        if getattr(provider, "requires_fresh_live", False):
+            if strategy.name != "manual_only":
+                raise ValueError("Fresh MT5 market data is manual-only; strategy automation stays OFF")
+            if getattr(provider, "status", None) not in {"CONNECTED", "STREAMING"}:
+                raise ValueError("Prepare authenticated fresh advancing MT5 data before starting paper")
+        market_data_context = {
+            "provider": getattr(provider, "provider_name", type(provider).__name__),
+            "requires_fresh_live": bool(getattr(provider, "requires_fresh_live", False)),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "automation_enabled": False,
+        }
         old = self.broker.context.get("selection")
         if (
             old
@@ -139,11 +151,37 @@ class PaperSimulator:
             if old == config
             else {}
         )
-        self.broker.context["selection"] = config
-        self.provider, self.strategy, self.symbols = provider, strategy, symbols
-        self.error, self.state = None, BotState.STARTING
-        self.task = asyncio.create_task(self._run())
-        return self.status()
+        missing = object()
+        previous_selection = self.broker.context.get("selection", missing)
+        previous_market_data = self.broker.context.get("market_data", missing)
+        previous = (
+            self.provider, self.strategy, self.symbols, self.state, self.error,
+            self._history,
+        )
+        try:
+            self.broker.context["selection"] = config
+            self.broker.context["market_data"] = market_data_context
+            self.provider, self.strategy, self.symbols = provider, strategy, symbols
+            self.error, self.state = None, BotState.STARTING
+            # No exception is allowed after the replacement task exists. This
+            # makes pre-task rollback sufficient and avoids cancelling orders.
+            result = self.status()
+            new_task = asyncio.create_task(self._run())
+        except Exception:
+            for key, value in (
+                ("selection", previous_selection), ("market_data", previous_market_data),
+            ):
+                if value is missing:
+                    self.broker.context.pop(key, None)
+                else:
+                    self.broker.context[key] = value
+            (
+                self.provider, self.strategy, self.symbols, self.state, self.error,
+                self._history,
+            ) = previous
+            raise
+        self.task = new_task
+        return result
 
     def process_bar(self, candle):
         validate([candle], self.broker.timeframe).require_valid()
@@ -179,7 +217,11 @@ class PaperSimulator:
                 )
                 logger.warning("data_gap_paused", extra={"symbol": candle.symbol})
         started = time.perf_counter()
-        snapshot = self.broker.on_bar(candle, persist=False)
+        get_provenance = getattr(self.provider, "provenance_for", None)
+        provenance = get_provenance(candle) if callable(get_provenance) else None
+        if getattr(self.provider, "requires_fresh_live", False) and not provenance:
+            raise ValueError("Fresh live bar is missing durable quote provenance")
+        snapshot = self.broker.on_bar(candle, persist=False, provenance=provenance)
         if snapshot is None:
             return
         history.append(candle)
@@ -194,6 +236,15 @@ class PaperSimulator:
             else Signal.HOLD
         )
         self.signals[candle.symbol] = {"signal": signal.value, "timestamp": snapshot["timestamp"]}
+        if provenance:
+            decisions = self.broker.context.setdefault("decision_provenance", {})
+            decisions[candle.symbol] = {
+                "signal": signal.value,
+                "decision_timestamp": snapshot["timestamp"],
+                **provenance,
+            }
+            while len(decisions) > 64:
+                decisions.pop(next(iter(decisions)))
         logger.debug(
             "CANDLE_COMPLETED",
             extra={"symbol": candle.symbol, "timestamp": candle.timestamp.isoformat()},
@@ -308,6 +359,9 @@ class PaperSimulator:
     async def resume(self):
         if self.state != BotState.PAUSED:
             raise ValueError("Can only resume a paused bot")
+        readiness = getattr(self.provider, "assert_resume_ready", None)
+        if callable(readiness):
+            readiness()
         self.state, self.error = BotState.RUNNING, None
         return self.status()
 

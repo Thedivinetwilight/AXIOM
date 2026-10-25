@@ -41,7 +41,7 @@ class BacktestRequest(StrategyRequest):
 
 
 class PaperStartRequest(StrategyRequest):
-    source: Literal["replay", "binance", "generic", "upstox", "alpaca"] = "replay"
+    source: Literal["replay", "binance", "generic", "upstox", "alpaca", "vantage_mt5"] = "replay"
     replay_delay: float = Field(default=0.05, ge=0, le=60)
 
     @model_validator(mode="after")
@@ -50,6 +50,11 @@ class PaperStartRequest(StrategyRequest):
             from app.data.alpaca import validate_us_symbol
 
             self.symbol = validate_us_symbol(self.symbol)
+        if self.source == "vantage_mt5":
+            if self.strategy != "manual_only" or self.parameters:
+                raise ValueError(
+                    "Vantage MT5 live-price paper requires strategy=manual_only and no strategy parameters"
+                )
         return self
 
 
@@ -69,11 +74,16 @@ class ManualOrderRequest(BaseModel):
     notional: float | None = Field(default=None, gt=0, le=1e15)
     order_type: Literal["MARKET", "LIMIT"] = "MARKET"
     limit_price: float | None = Field(default=None, gt=0, le=1e12)
+    idempotency_key: str | None = Field(
+        default=None, min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$"
+    )
 
     @field_validator("symbol")
     @classmethod
     def valid_symbol(cls, value):
-        return validate_symbol(value.strip().upper())
+        # Exact MT5 broker symbols can be case-sensitive; legacy routes apply
+        # their historical uppercase normalization only outside that feed.
+        return validate_symbol(value.strip())
 
     @model_validator(mode="after")
     def check_sizing(self) -> "ManualOrderRequest":

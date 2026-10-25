@@ -17,6 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
+    market_data,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -25,6 +26,7 @@ from app.vantage.risk import ContractViolation
 from app.vantage.secrets import DpapiSecretStore, SecretStoreUnavailable
 from app.vantage.service import OrderBlocked, ServiceError, VantageService
 from app.vantage.store import VantageStore
+from app.market_data.mt5 import MarketDataError, MT5MarketDataService
 
 
 def create_app(settings: Settings | None = None, data_dir: Path | None = None):
@@ -61,8 +63,14 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 vantage_store, secret_store,
                 lock_check=lambda: bool(repository._writer_file or repository._memory_writer),
             )
+            app.state.market_data = MT5MarketDataService(
+                secret_store,
+                execution_mode=lambda: app.state.vantage.mode,
+                audit=repository.record_system_event,
+            )
             yield
             await app.state.simulator.stop()
+            app.state.market_data.disconnect("Application shutdown")
             if app.state.vantage.connector:
                 app.state.vantage.connector.disconnect()
             broker.close()
@@ -120,6 +128,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     async def service_refused(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.exception_handler(MarketDataError)
+    async def market_data_refused(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.exception_handler(BrokerError)
     async def broker_refused(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -157,7 +169,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
     # every data route declares its own bearer dependency.
     app.include_router(chart.router)
-    for module in (market, strategies, backtests, paper, v2, market_events, vantage):
+    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
     # remote script, and nothing secret is ever placed here.

@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.3.0a1**
+**Current source version: 3.4.0a1**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -8,13 +8,13 @@ AXIOM now has three mutually exclusive execution modes:
 
 | Mode | Execution | What it means |
 |---|---|---|
-| **AXIOM PAPER** | AXIOM's local simulator | Independent paper state and clearly simulated fills. No MT5 credentials are used. |
+| **AXIOM PAPER** | AXIOM's local simulator | Independent paper state and clearly simulated fills. An optional, separate VANTAGE DEMO read-only feed can supply prices; it never routes a broker order. |
 | **VANTAGE DEMO** | Vantage MT5 demo account | Broker-executed demo orders after explicit review, Arm and Activate. Demo is not AXIOM paper. |
 | **VANTAGE LIVE** | Vantage MT5 live account | Real-money capability, disabled until the account owner completes every in-app gate and confirms each order. |
 
 > **No profitability or live-readiness claim.** Tests, a successful connection, and demo fills do not establish profitability or readiness for real money. AXIOM does not promise returns, execution quality, or a particular product offering. Live credentials and live activation are solely the account owner's responsibility.
 
-The Vantage integration uses the official `MetaTrader5` Python package through a local MetaTrader 5 terminal. It does not scrape the Vantage website or automate the terminal with screen coordinates. Quotes, contract metadata, account state and execution for a Vantage session come from the same terminal/account connection.
+The Vantage integration uses the official `MetaTrader5` Python package through a local MetaTrader 5 terminal. It does not scrape the Vantage website or automate the terminal with screen coordinates. In a Vantage execution session, quotes, contract metadata, account state and execution come from the same terminal/account connection. In AXIOM PAPER, the optional MT5 feed is a different service with a read-only gateway: it can discover contracts and read ticks/closed bars, but it has no order, position, history, margin-precheck or execution methods. Connecting it never changes the execution mode.
 
 For Windows download, installation and upgrade steps, read `packaging/windows/WINDOWS_INSTALL_MANUAL.md` or the copy installed beside the application. Historical Arena research and paper/sandbox material remains in `README.md`; it does not describe the Vantage order path.
 
@@ -100,10 +100,10 @@ The top mode badge and environment labels remain visible across the eight pages.
 |---|---|
 | **Overview** | Current mode, connection/lifecycle, broker or paper account state, positions, exposure and explicit limitations. |
 | **Instruments** | Account-specific discovery, product/contract details, search, selection and tradability. |
-| **Charts** | MT5 bars for selected Vantage instruments; the legacy chart remains available for AXIOM paper/replay. |
+| **Charts** | Account-discovered MT5 bars/contracts for Vantage execution or the independent DEMO feed; replay remains explicitly labeled. Includes the manual-only MT5 paper control and reviewed local paper ticket. |
 | **Orders / Positions** | Broker-truthful orders, deals, positions, P&L where available, durable intents, reviewed cancel/close/protection modification. |
 | **Risk** | Required bounded limits, current readiness checks, Arm/Activate/Pause/Stop and durable emergency controls. |
-| **Connections** | Separate demo/live credential metadata, read-only test, disconnect, replace/delete and non-secret capabilities. |
+| **Connections** | Separate demo/live credential metadata, execution read-only test, disconnect, replace/delete and non-secret capabilities. In AXIOM PAPER, only the VANTAGE DEMO profile can be edited for the independent quote feed. |
 | **Activity / Audit** | Redacted local operational events and unresolved outcomes. No external alert delivery is claimed. |
 | **Settings / Help** | Local token handling, links to the legacy chart/manual, mode explanations and recovery guidance. |
 
@@ -116,6 +116,10 @@ Controls that cannot run in the current state are disabled or return an explanat
 ### 4.1 Add a demo credential first
 
 Use a demo account explicitly supplied by Vantage if you want to rehearse the workflow. Do not use a live login to test demo mode.
+
+For **fresh prices with local paper fills**, do not follow the execution-mode switch below: keep **AXIOM PAPER**, save the DEMO-only profile, and use **Connect demo market data — read-only** as described in section 4.5. The execution **Test connection** button remains unavailable in paper mode.
+
+For a **Vantage demo execution** session:
 
 1. Choose **VANTAGE DEMO**.
 2. Open **Connections**.
@@ -151,6 +155,14 @@ Keep these credentials separate from:
 
 A passing test confirms only the observed connection, identity, discovery and read/reconcile operations at that time. It does not confirm future connectivity, order acceptance, margin availability at a later time, profitability, or live readiness. Disconnecting invalidates Arm/Activate.
 
+### 4.5 Independent DEMO market data in AXIOM PAPER
+
+The optional `VANTAGE DEMO MT5` feed is for market data only. It uses the saved **VANTAGE_DEMO** DPAPI profile and refuses a non-DEMO MT5 account. It never reads the VANTAGE LIVE profile and never selects or activates that execution mode. Saving credentials, connecting, disconnecting and loading a chart create zero orders.
+
+Its isolated gateway exposes only terminal initialization/login, terminal/account identity, account-symbol discovery/metadata/selection, current ticks, closed rates, constants needed to interpret them, and shutdown. It does not expose order placement/check/modify/cancel/close, positions, orders, history or margin calculation. The UI/API cannot reach the execution gateway through this service.
+
+Deleting the DEMO credential, selecting a Vantage execution environment, or explicitly disconnecting the feed closes that independent MT5 connection. AXIOM PAPER account state is preserved. A status of `CONNECTED` alone is not enough to start MT5 paper: a supported exact symbol must have a fresh, valid, advancing tick.
+
 ---
 
 ## 5. Instruments and product metadata
@@ -172,11 +184,15 @@ An instrument is rejected for order flow when it is unavailable, not selected, d
 
 ## 6. Quotes and charts
 
-Vantage quotes and execution use the same MT5 connection. Quote validation includes positive ordered prices, finite values, tick time and configured maximum age/spread. A chart's historical bars do not prove that the current quote is fresh.
+Vantage execution quotes use the same MT5 connection as that execution session. Independent paper quotes use only the separate DEMO read-only service. Quote validation includes positive ordered prices, finite values, tick time, receive time, maximum age and spread. A chart's historical bars do not prove that the current quote is fresh.
 
-To view a Vantage chart, select the instrument first, then choose a supported MT5 timeframe on **Charts**. The data label identifies DEMO or LIVE and states that it is the same MT5 account source as execution. DEMO market data can be real broker data while fills remain demo; do not confuse that with AXIOM PAPER simulation.
+To view a Vantage execution chart, select the instrument first, then choose a supported MT5 timeframe on **Charts**. Its label identifies DEMO or LIVE and states that it is the same MT5 account source as execution. DEMO market data can be real broker data while execution fills remain demo; do not confuse that with AXIOM PAPER simulation.
 
-The independent legacy `/chart` page supports replay/US-paper workflows. Its sample CSVs are labeled sample data, and Alpaca/US-paper fills remain locally simulated. It is not a Vantage order ticket.
+For independent paper charts, connect the DEMO feed and choose an exact account-discovered symbol on **Charts**. The label says **FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS** only when a current tick is fresh and advancing. Bars are validated, newly closed MT5 bars; chart history is not replayed into the paper strategy. Broker tick volume is labeled as such. The contract panel preserves the exact symbol, product/CFD classification, currencies, contract size, tick/point metadata and MT5 lot metadata for inspection, while the paper ticket explicitly uses **units, not MT5 lots**.
+
+A disconnected, stale, non-advancing, invalid, incomplete or refused feed is labeled with its reason. MT5 chart failures return an error and clear the chart; AXIOM never silently substitutes replay, cache, fixture or synthetic bars. Feed loss blocks new BUY entries but preserves paper cash, positions, orders and fills; a reviewed SELL exit of an existing long position remains available. Reconnect and verify the exact symbol/fresh quote before new entries.
+
+The legacy `/chart` page supports replay/US-paper workflows. Its sample CSVs are labeled sample data, and Alpaca/US-paper fills remain locally simulated. It is not a Vantage order ticket.
 
 TradingView integration and relayed webhooks are deferred. No TradingView alert is treated as an order in this version.
 
@@ -324,11 +340,15 @@ Do not “fix” a blocker by deleting journals, editing intents, disabling risk
 
 ## 13. AXIOM PAPER and legacy chart
 
-AXIOM PAPER remains independent of MT5. Selecting it does not use Vantage credentials. Its account, orders, positions and P&L are local simulation outputs and are labeled accordingly.
+AXIOM PAPER execution remains independent of MT5: its account, orders, positions and P&L are local simulation outputs. The optional DEMO market-data connection changes only the source of prices, never the execution mode or broker state. It uses VANTAGE DEMO credentials only when the operator explicitly saves/connects that read-only feed.
+
+On **Charts**, **Start manual-only MT5 paper** requires the selected exact symbol, configured timeframe, authenticated DEMO feed, complete contract metadata, and fresh advancing quotes. It stages only newly closed bars for the always-HOLD `manual_only` strategy. Automation remains off; startup itself creates no order. A manual order still requires Review, an idempotency key, and Confirm. The saved order/fill includes quote source, source timestamp, receive timestamp and stable closed-bar provenance.
+
+MT5 paper quantities are explicit units in the existing long-only, one-currency simulator. AXIOM does not convert MT5 lots with contract size, perform FX conversion, model short selling, or claim CFD margin/execution parity. Configured paper currency must match the DEMO account's profit currency. Fresh ticks gate entry; simulated fills use the existing last-completed-bar price/cost model, not a tick-accurate broker fill. A local paper fill based on a demo quote is **not** a Vantage demo execution fill.
 
 - Open `/chart` for the legacy chart/replay/US-paper workflow.
 - `/dashboard` is explicitly a **legacy paper/sandbox** page, not a Vantage live dashboard.
-- Selecting a Vantage mode stops the legacy paper simulator so two execution sessions cannot continue as one active session.
+- Selecting a Vantage execution mode disconnects the independent feed and stops the legacy paper simulator so two execution sessions cannot continue as one active session.
 - Paper emergency stop persists and blocks start/resume/new entries; confirmed risk-reducing exits remain supported.
 - Alpaca keys in `axiom.env`, if used, are market-data credentials only. They do not enable Alpaca order routing or Vantage connectivity.
 
@@ -342,7 +362,8 @@ Read the exact release's `BUILD_METADATA.json` and release notes. They distingui
 
 - source/unit/fake-MT5/API/UI tests;
 - real-Windows DPAPI, frozen executable and installer/upgrade/uninstall checks;
-- explicitly authorized demo connection/order evidence, if any;
+- real-demo read-only market-data/local-paper evidence, if any;
+- explicitly authorized demo execution connection/order evidence, if any;
 - live connection/order evidence, which is not implied by any of the above.
 
 No real-money action is part of automated development or CI. A demo account must be explicitly available for demo E2E; otherwise it is skipped and reported. Fake and demo results establish neither profitability nor live readiness.
@@ -350,7 +371,8 @@ No real-money action is part of automated development or CI. A demo account must
 Current functional limits include:
 
 - Windows production credential storage and official MT5 integration; Linux fake tests are not terminal evidence.
-- Manual reviewed Vantage order flow only; no Vantage strategy automation.
+- Manual reviewed Vantage order flow only; no Vantage strategy automation. MT5 fresh-price paper is always `manual_only` with automation off.
+- MT5 paper supports the configured timeframe, one exact symbol, long-only explicit units and one account currency; no lot/contract-size or FX conversion, short selling, tick-accurate fill or multi-symbol portfolio claim.
 - Market/limit entries, position close, managed-order cancel and position SL/TP modification; no claim of support for every MT5 order type.
 - No TradingView relay/webhook execution.
 - Local audit alerts only; no guaranteed external notification.
@@ -358,3 +380,38 @@ Current functional limits include:
 - Broker/session schedules, corporate actions, rejection behavior and execution quality remain external realities; software guards cannot remove market risk.
 
 The legacy historical documentation in `README.md` preserves earlier research releases. Where it says real-money routing did not exist, that statement belongs to those historical releases, not to this Vantage-capable operator version.
+
+---
+
+## 15. Local real-demo market-data verification procedure
+
+This procedure verifies a **real Vantage DEMO terminal/feed with local AXIOM simulated fills**. It does not place a Vantage demo order and does not verify live trading. Perform it yourself on Windows; never send the login, password, DPAPI files, local token or unredacted account screenshots to a developer, issue, chat or CI.
+
+### 15.1 Prepare an isolated paper test profile
+
+1. Hash-verify the exact unsigned Windows release and read its `BUILD_METADATA.json`. Install/open the Vantage MT5 desktop terminal using Vantage's official instructions. Manually log that terminal into the **DEMO** account you intend to test; do not select or log into a live account for this procedure.
+2. Close other AXIOM instances. From PowerShell in the directory containing the verified portable `AXIOM-Chart.exe`, choose a new empty data directory so an old paper configuration cannot conflict with the demo account:
+
+   ```powershell
+   $env:AXIOM_DATA_DIR = Join-Path $env:LOCALAPPDATA 'AXIOM-DemoFeedTest'
+   .\AXIOM-Chart.exe
+   ```
+
+3. On first launch, close AXIOM with Ctrl+C in its console. Open the newly created `%LOCALAPPDATA%\AXIOM-DemoFeedTest\axiom.env` locally. Set `DEFAULT_TIMEFRAME=1m` and set `CURRENCY` to the demo account's actual profit/account currency (for example `USD` only if the account is USD). Keep `MODE=PAPER`, `LIVE_TRADING=false`, and `BROKER=LOCAL_PAPER`. `DATA_SOURCE=replay` may remain for the legacy/default chart; it is never an MT5 fallback. Restart from the same PowerShell environment.
+
+   A saved paper database refuses a later currency/timeframe change. Do not delete or edit an existing database to bypass that guard; use a new data directory as above.
+
+### 15.2 Connect and inspect the real feed
+
+4. In `/terminal`, verify the global execution badge is **AXIOM PAPER**. Open **Connections**. The credential editor in this mode is explicitly DEMO-only. Enter the numeric demo login, demo password, exact demo server and terminal path locally; save/replace the protected profile. Do not use **VANTAGE LIVE**, the execution mode selector, **Test connection**, Arm or Activate.
+5. Choose **Connect demo market data — read-only**. Verify provider `VANTAGE_DEMO_MT5`, masked login, exact server, account type `DEMO`, and currency. Execution must still say AXIOM PAPER, automation OFF, and no order may appear. A module-installed indicator or saved credential alone is not a successful feed test.
+6. Open **Charts** and choose an exact symbol returned by this account. Check the broker description/path, product classification, currencies, contract size, tick/point metadata and volume limits. A share/ETF CFD must be labeled as a CFD, not owned shares. If a desired symbol is absent or unsupported, record that limitation; do not substitute a hard-coded ticker.
+7. Load the chart. Required evidence is the **FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS** label, a fresh advancing quote, separate source/receive timestamps, validated closed bars, and broker tick-volume labeling. Compare a few prices/times with the MT5 terminal. If the label says disconnected, degraded, stale, not advancing, replay or unavailable, stop and resolve that reason; do not record a pass.
+
+### 15.3 Verify manual-only local fills and degradation
+
+8. Choose **Start manual-only MT5 paper**. Confirm `manual_only`, the configured timeframe, automation OFF and zero automatically created orders. Enter a small **paper quantity in units, not MT5 lots**, then Review. Verify the modal says local simulated execution and shows `VANTAGE_DEMO_MT5`, source/receive timestamps and market-data ID. Confirm once; inspect the local order/fill and its provenance. The review carries an idempotency key: an API retry of that identical request must return its saved result, not create a second order. A new review is a new intention/key; never reuse a key for changed order content.
+9. Create a small long paper position, then use **Disconnect demo data** (or close only the MT5 terminal for a terminal-loss check). Verify an actionable degraded/disconnected reason, no replay bars, preserved paper position/cash/order/fill state, and rejection of a new BUY. A reviewed SELL that only exits the existing long paper position remains permitted and must retain its last closed-bar provenance. Reconnect and re-verify fresh advancing quotes before another BUY.
+10. Record the release commit/hash, Windows version, masked demo server/account identity, exact symbols/products tested, timeframes, timestamps, each pass/fail/skip and any terminal errors. Redact secrets and full account numbers from evidence. Keep fake-provider CI results distinct from this real-terminal check.
+
+A pass demonstrates only the observed demo-market-data and local-simulation behavior at that time. It does not demonstrate a Vantage demo execution fill, profitability, execution quality, complete instrument coverage or real-money readiness.

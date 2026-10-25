@@ -27,6 +27,16 @@ const maskedAccount = {
 let profiles = { VANTAGE_DEMO: null, VANTAGE_LIVE: null };
 let selected = [];
 let current;
+function emptyMarketData() {
+  return {
+    provider: "VANTAGE_DEMO_MT5", state: "DISCONNECTED", detail: "Not connected; execution remains AXIOM PAPER",
+    connected: false, authenticated: false, account: null, credential_profile: "VANTAGE_DEMO",
+    execution_mode: "AXIOM_PAPER", read_only: true, orders_modified: false, automation_enabled: false,
+    instrument_count: 0, supported_instrument_count: 0, selected_symbol: null, quote: null,
+    max_quote_age_seconds: 30, stall_after_seconds: 15, live_trading: false,
+  };
+}
+let marketData = emptyMarketData();
 const calls = [];
 const draws = { fillRect: 0, stroke: 0, fillText: 0 };
 
@@ -52,9 +62,10 @@ function makeWorkspace(mode, connected = false) {
   const currentStatus = status(mode, connected);
   return {
     status: currentStatus,
-    paper_session: paper ? { state: "STOPPED", provider: "replay" } : undefined,
+    paper_session: paper ? { state: "STOPPED", provider: "replay", timeframe: "1m" } : undefined,
     account: paper ? { currency: "USD", cash: 100000, balance: 100000, equity: 100000, margin_free: 100000 } : connected ? currentStatus.account : null,
     positions: [], orders: [], intents: [], deals: [], quotes: {},
+    market_data: paper ? marketData : undefined,
     pnl: paper || connected ? { realized_visible_history: 0, unrealized: 0, history_window_days: 90 } : null,
     simulated: mode !== "VANTAGE_LIVE", paper_only: paper, live_trading: false,
     broker_state_available: paper || connected,
@@ -119,16 +130,34 @@ async function fetchFake(url, options = {}) {
   if (path === "/api/trading/workspace") return response(current);
   if (path === "/api/trading/activity?limit=300") return response({ events: [{ ts: now(), environment: current.status.mode, kind: "FAKE_AUDIT", payload: { safe: true } }] });
   if (path === "/api/trading/connection") return response({ status: current.status, profiles, secret_store: "Windows DPAPI · current Windows user", test_is_read_only: true });
+  if (path === "/api/market-data/status") return response(marketData);
+  if (path === "/api/market-data/connect") {
+    if (current.status.mode !== "AXIOM_PAPER" || !profiles.VANTAGE_DEMO) return response({ detail: "Paper mode and a fake DEMO profile are required" }, 409);
+    marketData = {
+      ...emptyMarketData(), state: "CONNECTED", detail: "Discovered 3 account-specific fake MT5 instruments",
+      connected: true, authenticated: true,
+      account: { login_masked: "••••56", server: profiles.VANTAGE_DEMO.server, currency: "USD", account_trade_mode: "DEMO" },
+      instrument_count: 3, supported_instrument_count: 2,
+    };
+    current.market_data = marketData;
+    return response(marketData);
+  }
+  if (path === "/api/market-data/disconnect") {
+    marketData = emptyMarketData(); current.market_data = marketData; current.quotes = {};
+    return response(marketData);
+  }
   if (path === "/api/trading/session") {
-    selected = []; current = makeWorkspace(body.mode, false); return response(current.status);
+    selected = []; marketData = emptyMarketData(); current = makeWorkspace(body.mode, false); return response(current.status);
   }
   if (path === "/api/trading/credentials" && method === "PUT") {
     profiles[body.environment] = {
       login_masked: "••••56", server: body.server, terminal_path: body.terminal_path,
       label: body.label, updated_ts: now(),
     };
-    current.status.credential = profiles[body.environment]; current.status.server = body.server;
-    current.status.account_login_masked = "••••56"; current.status.connection = { state: "DISCONNECTED", detail: "Credential saved; not connected" };
+    if (body.environment === current.status.mode && current.status.mode !== "AXIOM_PAPER") {
+      current.status.credential = profiles[body.environment]; current.status.server = body.server;
+      current.status.account_login_masked = "••••56"; current.status.connection = { state: "DISCONNECTED", detail: "Credential saved; not connected" };
+    }
     return response(current.status);
   }
   if (path === "/api/trading/connection/test") {
@@ -181,6 +210,34 @@ async function fetchFake(url, options = {}) {
     const intent = { id: body.idempotency_key, symbol: current.positions[0].symbol, side: current.positions[0].side, order_type: "MODIFY_SLTP", volume: current.positions[0].volume, status: "MODIFIED", reason: "fake broker position confirms SL/TP", created_ts: now(), confirmed_ts: now() };
     current.intents.unshift(intent); return response({ duplicate: false, submission_attempted: true, order: intent, reconciled: true });
   }
+  if (path.startsWith("/api/market-data/instruments?")) {
+    const url = new URL(path, "http://fake.local");
+    const supportedOnly = url.searchParams.get("supported_only") === "true";
+    const instruments = [contract("EURUSD"), contract("AAPL", "SHARE_CFD"), contract("MYSTERY", "UNKNOWN")]
+      .filter((item) => !supportedOnly || item.product_type !== "UNKNOWN");
+    return response({
+      instruments, total_matching: instruments.length, account_specific: true,
+      hard_coded_universe: false, selected: marketData.selected_symbol,
+      timeframes: ["1m", "5m", "15m", "30m", "1h", "4h", "1D"], provider: "VANTAGE_DEMO_MT5",
+    });
+  }
+  if (path.startsWith("/api/market-data/chart?")) {
+    const url = new URL(path, "http://fake.local");
+    const symbol = url.searchParams.get("symbol") || "EURUSD";
+    const product = symbol === "AAPL" ? "SHARE_CFD" : "FOREX";
+    const instrument = { ...contract(symbol, product) };
+    const currentQuote = { ...quote, symbol, timestamp: now(), received_at: now(), fresh: true, advancing: true, age_seconds: 0.01 };
+    instrument.quote = currentQuote;
+    marketData = { ...marketData, state: "CONNECTED", selected_symbol: symbol, quote: currentQuote, detail: "Fresh advancing fake VANTAGE DEMO quotes confirmed" };
+    current.market_data = marketData; current.quotes = { [symbol]: currentQuote };
+    return response({
+      symbol, timeframe: url.searchParams.get("timeframe") || "1m", bars, quote: currentQuote,
+      instrument, product_type: product, is_cfd: product === "SHARE_CFD", currency_profit: "USD", account_currency: "USD",
+      volume_kind: "BROKER_TICK_VOLUME", source: "VANTAGE_DEMO_MT5", market_data: true, live: true,
+      data_feed_label: "VANTAGE DEMO MT5 · FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS",
+      generated_at: now(), note: "Fake MT5 closed bars; no replay fallback.", paper_only: true,
+    });
+  }
   if (path === "/chart/symbols") return response({ symbols: [{ symbol: "AAPL", timeframes: ["1m", "5m"], live: true }], default: "AAPL", timeframes: ["1m", "5m"] });
   if (path.startsWith("/chart/data?")) return response({
     symbol: "AAPL", timeframe: "1m", bars: {
@@ -195,13 +252,27 @@ async function fetchFake(url, options = {}) {
     source: "VANTAGE_MT5", market_data: true, data_feed_label: "VANTAGE_DEMO · SAME MT5 ACCOUNT AS EXECUTION",
     generated_at: now(), note: "Fake MT5 bars.",
   });
-  if (path.startsWith("/paper/ticket?")) return response({
-    symbol: "AAPL", last_price: 100, priced_at: now(), price_source: "last_closed_bar", cash: 100000,
-    equity: 100000, position: null, max_buy_quantity: 100, max_sell_quantity: 0, blocked: null,
-  });
+  if (path.startsWith("/paper/ticket?")) {
+    const url = new URL(path, "http://fake.local"); const symbol = url.searchParams.get("symbol") || "AAPL";
+    const mt5 = marketData.authenticated && marketData.selected_symbol === symbol;
+    return response({
+      symbol, last_price: 100, priced_at: now(), price_source: "last_closed_bar", cash: 100000,
+      equity: 100000, position: null, max_buy_quantity: 100, max_sell_quantity: 0, blocked: null,
+      entry_blocked: mt5 ? null : marketData.authenticated ? "Select and verify this exact MT5 symbol" : null,
+      quote_source: mt5 ? "VANTAGE_DEMO_MT5" : null, quote_timestamp: mt5 ? now() : null,
+      quote_received_at: mt5 ? now() : null, quote_id: mt5 ? "fake-closed-bar-id" : null,
+    });
+  }
   if (path === "/paper/order") {
-    const order = { ...body, id: "paper-order-1", status: "FILLED", timestamp: now() };
+    const order = { ...body, id: `paper-order-${current.orders.length + 1}`, status: "FILLED", timestamp: now() };
     current.orders.push(order); return response({ order, status: "FILLED", simulated: true, paper_only: true });
+  }
+  if (path === "/paper/start") {
+    current.paper_session = {
+      state: "RUNNING", provider: body.source, strategy: body.strategy, timeframe: body.timeframe,
+      automation_enabled: false, processed_bars: 1,
+    };
+    return response({ ...current.paper_session, execution_mode: "AXIOM_PAPER" });
   }
   if (path === "/api/paper/start-default" || path === "/paper/stop" || path === "/paper/pause" || path === "/paper/resume") return response({ state: path === "/paper/stop" ? "STOPPED" : path === "/paper/pause" ? "PAUSED" : "RUNNING" });
   return response({ detail: `Unhandled fake route: ${method} ${path}` }, 404);
@@ -251,23 +322,59 @@ try {
   const paperOrder = calls.find((call) => call.path === "/paper/order");
   assert.equal(paperOrder.body.quantity, 2, "reviewed paper quantity is the submitted quantity");
   assert.equal(paperOrder.body.side, "BUY");
+  assert.match(paperOrder.body.idempotency_key, /^paper-order-/, "paper review binds an idempotency key");
 
   await navigate("connections");
-  assert.equal(element("mt5-login").disabled, true, "broker credential form is disabled in paper mode");
-  element("session-mode").value = "VANTAGE_DEMO";
-  await click("apply-mode");
-  assert.equal(element("global-mode").textContent, "VANTAGE DEMO");
-  assert.equal(current.status.active, false, "mode selection never activates");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
-
-  await navigate("connections");
+  assert.equal(element("mt5-login").disabled, false, "paper mode permits the DEMO-only protected credential form");
+  assert.equal(element("test-connection").disabled, true, "execution connection test remains disabled in paper mode");
   element("mt5-login").value = "123456";
   element("mt5-password").value = FAKE_PASSWORD;
   element("mt5-server").value = "VantageMarkets-Demo";
   await submit("credential-form");
+  assert.equal(calls.find((call) => call.path === "/api/trading/credentials").body.environment, "VANTAGE_DEMO");
   assert.equal(element("mt5-password").value, "", "password field clears after save");
   assert.equal(window.document.documentElement.innerHTML.includes(FAKE_PASSWORD), false, "password is never rendered");
   assert.equal(element("mt5-login").value, "", "full login is not retained in the form");
+  assert.equal(element("global-mode").textContent, "AXIOM PAPER", "saving DEMO credentials never changes execution");
+  await click("connect-market-data");
+  assert.equal(marketData.authenticated, true);
+  assert.equal(element("global-mode").textContent, "AXIOM PAPER", "quote connection never changes execution");
+  assert.equal(current.status.active, false);
+  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
+
+  await navigate("charts");
+  assert.equal(element("order-symbol").value, "AAPL", "the exact previously selected broker symbol is preserved");
+  assert.match(element("chart-source").textContent, /READ-ONLY MARKET DATA/);
+  element("chart-symbol").value = "AAPL";
+  element("chart-symbol").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await settle();
+  assert.equal(element("order-symbol").value, "AAPL");
+  assert.match(element("chart-contract").textContent, /CFD · no underlying share\/ETF ownership/);
+  assert.match(element("chart-contract").textContent, /Contract size/);
+  assert.match(element("volume-label").textContent, /not MT5 lots/);
+  await click("start-paper");
+  const livePaperStart = calls.find((call) => call.path === "/paper/start");
+  assert.equal(livePaperStart.body.source, "vantage_mt5");
+  assert.equal(livePaperStart.body.symbol, "AAPL");
+  assert.equal(livePaperStart.body.strategy, "manual_only");
+  assert.equal(calls.filter((call) => call.path === "/paper/order").length, 1, "starting live prices creates no order");
+  element("order-volume").value = "0.25";
+  await submit("order-form");
+  assert.match(element("modal-body").textContent, /VANTAGE_DEMO_MT5/);
+  assert.match(element("modal-body").textContent, /Quote \/ bar ID/);
+  await click("modal-confirm");
+  const mt5PaperOrder = calls.filter((call) => call.path === "/paper/order").at(-1);
+  assert.equal(mt5PaperOrder.body.symbol, "AAPL");
+  assert.equal(mt5PaperOrder.body.quantity, 0.25);
+  assert.match(mt5PaperOrder.body.idempotency_key, /^paper-order-/);
+
+  await navigate("connections");
+  element("session-mode").value = "VANTAGE_DEMO";
+  await click("apply-mode");
+  assert.equal(element("global-mode").textContent, "VANTAGE DEMO");
+  assert.equal(current.status.active, false, "mode selection never activates");
+  assert.equal(marketData.authenticated, false, "execution selection disconnects the independent feed");
+  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
   await click("test-connection");
   assert.equal(current.status.connected, true);
   assert.equal(current.status.active, false, "read-only connection test never activates");

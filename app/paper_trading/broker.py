@@ -102,6 +102,7 @@ class PaperBroker(BrokerInterface):
         self.fills: list[Fill] = []
         self.last_bars: dict[str, str] = {}
         self.last_candles: dict[str, dict] = {}
+        self.market_provenance: dict[str, dict] = {}
         self.context: dict = {}  # Persist strategy warmup/controller metadata with account.
         self.repository = repository
         if repository:
@@ -129,6 +130,7 @@ class PaperBroker(BrokerInterface):
                     self.orders = {o["id"]: Order(**o) for o in state["orders"]}
                     self.fills = [Fill(**f) for f in state["fills"]]
                     self.last_candles = state.get("last_candles", {})
+                    self.market_provenance = state.get("market_provenance", {})
                     self.last_bars, self.context = state["last_bars"], state.get("context", {})
             except Exception:
                 repository.release_writer()
@@ -137,6 +139,36 @@ class PaperBroker(BrokerInterface):
     def _persist(self, snapshot=None):
         if self.repository:
             self.repository.save_broker(self, snapshot)
+
+    def _record_provenance(self, symbol: str, provenance: dict | None):
+        if provenance is None:
+            return
+        if not isinstance(provenance, dict):
+            raise ValueError("Market-data provenance must be a mapping")
+        required = ("source", "timestamp", "received_at", "id", "kind")
+        if any(not str(provenance.get(key) or "").strip() for key in required):
+            raise ValueError("Market-data provenance is incomplete")
+        parse_timestamp(provenance["timestamp"])
+        parse_timestamp(provenance["received_at"])
+        record = {
+            "source": str(provenance["source"])[:80],
+            "timestamp": parse_timestamp(provenance["timestamp"]).isoformat(),
+            "received_at": parse_timestamp(provenance["received_at"]).isoformat(),
+            "id": str(provenance["id"])[:128],
+            "kind": str(provenance["kind"])[:40],
+            "timeframe": str(provenance.get("timeframe") or self.timeframe)[:8],
+        }
+        self.market_provenance[symbol] = record
+
+    def _apply_provenance(self, order):
+        provenance = self.market_provenance.get(order.symbol)
+        if not provenance:
+            return order
+        order.quote_source = order.quote_source or provenance["source"]
+        order.quote_timestamp = order.quote_timestamp or provenance["timestamp"]
+        order.quote_received_at = order.quote_received_at or provenance["received_at"]
+        order.quote_id = order.quote_id or provenance["id"]
+        return order
 
     def paper_entry_block_reason(self, symbol: str, timestamp: str,
                                  *, order_value: float | None = None) -> str | None:
@@ -198,6 +230,7 @@ class PaperBroker(BrokerInterface):
             "fills": [asdict(f) for f in self.fills],
             "last_bars": self.last_bars,
             "last_candles": self.last_candles,
+            "market_provenance": self.market_provenance,
             "context": self.context,
         }
 
@@ -241,6 +274,7 @@ class PaperBroker(BrokerInterface):
             position is None or order.quantity > position.quantity - reserved + 1e-8
         ):
             order.status, order.reason = "REJECTED", "insufficient_position"
+        self._apply_provenance(order)
         self.orders[order.id] = order
         self._persist()
         logger.info(
@@ -285,6 +319,7 @@ class PaperBroker(BrokerInterface):
         return self.portfolio.snapshot(timestamp, self.currency)
 
     def _fill(self, order, quantity, price, timestamp, reason="signal", reference=None):
+        self._apply_provenance(order)
         fee = self.config.fee(quantity, price)
         impact = quantity * abs(price - reference) if reference is not None else 0.0
         fill = Fill(
@@ -298,6 +333,10 @@ class PaperBroker(BrokerInterface):
             order.strategy,
             reason,
             impact,
+            quote_source=order.quote_source,
+            quote_timestamp=order.quote_timestamp,
+            quote_received_at=order.quote_received_at,
+            quote_id=order.quote_id,
         )
         self.portfolio.apply_fill(fill)
         total = order.filled_quantity + quantity
@@ -318,8 +357,9 @@ class PaperBroker(BrokerInterface):
             },
         )
 
-    def on_bar(self, candle, *, persist=True) -> dict | None:
+    def on_bar(self, candle, *, persist=True, provenance=None) -> dict | None:
         validate([candle], self.timeframe).require_valid()
+        self._record_provenance(candle.symbol, provenance)
         timestamp = candle.timestamp.isoformat()
         if candle.symbol in self.last_bars and candle.timestamp < parse_timestamp(
             self.last_bars[candle.symbol]
@@ -447,6 +487,8 @@ class PaperBroker(BrokerInterface):
             candle.available_at(self.timeframe).isoformat(), self.currency
         )
         snapshot["exposed"] = snapshot["exposed"] or exposed_at_open or bought
+        if candle.symbol in self.market_provenance:
+            snapshot["quote_provenance"] = dict(self.market_provenance[candle.symbol])
         if persist:
             self._persist(snapshot)
         return snapshot
@@ -467,6 +509,7 @@ class PaperBroker(BrokerInterface):
             position = self.portfolio.positions.get(symbol)
             if position:
                 order = Order(symbol, "SELL", position.quantity, timestamp, strategy)
+                self._apply_provenance(order)
                 self.orders[order.id] = order
         elif signal == Signal.BUY and symbol not in self.portfolio.positions and not active:
             mark = self.portfolio.marks.get(symbol)
@@ -484,6 +527,7 @@ class PaperBroker(BrokerInterface):
             quantity = budget / (self.config.fill_price(mark, "BUY") * (1 + self.config.commission))
             if quantity > 1e-8:
                 order = Order(symbol, "BUY", quantity, timestamp, strategy)
+                self._apply_provenance(order)
                 self.orders[order.id] = order
         if persist:
             self._persist()
