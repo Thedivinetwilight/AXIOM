@@ -358,7 +358,8 @@ jobs:
 
           * focused Python suites (hard gate): ``$($meta.test_results.focused_windows)``
           * full Python suite (hard gate): ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
-          * JavaScript chart + operator interaction suites: ``$($meta.test_results.javascript)``
+          * JavaScript chart + terminal + autonomy interaction suites: ``$($meta.test_results.javascript)``
+          * Autonomy: $($meta.test_results.autonomy)
           * DPAPI: ``$($meta.test_results.dpapi)``
           * MT5 behavior: ``$($meta.test_results.fake_mt5)``
           * Independent read-only market-data tests: ``$($meta.test_results.read_only_mt5)``

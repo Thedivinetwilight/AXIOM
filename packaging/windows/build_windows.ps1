@@ -522,9 +522,9 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py'
         full_tests    = 'python -m pytest -q'
-        javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
+        javascript_tests = 'node --check app/static/autonomy/autonomy.js; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs; node tests/js/autonomy_smoke.mjs'
         performance_benchmarks = 'python scripts/benchmark_terminal.py; AXIOM_UI_BENCHMARK_OUTPUT=TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs'
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
         freeze_onedir = 'AXIOM_ONEDIR=1; python -m PyInstaller --noconfirm --clean --distpath dist-onedir --workpath build-onedir axiom.spec'
@@ -536,7 +536,8 @@ $Meta = [ordered]@{
         full_windows    = $(if ($FullExit -eq 0) { 'passed' } else { 'failed' })
         full_summary    = $FullSummary
         full_failures   = @($FullFailures)
-        javascript      = 'chart smoke + operator interaction passed'
+        javascript      = 'chart + terminal + autonomy interaction suites passed with local DOM/fetch fakes'
+        autonomy        = 'autonomy Python/API/fault/research/shakedown suites and frozen safe-default/manual/asset gates passed; no Upstox account, external order, Kronos inference or complete-session shakedown tested'
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
@@ -559,6 +560,8 @@ $Meta = [ordered]@{
         vantage_order_path = 'authenticated review -> durable intent -> one official MT5 request -> broker reconciliation'
         live_routing      = 'present but blocked until exact identity, readiness, Arm, separate Activate and final review'
         automation        = 'Vantage automation unavailable and OFF'
+        autonomy_paper    = 'live-market local simulation with no broker order/cancel/modify route'
+        autonomy_live     = 'UPSTOX_LIVE disabled by default; fresh daily authorization/risk and separate operator Arm/Activate required; no real account or order tested'
         fail_closed_cases = @('MODE=LIVE', 'LIVE_TRADING=true', 'BROKER=UPSTOX_SANDBOX',
                               'alpaca without credentials', 'alpaca without limits', 'empty API_TOKEN')
     }
