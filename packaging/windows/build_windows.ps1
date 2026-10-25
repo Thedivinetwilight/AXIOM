@@ -94,7 +94,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -160,6 +160,26 @@ $Exe = Join-Path $Dist 'AXIOM-Chart.exe'
 if (-not (Test-Path $Exe)) { Fail "expected $Exe" }
 $ExeItem = Get-Item $Exe
 Write-Host ("built {0} ({1:N1} MB)" -f $ExeItem.Name, ($ExeItem.Length / 1MB))
+
+Step '4b. Freeze the no-TEMP onedir runtime'
+$OnedirDist = Join-Path $Kit 'dist-onedir'
+$OnedirBuild = Join-Path $Kit 'build-onedir'
+foreach ($p in @($OnedirDist, $OnedirBuild)) { if (Test-Path $p) { Remove-Item -Recurse -Force $p } }
+$env:AXIOM_ONEDIR = '1'
+Push-Location $Kit
+try {
+    & python -m PyInstaller --noconfirm --clean --distpath $OnedirDist --workpath $OnedirBuild axiom.spec
+    if ($LASTEXITCODE -ne 0) { Fail 'PyInstaller onedir build failed' }
+}
+finally {
+    Pop-Location
+    Remove-Item Env:AXIOM_ONEDIR -ErrorAction SilentlyContinue
+}
+$OnedirRoot = Join-Path $OnedirDist 'AXIOM-Operator'
+$OnedirExe = Join-Path $OnedirRoot 'AXIOM-Chart.exe'
+if (-not (Test-Path $OnedirExe)) { Fail 'expected onedir AXIOM-Chart.exe' }
+if (-not (Test-Path (Join-Path $OnedirRoot '_internal'))) { Fail 'onedir _internal dependency directory is missing' }
+Write-Host 'onedir runtime built; it does not use PyInstaller onefile TEMP extraction'
 
 # ------------------------------------------------------- 5. smoke the build
 Step '5. Smoke-test the frozen executable on this machine'
@@ -371,15 +391,93 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail 'Inno Setup failed' }
 }
 finally { Pop-Location }
-$Setup = Get-ChildItem $Dist -Filter '*-setup.exe' | Select-Object -First 1
-if (-not $Setup) { Fail 'installer was not produced' }
-Write-Host ("built {0} ({1:N1} MB)" -f $Setup.Name, ($Setup.Length / 1MB))
+$Setup = Get-ChildItem $Dist -Filter '*-no-temp-setup.exe' | Select-Object -First 1
+if (-not $Setup) { Fail 'loaderless installer was not produced' }
+$SetupParts = @()
+foreach ($index in @(0, 1)) {
+    $part = Join-Path $Dist ($Setup.BaseName + "-$index.bin")
+    if (-not (Test-Path $part)) { Fail "loaderless installer sidecar is missing: $part" }
+    $SetupParts += $part
+}
+Write-Host ("built loaderless {0} with {1} required BIN sidecars" -f $Setup.Name, $SetupParts.Count)
+
+Step '7b. Package the loaderless installer and onedir portable ZIPs'
+$Staging = Join-Path $Kit 'package-staging'
+if (Test-Path $Staging) { Remove-Item -Recurse -Force $Staging }
+$InstallStage = Join-Path $Staging 'no-temp-install'
+$PortableStage = Join-Path $Staging 'portable'
+$PortableApp = Join-Path $PortableStage 'AXIOM-Operator'
+New-Item -ItemType Directory -Force -Path $InstallStage, $PortableStage | Out-Null
+Copy-Item $Setup.FullName $InstallStage
+foreach ($part in $SetupParts) { Copy-Item $part $InstallStage }
+Copy-Item -Recurse $OnedirRoot $PortableApp
+$Docs = @(
+    'US_EQUITIES_PAPER.md', 'VANTAGE_NEXT_VERSION_PLAN.md', 'TERMINAL_REDESIGN_PLAN.md',
+    'TERMINAL_PERFORMANCE.md', 'LISTED_ASSETS.md', 'WINDOWS_APP_CONTROL.md'
+)
+foreach ($destination in @($InstallStage, $PortableApp)) {
+    Copy-Item (Join-Path $Dist 'SOURCE_COMMIT.txt') $destination
+    Copy-Item (Join-Path $Kit 'WINDOWS_INSTALL_MANUAL.md') $destination
+    Copy-Item (Join-Path $RepoRoot 'USER_MANUAL.md') $destination
+    $docDir = Join-Path $destination 'docs'
+    New-Item -ItemType Directory -Force -Path $docDir | Out-Null
+    foreach ($doc in $Docs) { Copy-Item (Join-Path $RepoRoot "docs\$doc") $docDir }
+    Copy-Item (Join-Path $Kit 'TERMINAL_BENCHMARK.json') $docDir
+    Copy-Item (Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json') $docDir
+}
+$InstallReadme = @"
+AXIOM Operator $Version - loaderless installer workaround
+
+Extract this ENTIRE ZIP before running setup. Keep the no-temp-setup.exe and
+both matching -0.bin/-1.bin files in the same folder. Run only the EXE after
+all hashes have been verified. UseSetupLdr=no prevents Inno Setup from copying
+its setup program to TEMP. The installed runtime is onedir and avoids
+PyInstaller onefile TEMP extraction.
+
+The package is still UNSIGNED. It does not disable or bypass Windows policy,
+and an enforced Smart App Control/WDAC policy can still reject unsigned code.
+Trusted signing or administrator approval is required if the device still
+blocks it. No DEMO or LIVE account is contacted by installation.
+"@
+Set-Content -Path (Join-Path $InstallStage 'README-FIRST.txt') -Value $InstallReadme -Encoding utf8
+$PortableReadme = @"
+AXIOM Operator $Version - onedir portable workaround
+
+Extract the ENTIRE ZIP, then run AXIOM-Chart.exe inside AXIOM-Operator.
+Keep _internal beside the executable; do not copy the EXE out of this folder.
+This runtime avoids PyInstaller onefile TEMP extraction. It is UNSIGNED and
+Windows Application Control can still reject it. No security feature is
+changed or disabled by this package.
+"@
+Set-Content -Path (Join-Path $PortableApp 'README-FIRST.txt') -Value $PortableReadme -Encoding utf8
+$InstallZip = Join-Path $Dist "AXIOM-Operator-$Version-windows-x64-no-temp-install.zip"
+$PortableZip = Join-Path $Dist "AXIOM-Operator-$Version-windows-x64-portable.zip"
+Compress-Archive -Path (Join-Path $InstallStage '*') -DestinationPath $InstallZip -CompressionLevel Optimal
+Compress-Archive -Path $PortableApp -DestinationPath $PortableZip -CompressionLevel Optimal
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+foreach ($check in @(
+    @{ Path = $InstallZip; Required = @($Setup.Name, ($Setup.BaseName + '-0.bin'), ($Setup.BaseName + '-1.bin'), 'README-FIRST.txt') },
+    @{ Path = $PortableZip; Required = @('AXIOM-Operator/AXIOM-Chart.exe', 'AXIOM-Operator/README-FIRST.txt') }
+)) {
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($check.Path)
+    try {
+        $names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        foreach ($required in $check.Required) {
+            if ($names -notcontains $required) { Fail "ZIP $($check.Path) is missing $required" }
+        }
+        if ($check.Path -eq $PortableZip -and -not ($names | Where-Object { $_ -like 'AXIOM-Operator/_internal/*' } | Select-Object -First 1)) {
+            Fail 'portable ZIP has no _internal runtime dependencies'
+        }
+    }
+    finally { $archive.Dispose() }
+}
+Write-Host 'loaderless installer ZIP and onedir portable ZIP structure verified'
 
 Step '8. Checksums and build metadata'
 $Log | Set-Content -Path (Join-Path $Dist 'install-test-log.txt') -Encoding utf8
 
 $Artifacts = @()
-foreach ($f in @($Exe, $Setup.FullName)) {
+foreach ($f in @($Exe, $InstallZip, $PortableZip)) {
     $item = Get-Item $f
     $Artifacts += [ordered]@{
         name   = $item.Name
@@ -405,12 +503,14 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         performance_benchmarks = 'python scripts/benchmark_terminal.py; AXIOM_UI_BENCHMARK_OUTPUT=TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs'
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
-        installer     = "ISCC.exe /DMyAppVersion=$Version axiom.iss"
+        freeze_onedir = 'AXIOM_ONEDIR=1; python -m PyInstaller --noconfirm --clean --distpath dist-onedir --workpath build-onedir axiom.spec'
+        installer     = "ISCC.exe /DMyAppVersion=$Version axiom.iss (UseSetupLdr=no; onedir runtime)"
+        portable_test = 'pwsh packaging/windows/portable_test.ps1 -PackagePath <release-portable.zip> -ExpectedCommit <exact-commit>'
     }
     test_results  = [ordered]@{
         focused_windows = 'passed'
@@ -423,6 +523,7 @@ $Meta = [ordered]@{
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
         performance     = 'exact-commit Windows fake-provider backend + fake-canvas UI benchmarks passed; see TERMINAL_BENCHMARK.json and TERMINAL_UI_BENCHMARK.json; no real DEMO/LIVE latency measured'
         listed_assets   = 'authenticated listed identity/policy tests passed; no listed execution provider and no MT5/CFD substitution'
+        app_control_workaround = 'loaderless installer and onedir ZIPs built; portable ZIP acceptance runs in the workflow; enforced on-device Smart App Control remains unverified'
         vantage_demo    = 'NOT TESTED - no Vantage demo account available to CI'
         demo_market_data = 'NOT TESTED with a real terminal/account; no real quote, bar or local paper fill was observed'
         vantage_live    = 'NOT TESTED - live login/orders prohibited in CI'
@@ -441,17 +542,24 @@ $Meta = [ordered]@{
         fail_closed_cases = @('MODE=LIVE', 'LIVE_TRADING=true', 'BROKER=UPSTOX_SANDBOX',
                               'alpaca without credentials', 'alpaca without limits', 'empty API_TOKEN')
     }
+    packaging = [ordered]@{
+        installer_mode = 'Inno Setup UseSetupLdr=no; setup.exe requires matching -0.bin and -1.bin beside it'
+        installed_runtime = 'PyInstaller onedir; no onefile _MEI TEMP extraction'
+        portable_runtime = 'extract entire onedir ZIP and keep AXIOM-Chart.exe beside _internal'
+        legacy_onefile = 'AXIOM-Chart.exe retained for compatibility; it can use TEMP extraction'
+        app_control_boundary = 'UNSIGNED workaround only; no policy is disabled or bypassed and enforced on-device acceptance is not claimed'
+        setup_sidecars = @($SetupParts | ForEach-Object { Split-Path $_ -Leaf })
+    }
     signing       = [ordered]@{
         status = 'UNSIGNED'
-        detail = 'No code-signing certificate was configured; installer and executable are unsigned.'
+        detail = 'No code-signing certificate was configured; all installer, portable and runtime payloads are unsigned.'
     }
     artifacts     = $Artifacts
     pip_freeze    = $PipFreeze
 }
 $Meta | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Dist 'BUILD_METADATA.json') -Encoding utf8
 
-$SumFiles = @($Exe, $Setup.FullName, (Join-Path $Dist 'BUILD_METADATA.json')) +
-            @(Get-ChildItem $Dist -Filter '*.exe' | ForEach-Object { $_.FullName }) | Select-Object -Unique
+$SumFiles = @($Exe, $InstallZip, $PortableZip, (Join-Path $Dist 'BUILD_METADATA.json'))
 $SumFiles | ForEach-Object {
     "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $_).Hash.ToLower(), (Split-Path $_ -Leaf)
 } | Set-Content -Path (Join-Path $Dist 'SHA256SUMS.txt') -Encoding ascii

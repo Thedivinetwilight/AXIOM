@@ -20,3 +20,6 @@ packaging/windows/*.log
 packaging/windows/build-error.txt
 packaging/windows/TERMINAL_BENCHMARK.json
 packaging/windows/TERMINAL_UI_BENCHMARK.json
+packaging/windows/dist-onedir/
+packaging/windows/build-onedir/
+packaging/windows/package-staging/

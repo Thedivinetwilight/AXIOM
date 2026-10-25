@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.5.0a1**
+**Current source version: 3.5.0a2**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -70,11 +70,13 @@ The operator's **MT5 package available** capability only proves that the officia
 
 ### 2.2 Install or run portable
 
-1. Download the Windows x64 installer or portable executable and the published `SHA256SUMS.txt` from the same release.
-2. Verify the exact file hash before running it. Release binaries are **unsigned unless the release metadata explicitly says otherwise**; SmartScreen can warn.
-3. The per-user installer does not require administrator rights. It installs under `%LOCALAPPDATA%\Programs\AXIOM-Chart` for upgrade compatibility, while the product name is **AXIOM Operator**.
-4. Alternatively, run the portable `AXIOM-Chart.exe` (the filename is retained for upgrade compatibility). It stores operator data in the per-user data directory, not beside the executable.
+1. Download the Windows x64 `*-no-temp-install.zip` or `*-portable.zip` and the published `SHA256SUMS.txt` from the same release.
+2. Verify the exact ZIP hash before extracting it. Release binaries are **unsigned unless the release metadata explicitly says otherwise**; SmartScreen/Smart App Control can warn or block them.
+3. For installation, extract the entire installer ZIP, keep the setup EXE and matching `-0.bin`/`-1.bin` together, then run the EXE. The per-user installer does not require administrator rights and installs under `%LOCALAPPDATA%\Programs\AXIOM-Chart` for upgrade compatibility, while the product name is **AXIOM Operator**.
+4. Alternatively, extract the entire portable ZIP and run `AXIOM-Chart.exe` inside `AXIOM-Operator` with `_internal` beside it. The onedir folder avoids onefile TEMP extraction and stores operator data in the per-user data directory, not beside the executable.
 5. AXIOM opens `http://127.0.0.1:<port>/terminal`. The displayed local address is not a public hosted service.
+
+For the reported Error 4551, these loaderless/onedir packages avoid the identified Inno setup-loader and onefile runtime TEMP paths. They do not make unsigned code trusted or bypass Windows policy. Keep Application Control enabled; if the device still blocks the package, trusted signing or administrator approval is required. Read `WINDOWS_APP_CONTROL.md`.
 
 The release's `BUILD_METADATA.json` is the authoritative record of source commit, runner, commands, test results, skipped checks and signing status. A source archive is not a verified Windows binary.
 
@@ -396,7 +398,7 @@ This procedure verifies a **real Vantage DEMO terminal/feed with local AXIOM sim
 ### 15.1 Prepare an isolated paper test profile
 
 1. Hash-verify the exact unsigned Windows release and read its `BUILD_METADATA.json`. Install/open the Vantage MT5 desktop terminal using Vantage's official instructions. Manually log that terminal into the **DEMO** account you intend to test; do not select or log into a live account for this procedure.
-2. Close other AXIOM instances. From PowerShell in the directory containing the verified portable `AXIOM-Chart.exe`, choose a new empty data directory so an old paper configuration cannot conflict with the demo account:
+2. Close other AXIOM instances. From PowerShell inside the extracted portable `AXIOM-Operator` folder containing the verified `AXIOM-Chart.exe` and `_internal`, choose a new empty data directory so an old paper configuration cannot conflict with the demo account:
 
    ```powershell
    $env:AXIOM_DATA_DIR = Join-Path $env:LOCALAPPDATA 'AXIOM-DemoFeedTest'

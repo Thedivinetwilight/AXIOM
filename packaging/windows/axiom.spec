@@ -11,6 +11,7 @@ Everything writable (config, database, logs) lives in the per-user data
 directory created by ``axiom_launcher.py`` so upgrades never touch operator state.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -40,6 +41,7 @@ datas = [
     (str(ROOT / "docs" / "TERMINAL_REDESIGN_PLAN.md"), "docs"),
     (str(ROOT / "docs" / "TERMINAL_PERFORMANCE.md"), "docs"),
     (str(ROOT / "docs" / "LISTED_ASSETS.md"), "docs"),
+    (str(ROOT / "docs" / "WINDOWS_APP_CONTROL.md"), "docs"),
 ]
 
 # uvicorn resolves its loop and protocol implementations by name at runtime, so
@@ -110,28 +112,62 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name="AXIOM-Chart",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    # Console mode exposes startup/refusal messages and Ctrl+C. Secrets are
-    # deliberately not printed; the operator reads the private config locally.
-    console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    version=str(HERE / "version_info.txt") if sys.platform.startswith("win") else None,
-    icon=None,
-)
+# The default remains the upgrade-compatible onefile executable.  The App
+# Control workaround uses the same analyzed Python code in onedir mode: Windows
+# then loads the application and its dependencies from the extracted/install
+# folder instead of a PyInstaller temporary _MEI directory.
+if os.environ.get("AXIOM_ONEDIR") == "1":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="AXIOM-Chart",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        version=str(HERE / "version_info.txt") if sys.platform.startswith("win") else None,
+        icon=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="AXIOM-Operator",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name="AXIOM-Chart",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        # Console mode exposes startup/refusal messages and Ctrl+C. Secrets are
+        # deliberately not printed; the operator reads the private config locally.
+        console=True,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        version=str(HERE / "version_info.txt") if sys.platform.startswith("win") else None,
+        icon=None,
+    )

@@ -124,14 +124,28 @@ jobs:
           if ($meta.test_results.smoke_failed -ne 0) { throw "smoke failures: $($meta.test_results.smoke_failed)" }
           Write-Host "smoke checks passed: $($meta.test_results.smoke_checks.Count)"
 
-      - name: Install the installer, launch the installed copy, then uninstall
+      - name: Install the loaderless installer, launch onedir, upgrade, then uninstall
         shell: pwsh
         working-directory: src/packaging/windows
-        # The whole test lives in install_test.ps1: it logs to
-        # dist\installer-test-log.txt and announces every phase as an Actions
-        # notice annotation, so a failure is attributable from the check-run
-        # annotations even when the hosted step log cannot be downloaded.
-        run: ./install_test.ps1 -DistDir dist
+        # The test logs every phase and refuses incomplete EXE/BIN packages.
+        run: |
+          $package = (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName
+          if (-not $package) { throw 'loaderless installer ZIP was not produced' }
+          $extract = Join-Path $env:TEMP ('axiom-installer-' + [guid]::NewGuid().ToString('N'))
+          Expand-Archive -Path $package -DestinationPath $extract
+          $setup = (Get-ChildItem $extract -Filter '*-no-temp-setup.exe' | Select-Object -First 1).FullName
+          if (-not $setup) { throw 'extracted loaderless setup was not found' }
+          ./install_test.ps1 -DistDir dist -SetupPath $setup
+          if ($LASTEXITCODE -ne 0) { throw "loaderless install acceptance failed: $LASTEXITCODE" }
+
+      - name: Extract and test the onedir portable ZIP
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $package = (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName
+          if (-not $package) { throw 'onedir portable ZIP was not produced' }
+          ./portable_test.ps1 -PackagePath $package -ExpectedCommit "$env:TARGET_COMMIT"
+          if ($LASTEXITCODE -ne 0) { throw "onedir portable acceptance failed: $LASTEXITCODE" }
 
       - name: Finalize install results and checksum every release asset
         shell: pwsh
@@ -142,23 +156,31 @@ jobs:
           $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
           $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
           if ($installFailed -ne 0) { throw "installer checks failed: $installFailed" }
+          $portableLog = Get-Content dist\portable-test-log.txt -Raw
+          $portablePassed = @($portableLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $portableFailed = @($portableLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          if ($portableFailed -ne 0) { throw "portable checks failed: $portableFailed" }
           $metaPath = 'dist\BUILD_METADATA.json'
           $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
           $meta.test_results | Add-Member -NotePropertyName installer_checks_passed -NotePropertyValue $installPassed -Force
           $meta.test_results | Add-Member -NotePropertyName installer_checks_failed -NotePropertyValue $installFailed -Force
-          $meta.test_results | Add-Member -NotePropertyName upgrade_preservation -NotePropertyValue 'passed on this Windows runner' -Force
+          $meta.test_results | Add-Member -NotePropertyName upgrade_preservation -NotePropertyValue 'passed on this Windows runner with the loaderless onedir package' -Force
+          $meta.test_results | Add-Member -NotePropertyName portable_checks_passed -NotePropertyValue $portablePassed -Force
+          $meta.test_results | Add-Member -NotePropertyName portable_checks_failed -NotePropertyValue $portableFailed -Force
+          $meta.test_results | Add-Member -NotePropertyName app_control_device_verification -NotePropertyValue 'NOT TESTED on the reporting owner device; CI validates packaging and runtime only, with no policy change' -Force
           $meta | ConvertTo-Json -Depth 10 | Set-Content $metaPath -Encoding utf8
           $files = @(
             'dist\AXIOM-Chart.exe',
-            (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName,
+            (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName,
+            (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName,
             'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
-            'dist\install-test-log.txt', 'dist\installer-test-log.txt',
+            'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
             'pytest-focused.log', 'pytest-full.log', 'js-chart.log', 'js-terminal.log',
             'benchmark-python.log', 'js-terminal-benchmark.log',
             'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
             'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
             '..\..\docs\LISTED_ASSETS.md', '..\..\docs\TERMINAL_PERFORMANCE.md',
-            '..\..\docs\TERMINAL_REDESIGN_PLAN.md'
+            '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md'
           )
           $sums = @()
           foreach ($file in $files) {
@@ -191,7 +213,9 @@ jobs:
             'src/packaging/windows/js-terminal-benchmark.log',
             'src/packaging/windows/dist/install-test-log.txt',
             'src/packaging/windows/dist/installer-test-log.txt',
-            'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt'
+            'src/packaging/windows/dist/portable-test-log.txt',
+            'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt',
+            'src/packaging/windows/dist/PORTABLE_TEST_ERROR.txt'
           )
           $existing = @($candidates | Where-Object { Test-Path $_ })
           if ($existing.Count -eq 0) {
@@ -216,13 +240,17 @@ jobs:
         with:
           name: axiom-vantage-operator-windows-x64-${{ steps.resolve.outputs.VERSION }}
           path: |
-            src/packaging/windows/dist/*.exe
+            src/packaging/windows/dist/AXIOM-Chart.exe
+            src/packaging/windows/dist/*-no-temp-install.zip
+            src/packaging/windows/dist/*-portable.zip
             src/packaging/windows/dist/BUILD_METADATA.json
             src/packaging/windows/dist/SHA256SUMS.txt
             src/packaging/windows/dist/SOURCE_COMMIT.txt
             src/packaging/windows/dist/install-test-log.txt
             src/packaging/windows/dist/installer-test-log.txt
+            src/packaging/windows/dist/portable-test-log.txt
             src/packaging/windows/dist/INSTALL_TEST_ERROR.txt
+            src/packaging/windows/dist/PORTABLE_TEST_ERROR.txt
             src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
             src/packaging/windows/pytest-full.log
             src/packaging/windows/pytest-focused.log
@@ -236,6 +264,7 @@ jobs:
             src/docs/LISTED_ASSETS.md
             src/docs/TERMINAL_PERFORMANCE.md
             src/docs/TERMINAL_REDESIGN_PLAN.md
+            src/docs/WINDOWS_APP_CONTROL.md
           if-no-files-found: warn
           retention-days: 30
 
@@ -265,9 +294,21 @@ jobs:
           $installLog = Get-Content dist\installer-test-log.txt -Raw
           $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
           $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          $portableLog = Get-Content dist\portable-test-log.txt -Raw
+          $portablePassed = @($portableLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $portableFailed = @($portableLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
 
           $notes = @"
           Windows x64 AXIOM Operator built from exact source commit ``$($meta.commit)``.
+
+          **Error 4551 / Application Control workaround.** For the reported Inno Setup ``setup.tmp``
+          block, download ``*-no-temp-install.zip``, extract the ENTIRE ZIP, keep the setup EXE and
+          matching ``-0.bin`` / ``-1.bin`` together, then run the EXE. This uses ``UseSetupLdr=no``
+          and installs an onedir runtime. Alternatively extract ``*-portable.zip`` and run
+          ``AXIOM-Chart.exe`` inside its folder with ``_internal`` beside it. Both avoid the identified
+          setup-loader and onefile runtime TEMP paths. The legacy onefile EXE remains for compatibility.
+          All packages are UNSIGNED: no Windows policy is disabled or bypassed, and acceptance by an
+          enforced on-device Smart App Control/WDAC policy is NOT claimed. See ``WINDOWS_APP_CONTROL.md``.
 
           **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
           uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
@@ -298,9 +339,12 @@ jobs:
           * Listed assets: ``$($meta.test_results.listed_assets)``
           * Real demo terminal/feed verification: ``$($meta.test_results.demo_market_data)``
           * on-machine frozen-app checks: $passed passed, $($meta.test_results.smoke_failed) failed
-          * installer/upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
+          * loaderless installer/onedir upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
             launch, ``/terminal`` and legacy ``/chart``, static assets, token gates, safe disconnected
             Vantage selection, upgrade user-data preservation, and uninstall. See the full logs.
+          * extracted onedir portable ZIP: $portablePassed passed, $portableFailed failed, including no new
+            PyInstaller ``_MEI`` TEMP directory and safe authenticated defaults
+          * owner-device Smart App Control: ``$($meta.test_results.app_control_device_verification)``
 
           **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
           account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
@@ -318,22 +362,25 @@ jobs:
 
           $sumBlock
 
-          The per-user installer uses ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and preserves
-          ``%LOCALAPPDATA%\AXIOM`` on upgrade and silent uninstall. ``AXIOM-Chart.exe`` is retained
-          as the portable filename for upgrade compatibility; this is the new Operator release.
+          The per-user loaderless installer uses ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and preserves
+          ``%LOCALAPPDATA%\AXIOM`` on upgrade and silent uninstall. It installs the onedir runtime.
+          ``AXIOM-Chart.exe`` remains the executable name for upgrade compatibility; the recommended
+          portable workaround is the complete folder ZIP, not that lone legacy onefile download.
 
           Tests and demo fills establish neither profitability nor live readiness. Read both manuals
           and complete account-specific demo verification before considering any live action.
           "@
 
           $assets = @(
-            (Get-ChildItem dist -Filter '*-setup.exe' | Select-Object -First 1).FullName
+            (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName
+            (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName
             (Join-Path (Get-Location) 'dist\AXIOM-Chart.exe')
             (Join-Path (Get-Location) 'dist\BUILD_METADATA.json')
             (Join-Path (Get-Location) 'dist\SHA256SUMS.txt')
             (Join-Path (Get-Location) 'dist\SOURCE_COMMIT.txt')
             (Join-Path (Get-Location) 'dist\install-test-log.txt')
             (Join-Path (Get-Location) 'dist\installer-test-log.txt')
+            (Join-Path (Get-Location) 'dist\portable-test-log.txt')
             (Join-Path (Get-Location) 'pytest-focused.log')
             (Join-Path (Get-Location) 'pytest-full.log')
             (Join-Path (Get-Location) 'js-chart.log')
@@ -347,6 +394,7 @@ jobs:
             (Join-Path (Get-Location) '..\..\docs\LISTED_ASSETS.md')
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_PERFORMANCE.md')
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
+            (Join-Path (Get-Location) '..\..\docs\WINDOWS_APP_CONTROL.md')
           )
           foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
           gh release view $tag 2>$null | Out-Null

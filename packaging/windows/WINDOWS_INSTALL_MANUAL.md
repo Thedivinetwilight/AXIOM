@@ -1,8 +1,8 @@
 # AXIOM Operator — Windows x64 Install Guide
 
-**Version:** 3.5.0a1
+**Version:** 3.5.0a2
 
-**Applies to:** the AXIOM Operator installer and portable executable built from the exact commit named in `BUILD_METADATA.json`.
+**Applies to:** the AXIOM Operator loaderless installer and portable onedir folder built from the exact commit named in `BUILD_METADATA.json`.
 
 This guide covers installation and Windows-specific operation. Read the bundled **AXIOM Operator User Manual** before connecting a demo or live account. It explains credentials, account-discovered instruments, risk, readiness, Arm/Activate, reviewed orders, reconciliation and recovery.
 
@@ -25,48 +25,60 @@ AXIOM binds to loopback and opens a local browser page. Do not expose its API to
 A complete release provides, for the same source commit:
 
 ```text
-AXIOM-Operator-<version>-windows-x64-setup.exe
-AXIOM-Chart.exe                       # portable Operator executable
+AXIOM-Operator-<version>-windows-x64-no-temp-install.zip  # recommended installer workaround
+AXIOM-Operator-<version>-windows-x64-portable.zip         # recommended no-installer workaround
+AXIOM-Chart.exe                                           # legacy onefile compatibility build
 BUILD_METADATA.json
 installer-test-log.txt
+portable-test-log.txt
 TERMINAL_BENCHMARK.json         # exact-commit fake-provider Windows measurements
 TERMINAL_UI_BENCHMARK.json      # exact-commit fake-canvas measurements
 LISTED_ASSETS.md
+WINDOWS_APP_CONTROL.md
 TERMINAL_PERFORMANCE.md
 SHA256SUMS.txt
 ```
 
-The release may also include test logs/manuals. Read `BUILD_METADATA.json` for the runner, commands, actual test outcomes, skipped demo/live checks and signing status.
+The release also includes test logs/manuals. Read `BUILD_METADATA.json` for the runner, commands, actual test outcomes, skipped demo/live checks and signing status.
 
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AXIOM-Operator-3.5.0a1-windows-x64-setup.exe -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.5.0a2-windows-x64-no-temp-install.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.5.0a2-windows-x64-portable.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
 The file name and full 64-character hash must match the same release. Do not use a hash from another version.
 
-**Signing:** these builds are **unsigned unless the exact release metadata explicitly says otherwise**. Windows SmartScreen can show a warning and no verified publisher identity is claimed. Verify the source/release and hash; do not treat bypassing a warning as a safety check.
+**Signing:** these builds are **unsigned unless the exact release metadata explicitly says otherwise**. Windows SmartScreen/Smart App Control can show a warning or block an unknown publisher, and no verified publisher identity is claimed. Verify the source/release and hash; do not treat bypassing a warning as a safety check.
+
+### 2.1 Error 4551 / Application Control
+
+The 3.5.0a1 single installer was blocked on the reporting device while Inno Setup tried to execute its unsigned temporary `setup.tmp`. Version 3.5.0a2 uses Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids the identified setup-loader and onefile runtime TEMP paths.
+
+It is a packaging workaround, **not a policy bypass**. The packages are still unsigned. If an enforced Smart App Control or organization policy still blocks them, keep Windows security enabled and obtain trusted signing or administrator approval. Do not disable Application Control to install AXIOM. See `WINDOWS_APP_CONTROL.md`.
 
 ## 3. Install
 
 1. Close running AXIOM instances.
-2. Run `AXIOM-Operator-<version>-windows-x64-setup.exe`.
-3. Review the install location and shortcuts. For upgrade compatibility, the executable and default folder retain the technical name `AXIOM-Chart`; the displayed product is **AXIOM Operator**.
-4. Launch from the Start Menu/desktop shortcut or the final wizard page.
+2. Extract the **entire** `*-no-temp-install.zip` into a normal folder.
+3. Confirm it contains one `*-no-temp-setup.exe` plus its matching `-0.bin` and `-1.bin` files. These sidecars are required; do not copy or run the EXE alone.
+4. Run `AXIOM-Operator-<version>-windows-x64-no-temp-setup.exe` from that extracted folder.
+5. Review the install location and shortcuts. For upgrade compatibility, the executable and default folder retain the technical name `AXIOM-Chart`; the displayed product is **AXIOM Operator**.
+6. Launch from the Start Menu/desktop shortcut or the final wizard page.
 
-The installer bundles the operator UI, legacy chart, official MT5 Python dependency, manuals, version information and build metadata. It does not install the Vantage MT5 desktop terminal and does not contain broker credentials.
+The installer deploys `AXIOM-Chart.exe`, its `_internal` dependency folder, the operator UI, legacy chart, official MT5 Python dependency, manuals, version information and build metadata. It does not install the Vantage MT5 desktop terminal and does not contain broker credentials.
 
-## 4. Portable executable
+## 4. Portable onedir folder
 
-Run:
+1. Extract the **entire** `AXIOM-Operator-<version>-windows-x64-portable.zip`.
+2. Open its `AXIOM-Operator` folder.
+3. Run `AXIOM-Chart.exe` there, keeping `_internal` beside it. Do not copy only the EXE to another folder.
 
-```text
-AXIOM-Chart.exe
-```
+The portable folder contains the same application as the installed onedir runtime and avoids onefile `_MEI` TEMP extraction. “Portable” means no installer is required; it does **not** mean credential/data files travel with the folder. AXIOM writes operator data under the current user's `%LOCALAPPDATA%\AXIOM` directory.
 
-The portable file contains the same application as the installed executable. “Portable” means no installer is required; it does **not** mean credential/data files travel with the executable. AXIOM writes operator data under the current user's `%LOCALAPPDATA%\AXIOM` directory.
+The separate lone `AXIOM-Chart.exe` release asset is the legacy onefile build retained for compatibility. It can use TEMP extraction and is not the preferred App Control workaround.
 
 Only run one writer against a data directory. The readiness writer-lock check must pass before Vantage activation.
 
@@ -186,10 +198,10 @@ Maintainers can reproduce the build on a real Windows x64 machine with the pinne
 ```powershell
 cd packaging\windows
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
-  -ExpectedCommit <full-source-commit> -Version 3.5.0a1
+  -ExpectedCommit <full-source-commit> -Version 3.5.0a2
 ```
 
-The script requires a clean source tree, runs focused and full Python tests, both pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller frozen-app smoke/fail-closed checks, and Inno Setup packaging. It refuses to produce a success result when a hard gate fails.
+The script requires a clean source tree, runs focused and full Python tests, both pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller onefile/onedir frozen-app checks, loaderless Inno packaging and ZIP structure checks. The release workflow separately extracts and tests both release ZIPs, including install/upgrade/uninstall and the portable no-`_MEI` runtime check. It refuses to produce a success result when a hard gate fails.
 
 Run the separate installed-copy acceptance test against the generated setup file:
 

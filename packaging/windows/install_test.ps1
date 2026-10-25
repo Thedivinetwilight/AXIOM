@@ -30,6 +30,7 @@
 [CmdletBinding()]
 param(
     [string]$DistDir = 'dist',
+    [string]$SetupPath = '',
     [int]$Port = 0
 )
 
@@ -115,10 +116,21 @@ try {
     # ---------------------------------------------------------------- phase 1
     Step 'install' 'locating the installer'
     if (-not (Test-Path $DistDir)) { throw "the dist directory '$DistDir' does not exist" }
-    $setupItem = Get-ChildItem -Path $DistDir -Filter '*-setup.exe' | Select-Object -First 1
-    if (-not $setupItem) { throw "no *-setup.exe was found in $DistDir" }
+    if ($SetupPath) {
+        $setupItem = Get-Item $SetupPath
+    } else {
+        $setupItem = Get-ChildItem -Path $DistDir -Filter '*-no-temp-setup.exe' | Select-Object -First 1
+    }
+    if (-not $setupItem) { throw "no *-no-temp-setup.exe was found in $DistDir" }
     $setup = $setupItem.FullName
     Say ('installer: {0} ({1:N1} MB)' -f $setup, ($setupItem.Length / 1MB))
+    Check ($setupItem.Name -match '-no-temp-setup\.exe$') 'acceptance uses the loaderless no-TEMP installer'
+    foreach ($index in @(0, 1)) {
+        $sidecar = Join-Path $setupItem.DirectoryName ($setupItem.BaseName + "-$index.bin")
+        Check (Test-Path $sidecar) "required installer sidecar exists: $($setupItem.BaseName)-$index.bin"
+        if (-not (Test-Path $sidecar)) { throw "refusing to run an incomplete loaderless installer; missing $sidecar" }
+    }
+    Check (Test-Path (Join-Path $DistDir 'AXIOM-Chart.exe')) 'legacy onefile remains available but is not the installed runtime'
 
     $installDir = Join-Path $env:LOCALAPPDATA 'Programs\AXIOM-Chart'
     $installedExe = Join-Path $installDir 'AXIOM-Chart.exe'
@@ -172,7 +184,8 @@ try {
     Check (Test-Path $installedExe) ('the installer placed AXIOM-Chart.exe in {0}' -f $installDir)
     Check (Test-Path (Join-Path $installDir 'WINDOWS_INSTALL_MANUAL.md')) 'the user manual was installed next to the executable'
     Check (Test-Path (Join-Path $installDir 'SOURCE_COMMIT.txt')) 'the source commit record was installed'
-    foreach ($doc in @('docs\LISTED_ASSETS.md', 'docs\TERMINAL_PERFORMANCE.md', 'docs\TERMINAL_BENCHMARK.json', 'docs\TERMINAL_UI_BENCHMARK.json')) {
+    Check (Test-Path (Join-Path $installDir '_internal')) 'loaderless installer deployed the onedir _internal runtime beside the executable'
+    foreach ($doc in @('docs\LISTED_ASSETS.md', 'docs\TERMINAL_PERFORMANCE.md', 'docs\TERMINAL_BENCHMARK.json', 'docs\TERMINAL_UI_BENCHMARK.json', 'docs\WINDOWS_APP_CONTROL.md')) {
         Check (Test-Path (Join-Path $installDir $doc)) ('installer included ' + $doc)
     }
     $uninstaller = Join-Path $installDir 'unins000.exe'

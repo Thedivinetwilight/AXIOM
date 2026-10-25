@@ -22,7 +22,7 @@ VSVersionInfo(
          StringStruct('LegalCopyright', ''),
          StringStruct('OriginalFilename', 'AXIOM-Chart.exe'),
          StringStruct('ProductName', 'AXIOM Operator'),
-         StringStruct('ProductVersion', '3.5.0a1')])
+         StringStruct('ProductVersion', '3.5.0a2')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

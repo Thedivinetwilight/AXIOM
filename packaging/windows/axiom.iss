@@ -4,14 +4,12 @@
 ; credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
 ; live in %LOCALAPPDATA%\AXIOM, preserved on upgrade and silent uninstall.
 ;
-; Build with:  ISCC.exe /DMyAppVersion=3.5.0a1 axiom.iss
+; Build with:  ISCC.exe /DMyAppVersion=3.5.0a2 axiom.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
-#ifndef SourceExe
-  #define SourceExe "dist\AXIOM-Chart.exe"
-#endif
+; The installer uses the onedir runtime and loaderless mode below.
 
 #define MyAppName "AXIOM Operator"
 #define MyAppPublisher "AXIOM"
@@ -35,7 +33,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir=dist
-OutputBaseFilename=AXIOM-Operator-{#MyAppVersion}-windows-x64-setup
+OutputBaseFilename=AXIOM-Operator-{#MyAppVersion}-windows-x64-no-temp-setup
+; Avoid SetupLdr extracting and executing an unsigned setup.tmp from TEMP.
+; Keep the generated -0.bin and -1.bin beside the setup executable.
+UseSetupLdr=no
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -55,7 +56,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist-onedir\AXIOM-Operator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\SOURCE_COMMIT.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "WINDOWS_INSTALL_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\USER_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -64,6 +65,7 @@ Source: "..\..\docs\VANTAGE_NEXT_VERSION_PLAN.md"; DestDir: "{app}\docs"; Flags:
 Source: "..\..\docs\TERMINAL_REDESIGN_PLAN.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\TERMINAL_PERFORMANCE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\LISTED_ASSETS.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\WINDOWS_APP_CONTROL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_UI_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

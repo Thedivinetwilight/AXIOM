@@ -1,6 +1,6 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.5.0a1`.** AXIOM provides an eight-page Operator
+**Current source version: `3.5.0a2`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
@@ -27,6 +27,12 @@ feed/chart/submission/broker-acknowledgement measurements. A fail-closed
 `listed-assets-v1` interface requires exact listed identity and a separate provider;
 it does not route listed instruments to Vantage CFDs or claim listed execution.
 
+Version 3.5.0a2 adds a packaging-only workaround for the reported Windows Error
+4551: a loaderless Inno installer ZIP with required BIN sidecars and a complete
+onedir portable ZIP. Both avoid the identified temporary setup/onefile runtime
+paths. They remain unsigned, do not disable or bypass Application Control, and
+cannot guarantee acceptance by an enforced on-device policy.
+
 > **No profitability or live-readiness claim.** Fake tests, demo fills and a
 > successful connection establish neither profitability nor real-money readiness.
 > No live login/order is permitted in CI. Read the exact release's build metadata
@@ -34,6 +40,7 @@ it does not route listed instruments to Vantage CFDs or claim listed execution.
 
 - **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
 - **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
+- **Error 4551 / App Control boundary:** [`docs/WINDOWS_APP_CONTROL.md`](docs/WINDOWS_APP_CONTROL.md)
 - **Architecture and verification plan:** [`docs/VANTAGE_NEXT_VERSION_PLAN.md`](docs/VANTAGE_NEXT_VERSION_PLAN.md)
 - **Redesign audit/acceptance:** [`docs/TERMINAL_REDESIGN_PLAN.md`](docs/TERMINAL_REDESIGN_PLAN.md)
 - **Performance definitions and benchmark conditions:** [`docs/TERMINAL_PERFORMANCE.md`](docs/TERMINAL_PERFORMANCE.md)
