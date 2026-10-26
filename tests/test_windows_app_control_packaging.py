@@ -103,6 +103,7 @@ def test_kronos_frozen_resources_and_installed_inference_release_gate():
     build = read(KIT / "build_windows.ps1")
     assert "tests/test_kronos_setup.py" in build
     attributes = read(ROOT / ".gitattributes")
+    assert "app/autonomy/vendor/kronos/model/*.py -text" in attributes
     assert "config/kronos-small.json text eol=lf" in attributes
     assert "config/kronos-runtime-requirements.txt text eol=lf" in attributes
 
