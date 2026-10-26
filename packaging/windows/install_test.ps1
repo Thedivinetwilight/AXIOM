@@ -365,14 +365,19 @@ try {
     $explicitLauncherCoverage = $false
     $launcher = Get-Command py -ErrorAction SilentlyContinue
     if ($launcher) {
-        $launcherPython = & $launcher.Source -3.11-64 -I -c "import sys,pip;print(sys.executable)" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $launcherPython) {
-            $pythonExe = $launcherPython.Trim()
-            $explicitLauncherCoverage = $true
-            Check ($discoveredPython.runtime.python.command_label -eq 'py -3.11-64') 'installed app used the explicit py -3.11-64 x64 selector'
+        $launcherIdentityJson = & $launcher.Source -3.11-64 -I -c "import json,platform,sys,pip;print(json.dumps({'version':list(sys.version_info[:3]),'machine':platform.machine(),'implementation':platform.python_implementation(),'bits':64 if sys.maxsize>2**32 else 32,'executable':sys.executable,'pip':pip.__version__}))" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $launcherIdentityJson) {
+            $launcherIdentity = $launcherIdentityJson | ConvertFrom-Json
+            if ($launcherIdentity.version[0] -eq 3 -and $launcherIdentity.version[1] -eq 11 -and $launcherIdentity.implementation -eq 'CPython' -and $launcherIdentity.bits -eq 64 -and $launcherIdentity.machine -match '^(AMD64|x86_64)$' -and $launcherIdentity.pip) {
+                $pythonExe = $launcherIdentity.executable
+                $explicitLauncherCoverage = $true
+                Check ($discoveredPython.runtime.python.command_label -eq 'py -3.11-64') 'installed app used the explicit py -3.11-64 x64 selector'
+            } else {
+                Say ('py -3.11-64 is not CPython 3.11 x64 with pip on this runner (machine={0}; bits={1}); explicit-selector coverage is fake-probe only' -f $launcherIdentity.machine, $launcherIdentity.bits)
+            }
         }
     }
-    if (-not $explicitLauncherCoverage) { Say 'py -3.11-64 with pip is unavailable on this runner; explicit-selector coverage is fake-probe only' }
+    if (-not $explicitLauncherCoverage) { Say 'no supported py -3.11-64 x64 interpreter with pip is available on this runner; using the automatically discovered validated interpreter for installed inference' }
     $pythonBody = @{ executable = $pythonExe } | ConvertTo-Json
     $selectedPython = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $pythonBody ('{0}/api/autonomy/kronos/python' -f $base) -TimeoutSec 30
     Check ($selectedPython.runtime.python.selection -eq 'manual' -and $selectedPython.runtime.python.command_label -eq 'manual selection' -and $selectedPython.runtime.python.bits -eq 64) 'installed app accepts one validated full Python executable path'

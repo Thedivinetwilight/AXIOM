@@ -93,6 +93,7 @@ def test_kronos_frozen_resources_and_installed_inference_release_gate():
     assert "/api/autonomy/kronos/python" in installer
     assert "automatically discovers CPython x64 with pip" in installer
     assert "explicit py -3.11-64 x64 selector" in installer
+    assert "$launcherIdentity.machine -match '^(AMD64|x86_64)$'" in installer
     assert "self-test is bound to the selected Python version and platform" in installer
     assert "kronos-status.json" in installer
     assert "SYNTHETIC_INFERENCE_SMOKE_ONLY" in installer
