@@ -1,6 +1,6 @@
-AXIOM installer test  2026-10-26T13:02:24.4976338+00:00
+AXIOM installer test  2026-10-26T13:14:44.2015608+00:00
 [install] locating the installer
-installer: C:\Users\runneradmin\AppData\Local\Temp\axiom-installer-38df91745a774e40bbc3261bc3512513\AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe (4.2 MB)
+installer: C:\Users\runneradmin\AppData\Local\Temp\axiom-installer-a08a64a947314afda91d7af6b185d970\AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe (4.2 MB)
 PASS  acceptance uses the loaderless no-TEMP installer
 PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-0.bin
 PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-1.bin
@@ -12,18 +12,18 @@ arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="C:\Users\runneradmin\A
 installer exit code: 0
 PASS  silent install reported success
 [installed files] verifying what the installer placed on disk
-  inno| 2026-10-26 13:02:28.814   Dest filename: C:\Users\runneradmin\Desktop\AXIOM Operator.lnk
-  inno| 2026-10-26 13:02:28.814   Creating the icon.
-  inno| 2026-10-26 13:02:28.819   Successfully created the icon.
-  inno| 2026-10-26 13:02:28.832   Saving uninstall information.
-  inno| 2026-10-26 13:02:28.832   Creating new uninstall key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1E4A52-9F3B-4E6C-9A18-2B5D7E0C4F31}_is1
-  inno| 2026-10-26 13:02:28.832   Writing uninstall key values.
-  inno| 2026-10-26 13:02:28.832   Detected previous administrative 64-bit install? No
-  inno| 2026-10-26 13:02:28.832   Detected previous administrative 32-bit install? No
-  inno| 2026-10-26 13:02:28.848   Installation process succeeded.
-  inno| 2026-10-26 13:02:28.848   Need to restart Windows? No
-  inno| 2026-10-26 13:02:28.852   Deinitializing Setup.
-  inno| 2026-10-26 13:02:28.869   Log closed.
+  inno| 2026-10-26 13:14:50.742   Dest filename: C:\Users\runneradmin\Desktop\AXIOM Operator.lnk
+  inno| 2026-10-26 13:14:50.742   Creating the icon.
+  inno| 2026-10-26 13:14:50.750   Successfully created the icon.
+  inno| 2026-10-26 13:14:50.770   Saving uninstall information.
+  inno| 2026-10-26 13:14:50.770   Creating new uninstall key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1E4A52-9F3B-4E6C-9A18-2B5D7E0C4F31}_is1
+  inno| 2026-10-26 13:14:50.770   Writing uninstall key values.
+  inno| 2026-10-26 13:14:50.772   Detected previous administrative 64-bit install? No
+  inno| 2026-10-26 13:14:50.772   Detected previous administrative 32-bit install? No
+  inno| 2026-10-26 13:14:50.812   Installation process succeeded.
+  inno| 2026-10-26 13:14:50.812   Need to restart Windows? No
+  inno| 2026-10-26 13:14:50.816   Deinitializing Setup.
+  inno| 2026-10-26 13:14:50.848   Log closed.
 PASS  the installer placed AXIOM-Chart.exe in C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart
 PASS  the user manual was installed next to the executable
 PASS  the source commit record was installed
@@ -35,8 +35,8 @@ PASS  installer included docs\TERMINAL_UI_BENCHMARK.json
 PASS  installer included docs\WINDOWS_APP_CONTROL.md
 PASS  the uninstaller was installed
 [launch] starting the installed copy and waiting for /health
-data dir: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-05a1066b4bd0466fbf04db30a0d2ac63
-port:     58381
+data dir: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-ddd7b82853454943bd1b337b5bb8f01f
+port:     55739
 PASS  the installed copy answered /health on loopback
 [operator-and-chart] checking installed pages, assets and token gates
 PASS  /terminal returns 200 (got 200)
@@ -80,18 +80,18 @@ PASS  installed app used the explicit py -3.11-64 x64 selector
 PASS  installed app accepts one validated full Python executable path
 PASS  Python selection response does not disclose the per-user executable path
 PASS  Python selection creates no autonomy session or execution state
-  kronos| state=RUNNING phase=DOWNLOAD bytes=98981185/114823553
+  kronos| state=RUNNING phase=DOWNLOAD bytes=98980884/114823553
   kronos| state=RUNNING phase=RUNTIME_INSTALL bytes=114823553/114823553
   kronos| state=RUNNING phase=RUNTIME_PROBE bytes=114823553/114823553
   kronos| state=ERROR phase=ERROR bytes=114823553/114823553
-FAIL  pinned Kronos setup completed (state ERROR; Kronos runtime worker failed (ImportError))
+FAIL  pinned Kronos setup completed (state ERROR; Kronos runtime worker failed during RUNTIME_PROBE (ImportError))
 
 FAILED in phase [kronos]
 Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:402
 Line |
  402 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Kronos setup failed closed: Kronos runtime worker failed (ImportError)
+     | Kronos setup failed closed: Kronos runtime worker failed during RUNTIME_PROBE (ImportError)
 stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 402
-at <ScriptBlock>, D:\a\_temp\b741fdce-b88b-4cf6-b800-15bc5ed89fcc.ps1: line 8
+at <ScriptBlock>, D:\a\_temp\365385a2-91ca-4d16-b4b7-38ee59b4ce88.ps1: line 8
 at <ScriptBlock>, <No file>: line 1
