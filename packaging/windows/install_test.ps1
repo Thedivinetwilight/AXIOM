@@ -348,6 +348,57 @@ try {
         Say 'no config.json was written; nothing to inspect for live credentials'
     }
 
+    # ------------------------------------------------------------- phase 5a
+    Step 'kronos' 'installing only pinned public artifacts/runtime and running real offline inference'
+    $anonymousKronos = -1
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing ('{0}/api/autonomy/kronos' -f $base) -TimeoutSec 10
+        $anonymousKronos = 200
+    } catch {
+        if ($_.Exception.Response) { $anonymousKronos = [int]$_.Exception.Response.StatusCode }
+    }
+    Check ($anonymousKronos -eq 401) ('Kronos setup status refuses anonymous access (got {0})' -f $anonymousKronos)
+    $beforeKronos = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/status' -f $base) -TimeoutSec 15
+    $null = Invoke-RestMethod -Method Post -Headers $headers ('{0}/api/autonomy/kronos/install' -f $base) -TimeoutSec 30
+    $kronos = $null
+    $lastKronosPhase = ''
+    $kronosDeadline = (Get-Date).AddMinutes(30)
+    do {
+        Start-Sleep -Seconds 3
+        $kronos = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/kronos' -f $base) -TimeoutSec 30
+        if ($kronos.operation.phase -ne $lastKronosPhase) {
+            $lastKronosPhase = $kronos.operation.phase
+            Say ('  kronos| state={0} phase={1} bytes={2}/{3}' -f $kronos.operation.state, $lastKronosPhase, $kronos.operation.bytes, $kronos.operation.total_bytes)
+        }
+        if ((Get-Date) -gt $kronosDeadline) { throw 'pinned Kronos setup/self-test exceeded 30 minutes' }
+    } while ($kronos.operation.active)
+    $kronos | ConvertTo-Json -Depth 15 | Set-Content -Path (Join-Path $DistDir 'kronos-status.json') -Encoding utf8
+    Check ($kronos.operation.state -eq 'COMPLETED') ('pinned Kronos setup completed (state {0}; {1})' -f $kronos.operation.state, $kronos.operation.error.message)
+    if ($kronos.operation.state -ne 'COMPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation.error.message) }
+    Check ($kronos.source.status -eq 'VERIFIED' -and $kronos.model.status -eq 'VERIFIED' -and $kronos.tokenizer.status -eq 'VERIFIED') 'installed app verified pinned source, model and tokenizer separately'
+    foreach ($component in @($kronos.model, $kronos.tokenizer)) {
+        foreach ($property in $component.files.PSObject.Properties) {
+            $file = $property.Value
+            Check ($file.verified -and $file.actual_sha256 -eq $file.expected_sha256 -and $file.actual_size -eq $file.expected_size) ('pinned artifact size/hash verified: ' + $property.Name)
+        }
+    }
+    Check ($kronos.runtime.status -eq 'READY' -and $kronos.runtime.device -eq 'cpu' -and -not $kronos.runtime.cuda_available -and $null -eq $kronos.runtime.torch_cuda_build) 'isolated Windows runtime is exact, imported and CPU-only'
+    Check ($kronos.runtime.runtime_lock_sha256 -eq $kronos.install_plan.runtime.lock_sha256) 'runtime evidence matches the exact shipped lock'
+    Check ($kronos.available_for_inference -and $kronos.last_self_test.status -eq 'PASSED') 'real offline Kronos inference self-test passed in the installed app'
+    Check ($kronos.last_self_test.mock_outputs_used -eq $false -and $kronos.last_self_test.model_loaded -and $kronos.last_self_test.forecast_validated) 'self-test loaded the real model and used no mock forecast'
+    Check ($kronos.last_self_test.manifest_file_sha256 -eq $kronos.install_plan.manifest_file_sha256 -and $kronos.last_self_test.manifest_sha256 -eq $kronos.install_plan.manifest_sha256) 'self-test artifact identity matches the reviewed manifest file'
+    Check ($kronos.last_self_test.model_revision -eq $kronos.install_plan.model.revision -and $kronos.last_self_test.tokenizer_revision -eq $kronos.install_plan.tokenizer.revision) 'self-test model/tokenizer revisions match the immutable pins'
+    Check ([double]$kronos.last_self_test.inference_ms -gt 0 -and [double]$kronos.last_self_test.load_ms -gt 0) 'self-test reports genuine positive load and inference latency'
+    Check ($kronos.last_self_test.input_label -match 'SYNTHETIC_INFERENCE_SMOKE_ONLY' -and -not $kronos.last_self_test.market_evaluation -and -not $kronos.last_self_test.profitability_evidence) 'self-test is explicitly separated from market/profitability evidence'
+    $afterKronos = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/status' -f $base) -TimeoutSec 15
+    Check ($afterKronos.sessions.Count -eq $beforeKronos.sessions.Count -and $afterKronos.sessions.Count -eq 0) 'Kronos setup created no autonomy session or execution state'
+    $tradingAfterKronos = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
+    Check ($tradingAfterKronos.mode -eq 'AXIOM_PAPER' -and -not $tradingAfterKronos.armed -and -not $tradingAfterKronos.active) 'Kronos setup preserved disarmed PAPER execution'
+    $installedWeights = @(Get-ChildItem -Path $installDir -Recurse -Filter '*.safetensors' -ErrorAction SilentlyContinue)
+    $installedRuntimes = @(Get-ChildItem -Path $installDir -Recurse -Filter 'axiom-runtime.json' -ErrorAction SilentlyContinue)
+    Check ($installedWeights.Count -eq 0 -and $installedRuntimes.Count -eq 0) 'weights and optional runtime are outside the application install directory'
+    Check (Test-Path (Join-Path $dataDir 'autonomy\kronos\self-test.json')) 'sanitized real-inference evidence is in per-user data storage'
+
     # ------------------------------------------------------------- phase 5b
     Step 'upgrade' 'reinstalling over the installed copy and verifying user-data preservation'
     $stoppedForUpgrade = Stop-App
@@ -419,7 +470,7 @@ try {
     if ($script:Failures.Count -gt 0) {
         throw ('{0} check(s) failed: {1}' -f $script:Failures.Count, ($script:Failures -join '; '))
     }
-    Note 'PASS - install, operator/chart launch, token gates, safe Vantage default, upgrade preservation and uninstall verified on this machine'
+    Note 'PASS - install, token gates, pinned Kronos CPU inference, safe Vantage default, upgrade preservation and uninstall verified on this machine'
     exit 0
 }
 catch {

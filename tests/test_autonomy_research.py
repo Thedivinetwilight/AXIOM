@@ -82,10 +82,29 @@ def test_research_forecast_hook_sees_only_prefix_and_reports_calibration(tmp_pat
     metrics = report["results"]["KRONOS_INFORMED:BUY"]["walk_forward"]["forecast"]
     assert metrics["status"] == "EVALUATED"
     assert metrics["count"] > 0
+    assert metrics["errors"] == 0 and isinstance(metrics["errors"], int)
+    assert metrics["unavailable"] == 0
+    assert metrics["unresolved"] > 0  # final horizons are not evaluated with unseen bars
+    assert metrics["attempts"] == metrics["count"] + metrics["errors"] + metrics["unresolved"]
     assert 0 <= metrics["direction_accuracy"] <= 1
     assert 0 <= metrics["brier_score"] <= 1
     assert metrics["calibration"]
     assert report["results"]["KRONOS_INFORMED:BUY"]["evidence_metrics"]["forecast"]["count"] >= 0
+
+
+def test_unavailable_forecasts_have_no_numeric_incremental_claim(tmp_path):
+    def unavailable_provider(*, instrument_key, bars, horizon, holdout):
+        return None
+
+    report = ResearchRunner(config(), unavailable_provider).run(dataset(), output_dir=tmp_path / "research")
+    metrics = report["results"]["KRONOS_INFORMED:BUY"]["walk_forward"]["forecast"]
+    assert metrics["status"] == "UNAVAILABLE"
+    assert metrics["count"] == 0 and metrics["errors"] == 0
+    assert metrics["unavailable"] > 0 and metrics["attempts"] == metrics["unavailable"]
+    incremental = report["incremental_value"]["BUY"]
+    assert incremental["status"] == "UNMEASURED_NO_RESOLVED_REAL_FORECAST"
+    assert incremental["delta_net_expectancy"] is None
+    assert incremental["delta_risk_adjusted_score"] is None
 
 
 def test_csv_cannot_be_relabelled_as_upstox_authoritative(tmp_path):

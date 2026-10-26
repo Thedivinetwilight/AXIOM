@@ -1,13 +1,13 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.7.0a3`.** AXIOM provides an eight-page Operator
+**Current source version: `3.7.0a4`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
 or coordinate automation. Only instruments exposed by the connected account are
 discovered; share/ETF CFDs are not represented as owned underlying assets.
 
-Version 3.7.0a3 makes legacy replay behavior explicit: the default replay runs
+Version 3.7.0a4 makes legacy replay behavior explicit: the default replay runs
 `moving_average` with **local strategy automation ON** and can create simulated
 orders/fills without per-ticket review. Durable allowlisted audit events record
 session start/running, actionable signals, simulated orders/fills and stop reasons
@@ -42,8 +42,16 @@ default-disabled UPSTOX_LIVE requiring fresh daily authorization/risk plus
 explicit Arm and Activate. It includes intent-before-write journals, three-leg
 GTT protection, reconciliation, confirmed-swing/non-loosening stops, dynamic
 portfolio sizing, paired-ablation research, and pinned/hash-checked optional
-Kronos integration. No Upstox account, external DEMO/LIVE order, Kronos inference,
-or complete-session shakedown has been verified by the development tests.
+Kronos integration. No Upstox account, external DEMO/LIVE order, or complete-session
+shakedown has been verified by the development tests.
+
+Version 3.7.0a4 adds an authenticated operator setup/status flow for the exact
+manifest-pinned public Kronos artifacts and a separately locked per-user CPU runtime.
+It enforces HTTPS redirect allowlists, streaming integrity checks, atomic generations,
+cancellation/cleanup, and an isolated offline inference worker. The Windows release
+gate must run a genuine installed-app inference self-test and publish its sanitized
+evidence; source code or synthetic fixtures alone are not such evidence. No paired
+ON/OFF profitability result is supplied without suitable licensed chronological data.
 
 Version 3.6.0a2's research candidate repairs are retained:
 independent instrument runs, chronological prior-only warmup,

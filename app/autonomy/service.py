@@ -33,6 +33,7 @@ from app.autonomy.config import AutonomySettings
 from app.config.settings import ROOT as APPLICATION_ROOT
 from app.autonomy.feed import ExchangeCalendar, UpstoxCompletedBarFeed, completed_bar_is_fresh
 from app.autonomy.kronos import KronosService
+from app.autonomy.kronos_setup import KronosSetupManager
 from app.autonomy.models import (
     AccountProfile, AccountSnapshot, Candidate, DailyRisk, ExecutionPermit, Fault,
     Instrument, Lifecycle, Position, ProtectedOrder, SessionMode, StrategyEvidence,
@@ -164,13 +165,45 @@ class AutonomyService:
         evidence_path = Path(settings.evidence_dir)
         if not evidence_path.is_absolute() and settings.evidence_dir == "data/autonomy/evidence":
             evidence_path = data_dir / "evidence"
-        self.kronos = kronos or KronosService(manifest_path, artifact_root, vendor_root)
+        self.kronos = kronos or KronosService(
+            manifest_path, artifact_root, vendor_root, application_root=APPLICATION_ROOT,
+        )
         self.evidence = evidence or EvidenceRegistry.load(evidence_path)
         self.kronos_status = self.kronos.verify()
+        self.kronos_setup = KronosSetupManager(
+            self.kronos, audit=self.store.audit, on_status=self._kronos_updated,
+        )
         self.runtimes: dict[str, Runtime] = {}
         self._lock = threading.RLock()
         self._closed = False
         self._restore_sessions()
+
+    def _kronos_updated(self, status: dict) -> None:
+        # Atomic reference update only; setup work never holds the session lock.
+        self.kronos_status = status
+
+    def kronos_view(self) -> dict:
+        result = self.kronos_setup.status()
+        result["audit_events"] = [
+            event for event in self.store.events(limit=300)
+            if event["session_id"] is None and event["event_type"].startswith("KRONOS_")
+        ][:30]
+        return result
+
+    def kronos_install(self) -> dict:
+        result = self.kronos_setup.start_install()
+        self.kronos_status = self.kronos.status()
+        return result
+
+    def kronos_self_test(self) -> dict:
+        result = self.kronos_setup.start_self_test()
+        self.kronos_status = self.kronos.status()
+        return result
+
+    def kronos_cancel(self) -> dict:
+        result = self.kronos_setup.cancel()
+        self.kronos_status = self.kronos.status()
+        return result
 
     def now(self) -> datetime:
         value = self.clock()
@@ -1167,7 +1200,7 @@ class AutonomyService:
             return cached
         evidence = [item for item in self.evidence.for_instrument(key)
                     if item.kronos_required and item.kronos_artifact_digest == self.kronos.artifact_digest]
-        if self.kronos_status.get("status") != "VERIFIED":
+        if not self.kronos_status.get("available_for_inference"):
             return None
         try:
             forecast = self.kronos.forecast(
@@ -1175,6 +1208,7 @@ class AutonomyService:
                 validated=bool(evidence), validation_id=evidence[0].evidence_id if evidence else "",
             )
             runtime.forecasts[key] = forecast
+            self.kronos_status = self.kronos.status()
             return forecast
         except Exception as exc:
             self.kronos_status = self.kronos.status()
@@ -1580,6 +1614,7 @@ class AutonomyService:
                 "credentials_stored": False, "permits_persisted": False}
 
     def close(self) -> None:
+        self.kronos_setup.close()
         with self._lock:
             for runtime in self.runtimes.values():
                 runtime.stop_requested.set()

@@ -187,10 +187,18 @@ class HoldoutLocked(RuntimeError):
     pass
 
 
-def _forecast_metrics(records: list[dict], errors: int = 0) -> dict:
+def _forecast_metrics(records: list[dict], errors: int = 0, *,
+                      unavailable: int = 0, unresolved: int = 0) -> dict:
+    attempts = len(records) + errors + unavailable + unresolved
     if not records:
-        return {"status": "NO_REAL_FORECAST", "count": 0, "errors": errors, "calibration": []}
-    errors = [record["actual"] - record["predicted"] for record in records]
+        status = "NO_REAL_FORECAST" if not attempts else (
+            "PENDING" if unresolved and not errors and not unavailable else "UNAVAILABLE"
+        )
+        return {"status": status, "count": 0, "errors": errors,
+                "unavailable": unavailable, "unresolved": unresolved,
+                "attempts": attempts, "calibration": [],
+                "sample_limits": "No resolved forecast-horizon sample; accuracy and profitability impact are unmeasured."}
+    residuals = [record["actual"] - record["predicted"] for record in records]
     directions = [record["direction_correct"] for record in records]
     brier = [(record["up_probability"] - record["actual_up"]) ** 2 for record in records]
     coverage = [record["q10"] <= record["actual"] <= record["q90"] for record in records]
@@ -205,11 +213,13 @@ def _forecast_metrics(records: list[dict], errors: int = 0) -> dict:
                          "observed_frequency": statistics.mean(r["actual_up"] for r in selected)})
     return {
         "status": "EVALUATED", "count": len(records), "errors": errors,
-        "mae": statistics.mean(abs(error) for error in errors),
-        "rmse": math.sqrt(statistics.mean(error * error for error in errors)),
+        "unavailable": unavailable, "unresolved": unresolved, "attempts": attempts,
+        "mae": statistics.mean(abs(error) for error in residuals),
+        "rmse": math.sqrt(statistics.mean(error * error for error in residuals)),
         "direction_accuracy": statistics.mean(directions),
         "brier_score": statistics.mean(brier), "interval_coverage": statistics.mean(coverage),
         "calibration": bins,
+        "sample_limits": "Only resolved horizons contribute to accuracy; failed, unavailable and unresolved attempts are excluded and counted separately.",
     }
 
 
@@ -217,6 +227,8 @@ def _aggregate(results: list[dict]) -> dict:
     trades = [trade for result in results for trade in result["trade_log"]]
     forecasts = [record for result in results for record in result["forecast_records"]]
     forecast_errors = sum(result.get("forecast_errors", 0) for result in results)
+    forecast_unavailable = sum(result.get("forecast_unavailable", 0) for result in results)
+    forecast_unresolved = sum(result.get("forecast_unresolved", 0) for result in results)
     net = sum(result["net_total"] for result in results)
     drawdown = max((result["max_drawdown"] for result in results), default=0.0)
     regimes = {}
@@ -233,7 +245,10 @@ def _aggregate(results: list[dict]) -> dict:
         "win_rate": statistics.mean([trade["net"] > 0 for trade in trades]) if trades else 0.0,
         "instrument_regime": {key: {"trades": len(values), "net_expectancy": statistics.mean(values),
                                     "net_total": sum(values)} for key, values in regimes.items()},
-        "forecast": _forecast_metrics(forecasts, forecast_errors),
+        "forecast": _forecast_metrics(
+            forecasts, forecast_errors, unavailable=forecast_unavailable,
+            unresolved=forecast_unresolved,
+        ),
         "trade_log": trades, "forecast_records": forecasts,
     }
 
@@ -255,6 +270,7 @@ def _run_segment(dataset: ResearchDataset, config: ResearchConfig, family: str, 
                       datetime.now(timezone.utc))
     forecast_records: list[dict] = []
     forecast_errors = 0
+    forecast_unavailable = 0
     pending: list[tuple[int, Forecast]] = []
     equity_curve = [config.starting_equity]
     last_day = None
@@ -278,6 +294,8 @@ def _run_segment(dataset: ResearchDataset, config: ResearchConfig, family: str, 
                         raise ValueError("Forecast input includes a different/future bar")
                     forecast.validate(bar.close)
                     pending.append((index, forecast))
+                else:
+                    forecast_unavailable += 1
             except Exception:
                 # Missing/failed real inference is an explicit no-forecast
                 # outcome, never a synthetic replacement.
@@ -360,7 +378,8 @@ def _run_segment(dataset: ResearchDataset, config: ResearchConfig, family: str, 
     return {
         "orders": len(paper.gtt), "rejections": paper.rejections,
         "trade_log": paper.trade_log, "forecast_records": forecast_records,
-        "forecast_errors": forecast_errors,
+        "forecast_errors": forecast_errors, "forecast_unavailable": forecast_unavailable,
+        "forecast_unresolved": len(pending),
         "net_total": paper.account().equity - config.starting_equity,
         "max_drawdown": max_drawdown, "equity_curve": equity_curve,
     }
@@ -375,7 +394,7 @@ class KronosForecastProvider:
 
     def __call__(self, *, instrument_key: str, bars: list[Candle], horizon: int,
                  holdout: bool) -> Forecast | None:
-        if self.service.status().get("status") != "VERIFIED":
+        if not self.service.status().get("available_for_inference"):
             return None
         return self.service.forecast(
             instrument_key, bars, timeframe=self.timeframe, horizon=horizon,
@@ -426,15 +445,32 @@ class ResearchRunner:
         for side in ("BUY", "SELL"):
             kronos = results[f"KRONOS_INFORMED:{side}"]["evidence_metrics"]
             baseline = results[f"TREND_MOMENTUM:{side}"]["evidence_metrics"]
+            forecast_metrics = kronos["forecast"]
+            has_resolved_sample = forecast_metrics["count"] > 0
+            if not has_resolved_sample:
+                assessment = "UNMEASURED_NO_RESOLVED_REAL_FORECAST"
+            elif dataset.synthetic:
+                assessment = "SYNTHETIC_ONLY_NOT_PROFITABILITY_EVIDENCE"
+            elif forecast_metrics["attempts"] != forecast_metrics["count"]:
+                assessment = "LIMITED_BY_FORECAST_SAMPLE_GAPS"
+            else:
+                assessment = "EVALUATED_RESEARCH_ONLY_NOT_FUTURE_GUARANTEE"
             incremental[side] = {
                 "design": "paired_forecast_filter_ablation",
+                "status": assessment,
                 "baseline": "TREND_MOMENTUM: identical underlying setup without Kronos filter",
                 "same_underlying_setup": True,
                 "paired_order_identity": True,
                 "filter": "Kronos expected direction and directional probability >= 0.55",
-                "delta_risk_adjusted_score": kronos["risk_adjusted_score"] - baseline["risk_adjusted_score"],
-                "delta_net_expectancy": kronos["net_expectancy"] - baseline["net_expectancy"],
-                "kronos_forecast": kronos["forecast"],
+                "delta_risk_adjusted_score": (
+                    kronos["risk_adjusted_score"] - baseline["risk_adjusted_score"]
+                    if has_resolved_sample else None
+                ),
+                "delta_net_expectancy": (
+                    kronos["net_expectancy"] - baseline["net_expectancy"]
+                    if has_resolved_sample else None
+                ),
+                "kronos_forecast": forecast_metrics,
             }
         report = {
             "schema": "axiom.autonomy.research.v1", "generated_at": datetime.now(timezone.utc).isoformat(),

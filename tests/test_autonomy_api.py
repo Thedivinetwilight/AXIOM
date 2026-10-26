@@ -37,6 +37,38 @@ def test_autonomy_page_status_and_manual_are_local_and_credentialed(tmp_path):
         assert "localhost" not in script.text and "127.0.0.1" not in script.text
 
 
+def test_kronos_setup_routes_are_authenticated_fixed_actions(tmp_path, monkeypatch):
+    with client(tmp_path) as web:
+        assert web.get("/api/autonomy/kronos").status_code == 401
+        headers = {"Authorization": "Bearer local-api-test"}
+        response = web.get("/api/autonomy/kronos", headers=headers)
+        assert response.status_code == 200, response.text
+        view = response.json()
+        assert view["install_plan"]["model"]["repository"] == "NeoQuasar/Kronos-small"
+        assert view["install_plan"]["manifest_file_sha256"] == (
+            "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa"
+        )
+        assert view["install_plan"]["runtime"]["packages"][0]["name"] == "torch"
+        assert view["install_plan"]["runtime"]["cuda_stack"] is False
+        assert view["execution_effect"].startswith("NONE")
+        assert str(tmp_path) not in response.text  # no per-user paths or Python command leak
+        service = web.app.state.autonomy
+        calls = []
+        monkeypatch.setattr(service, "kronos_install", lambda: calls.append("install") or {"fixed": True})
+        monkeypatch.setattr(service, "kronos_self_test", lambda: calls.append("self-test") or {"fixed": True})
+        monkeypatch.setattr(service, "kronos_cancel", lambda: calls.append("cancel") or {"fixed": True})
+        for action in ("install", "self-test"):
+            result = web.post(f"/api/autonomy/kronos/{action}", headers=headers, json={
+                "url": "https://evil.example/weights", "revision": "latest",
+                "package": "torch", "credentials": "must-not-be-echoed",
+            })
+            expected = 202
+            assert result.status_code == expected and result.json() == {"fixed": True}
+            assert "evil.example" not in result.text and "must-not-be-echoed" not in result.text
+        assert web.post("/api/autonomy/kronos/cancel", headers=headers).json() == {"fixed": True}
+        assert calls == ["install", "self-test", "cancel"]
+
+
 def test_credential_fields_are_rejected_and_never_echoed(tmp_path):
     with client(tmp_path) as web:
         headers = {"Authorization": "Bearer local-api-test"}

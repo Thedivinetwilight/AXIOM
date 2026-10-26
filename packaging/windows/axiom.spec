@@ -43,7 +43,15 @@ datas = [
 ] + demo_datas + [
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
     (str(ROOT / "app" / "autonomy" / "vendor" / "kronos"), "app/autonomy/vendor/kronos"),
+    # The optional system-Python worker reads these small modules as files.
+    # Torch/Pandas and all weights remain outside the frozen package.
+    (str(ROOT / "app" / "__init__.py"), "app"),
+    (str(ROOT / "app" / "autonomy" / "__init__.py"), "app/autonomy"),
+    (str(ROOT / "app" / "autonomy" / "kronos_artifacts.py"), "app/autonomy"),
+    (str(ROOT / "app" / "autonomy" / "kronos_runtime.py"), "app/autonomy"),
+    (str(ROOT / "app" / "autonomy" / "kronos_worker.py"), "app/autonomy"),
     (str(ROOT / "config" / "kronos-small.json"), "config"),
+    (str(ROOT / "config" / "kronos-runtime-requirements.txt"), "config"),
     # PyInstaller data destinations are directories, not target filenames.
     # /manual reads USER_MANUAL.md at the frozen resource root.
     (str(ROOT / "USER_MANUAL.md"), "."),
@@ -54,6 +62,7 @@ datas = [
     (str(ROOT / "docs" / "RESEARCH_CANDIDATES.md"), "docs"),
     (str(ROOT / "docs" / "WINDOWS_APP_CONTROL.md"), "docs"),
     (str(ROOT / "docs" / "AUTONOMY.md"), "docs"),
+    (str(ROOT / "docs" / "ARCHITECTURE_AUDIT.md"), "docs"),
     (str(ROOT / "docs" / "autonomy-shakedown.template.json"), "docs"),
 ]
 

@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import authenticate, loopback_or_bearer
+from app.autonomy.kronos_artifacts import ArtifactError
 from app.autonomy.service import NotReady, SessionError
 from app.autonomy.upstox import ReconciliationFailure, UpstoxAuthError, UpstoxError
 
@@ -63,6 +64,8 @@ def call(request: Request, operation):
         raise HTTPException(502, str(exc)) from None
     except PermissionError as exc:
         raise HTTPException(409, str(exc)) from None
+    except ArtifactError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @api.get("/status")
@@ -70,7 +73,7 @@ def status(request: Request):
     value = service(request)
     return {
         "sessions": value.sessions(),
-        "kronos": value.kronos_status,
+        "kronos": value.kronos_view(),
         "catalog": {
             "refreshed_at": value.catalog.refreshed_at.isoformat() if value.catalog.refreshed_at else None,
             "source_sha256": value.catalog.source_sha256,
@@ -81,6 +84,29 @@ def status(request: Request):
         "automatic_arm_or_activate": False,
         "profitability_claim": "none",
     }
+
+
+@api.get("/kronos")
+def kronos_status(request: Request):
+    # Read-only setup/artifact/runtime view; no account or execution state.
+    return service(request).kronos_view()
+
+
+@api.post("/kronos/install", status_code=202)
+def kronos_install(request: Request):
+    # The request has no URL, repository, revision, package or credential body.
+    return call(request, lambda value: value.kronos_install())
+
+
+@api.post("/kronos/self-test", status_code=202)
+def kronos_self_test(request: Request):
+    # Offline verification and real inference only; no synthetic forecast fallback.
+    return call(request, lambda value: value.kronos_self_test())
+
+
+@api.post("/kronos/cancel")
+def kronos_cancel(request: Request):
+    return call(request, lambda value: value.kronos_cancel())
 
 
 @api.get("/catalog")

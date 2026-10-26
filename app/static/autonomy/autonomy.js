@@ -1,5 +1,5 @@
 'use strict';
-const $=id=>document.getElementById(id);let session=null;let catalog=[];let chart=null;let series=null;
+const $=id=>document.getElementById(id);let session=null;let catalog=[];let chart=null;let series=null;let kronosData=null;
 const token=()=>sessionStorage.getItem('arena_token')||'';
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function note(message,error=false){$('notice').textContent=message;$('notice').className=error?'notice error':'notice';}
@@ -78,6 +78,37 @@ function render(){
 }
 async function loadAudit(){if(!session)return;try{const data=await api('/sessions/'+session.session_id+'/audit?limit=100');$('chain').textContent=data.hash_chain_valid?'hash chain valid':'HASH CHAIN INVALID';$('audit').innerHTML=data.events.map(e=>`<tr><td>${esc(e.event_type)}</td><td>${esc(e.ts)}</td><td><code>${esc(JSON.stringify(e.payload))}</code></td></tr>`).join('');}catch(error){note(error.message,true);}}
 async function loadBars(){if(!session||!$('chartInstrument').value)return;try{const key=$('chartInstrument').value;const data=await api('/sessions/'+session.session_id+'/bars/'+encodeURIComponent(key));if(!chart){chart=LightweightCharts.createChart($('chart'),{layout:{background:{color:'#101c29'},textColor:'#edf4fb'},grid:{vertLines:{color:'#294055'},horzLines:{color:'#294055'}},timeScale:{timeVisible:true,secondsVisible:false}});series=chart.addSeries(LightweightCharts.CandlestickSeries,{upColor:'#66d9c2',downColor:'#ff8d8d',wickUpColor:'#66d9c2',wickDownColor:'#ff8d8d'});}series.setData(data.bars.map(b=>({time:Math.floor(new Date(b.timestamp).getTime()/1000),open:b.open,high:b.high,low:b.low,close:b.close})));chart.timeScale().fitContent();}catch(error){note(error.message,true);}}
+function bytes(value){const n=Number(value||0);if(n>=1073741824)return (n/1073741824).toFixed(2)+' GiB';if(n>=1048576)return (n/1048576).toFixed(2)+' MiB';return Math.round(n/1024)+' KiB';}
+function renderKronos(){
+  if(!kronosData)return;
+  const d=kronosData,plan=d.install_plan||{},op=d.operation||{};
+  const available=d.available_for_inference===true;
+  $('kronosSetupPill').textContent=available?'READY · REAL INFERENCE AVAILABLE':(d.status||'UNAVAILABLE');
+  $('kronosSetupPill').className='pill '+(available?'good':op.state==='ERROR'?'bad':'warn');
+  const component=name=>{
+    const item=plan[name]||{};
+    return `<h3>${esc(name)} · ${esc(item.repository||'')} @ <code>${esc(item.revision||'')}</code></h3><p><small>Expected ${bytes(item.expected_bytes)} · pinned HTTPS revision</small></p>`+(item.files||[]).map(file=>`<p><code>${esc(file.name)}</code><br><small>${bytes(file.size)} · SHA-256 ${esc(file.sha256)}<br>${esc(file.url)}</small></p>`).join('');
+  };
+  const runtime=plan.runtime||{};
+  $('kronosInstallPlan').innerHTML=`<p><small>Source ${esc(plan.source?.repository||'')} @ <code>${esc(plan.source?.commit||'')}</code><br>Total model + tokenizer ${bytes(plan.expected_total_bytes)} · ${esc(plan.atomic_install||'')}<br>Manifest file SHA-256 <code>${esc(plan.manifest_file_sha256||'')}</code><br>${esc(plan.location||'')}</small></p>${component('model')}${component('tokenizer')}<h3>Locked CPU runtime</h3><p><small>${esc(runtime.python||'')} · ${(runtime.packages||[]).length} exact packages · no CUDA stack<br>Runtime lock <code>${esc(runtime.lock_sha256||'')}</code><br>Minimum free space ${bytes(runtime.minimum_free_bytes)} · ${esc((runtime.indexes||[]).join(' · '))}</small></p>${d.install_plan_error?`<p class="error">${esc(d.install_plan_error)}</p>`:''}`;
+  const pct=op.total_bytes?Math.min(100,Math.round(100*Number(op.bytes||0)/Number(op.total_bytes))):0;
+  $('kronosOperation').textContent=op.kind?`${op.kind} · ${op.state} · ${op.phase||''}${op.total_bytes?` · ${pct}% (${bytes(op.bytes)} / ${bytes(op.total_bytes)})`:''}${op.component?` · ${op.component}/${op.file||''}`:''}${op.error?` · ${op.error.message}`:''}`:'No setup operation running. Review the pinned sources, revisions, sizes and hashes above before installing.';
+  const rt=d.runtime||{},last=d.last_self_test;
+  const present=name=>{const files=Object.values(d[name]?.files||{});return files.length>0&&files.every(file=>file.present);};
+  const fileDetails=name=>Object.entries(d[name]?.files||{}).map(([file,view])=>esc(`${name}/${file}: ${view.present?'present':'missing'}, ${view.verified?'SHA-256 verified':view.issue||'unverified'}`)).join('<br>');
+  $('kronosSetupStatus').innerHTML=`<p><small>Source: ${present('source')?'present':'incomplete'} / ${esc(d.source?.status||'NOT_CHECKED')} · Model: ${present('model')?'present':'incomplete'} / ${esc(d.model?.status||'NOT_CHECKED')} · Tokenizer: ${present('tokenizer')?'present':'incomplete'} / ${esc(d.tokenizer?.status||'NOT_CHECKED')}<br>Runtime: ${rt.installed?'installed':'not installed'} / ${esc(rt.status||d.inference_runtime||'NOT_CHECKED')}<br>${fileDetails('model')}<br>${fileDetails('tokenizer')}<br>Loaded now: ${d.loaded?'YES · offline worker active':'no persistent model in the server'} · Real forecast: ${d.last_inference?.status||'not yet produced'}<br>${esc((d.issues||[]).join(' · ')||'No current setup issue.')}</small></p>${last?`<p><small>Last self-test ${esc(last.status)} · ${esc(last.input_label)}<br>Device ${esc(last.device)} · load ${esc(Math.round(Number(last.load_ms||0)))} ms · inference ${esc(Math.round(Number(last.inference_ms||0)))} ms<br>Artifact ${esc(last.manifest_sha256)}<br>Runtime ${esc(last.runtime_lock_sha256)}</small></p>`:'<p><small>No successful real-inference self-test is recorded for this exact artifact/runtime identity.</small></p>'}`;
+  $('installKronos').disabled=op.active===true;
+  $('installKronos').textContent=op.state==='ERROR'?'Retry pinned Kronos setup':'Download & install pinned Kronos';
+  $('cancelKronos').disabled=op.active!==true;
+  $('testKronos').disabled=op.active===true||!available;
+}
+async function loadKronos(){if(!token())return;try{kronosData=await api('/kronos');renderKronos();}catch(error){note(error.message,true);}}
+async function kronosAction(name,confirmText){
+  try{await ensureToken();if(!kronosData){await loadKronos();if(!kronosData)throw new Error('Kronos install plan is unavailable');}if(confirmText===true){const p=kronosData.install_plan||{};if(!window.confirm(`Download only the displayed pinned model/tokenizer (${bytes(p.expected_total_bytes)}) and locked CPU runtime? No weights or runtime go into the application directory. No GPU/CUDA stack or trading action is included.`))return;}kronosData=await api('/kronos/'+name,{method:'POST'});renderKronos();note(name==='cancel'?'Cancellation requested; partial setup files are removed.':'Kronos '+name+' started. No trading session or execution state changed.');}catch(error){note(error.message,true);}
+}
+$('installKronos').onclick=()=>kronosAction('install',true);
+$('testKronos').onclick=()=>kronosAction('self-test','');
+$('cancelKronos').onclick=()=>kronosAction('cancel','');
 $('searchCatalog').onclick=searchCatalog;
 $('refreshCatalog').onclick=async()=>{try{await ensureToken();await api('/catalog/refresh',{method:'POST'});note('BOD metadata refreshed. No session or execution state changed.');searchCatalog();}catch(error){note(error.message,true);}};
 $('loadSession').onclick=()=>loadSessions(true);
@@ -93,5 +124,6 @@ $('reconcile').onclick=()=>action('reconcile');
 $('cancelUnfilled').onclick=()=>{const key=$('chartInstrument').value;if(key&&window.confirm('Cancel only the selected unfilled entry after fresh reconciliation? Open-position protection will not be cancelled.'))action('cancel-unfilled',{instrument_key:key});};
 $('loadAudit').onclick=loadAudit;
 $('chartInstrument').onchange=loadBars;
-if(token())loadSessions();
+if(token()){loadSessions();loadKronos();}
+setInterval(loadKronos,3000);
 setInterval(async()=>{if(session){await reload();await loadBars();}},7000);

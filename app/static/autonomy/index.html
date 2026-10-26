@@ -13,6 +13,14 @@
 <div id="modeBanner" class="banner">No autonomy session selected. Startup is disconnected and disarmed.</div>
 <div id="notice" class="notice" role="status" aria-live="polite"></div>
 <section class="panel"><div class="row"><div style="flex:1;min-width:280px"><label for="existingSessions">Loaded / recovered sessions (read-only until fresh setup)</label><select id="existingSessions"><option value="">Select a session</option></select></div><button id="loadSession">Load read-only / revoke approval</button></div></section>
+<section class="panel" id="kronosSetupPanel">
+<div class="row spread"><h2>Optional Kronos setup & offline verification</h2><span id="kronosSetupPill" class="pill">NOT CHECKED</span></div>
+<p class="muted">Kronos is optional. Setup changes no trading session or execution state. Downloads use only the pinned official artifacts and exact CPU runtime lock; weights/runtime stay in the per-user AXIOM data directory. No mock forecast is produced on failure.</p>
+<div id="kronosInstallPlan" class="scroll"></div>
+<div class="row"><button id="installKronos" class="primary">Download & install pinned Kronos</button><button id="testKronos">Offline verify + real inference self-test</button><button id="cancelKronos" class="warn">Cancel setup</button></div>
+<div id="kronosOperation" class="notice" role="status" aria-live="polite"></div>
+<div id="kronosSetupStatus"></div>
+</section>
 <div class="grid">
 <section class="panel"><h2>1 · Exact instruments & mode</h2>
 <p class="muted">Only exact BOD instrument keys are accepted. Currency rows are exchange-listed futures/options, <b>not spot forex</b>. A quote or chart never changes execution mode.</p>

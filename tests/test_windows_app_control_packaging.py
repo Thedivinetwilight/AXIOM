@@ -29,15 +29,15 @@ def payload_guard():
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.7.0a3"
+    assert version == "3.7.0a4"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f'version = "{version}"' in read(ROOT / "pyproject.toml")
     assert f"**Current source version: `{version}`.**" in read(ROOT / "README.md")
     assert f"**Current source version: {version}**" in read(ROOT / "USER_MANUAL.md")
     version_info = read(KIT / "version_info.txt")
-    assert "filevers=(3, 7, 0, 3)" in version_info
-    assert "prodvers=(3, 7, 0, 3)" in version_info
-    assert "StringStruct('FileVersion', '3.7.0.3')" in version_info
+    assert "filevers=(3, 7, 0, 4)" in version_info
+    assert "prodvers=(3, 7, 0, 4)" in version_info
+    assert "StringStruct('FileVersion', '3.7.0.4')" in version_info
     assert f"StringStruct('ProductVersion', '{version}')" in version_info
     manual = read(KIT / "WINDOWS_INSTALL_MANUAL.md")
     assert f"**Version:** {version}" in manual
@@ -46,8 +46,8 @@ def test_version_is_consistent_across_frozen_and_operator_metadata():
     assert f"AXIOM-Operator-{version}-windows-x64-portable.zip" in manual
 
 
-def test_release_workflow_derives_the_a3_prerelease_tag_from_version_metadata():
-    assert read(KIT / "VERSION").strip() == "3.7.0a3"
+def test_release_workflow_derives_the_a4_prerelease_tag_from_version_metadata():
+    assert read(KIT / "VERSION").strip() == "3.7.0a4"
     workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
     assert "Get-Content _kit/packaging/windows/VERSION" in workflow
     assert '$tag = "v$($env:VERSION)"' in workflow
@@ -79,6 +79,29 @@ def test_spec_retains_legacy_onefile_and_has_explicit_onedir_branch():
     # The default EXE still contains binaries directly for upgrade compatibility.
     default = spec.rsplit("else:", 1)[-1]
     assert "a.binaries" in default and "runtime_tmpdir=None" in default
+
+
+def test_kronos_frozen_resources_and_installed_inference_release_gate():
+    spec = read(KIT / "axiom.spec")
+    for resource in (
+        'kronos_artifacts.py', 'kronos_runtime.py', 'kronos_worker.py',
+        'kronos-small.json', 'kronos-runtime-requirements.txt',
+    ):
+        assert resource in spec
+    installer = read(KIT / "install_test.ps1")
+    assert "/api/autonomy/kronos/install" in installer
+    assert "kronos-status.json" in installer
+    assert "SYNTHETIC_INFERENCE_SMOKE_ONLY" in installer
+    assert "installedWeights.Count -eq 0" in installer
+    workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
+    assert "kronos_real_inference" in workflow and "kronos_evidence" in workflow
+    for asset in (
+        "kronos-status.json", "kronos-small.json", "kronos-runtime-requirements.txt",
+        "ARCHITECTURE_AUDIT.md",
+    ):
+        assert asset in workflow
+    build = read(KIT / "build_windows.ps1")
+    assert "tests/test_kronos_setup.py" in build
 
 
 def test_build_packages_sidecars_and_both_zip_alternatives():

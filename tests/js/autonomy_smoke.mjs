@@ -34,12 +34,33 @@ let session = {
   operator_note: "PAPER is local simulation",
 };
 let availableSessions = [];
+const confirmations = [];
+const manifestFile = "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa";
+const installPlan = {
+  manifest_sha256: "a".repeat(64), manifest_file_sha256: manifestFile,
+  expected_total_bytes: 114823553, atomic_install: "verified generation then pointer",
+  location: "per-user data only",
+  source: { repository: "https://github.com/shiyu-coder/Kronos", commit: "67b630e67f6a18c9e9be918d9b4337c960db1e9a" },
+  model: { repository: "NeoQuasar/Kronos-small", revision: "901c26c1332695a2a8f243eb2f37243a37bea320", expected_bytes: 98980884,
+    files: [{ name: "model.safetensors", size: 98980656, sha256: "b082dfcbd8e8c142a725c8bbb99781802f38fec81210e13479effb32b3c3e020", url: "https://huggingface.co/pinned-model" }] },
+  tokenizer: { repository: "NeoQuasar/Kronos-Tokenizer-base", revision: "0e0117387f39004a9016484a186a908917e22426", expected_bytes: 15842669,
+    files: [{ name: "model.safetensors", size: 15842368, sha256: "59d85f6af76a2c3b8240ea06cb21db4213b4eeca053f246b23e29cf832fc6bee", url: "https://huggingface.co/pinned-tokenizer" }] },
+  runtime: { python: "CPython 3.11/3.12", lock_sha256: "f".repeat(64), packages: [{ name: "torch", version: "2.7.1+cpu" }], minimum_free_bytes: 4294967296, indexes: ["https://pypi.org/simple"] },
+};
+let kronos = {
+  status: "UNAVAILABLE", available_for_inference: false, issues: ["pinned files missing"],
+  source: { status: "VERIFIED", files: { "model/kronos.py": { present: true, verified: true } } },
+  model: { status: "UNAVAILABLE", files: { "model.safetensors": { present: false, verified: false, issue: "MISSING" } } },
+  tokenizer: { status: "UNAVAILABLE", files: { "model.safetensors": { present: false, verified: false, issue: "MISSING" } } },
+  runtime: { status: "UNAVAILABLE", installed: false }, operation: { state: "IDLE", active: false },
+  install_plan: installPlan, weights_bundled: false, mock_outputs_used: false,
+};
 function response(body, ok = true, status = 200) {
   return Promise.resolve({ ok, status, json: async () => body });
 }
 window.sessionStorage.setItem("arena_token", "local-ui-test-only");
 window.prompt = () => null;
-window.confirm = () => true;
+window.confirm = message => { confirmations.push(String(message)); return true; };
 window.LightweightCharts = {
   CandlestickSeries: {},
   createChart: () => ({
@@ -50,6 +71,24 @@ window.LightweightCharts = {
 window.fetch = (url, options = {}) => {
   const path = String(url);
   calls.push({ path, options });
+  if (path === "/api/autonomy/kronos" && !options.method) return response(kronos);
+  if (path === "/api/autonomy/kronos/install" && options.method === "POST") {
+    kronos = {
+      ...kronos, status: "READY", available_for_inference: true, issues: [],
+      model: { status: "VERIFIED", files: { "model.safetensors": { present: true, verified: true } } },
+      tokenizer: { status: "VERIFIED", files: { "model.safetensors": { present: true, verified: true } } },
+      runtime: { status: "READY", installed: true, device: "cpu", cuda_available: false },
+      operation: { kind: "INSTALL_PINNED", state: "COMPLETED", active: false, phase: "COMPLETED" },
+      last_inference: { status: "REAL_FORECAST" },
+      last_self_test: { status: "PASSED", input_label: "SYNTHETIC_INFERENCE_SMOKE_ONLY_NOT_MARKET_EVALUATION", device: "cpu", load_ms: 2, inference_ms: 3, manifest_sha256: "a".repeat(64), runtime_lock_sha256: "f".repeat(64) },
+    };
+    return response(kronos, true, 202);
+  }
+  if (path === "/api/autonomy/kronos/self-test" && options.method === "POST") {
+    kronos = { ...kronos, operation: { kind: "OFFLINE_SELF_TEST", state: "COMPLETED", active: false, phase: "COMPLETED" } };
+    return response(kronos, true, 202);
+  }
+  if (path === "/api/autonomy/kronos/cancel" && options.method === "POST") return response(kronos);
   if (path.startsWith("/api/autonomy/catalog?")) {
     return response({ total: 1, refreshed_at: "2026-10-25T00:00:00+00:00", scope: "test exact scope", instruments: [instrument], warnings: [] });
   }
@@ -130,6 +169,17 @@ await click("emergency");
 assert.match(window.document.getElementById("emergencyStatus").textContent, /UNRESOLVED/);
 assert.match(window.document.getElementById("emergencyStatus").textContent, /Account clear is NOT claimed/);
 assert.match(window.document.getElementById("intents").textContent, /UNRESOLVED/);
+
+assert.match(window.document.getElementById("kronosInstallPlan").textContent, new RegExp(manifestFile));
+await click("installKronos");
+assert(confirmations.some(text => text.includes("pinned model/tokenizer") && text.includes("No GPU/CUDA stack")));
+assert(calls.some(call => call.path === "/api/autonomy/kronos/install" && call.options.method === "POST" && !call.options.body));
+assert.match(window.document.getElementById("kronosSetupStatus").textContent, /model.safetensors: present, SHA-256 verified/);
+assert.match(window.document.getElementById("kronosSetupStatus").textContent, /REAL_FORECAST/);
+assert.equal(window.document.getElementById("testKronos").disabled, false);
+await click("testKronos");
+assert(calls.some(call => call.path === "/api/autonomy/kronos/self-test" && call.options.method === "POST" && !call.options.body));
+assert.match(window.document.getElementById("kronosOperation").textContent, /OFFLINE_SELF_TEST · COMPLETED/);
 
 const create = calls.find(call => call.path === "/api/autonomy/sessions");
 assert.deepEqual(JSON.parse(create.options.body).instrument_keys, [key]);

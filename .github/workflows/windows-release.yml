@@ -170,6 +170,22 @@ jobs:
           $meta.test_results | Add-Member -NotePropertyName portable_checks_passed -NotePropertyValue $portablePassed -Force
           $meta.test_results | Add-Member -NotePropertyName portable_checks_failed -NotePropertyValue $portableFailed -Force
           $meta.test_results | Add-Member -NotePropertyName app_control_device_verification -NotePropertyValue 'NOT TESTED on the reporting owner device; CI validates packaging and runtime only, with no policy change' -Force
+          $kronos = Get-Content dist\kronos-status.json -Raw | ConvertFrom-Json
+          if ($kronos.operation.state -ne 'COMPLETED' -or -not $kronos.available_for_inference -or $kronos.last_self_test.status -ne 'PASSED') { throw 'real installed-app Kronos evidence is incomplete' }
+          if ($kronos.last_self_test.mock_outputs_used -or $kronos.runtime.cuda_available -or $null -ne $kronos.runtime.torch_cuda_build) { throw 'Kronos CPU/no-mock evidence failed' }
+          $meta.test_results | Add-Member -NotePropertyName kronos_real_inference -NotePropertyValue 'PASSED in the installed Windows app with manifest-pinned artifacts and exact CPU runtime; synthetic inference smoke only, not market/profitability evidence' -Force
+          $meta | Add-Member -NotePropertyName kronos_evidence -NotePropertyValue ([pscustomobject]@{
+            manifest_sha256 = $kronos.last_self_test.manifest_sha256
+            manifest_file_sha256 = $kronos.last_self_test.manifest_file_sha256
+            runtime_lock_sha256 = $kronos.last_self_test.runtime_lock_sha256
+            model_revision = $kronos.last_self_test.model_revision
+            tokenizer_revision = $kronos.last_self_test.tokenizer_revision
+            device = $kronos.last_self_test.device
+            load_ms = $kronos.last_self_test.load_ms
+            inference_ms = $kronos.last_self_test.inference_ms
+            mock_outputs_used = $kronos.last_self_test.mock_outputs_used
+            market_evaluation = $false
+          }) -Force
           $meta | ConvertTo-Json -Depth 10 | Set-Content $metaPath -Encoding utf8
           $files = @(
             'dist\AXIOM-Chart.exe',
@@ -177,6 +193,8 @@ jobs:
             (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName,
             'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
             'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
+            'dist\kronos-status.json',
+            '..\..\config\kronos-small.json', '..\..\config\kronos-runtime-requirements.txt',
             'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log',
             'benchmark-python.log', 'js-terminal-benchmark.log',
             'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
@@ -184,7 +202,8 @@ jobs:
             '..\..\docs\LISTED_ASSETS.md', '..\..\docs\RESEARCH_CANDIDATES.md',
             '..\..\docs\TERMINAL_PERFORMANCE.md',
             '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md',
-            '..\..\docs\AUTONOMY.md', '..\..\docs\autonomy-shakedown.template.json'
+            '..\..\docs\AUTONOMY.md', '..\..\docs\ARCHITECTURE_AUDIT.md',
+            '..\..\docs\autonomy-shakedown.template.json'
           )
           $sums = @()
           foreach ($file in $files) {
@@ -227,6 +246,7 @@ jobs:
             'src/packaging/windows/dist/install-test-log.txt',
             'src/packaging/windows/dist/installer-test-log.txt',
             'src/packaging/windows/dist/portable-test-log.txt',
+            'src/packaging/windows/dist/kronos-status.json',
             'src/packaging/windows/dist/INSTALL_TEST_ERROR.txt',
             'src/packaging/windows/dist/PORTABLE_TEST_ERROR.txt'
           )
@@ -262,6 +282,9 @@ jobs:
             src/packaging/windows/dist/install-test-log.txt
             src/packaging/windows/dist/installer-test-log.txt
             src/packaging/windows/dist/portable-test-log.txt
+            src/packaging/windows/dist/kronos-status.json
+            src/config/kronos-small.json
+            src/config/kronos-runtime-requirements.txt
             src/packaging/windows/dist/INSTALL_TEST_ERROR.txt
             src/packaging/windows/dist/PORTABLE_TEST_ERROR.txt
             src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
@@ -281,6 +304,7 @@ jobs:
             src/docs/TERMINAL_REDESIGN_PLAN.md
             src/docs/WINDOWS_APP_CONTROL.md
             src/docs/AUTONOMY.md
+            src/docs/ARCHITECTURE_AUDIT.md
             src/docs/autonomy-shakedown.template.json
           if-no-files-found: warn
           retention-days: 30
@@ -342,7 +366,10 @@ jobs:
           fresh daily read-only authorization/risk, account/margin/static-IP/session/evidence preflights,
           and separate operator Arm + Activate. Intent-before-write journals, three-leg GTT protection,
           non-loosening stops, reconciliation, daily-loss entry blocking, and fail-closed recovery are
-          included. Kronos weights are not bundled; hash verification and real inference are not claimed.
+          included. Kronos weights/runtime are not bundled. The installed app must download the exact
+          manifest-pinned public artifacts and locked CPU runtime into per-user storage and pass a real
+          offline inference self-test before this release can publish; see ``kronos-status.json``.
+          This synthetic-input inference smoke is not a market evaluation or profitability claim.
           Read ``docs/AUTONOMY.md``. No external Upstox DEMO/LIVE account or complete-session shakedown
           was available to CI, so account eligibility, compliance, production protection and live readiness
           remain unverified.
@@ -389,13 +416,18 @@ jobs:
             Vantage selection, upgrade user-data preservation, and uninstall. See the full logs.
           * extracted onedir portable ZIP: $portablePassed passed, $portableFailed failed, including no new
             PyInstaller ``_MEI`` TEMP directory and safe authenticated defaults
+          * Kronos pinned setup + real offline inference: ``$($meta.test_results.kronos_real_inference)``;
+            device ``$($meta.kronos_evidence.device)``, load $([math]::Round([double]$meta.kronos_evidence.load_ms, 2)) ms,
+            inference $([math]::Round([double]$meta.kronos_evidence.inference_ms, 2)) ms, mock outputs ``$($meta.kronos_evidence.mock_outputs_used)``
           * owner-device Smart App Control: ``$($meta.test_results.app_control_device_verification)``
 
           **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
           account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
           No Vantage demo execution fill, live login or real-money order/cancel/modify was attempted.
-          No Upstox account login, external sandbox/DEMO order, real-money order/cancel/modify, Kronos
-          weight download/inference, or complete market-session autonomy shakedown was attempted.
+          No Upstox account login, external sandbox/DEMO order, real-money order/cancel/modify, or
+          complete market-session autonomy shakedown was attempted. Kronos used genuine pinned-artifact
+          inference on deterministic synthetic smoke bars only; no suitable licensed chronological
+          intraday dataset or paired ON/OFF profitability result was available.
           Benchmark reports measure fake in-process provider and fake canvas paths only; no real DEMO/LIVE
           terminal, network, broker or GPU latency was measured. The owner must follow the local demo
           market-data and separate DEMO execution procedures in ``USER_MANUAL.md`` before external claims.
@@ -428,6 +460,9 @@ jobs:
             (Join-Path (Get-Location) 'dist\install-test-log.txt')
             (Join-Path (Get-Location) 'dist\installer-test-log.txt')
             (Join-Path (Get-Location) 'dist\portable-test-log.txt')
+            (Join-Path (Get-Location) 'dist\kronos-status.json')
+            (Join-Path (Get-Location) '..\..\config\kronos-small.json')
+            (Join-Path (Get-Location) '..\..\config\kronos-runtime-requirements.txt')
             (Join-Path (Get-Location) 'pytest-focused.log')
             (Join-Path (Get-Location) 'pytest-full.log')
             (Join-Path (Get-Location) 'js-autonomy.log')
@@ -445,6 +480,7 @@ jobs:
             (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
             (Join-Path (Get-Location) '..\..\docs\WINDOWS_APP_CONTROL.md')
             (Join-Path (Get-Location) '..\..\docs\AUTONOMY.md')
+            (Join-Path (Get-Location) '..\..\docs\ARCHITECTURE_AUDIT.md')
             (Join-Path (Get-Location) '..\..\docs\autonomy-shakedown.template.json')
           )
           # The manifest is uploaded too, but cannot contain its own hash.
