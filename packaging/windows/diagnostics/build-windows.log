@@ -1,7 +1,7 @@
 
 === 1. Verify the source commit ===
-commit  fbae45f7db54dab5f489910d1fa626e46b84e8f4
-subject fix: identify sanitized Kronos worker import failures
+commit  289c155e0b876a61ecbe52e5211b887a4a0c1c01
+subject fix: report sanitized Kronos runtime probe stages
 
 === 2. Build environment ===
 python 3.12.10 (AMD64)
@@ -21,13 +21,13 @@ C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testcl
     _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-292 passed, 1 warning in 77.70s (0:01:17)
+292 passed, 1 warning in 59.79s
 focused suites passed, including real DPAPI round-trips with dummy values
 
 === 3a. JavaScript operator suites (hard gate) ===
 npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
 
-added 39 packages in 4s
+added 39 packages in 5s
 PASS autonomy UI: 18 local API interactions, separate Arm/Activate, no credential/order API
 chart harness: {"fillRect":2916,"lineTo":5596,"stroke":1616,"fillText":142,"moveTo":1630}
 chart harness: OK
@@ -52,7 +52,7 @@ C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testcl
     _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-850 passed, 1 warning in 224.70s (0:03:44)
+850 passed, 1 warning in 195.03s (0:03:15)
 full suite passed (850 passed)
 
 === 3c. Exact-commit fake-provider performance benchmarks (hard gate) ===
@@ -61,43 +61,43 @@ full suite passed (850 passed)
   "http": {
     "http.chart.update": {
       "samples": 120,
-      "p50_ms": 32.903,
-      "p95_ms": 47.865,
-      "p99_ms": 62.619,
-      "max_ms": 68.491,
-      "mean_ms": 35.021
+      "p50_ms": 32.228,
+      "p95_ms": 44.055,
+      "p99_ms": 51.863,
+      "max_ms": 52.475,
+      "mean_ms": 33.001
     },
     "http.feed.quotes": {
       "samples": 120,
-      "p50_ms": 31.886,
-      "p95_ms": 45.172,
-      "p99_ms": 55.359,
-      "max_ms": 58.008,
-      "mean_ms": 31.266
+      "p50_ms": 32.082,
+      "p95_ms": 47.553,
+      "p99_ms": 50.38,
+      "max_ms": 56.065,
+      "mean_ms": 32.37
     },
     "http.order.review": {
       "samples": 12,
-      "p50_ms": 4.391,
-      "p95_ms": 4.966,
-      "p99_ms": 5.02,
-      "max_ms": 5.033,
-      "mean_ms": 4.384
+      "p50_ms": 4.226,
+      "p95_ms": 4.761,
+      "p99_ms": 4.857,
+      "max_ms": 4.881,
+      "mean_ms": 4.208
     },
     "http.order.submit": {
       "samples": 12,
-      "p50_ms": 5.788,
-      "p95_ms": 6.798,
-      "p99_ms": 6.867,
-      "max_ms": 6.884,
-      "mean_ms": 5.756
+      "p50_ms": 5.571,
+      "p95_ms": 7.541,
+      "p99_ms": 8.046,
+      "max_ms": 8.173,
+      "mean_ms": 5.907
     },
     "http.reconcile": {
       "samples": 6,
-      "p50_ms": 4.251,
-      "p95_ms": 4.394,
-      "p99_ms": 4.423,
-      "max_ms": 4.431,
-      "mean_ms": 4.258
+      "p50_ms": 4.261,
+      "p95_ms": 4.337,
+      "p99_ms": 4.349,
+      "max_ms": 4.352,
+      "mean_ms": 4.236
     }
   },
   "order_send_calls": 12
@@ -110,12 +110,12 @@ exact-commit fake-only backend and UI benchmarks passed; no real DEMO/LIVE laten
 PASS payload hygiene: source: 8 explicit DEMO source fixtures; no forbidden names or SQLite payloads
 
 === 4. Freeze with PyInstaller ===
-307 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
-307 INFO: Python: 3.12.10
-332 INFO: Platform: Windows-2025Server-10.0.26100-SP0
-332 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
-339 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
-477 INFO: Module search paths (PYTHONPATH):
+292 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
+292 INFO: Python: 3.12.10
+318 INFO: Platform: Windows-2025Server-10.0.26100-SP0
+318 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
+328 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+462 INFO: Module search paths (PYTHONPATH):
 ['D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
  'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
  'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.zip',
@@ -125,111 +125,111 @@ PASS payload hygiene: source: 8 explicit DEMO source fixtures; no forbidden name
  'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages',
  'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
  'D:\\a\\AXIOM\\AXIOM\\src']
-799 INFO: Appending 'datas' from .spec
-801 INFO: checking Analysis
-801 INFO: Building Analysis because Analysis-00.toc is non existent
-801 INFO: Looking for Python shared library...
-802 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
-802 INFO: Running Analysis Analysis-00.toc
-802 INFO: Target bytecode optimization level: 0
-802 INFO: Initializing module dependency graph...
-803 INFO: Initializing module graph hook caches...
-820 INFO: Analyzing modules for base_library.zip ...
-1998 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-3521 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-4593 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-5115 INFO: Caching module dependency graph...
-5156 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
-5447 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-5797 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-5799 INFO: SetuptoolsInfo: initializing cached setuptools info...
-6645 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-6813 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-7128 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-7887 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-8312 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-8676 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-8716 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-10084 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-10894 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-11623 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-11870 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-13421 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-13905 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-14997 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-15790 INFO: Analyzing hidden import 'uvicorn.loops'
-15791 INFO: Analyzing hidden import 'uvicorn.loops.auto'
-15794 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
-15795 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
-15797 INFO: Analyzing hidden import 'uvicorn.lifespan'
-15797 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
-15803 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
-15803 INFO: Processing module hooks (post-graph stage)...
-15922 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16130 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16130 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
-16135 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-16149 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16179 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16179 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
-16191 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16191 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
-16322 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-16690 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16690 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
-16700 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-16701 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16702 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16703 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
-17558 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-17558 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
-20060 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-20530 INFO: Performing binary vs. data reclassification (661 entries)
-20578 INFO: Looking for ctypes DLLs
-20605 INFO: Analyzing run-time hooks ...
-20612 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-20615 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-20617 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-20619 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-20654 INFO: Creating base_library.zip...
-20698 INFO: Looking for dynamic libraries
-21564 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
-21564 INFO: Extra DLL search directories (PATH): []
-22312 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
-22336 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\warn-axiom.txt
-22463 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\xref-axiom.html
-22520 INFO: checking PYZ
-22520 INFO: Building PYZ because PYZ-00.toc is non existent
-22522 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz
-23553 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz completed successfully.
-23603 INFO: checking PKG
-23603 INFO: Building PKG because PKG-00.toc is non existent
-23603 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
-28116 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
-28132 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
-28132 INFO: checking EXE
-28132 INFO: Building EXE because EXE-00.toc is non existent
-28132 INFO: Building EXE from EXE-00.toc
-28132 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\dist\AXIOM-Chart.exe
-28136 INFO: Copying icon to EXE
-28138 INFO: Copying version information to EXE
-28142 INFO: Copying 0 resources to EXE
-28142 INFO: Embedding manifest in EXE
-28144 INFO: Appending PKG archive to EXE
-28155 INFO: Fixing EXE headers
-28281 INFO: Building EXE from EXE-00.toc completed successfully.
-28298 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist
+778 INFO: Appending 'datas' from .spec
+782 INFO: checking Analysis
+782 INFO: Building Analysis because Analysis-00.toc is non existent
+782 INFO: Looking for Python shared library...
+782 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
+782 INFO: Running Analysis Analysis-00.toc
+784 INFO: Target bytecode optimization level: 0
+784 INFO: Initializing module dependency graph...
+784 INFO: Initializing module graph hook caches...
+802 INFO: Analyzing modules for base_library.zip ...
+2029 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3698 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4838 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5358 INFO: Caching module dependency graph...
+5400 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
+5697 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+6059 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+6059 INFO: SetuptoolsInfo: initializing cached setuptools info...
+6940 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7120 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7435 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+8237 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+8673 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+9037 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+9074 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10404 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+11282 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+12030 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12292 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+13842 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+14333 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+15431 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+16242 INFO: Analyzing hidden import 'uvicorn.loops'
+16243 INFO: Analyzing hidden import 'uvicorn.loops.auto'
+16246 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
+16248 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
+16248 INFO: Analyzing hidden import 'uvicorn.lifespan'
+16250 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
+16255 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
+16256 INFO: Processing module hooks (post-graph stage)...
+16372 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16576 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16578 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+16583 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+16598 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16628 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16628 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
+16639 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16639 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+16773 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+17231 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+17231 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
+17242 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+17243 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+17244 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+17244 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
+18147 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+18147 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+20736 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+21206 INFO: Performing binary vs. data reclassification (661 entries)
+21254 INFO: Looking for ctypes DLLs
+21281 INFO: Analyzing run-time hooks ...
+21287 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+21289 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+21291 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+21295 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+21331 INFO: Creating base_library.zip...
+21373 INFO: Looking for dynamic libraries
+22246 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
+22246 INFO: Extra DLL search directories (PATH): []
+22942 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
+22967 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\warn-axiom.txt
+23090 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\xref-axiom.html
+23147 INFO: checking PYZ
+23147 INFO: Building PYZ because PYZ-00.toc is non existent
+23147 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz
+24183 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz completed successfully.
+24234 INFO: checking PKG
+24234 INFO: Building PKG because PKG-00.toc is non existent
+24234 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
+28725 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
+28743 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+28743 INFO: checking EXE
+28743 INFO: Building EXE because EXE-00.toc is non existent
+28743 INFO: Building EXE from EXE-00.toc
+28743 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\dist\AXIOM-Chart.exe
+28747 INFO: Copying icon to EXE
+28749 INFO: Copying version information to EXE
+28755 INFO: Copying 0 resources to EXE
+28755 INFO: Embedding manifest in EXE
+28757 INFO: Appending PKG archive to EXE
+28769 INFO: Fixing EXE headers
+28888 INFO: Building EXE from EXE-00.toc completed successfully.
+28906 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist
 built AXIOM-Chart.exe (20.1 MB)
 
 === 4a. Inspect every legacy onefile CArchive payload (hard gate) ===
 PASS payload hygiene: onefile: 765 onefile CArchive entries; no forbidden names or SQLite payloads
 
 === 4b. Freeze the no-TEMP onedir runtime ===
-119 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
-119 INFO: Python: 3.12.10
-142 INFO: Platform: Windows-2025Server-10.0.26100-SP0
-142 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
-144 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+117 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
+117 INFO: Python: 3.12.10
+138 INFO: Platform: Windows-2025Server-10.0.26100-SP0
+140 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
+142 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
 277 INFO: Module search paths (PYTHONPATH):
 ['D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
  'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
@@ -240,104 +240,104 @@ PASS payload hygiene: onefile: 765 onefile CArchive entries; no forbidden names 
  'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages',
  'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
  'D:\\a\\AXIOM\\AXIOM\\src']
-589 INFO: Appending 'datas' from .spec
-591 INFO: checking Analysis
-591 INFO: Building Analysis because Analysis-00.toc is non existent
-591 INFO: Looking for Python shared library...
-591 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
-591 INFO: Running Analysis Analysis-00.toc
-591 INFO: Target bytecode optimization level: 0
-593 INFO: Initializing module dependency graph...
-593 INFO: Initializing module graph hook caches...
+591 INFO: Appending 'datas' from .spec
+594 INFO: checking Analysis
+594 INFO: Building Analysis because Analysis-00.toc is non existent
+594 INFO: Looking for Python shared library...
+594 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
+594 INFO: Running Analysis Analysis-00.toc
+594 INFO: Target bytecode optimization level: 0
+594 INFO: Initializing module dependency graph...
+596 INFO: Initializing module graph hook caches...
 611 INFO: Analyzing modules for base_library.zip ...
-1672 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-2225 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-3142 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-4406 INFO: Caching module dependency graph...
-4448 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
-4725 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-5074 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-5074 INFO: SetuptoolsInfo: initializing cached setuptools info...
-5778 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-5934 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-6202 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-6944 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-7374 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-7737 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-7769 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-9025 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-9798 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-10468 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-10680 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-12226 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-12692 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-13754 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-14506 INFO: Analyzing hidden import 'uvicorn.loops'
-14507 INFO: Analyzing hidden import 'uvicorn.loops.auto'
-14509 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
-14511 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
-14512 INFO: Analyzing hidden import 'uvicorn.lifespan'
-14512 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
-14519 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
-14519 INFO: Processing module hooks (post-graph stage)...
-14629 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-14821 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-14821 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
-14827 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-14839 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-14867 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-14868 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
-14878 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-14878 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
-15013 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-15305 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-15306 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
-15316 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
-15318 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-15318 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-15318 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
-16192 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
-16192 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
-18624 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
-19074 INFO: Performing binary vs. data reclassification (661 entries)
-19121 INFO: Looking for ctypes DLLs
-19147 INFO: Analyzing run-time hooks ...
-19152 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-19155 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-19157 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-19159 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
-19206 INFO: Creating base_library.zip...
-19230 INFO: Looking for dynamic libraries
-20040 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
-20040 INFO: Extra DLL search directories (PATH): []
-20488 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
-20509 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\warn-axiom.txt
-20624 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\xref-axiom.html
-20679 INFO: checking PYZ
-20679 INFO: Building PYZ because PYZ-00.toc is non existent
-20679 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz
-21701 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz completed successfully.
-21728 INFO: checking PKG
-21728 INFO: Building PKG because PKG-00.toc is non existent
-21728 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
-21750 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
-21752 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
-21752 INFO: checking EXE
-21752 INFO: Building EXE because EXE-00.toc is non existent
-21752 INFO: Building EXE from EXE-00.toc
-21752 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\AXIOM-Chart.exe
-21756 INFO: Copying icon to EXE
-21758 INFO: Copying version information to EXE
-21760 INFO: Copying 0 resources to EXE
-21760 INFO: Embedding manifest in EXE
-21762 INFO: Appending PKG archive to EXE
-21768 INFO: Fixing EXE headers
-21849 INFO: Building EXE from EXE-00.toc completed successfully.
-21859 INFO: checking COLLECT
-21859 INFO: Building COLLECT because COLLECT-00.toc is non existent
-21859 INFO: Building COLLECT COLLECT-00.toc
-22239 INFO: Building COLLECT COLLECT-00.toc completed successfully.
-22253 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir
+1558 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3102 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4039 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4457 INFO: Caching module dependency graph...
+4498 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
+4761 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+5109 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+5111 INFO: SetuptoolsInfo: initializing cached setuptools info...
+5818 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5975 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6258 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7016 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7443 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7804 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7837 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+9123 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+9907 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+10581 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10788 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12338 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+12814 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+13894 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+14642 INFO: Analyzing hidden import 'uvicorn.loops'
+14642 INFO: Analyzing hidden import 'uvicorn.loops.auto'
+14646 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
+14646 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
+14648 INFO: Analyzing hidden import 'uvicorn.lifespan'
+14649 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
+14656 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
+14656 INFO: Processing module hooks (post-graph stage)...
+14778 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14969 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14969 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+14975 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+14989 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15019 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15019 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
+15030 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15030 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+15158 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+15453 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15453 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
+15465 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+15465 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15467 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+15467 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
+16378 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+16378 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+18997 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+19475 INFO: Performing binary vs. data reclassification (661 entries)
+19525 INFO: Looking for ctypes DLLs
+19553 INFO: Analyzing run-time hooks ...
+19558 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+19562 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+19564 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+19566 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+19603 INFO: Creating base_library.zip...
+19655 INFO: Looking for dynamic libraries
+20499 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
+20499 INFO: Extra DLL search directories (PATH): []
+20966 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
+20990 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\warn-axiom.txt
+21116 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\xref-axiom.html
+21174 INFO: checking PYZ
+21174 INFO: Building PYZ because PYZ-00.toc is non existent
+21174 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz
+22204 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz completed successfully.
+22233 INFO: checking PKG
+22233 INFO: Building PKG because PKG-00.toc is non existent
+22233 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
+22257 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
+22257 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+22257 INFO: checking EXE
+22257 INFO: Building EXE because EXE-00.toc is non existent
+22257 INFO: Building EXE from EXE-00.toc
+22257 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\AXIOM-Chart.exe
+22261 INFO: Copying icon to EXE
+22265 INFO: Copying version information to EXE
+22268 INFO: Copying 0 resources to EXE
+22268 INFO: Embedding manifest in EXE
+22270 INFO: Appending PKG archive to EXE
+22275 INFO: Fixing EXE headers
+22362 INFO: Building EXE from EXE-00.toc completed successfully.
+22370 INFO: checking COLLECT
+22370 INFO: Building COLLECT because COLLECT-00.toc is non existent
+22370 INFO: Building COLLECT COLLECT-00.toc
+22771 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+22786 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir
 onedir runtime built; it does not use PyInstaller onefile TEMP extraction
 
 === 4c. Inspect every onedir payload file (hard gate) ===
@@ -380,7 +380,7 @@ PASS payload hygiene: tree: 754 onedir files; no forbidden names or SQLite paylo
   PASS  DEMO preview drew 60 bars from bundled data
   PASS  DEMO bars labelled 'DEMO REPLAY SAMPLE DATA · NOT MARKET DATA'
   PASS  paper session start reported PAPER / live_trading=false
-  PASS  session RUNNING, 96 bars processed, paper_mode=true
+  PASS  session RUNNING, 102 bars processed, paper_mode=true
   PASS  chart then drew bars the engine processed (source=engine)
   PASS  paper session stopped
   PASS  ticket reports paper_only=true, live_trading=false
@@ -1240,7 +1240,7 @@ Creating setup files
    Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\TERMINAL_UI_BENCHMARK.json
 
 
-Successful compile (7.469 sec). Resulting Setup program filename is:
+Successful compile (6.859 sec). Resulting Setup program filename is:
 D:\a\AXIOM\AXIOM\src\packaging\windows\dist\AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe
 built loaderless AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe with 2 required BIN sidecars
 
@@ -1254,17 +1254,17 @@ PASS payload hygiene: zip: 767 ZIP entries; no forbidden names or SQLite payload
 === 8. Checksums and build metadata ===
 
 === Done ===
-AXIOM-Chart.exe                                              20,602.7 KB
-AXIOM-Operator-3.7.0a5-windows-x64-no-temp-install.zip       18,694.2 KB
-AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-0.bin           55.8 KB
-AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-1.bin       16,830.4 KB
+AXIOM-Chart.exe                                              20,602.9 KB
+AXIOM-Operator-3.7.0a5-windows-x64-no-temp-install.zip       18,696.0 KB
+AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-0.bin           55.5 KB
+AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-1.bin       16,832.5 KB
 AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe          4,322.0 KB
-AXIOM-Operator-3.7.0a5-windows-x64-portable.zip              21,022.3 KB
+AXIOM-Operator-3.7.0a5-windows-x64-portable.zip              21,022.7 KB
 BUILD_METADATA.json                                              12.6 KB
 install-test-log.txt                                              2.7 KB
 SHA256SUMS.txt                                                    0.4 KB
 SOURCE_COMMIT.txt                                                 0.2 KB
-8eb18aefc16b6d03c68656d77553968f7f964324d25625034e6e1a47852e2f48  AXIOM-Chart.exe
-b40e1894918c278b46dfdc133c3494e13d16074cd08ba7013670156dace752b2  AXIOM-Operator-3.7.0a5-windows-x64-no-temp-install.zip
-063dd0eaaaf5814652c702a805349d6731fa4a0d6719ff41889344e40dfcf6c4  AXIOM-Operator-3.7.0a5-windows-x64-portable.zip
-3ba5802e19b1125d056b60e09684724b034251ee40cfe94442f163c32b3b3e22  BUILD_METADATA.json
+826ee0fa06be0fd1964aefaf5133dd8192062aa839e2e0642fef21d46bd1be94  AXIOM-Chart.exe
+af898047c45385446d4fc8ac5710b512d2e89d1e6fa39234b741e11033cfcf7b  AXIOM-Operator-3.7.0a5-windows-x64-no-temp-install.zip
+73aef9d21c5baf8e86ec6308fc71e7222bdd505890dba3e81e71188d3eb910b5  AXIOM-Operator-3.7.0a5-windows-x64-portable.zip
+c8da4d27afaf25ea9dfc56d0444e5de37e5359b1d3ea834160c68c6638a64955  BUILD_METADATA.json

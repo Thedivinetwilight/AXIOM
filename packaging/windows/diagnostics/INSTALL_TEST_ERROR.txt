@@ -3,7 +3,7 @@ Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:402
 Line |
  402 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Kronos setup failed closed: Kronos runtime worker failed during RUNTIME_PROBE (ImportError)
+     | Kronos setup failed closed: Kronos runtime stage SUPPORT_IMPORT failed (ImportError)
 stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 402
-at <ScriptBlock>, D:\a\_temp\365385a2-91ca-4d16-b4b7-38ee59b4ce88.ps1: line 8
+at <ScriptBlock>, D:\a\_temp\a75d20c7-7f55-44ba-9130-2527f1d7541e.ps1: line 8
 at <ScriptBlock>, <No file>: line 1
