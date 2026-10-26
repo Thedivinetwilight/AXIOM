@@ -29,13 +29,22 @@ def _runtime_probe(site: Path, lock_path: Path) -> dict:
     if versions != expected:
         return {"status": "UNAVAILABLE", "error_type": "RUNTIME_LOCK_MISMATCH",
                 "package_versions": versions}
-    import numpy  # noqa: F401
-    import pandas  # noqa: F401
-    import einops  # noqa: F401
-    import safetensors  # noqa: F401
-    import huggingface_hub  # noqa: F401
-    import tqdm  # noqa: F401
-    import torch
+    modules = {}
+    for name in ("numpy", "pandas", "einops", "safetensors", "huggingface_hub", "tqdm", "torch"):
+        try:
+            modules[name] = importlib.import_module(name)
+        except Exception as exc:
+            return {
+                "status": "UNAVAILABLE", "error_type": "RUNTIME_IMPORT_ERROR",
+                "module": name, "exception_type": type(exc).__name__,
+                "package_versions": versions,
+            }
+    numpy = modules["numpy"]
+    pandas = modules["pandas"]
+    einops = modules["einops"]
+    safetensors = modules["safetensors"]
+    huggingface_hub = modules["huggingface_hub"]
+    torch = modules["torch"]
 
     threads = max(1, min(4, os.cpu_count() or 1))
     torch.set_num_threads(threads)

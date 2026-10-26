@@ -512,6 +512,28 @@ def test_isolated_worker_probe_only_contract(tmp_path):
     assert result["installed"] is True and result["verified"] is True
 
 
+def test_worker_import_failure_keeps_safe_module_and_package_evidence(tmp_path, monkeypatch):
+    """Fake import failure tests diagnostics, never model inference."""
+    import app.autonomy.kronos_runtime as runtime_module
+    import app.autonomy.kronos_worker as worker
+    monkeypatch.setattr(runtime_module, "runtime_lock", lambda _path: {"packages": []})
+    monkeypatch.setattr(worker.importlib.metadata, "distributions", lambda path: [])
+
+    def fail_import(name):
+        raise ImportError("sensitive local path must not be disclosed")
+
+    monkeypatch.setattr(worker.importlib, "import_module", fail_import)
+    result = worker._runtime_probe(tmp_path / "runtime", tmp_path / "lock")
+    assert result["status"] == "UNAVAILABLE"
+    assert result["error_type"] == "RUNTIME_IMPORT_ERROR"
+    assert result["module"] == "numpy" and result["package_versions"] == {}
+    with pytest.raises(ArtifactError, match="numpy.*ImportError") as failure:
+        runtime_module.KronosRuntimeManager._validate_probe(
+            result, {"packages": []}, {"version": [3, 11, 9], "system": "Windows"},
+        )
+    assert "sensitive local path" not in str(failure.value)
+
+
 def test_worker_ipc_isolates_hub_loader_stdout(tmp_path, monkeypatch, capsys):
     """A stdout notice must not corrupt JSON; this is not an inference test."""
     import app.autonomy.kronos_worker as worker

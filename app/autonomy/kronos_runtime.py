@@ -467,12 +467,28 @@ class KronosRuntimeManager:
         }
         versions = result.get("package_versions") or {}
         normalized = {key.lower().replace("_", "-"): str(value) for key, value in versions.items()}
-        if normalized != expected:
-            def safe(value: object) -> str:
-                text = str(value)
-                return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+!-]{0,63}", text) \
-                    else "<nonconforming>"
 
+        def safe(value: object) -> str:
+            if value is None:
+                return "unknown"
+            text = str(value)
+            return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+!-]{0,63}", text) \
+                else "<nonconforming>"
+
+        if result.get("status") == "UNAVAILABLE" \
+                and result.get("error_type") == "RUNTIME_IMPORT_ERROR":
+            module = result.get("module")
+            if module not in {"numpy", "pandas", "einops", "safetensors",
+                              "huggingface_hub", "tqdm", "torch"}:
+                module = "unknown"
+            raise ArtifactError(
+                f"Kronos runtime import failed for {module} ({safe(result.get('exception_type'))})"
+            )
+        if result.get("status") == "ERROR":
+            raise ArtifactError(
+                "Kronos runtime worker failed (" + safe(result.get("error_type")) + ")"
+            )
+        if normalized != expected:
             missing = sorted(set(expected) - set(normalized))
             unexpected = sorted(set(normalized) - set(expected))
             mismatched = sorted(
