@@ -95,6 +95,9 @@ def applicable_packages(lock: dict, *, python: dict | None = None) -> list[dict]
 def _environment(temp: Path | None = None) -> dict:
     allowed = (
         "PATH", "SYSTEMROOT", "WINDIR", "LD_LIBRARY_PATH", "NUMBER_OF_PROCESSORS",
+        # CPython 3.11's Windows platform.machine() reads these non-secret
+        # architecture identifiers; stripping them makes valid x64 look unknown.
+        "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432",
     )
     env = {key: os.environ[key] for key in allowed if os.environ.get(key)}
     env.update({

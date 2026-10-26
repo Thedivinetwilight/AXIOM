@@ -334,9 +334,13 @@ def test_reported_py_311_64_python_3119_pip_240_is_accepted(tmp_path, monkeypatc
     monkeypatch.setattr(runtime_module.sys, "platform", "win32")
     monkeypatch.setattr(runtime_module.sys, "frozen", True, raising=False)
     monkeypatch.setattr(manager, "_py_launcher_candidates", lambda: [])
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "AMD64")
     calls = []
 
     def probe(command, **kwargs):
+        assert kwargs["env"]["PROCESSOR_ARCHITECTURE"] == "AMD64"
+        assert kwargs["env"]["PROCESSOR_ARCHITEW6432"] == "AMD64"
         calls.append(command)
         return SimpleNamespace(returncode=0, stdout=json.dumps({
             "version": [3, 11, 9], "machine": "AMD64", "implementation": "CPython",
