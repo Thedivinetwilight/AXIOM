@@ -29,11 +29,31 @@ def payload_guard():
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.7.0a1"
+    assert version == "3.7.0a2"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
-    assert f"StringStruct('ProductVersion', '{version}')" in read(KIT / "version_info.txt")
-    assert f"**Version:** {version}" in read(KIT / "WINDOWS_INSTALL_MANUAL.md")
+    assert f'version = "{version}"' in read(ROOT / "pyproject.toml")
+    assert f"**Current source version: `{version}`.**" in read(ROOT / "README.md")
     assert f"**Current source version: {version}**" in read(ROOT / "USER_MANUAL.md")
+    version_info = read(KIT / "version_info.txt")
+    assert "filevers=(3, 7, 0, 2)" in version_info
+    assert "prodvers=(3, 7, 0, 2)" in version_info
+    assert "StringStruct('FileVersion', '3.7.0.2')" in version_info
+    assert f"StringStruct('ProductVersion', '{version}')" in version_info
+    manual = read(KIT / "WINDOWS_INSTALL_MANUAL.md")
+    assert f"**Version:** {version}" in manual
+    assert f"-ExpectedCommit <full-source-commit> -Version {version}" in manual
+    assert f"AXIOM-Operator-{version}-windows-x64-no-temp-install.zip" in manual
+    assert f"AXIOM-Operator-{version}-windows-x64-portable.zip" in manual
+
+
+def test_release_workflow_derives_the_a2_prerelease_tag_from_version_metadata():
+    assert read(KIT / "VERSION").strip() == "3.7.0a2"
+    workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
+    assert "Get-Content _kit/packaging/windows/VERSION" in workflow
+    assert '$tag = "v$($env:VERSION)"' in workflow
+    assert "gh release create $tag --prerelease --target $meta.commit" in workflow
+    assert "gh release delete $tag --yes --cleanup-tag" in workflow
+    assert "v3.7.0a1" not in workflow
 
 
 def test_inno_uses_loaderless_mode_and_complete_onedir_sources():
