@@ -1,0 +1,9 @@
+phase: kronos
+Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:377
+Line |
+ 377 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
+     |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Kronos setup failed closed: Kronos setup remained UNAVAILABLE after verification
+stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 377
+at <ScriptBlock>, D:\a\_temp\3d10e3de-ee47-4356-8ace-84fdc1645faf.ps1: line 8
+at <ScriptBlock>, <No file>: line 1

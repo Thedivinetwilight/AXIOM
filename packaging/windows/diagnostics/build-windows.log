@@ -1,7 +1,7 @@
 
 === 1. Verify the source commit ===
-commit  46a82bb24eecf6b7fcca392aba2a3fabb05a337e
-subject feat: add gated Kronos setup and inference
+commit  993f64a9b7cc95aa111c217a4d33e93023c35933
+subject fix: harden Kronos Windows verification
 
 === 2. Build environment ===
 python 3.12.10 (AMD64)
@@ -12,316 +12,1258 @@ Microsoft Windows NT 10.0.26100.0
 === 3. Focused Python test suites (hard gate) ===
 ........................................................................ [ 25%]
 ........................................................................ [ 50%]
-......................................................F...F..F.......... [ 76%]
-.........................................................F.........      [100%]
-================================== FAILURES ===================================
-________________ test_atomic_install_and_offline_verification _________________
-
-tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_atomic_install_and_offlin0')
-
-    def test_atomic_install_and_offline_verification(tmp_path):
-        manifest_path, vendor, contents = small_manifest(tmp_path)
-        root = tmp_path / "per-user" / "kronos"
-        store = ArtifactStore(root)
-        installer = KronosArtifactInstaller(manifest_path, store, FixtureDownloader(contents))
->       result = installer.install(cancel=threading.Event(), progress=lambda _value: None)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-tests\test_kronos_setup.py:127: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-
-self = <app.autonomy.kronos_artifacts.KronosArtifactInstaller object at 0x0000019F3F60D250>
-cancel = <threading.Event at 0x19f3f60df70: unset>
-progress = <function test_atomic_install_and_offline_verification.<locals>.<lambda> at 0x0000019F3EC33740>
-
-    def install(self, *, cancel: threading.Event, progress: Callable[[dict], None]) -> dict:
-        manifest = load_manifest(self.manifest_path)
-        digest = manifest_digest(manifest)
-        total = expected_artifact_bytes(manifest)
-        self.store.root.mkdir(parents=True, exist_ok=True)
-        self.store.cleanup_partials()
-        free = shutil.disk_usage(self.store.root).free
-        required = total + 16 * 1024 * 1024
-        if free < required:
-            raise DiskSpaceError("Insufficient disk space for the pinned Kronos artifacts")
-        staging = self.store.root / f".install-{uuid4().hex}"
-        completed = 0
-        try:
-            for component in ("model", "tokenizer"):
-                spec = manifest[component]
-                for relative, expected in spec["files"].items():
-                    if cancel.is_set():
-                        raise DownloadCancelled("Kronos download cancelled")
-                    target = staging / component / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    partial = target.with_name(target.name + ".part")
-                    url = self.downloader.url_for(spec["repository"], spec["revision"], relative)
-                    progress({"phase": "DOWNLOAD", "component": component, "file": relative,
-                              "bytes": completed, "total_bytes": total, "file_bytes": 0,
-                              "file_total_bytes": expected["size"]})
-                    response, _host = self.downloader.open(url, cancel)
-                    digestor = hashlib.sha256()
-                    written = 0
-                    try:
-                        content_length = response.getheader("Content-Length")
-                        if content_length is not None and int(content_length) != expected["size"]:
-                            raise ArtifactError(f"Pinned size header mismatch: {component}/{relative}")
-                        with partial.open("xb") as handle:
-                            while True:
-                                if cancel.is_set():
-                                    raise DownloadCancelled("Kronos download cancelled")
-                                chunk = response.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                written += len(chunk)
-                                if written > expected["size"]:
-                                    raise ArtifactError(f"Pinned file exceeded expected size: {component}/{relative}")
-                                digestor.update(chunk)
-                                handle.write(chunk)
-                                progress({"phase": "DOWNLOAD", "component": component, "file": relative,
-                                          "bytes": completed + written, "total_bytes": total,
-                                          "file_bytes": written, "file_total_bytes": expected["size"]})
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                    except DownloadCancelled:
-                        raise
-                    except ArtifactError:
-                        raise
-                    except Exception as exc:
-                        if cancel.is_set():
-                            raise DownloadCancelled("Kronos download cancelled") from None
-                        raise ArtifactError(f"Pinned download interrupted: {type(exc).__name__}") from None
-                    finally:
-                        response.close()
-                        self.downloader.close()
-                    if written != expected["size"]:
-                        raise ArtifactError(f"Pinned size mismatch: {component}/{relative}")
-                    if digestor.hexdigest() != expected["sha256"]:
-                        raise ArtifactError(f"Pinned SHA-256 mismatch: {component}/{relative}")
-                    partial.replace(target)
-                    completed += written
-            # Verify the complete staged generation independently before publish.
-            for component in ("model", "tokenizer"):
-                for relative, expected in manifest[component]["files"].items():
-                    view = _file_view(staging / component / relative, expected, hash_files=True)
-                    if not view["verified"]:
-                        raise ArtifactError(f"Staged verification failed: {component}/{relative}")
-            generation = self.store.generation_path(digest)
-            generation.parent.mkdir(parents=True, exist_ok=True)
-            preserve = False
-            if generation.is_dir() and not generation.is_symlink():
-                # A valid active generation is never deleted just because the
-                # operator retried setup.  The newly staged copy can be discarded.
-                preserve = all(
-                    _file_view(generation / component / relative, expected, hash_files=True)["verified"]
-                    for component in ("model", "tokenizer")
-                    for relative, expected in manifest[component]["files"].items()
-                )
-            if generation.exists() and not preserve:
-                # The old generation was already invalid; retain it under a
-                # private installer name until the complete replacement exists.
-                replaced = self.store.root / f".replaced-{uuid4().hex}"
-                generation.replace(replaced)
-                try:
-                    staging.replace(generation)
-                except Exception:
-                    replaced.replace(generation)
-                    raise
-                if replaced.is_dir() and not replaced.is_symlink():
-                    shutil.rmtree(replaced, ignore_errors=True)
-                else:
-                    replaced.unlink(missing_ok=True)
-            elif not preserve:
-                staging.replace(generation)
-            pointer = self.store.root / f".current-{uuid4().hex}.tmp"
-            pointer.write_text(canonical({
-                "schema": CURRENT_SCHEMA, "manifest_sha256": digest, "generation": digest,
-            }), encoding="utf-8")
-            with pointer.open("rb") as handle:
->               os.fsync(handle.fileno())
-E               OSError: [Errno 9] Bad file descriptor
-
-app\autonomy\kronos_artifacts.py:456: OSError
-________________ test_exact_runtime_lock_and_platform_markers _________________
-
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000019F3F55A630>
-
-    def test_exact_runtime_lock_and_platform_markers(monkeypatch):
-        import app.autonomy.kronos_runtime as runtime_module
-        lock = runtime_lock(ROOT / "config" / "kronos-runtime-requirements.txt")
-        assert len(lock["sha256"]) == 64
-        monkeypatch.setattr(runtime_module.sys, "platform", "linux")
-        linux = {item["name"]: item["version"] for item in applicable_packages(lock)}
-        monkeypatch.setattr(runtime_module.sys, "platform", "win32")
-        windows = {item["name"]: item["version"] for item in applicable_packages(lock)}
-        assert linux["torch"] == "2.7.1+cpu"
-        assert "nvidia-cublas-cu12" not in linux
-        assert windows["colorama"] == "0.4.6"
-        assert "colorama" not in linux
->       assert "setuptools" not in windows
-E       AssertionError: assert 'setuptools' not in {'torch': '2.7.1+cpu', 'setuptools': '80.9.0', 'numpy': '2.2.6', 'pandas': '2.2.2', ...}
-
-tests\test_kronos_setup.py:255: AssertionError
-______________ test_service_requires_runtime_and_has_no_fallback ______________
-
-tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_service_requires_runtime_0')
-
-    def test_service_requires_runtime_and_has_no_fallback(tmp_path):
-        manifest, vendor, contents = small_manifest(tmp_path)
->       KronosArtifactInstaller(manifest, ArtifactStore(tmp_path / "off"), FixtureDownloader(contents)).install(cancel=threading.Event(), progress=lambda _value: None)
-
-tests\test_kronos_setup.py:378: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-
-self = <app.autonomy.kronos_artifacts.KronosArtifactInstaller object at 0x0000019F3F55B3B0>
-cancel = <threading.Event at 0x19f3f55ba70: unset>
-progress = <function test_service_requires_runtime_and_has_no_fallback.<locals>.<lambda> at 0x0000019F3EEC16C0>
-
-    def install(self, *, cancel: threading.Event, progress: Callable[[dict], None]) -> dict:
-        manifest = load_manifest(self.manifest_path)
-        digest = manifest_digest(manifest)
-        total = expected_artifact_bytes(manifest)
-        self.store.root.mkdir(parents=True, exist_ok=True)
-        self.store.cleanup_partials()
-        free = shutil.disk_usage(self.store.root).free
-        required = total + 16 * 1024 * 1024
-        if free < required:
-            raise DiskSpaceError("Insufficient disk space for the pinned Kronos artifacts")
-        staging = self.store.root / f".install-{uuid4().hex}"
-        completed = 0
-        try:
-            for component in ("model", "tokenizer"):
-                spec = manifest[component]
-                for relative, expected in spec["files"].items():
-                    if cancel.is_set():
-                        raise DownloadCancelled("Kronos download cancelled")
-                    target = staging / component / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    partial = target.with_name(target.name + ".part")
-                    url = self.downloader.url_for(spec["repository"], spec["revision"], relative)
-                    progress({"phase": "DOWNLOAD", "component": component, "file": relative,
-                              "bytes": completed, "total_bytes": total, "file_bytes": 0,
-                              "file_total_bytes": expected["size"]})
-                    response, _host = self.downloader.open(url, cancel)
-                    digestor = hashlib.sha256()
-                    written = 0
-                    try:
-                        content_length = response.getheader("Content-Length")
-                        if content_length is not None and int(content_length) != expected["size"]:
-                            raise ArtifactError(f"Pinned size header mismatch: {component}/{relative}")
-                        with partial.open("xb") as handle:
-                            while True:
-                                if cancel.is_set():
-                                    raise DownloadCancelled("Kronos download cancelled")
-                                chunk = response.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                written += len(chunk)
-                                if written > expected["size"]:
-                                    raise ArtifactError(f"Pinned file exceeded expected size: {component}/{relative}")
-                                digestor.update(chunk)
-                                handle.write(chunk)
-                                progress({"phase": "DOWNLOAD", "component": component, "file": relative,
-                                          "bytes": completed + written, "total_bytes": total,
-                                          "file_bytes": written, "file_total_bytes": expected["size"]})
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                    except DownloadCancelled:
-                        raise
-                    except ArtifactError:
-                        raise
-                    except Exception as exc:
-                        if cancel.is_set():
-                            raise DownloadCancelled("Kronos download cancelled") from None
-                        raise ArtifactError(f"Pinned download interrupted: {type(exc).__name__}") from None
-                    finally:
-                        response.close()
-                        self.downloader.close()
-                    if written != expected["size"]:
-                        raise ArtifactError(f"Pinned size mismatch: {component}/{relative}")
-                    if digestor.hexdigest() != expected["sha256"]:
-                        raise ArtifactError(f"Pinned SHA-256 mismatch: {component}/{relative}")
-                    partial.replace(target)
-                    completed += written
-            # Verify the complete staged generation independently before publish.
-            for component in ("model", "tokenizer"):
-                for relative, expected in manifest[component]["files"].items():
-                    view = _file_view(staging / component / relative, expected, hash_files=True)
-                    if not view["verified"]:
-                        raise ArtifactError(f"Staged verification failed: {component}/{relative}")
-            generation = self.store.generation_path(digest)
-            generation.parent.mkdir(parents=True, exist_ok=True)
-            preserve = False
-            if generation.is_dir() and not generation.is_symlink():
-                # A valid active generation is never deleted just because the
-                # operator retried setup.  The newly staged copy can be discarded.
-                preserve = all(
-                    _file_view(generation / component / relative, expected, hash_files=True)["verified"]
-                    for component in ("model", "tokenizer")
-                    for relative, expected in manifest[component]["files"].items()
-                )
-            if generation.exists() and not preserve:
-                # The old generation was already invalid; retain it under a
-                # private installer name until the complete replacement exists.
-                replaced = self.store.root / f".replaced-{uuid4().hex}"
-                generation.replace(replaced)
-                try:
-                    staging.replace(generation)
-                except Exception:
-                    replaced.replace(generation)
-                    raise
-                if replaced.is_dir() and not replaced.is_symlink():
-                    shutil.rmtree(replaced, ignore_errors=True)
-                else:
-                    replaced.unlink(missing_ok=True)
-            elif not preserve:
-                staging.replace(generation)
-            pointer = self.store.root / f".current-{uuid4().hex}.tmp"
-            pointer.write_text(canonical({
-                "schema": CURRENT_SCHEMA, "manifest_sha256": digest, "generation": digest,
-            }), encoding="utf-8")
-            with pointer.open("rb") as handle:
->               os.fsync(handle.fileno())
-E               OSError: [Errno 9] Bad file descriptor
-
-app\autonomy\kronos_artifacts.py:456: OSError
-__________ test_kronos_setup_routes_are_authenticated_fixed_actions ___________
-
-tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_kronos_setup_routes_are_a0')
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000019F3F13EF00>
-
-    def test_kronos_setup_routes_are_authenticated_fixed_actions(tmp_path, monkeypatch):
-        with client(tmp_path) as web:
-            assert web.get("/api/autonomy/kronos").status_code == 401
-            headers = {"Authorization": "Bearer local-api-test"}
-            response = web.get("/api/autonomy/kronos", headers=headers)
-            assert response.status_code == 200, response.text
-            view = response.json()
-            assert view["install_plan"]["model"]["repository"] == "NeoQuasar/Kronos-small"
->           assert view["install_plan"]["manifest_file_sha256"] == (
-                "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa"
-            )
-E           AssertionError: assert '0a2e45c4bbd0...a60cc29690862' == '379ffadfb569...847dc479785aa'
-E             
-E             - 379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa
-E             + 0a2e45c4bbd03b0565ed24a33912643c801b62c7df1e443483ba60cc29690862
-
-tests\test_autonomy_api.py:48: AssertionError
+........................................................................ [ 76%]
+...................................................................      [100%]
 ============================== warnings summary ===============================
 C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45
   C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
     _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-=========================== short test summary info ===========================
-FAILED tests/test_kronos_setup.py::test_atomic_install_and_offline_verification - OSError: [Errno 9] Bad file descriptor
-FAILED tests/test_kronos_setup.py::test_exact_runtime_lock_and_platform_markers - AssertionError: assert 'setuptools' not in {'torch': '2.7.1+cpu', 'setuptools': '80.9.0', 'numpy': '2.2.6', 'pandas': '2.2.2', ...}
-FAILED tests/test_kronos_setup.py::test_service_requires_runtime_and_has_no_fallback - OSError: [Errno 9] Bad file descriptor
-FAILED tests/test_autonomy_api.py::test_kronos_setup_routes_are_authenticated_fixed_actions - AssertionError: assert '0a2e45c4bbd0...a60cc29690862' == '379ffadfb569...847dc479785aa'
-  
-  - 379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa
-  + 0a2e45c4bbd03b0565ed24a33912643c801b62c7df1e443483ba60cc29690862
-4 failed, 279 passed, 1 warning in 64.94s (0:01:04)
+283 passed, 1 warning in 57.02s
+focused suites passed, including real DPAPI round-trips with dummy values
 
-BUILD FAILED: focused Vantage/US/chart suites failed on Windows
-::error title=AXIOM Windows build gate::focused Vantage/US/chart suites failed on Windows
+=== 3a. JavaScript operator suites (hard gate) ===
+npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+
+added 39 packages in 3s
+PASS autonomy UI: 16 local API interactions, separate Arm/Activate, no credential/order API
+chart harness: {"fillRect":2916,"lineTo":5596,"stroke":1616,"fillText":142,"moveTo":1630}
+chart harness: OK
+terminal harness: OK (92 authenticated fake API calls, 1085 candle/background draw calls)
+
+=== 3b. Full Python test suite (hard gate) ===
+........................................................................ [  8%]
+........................................................................ [ 17%]
+........................................................................ [ 25%]
+........................................................................ [ 34%]
+........................................................................ [ 42%]
+........................................................................ [ 51%]
+........................................................................ [ 59%]
+........................................................................ [ 68%]
+........................................................................ [ 77%]
+........................................................................ [ 85%]
+........................................................................ [ 94%]
+.................................................                        [100%]
+============================== warnings summary ===============================
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45
+  C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+841 passed, 1 warning in 174.20s (0:02:54)
+full suite passed (841 passed)
+
+=== 3c. Exact-commit fake-provider performance benchmarks (hard gate) ===
+{
+  "output": "D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows\\TERMINAL_BENCHMARK.json",
+  "http": {
+    "http.chart.update": {
+      "samples": 120,
+      "p50_ms": 24.524,
+      "p95_ms": 34.954,
+      "p99_ms": 49.797,
+      "max_ms": 51.835,
+      "mean_ms": 26.165
+    },
+    "http.feed.quotes": {
+      "samples": 120,
+      "p50_ms": 23.751,
+      "p95_ms": 34.031,
+      "p99_ms": 57.912,
+      "max_ms": 61.57,
+      "mean_ms": 22.909
+    },
+    "http.order.review": {
+      "samples": 12,
+      "p50_ms": 3.218,
+      "p95_ms": 3.682,
+      "p99_ms": 3.719,
+      "max_ms": 3.729,
+      "mean_ms": 3.177
+    },
+    "http.order.submit": {
+      "samples": 12,
+      "p50_ms": 4.152,
+      "p95_ms": 5.03,
+      "p99_ms": 5.12,
+      "max_ms": 5.142,
+      "mean_ms": 4.137
+    },
+    "http.reconcile": {
+      "samples": 6,
+      "p50_ms": 2.963,
+      "p95_ms": 3.162,
+      "p99_ms": 3.194,
+      "max_ms": 3.202,
+      "mean_ms": 2.99
+    }
+  },
+  "order_send_calls": 12
+}
+terminal UI benchmark: D:\a\AXIOM\AXIOM\src\packaging\windows\TERMINAL_UI_BENCHMARK.json
+terminal harness: OK (92 authenticated fake API calls, 6005 candle/background draw calls)
+exact-commit fake-only backend and UI benchmarks passed; no real DEMO/LIVE latency measured
+
+=== 3d. Explicit DEMO source payload allowlist (hard gate) ===
+PASS payload hygiene: source: 8 explicit DEMO source fixtures; no forbidden names or SQLite payloads
+
+=== 4. Freeze with PyInstaller ===
+269 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
+269 INFO: Python: 3.12.10
+291 INFO: Platform: Windows-2025Server-10.0.26100-SP0
+291 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
+299 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+413 INFO: Module search paths (PYTHONPATH):
+['D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.zip',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\DLLs',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages',
+ 'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'D:\\a\\AXIOM\\AXIOM\\src']
+676 INFO: Appending 'datas' from .spec
+678 INFO: checking Analysis
+678 INFO: Building Analysis because Analysis-00.toc is non existent
+678 INFO: Looking for Python shared library...
+678 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
+678 INFO: Running Analysis Analysis-00.toc
+680 INFO: Target bytecode optimization level: 0
+680 INFO: Initializing module dependency graph...
+680 INFO: Initializing module graph hook caches...
+694 INFO: Analyzing modules for base_library.zip ...
+1515 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+1610 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3245 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4687 INFO: Caching module dependency graph...
+4719 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
+4961 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+5249 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+5251 INFO: SetuptoolsInfo: initializing cached setuptools info...
+5932 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6071 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6350 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6959 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7311 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7613 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+7639 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+8724 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+9407 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+10003 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10212 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+11500 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+11886 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12759 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+13428 INFO: Analyzing hidden import 'uvicorn.loops'
+13428 INFO: Analyzing hidden import 'uvicorn.loops.auto'
+13430 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
+13432 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
+13432 INFO: Analyzing hidden import 'uvicorn.lifespan'
+13432 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
+13438 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
+13438 INFO: Processing module hooks (post-graph stage)...
+13530 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13708 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13708 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+13714 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+13724 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13748 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13748 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
+13756 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13756 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+13874 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+14204 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14204 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
+14212 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+14214 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14214 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14214 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
+14965 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14965 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+17124 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+17479 INFO: Performing binary vs. data reclassification (661 entries)
+17507 INFO: Looking for ctypes DLLs
+17527 INFO: Analyzing run-time hooks ...
+17535 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+17537 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+17539 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+17540 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+17590 INFO: Creating base_library.zip...
+17609 INFO: Looking for dynamic libraries
+18311 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
+18311 INFO: Extra DLL search directories (PATH): []
+18968 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
+18988 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\warn-axiom.txt
+19081 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\xref-axiom.html
+19123 INFO: checking PYZ
+19125 INFO: Building PYZ because PYZ-00.toc is non existent
+19125 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz
+19984 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build\axiom\PYZ-00.pyz completed successfully.
+20022 INFO: checking PKG
+20022 INFO: Building PKG because PKG-00.toc is non existent
+20022 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
+23823 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
+23835 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+23835 INFO: checking EXE
+23835 INFO: Building EXE because EXE-00.toc is non existent
+23835 INFO: Building EXE from EXE-00.toc
+23835 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\dist\AXIOM-Chart.exe
+23837 INFO: Copying icon to EXE
+23839 INFO: Copying version information to EXE
+23841 INFO: Copying 0 resources to EXE
+23841 INFO: Embedding manifest in EXE
+23843 INFO: Appending PKG archive to EXE
+23855 INFO: Fixing EXE headers
+23962 INFO: Building EXE from EXE-00.toc completed successfully.
+23974 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist
+built AXIOM-Chart.exe (20.1 MB)
+
+=== 4a. Inspect every legacy onefile CArchive payload (hard gate) ===
+PASS payload hygiene: onefile: 765 onefile CArchive entries; no forbidden names or SQLite payloads
+
+=== 4b. Freeze the no-TEMP onedir runtime ===
+93 INFO: PyInstaller: 6.16.0, contrib hooks: 2025.9
+93 INFO: Python: 3.12.10
+113 INFO: Platform: Windows-2025Server-10.0.26100-SP0
+113 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
+117 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+232 INFO: Module search paths (PYTHONPATH):
+['D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.zip',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\DLLs',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages',
+ 'D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows',
+ 'D:\\a\\AXIOM\\AXIOM\\src']
+487 INFO: Appending 'datas' from .spec
+488 INFO: checking Analysis
+489 INFO: Building Analysis because Analysis-00.toc is non existent
+489 INFO: Looking for Python shared library...
+489 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
+489 INFO: Running Analysis Analysis-00.toc
+489 INFO: Target bytecode optimization level: 0
+489 INFO: Initializing module dependency graph...
+489 INFO: Initializing module graph hook caches...
+503 INFO: Analyzing modules for base_library.zip ...
+1250 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+1318 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+2638 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3753 INFO: Caching module dependency graph...
+3785 INFO: Analyzing D:\a\AXIOM\AXIOM\src\packaging\windows\axiom_launcher.py
+3993 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+4279 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+4281 INFO: SetuptoolsInfo: initializing cached setuptools info...
+4827 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4956 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5208 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5810 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+6170 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6471 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+6491 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7551 INFO: Processing standard module hook 'hook-opentelemetry.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+8190 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+8755 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+8925 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10219 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+10607 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+11498 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+12086 INFO: Analyzing hidden import 'uvicorn.loops'
+12086 INFO: Analyzing hidden import 'uvicorn.loops.auto'
+12088 INFO: Analyzing hidden import 'uvicorn.protocols.http.auto'
+12090 INFO: Analyzing hidden import 'uvicorn.protocols.websockets.auto'
+12090 INFO: Analyzing hidden import 'uvicorn.lifespan'
+12090 INFO: Analyzing hidden import 'uvicorn.lifespan.on'
+12096 INFO: Analyzing hidden import 'uvicorn.lifespan.off'
+12096 INFO: Processing module hooks (post-graph stage)...
+12181 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12348 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12348 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+12352 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12362 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12385 INFO: Processing pre-safe-import-module hook 'hook-jaraco.functools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12385 INFO: Setuptools: 'jaraco.functools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.functools'!
+12393 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12393 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+12510 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12751 INFO: Processing pre-safe-import-module hook 'hook-jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12751 INFO: Setuptools: 'jaraco.text' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.text'!
+12761 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12763 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12763 INFO: Processing pre-safe-import-module hook 'hook-jaraco.context.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12763 INFO: Setuptools: 'jaraco.context' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco.context'!
+13484 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13486 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+15540 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+15889 INFO: Performing binary vs. data reclassification (661 entries)
+15915 INFO: Looking for ctypes DLLs
+15935 INFO: Analyzing run-time hooks ...
+15941 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15943 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15945 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15947 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+16000 INFO: Creating base_library.zip...
+16018 INFO: Looking for dynamic libraries
+16700 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs']
+16700 INFO: Extra DLL search directories (PATH): []
+17039 WARNING: Library not found: could not resolve 'api-ms-win-core-path-l1-1-0.dll', dependency of 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.dll'.
+17057 INFO: Warnings written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\warn-axiom.txt
+17149 INFO: Graph cross-reference written to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\xref-axiom.html
+17194 INFO: checking PYZ
+17194 INFO: Building PYZ because PYZ-00.toc is non existent
+17194 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz
+18077 INFO: Building PYZ (ZlibArchive) D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\PYZ-00.pyz completed successfully.
+18099 INFO: checking PKG
+18099 INFO: Building PKG because PKG-00.toc is non existent
+18099 INFO: Building PKG (CArchive) AXIOM-Chart.pkg
+18119 INFO: Building PKG (CArchive) AXIOM-Chart.pkg completed successfully.
+18121 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+18121 INFO: checking EXE
+18121 INFO: Building EXE because EXE-00.toc is non existent
+18121 INFO: Building EXE from EXE-00.toc
+18121 INFO: Copying bootloader EXE to D:\a\AXIOM\AXIOM\src\packaging\windows\build-onedir\axiom\AXIOM-Chart.exe
+18123 INFO: Copying icon to EXE
+18125 INFO: Copying version information to EXE
+18127 INFO: Copying 0 resources to EXE
+18127 INFO: Embedding manifest in EXE
+18129 INFO: Appending PKG archive to EXE
+18133 INFO: Fixing EXE headers
+18199 INFO: Building EXE from EXE-00.toc completed successfully.
+18207 INFO: checking COLLECT
+18207 INFO: Building COLLECT because COLLECT-00.toc is non existent
+18207 INFO: Building COLLECT COLLECT-00.toc
+18510 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+18524 INFO: Build complete! The results are available in: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir
+onedir runtime built; it does not use PyInstaller onefile TEMP extraction
+
+=== 4c. Inspect every onedir payload file (hard gate) ===
+PASS payload hygiene: tree: 754 onedir files; no forbidden names or SQLite payloads
+
+=== 5. Smoke-test the frozen executable on this machine ===
+  PASS  launch: API answered /health on loopback
+  PASS  /chart returns 200
+  PASS  chart page displays the PAPER badge
+  PASS  /terminal returns all explicit execution modes
+  PASS  redesigned boundary, watchlist, chart tools and diagnostics are bundled
+  PASS  operator terminal.js and reviewed ticket/chart interactions served from the bundle
+  PASS  operator terminal.css served from the bundle
+  PASS  bundled user manual covers lifecycle, owner DEMO verification and LIVE checklist
+  PASS  autonomy page and explicit execution boundaries are bundled
+  PASS  autonomy JavaScript served from the bundle
+  PASS  pinned display-only Lightweight Charts runtime is bundled
+  PASS  autonomy operator manual is bundled with honest limitations
+  PASS  chart.js served from the bundle
+  PASS  chart.css served from the bundle
+  PASS  data route refuses anonymous request (401)
+  PASS  Vantage status refuses anonymous request (401)
+  PASS  independent market-data status refuses anonymous request (401)
+  PASS  performance diagnostics refuse anonymous request (401)
+  PASS  listed-asset status refuses anonymous request (401)
+  PASS  autonomy status refuses anonymous request (401)
+  PASS  autonomy starts with no sessions, no automatic approval and no bundled Kronos weights
+  PASS  operator starts in independent PAPER, disarmed
+  PASS  performance diagnostics are bounded and make no zero-latency claim
+  PASS  listed execution and MT5/CFD substitution are disabled
+  PASS  listed policy check is read-only and never routes to MT5
+  PASS  Windows DPAPI protected storage is available
+  PASS  official MetaTrader5 module is present in the frozen build
+  PASS  independent MT5 market data starts disconnected, read-only and paper-only
+  PASS  market-data connect without a DEMO profile fails closed (409)
+  PASS  failed market-data connect never changes execution or activates
+  PASS  selecting DEMO never auto-connects or activates
+  PASS  disconnected workspace is explicitly not a flat-account snapshot
+  PASS  symbols listed (2)
+  PASS  DEMO preview drew 60 bars from bundled data
+  PASS  DEMO bars labelled 'DEMO REPLAY SAMPLE DATA · NOT MARKET DATA'
+  PASS  paper session start reported PAPER / live_trading=false
+  PASS  session RUNNING, 108 bars processed, paper_mode=true
+  PASS  chart then drew bars the engine processed (source=engine)
+  PASS  paper session stopped
+  PASS  ticket reports paper_only=true, live_trading=false
+  PASS  unknown symbol refused with an explanation (422)
+True
+True
+  PASS  launcher output does not expose the local API token
+
+=== 6. Fail-closed checks ===
+  PASS  refused MODE=LIVE (exit 2)
+  PASS  refused LIVE_TRADING=true (exit 2)
+  PASS  refused BROKER=UPSTOX_SANDBOX (exit 2)
+  PASS  refused alpaca without credentials (exit 2)
+  PASS  refused alpaca without limits (exit 2)
+  PASS  refused empty API_TOKEN (exit 2)
+
+=== 7. Build the installer (Inno Setup 6) ===
+using C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+Inno Setup 6 Command-Line Compiler
+Copyright (C) 1997-2026 Jordan Russell. All rights reserved.
+Portions Copyright (C) 2000-2026 Martijn Laan. All rights reserved.
+Portions Copyright (C) 2001-2004 Alex Yackimoff. All rights reserved.
+https://www.innosetup.com
+
+Compiler engine version: Inno Setup 6.7.1
+Non-commercial use only
+
+Preprocessing
+   Reading file: C:\Program Files (x86)\Inno Setup 6\ISPPBuiltins.iss
+Parsing [Setup] section, line 22
+Parsing [Setup] section, line 23
+Parsing [Setup] section, line 24
+Parsing [Setup] section, line 25
+Parsing [Setup] section, line 26
+Parsing [Setup] section, line 28
+Parsing [Setup] section, line 29
+Parsing [Setup] section, line 30
+Parsing [Setup] section, line 31
+Parsing [Setup] section, line 32
+Parsing [Setup] section, line 33
+Parsing [Setup] section, line 34
+Parsing [Setup] section, line 35
+Parsing [Setup] section, line 36
+Parsing [Setup] section, line 39
+Parsing [Setup] section, line 40
+Parsing [Setup] section, line 41
+Parsing [Setup] section, line 42
+Parsing [Setup] section, line 43
+Parsing [Setup] section, line 44
+Parsing [Setup] section, line 46
+Parsing [Setup] section, line 47
+Parsing [Setup] section, line 48
+Parsing [Setup] section, line 50
+Reading file (InfoBeforeFile)
+Reading file (WizardImageFile)
+Reading file (WizardSmallImageFile)
+Preparing Setup program executable
+   Verification successful
+   Updating icons (Setup.e32)
+   Updating version info (Setup.e32)
+Determining language code pages
+Parsing [Languages] section, line 53
+   Reading file: C:\Program Files (x86)\Inno Setup 6\Default.isl
+   Messages in script file
+Reading default messages from Default.isl
+Parsing [Languages] section, line 53
+   Reading file: C:\Program Files (x86)\Inno Setup 6\Default.isl
+Parsing [LangOptions], [Messages], and [CustomMessages] sections
+   Messages in script file
+Reading [Code] section
+Parsing [Tasks] section, line 56
+Parsing [Icons] section, line 75
+Parsing [Icons] section, line 76
+Parsing [Icons] section, line 77
+Parsing [Run] section, line 81
+Parsing [Files] section, line 59
+Parsing [Files] section, line 60
+Parsing [Files] section, line 61
+Parsing [Files] section, line 62
+Parsing [Files] section, line 63
+Parsing [Files] section, line 64
+Parsing [Files] section, line 65
+Parsing [Files] section, line 66
+Parsing [Files] section, line 67
+Parsing [Files] section, line 68
+Parsing [Files] section, line 69
+Parsing [Files] section, line 70
+Parsing [Files] section, line 71
+Parsing [Files] section, line 72
+Compiling [Code] section
+Creating setup files
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\AXIOM-Chart.exe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-console-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-datetime-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-debug-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-errorhandling-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-fibers-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-fibers-l1-1-1.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-file-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-file-l1-2-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-file-l2-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-handle-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-heap-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-interlocked-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-kernel32-legacy-l1-1-1.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-libraryloader-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-localization-l1-2-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-memory-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-namedpipe-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-processenvironment-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-processthreads-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-processthreads-l1-1-1.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-profile-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-rtlsupport-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-string-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-synch-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-synch-l1-2-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-sysinfo-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-sysinfo-l1-2-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-timezone-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-core-util-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-conio-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-convert-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-environment-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-filesystem-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-heap-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-locale-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-math-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-process-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-runtime-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-stdio-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-string-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-time-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\api-ms-win-crt-utility-l1-1-0.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\base_library.zip
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\libcrypto-3.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\libffi-8.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\libssl-3.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pyexpat.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\python3.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\python312.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\select.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\sqlite3.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\ucrtbase.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\unicodedata.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\USER_MANUAL.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\VCRUNTIME140.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\VCRUNTIME140_1.dll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_asyncio.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_bz2.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_ctypes.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_decimal.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_hashlib.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_lzma.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_multiprocessing.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_overlapped.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_queue.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_socket.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_sqlite3.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_ssl.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_uuid.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_wmi.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\_zoneinfo.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\__init__.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\kronos_artifacts.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\kronos_runtime.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\kronos_worker.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\__init__.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\vendor\kronos\LICENSE
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\vendor\kronos\UPSTREAM_REQUIREMENTS.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\vendor\kronos\model\kronos.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\vendor\kronos\model\module.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\autonomy\vendor\kronos\model\__init__.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\MarketDataFeed.proto
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\MarketDataFeed_pb2.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\README.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\__init__.py
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\__pycache__\MarketDataFeed_pb2.cpython-312.pyc
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\data\upstox_proto\__pycache__\__init__.cpython-312.pyc
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\autonomy\autonomy.js
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\autonomy\index.html
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\chart\chart.css
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\chart\chart.js
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\chart\index.html
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\terminal\index.html
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\terminal\terminal.css
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\terminal\terminal.js
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\vendor\lightweight-charts\LICENSE
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\app\static\vendor\lightweight-charts\lightweight-charts.standalone.production.js
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\certifi\cacert.pem
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\certifi\py.typed
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\click-8.5.0.dist-info\INSTALLER
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\click-8.5.0.dist-info\METADATA
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\click-8.5.0.dist-info\RECORD
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\click-8.5.0.dist-info\WHEEL
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\click-8.5.0.dist-info\licenses\LICENSE.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\config\kronos-runtime-requirements.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\config\kronos-small.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\.gitkeep
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\example_grids.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\example_scoring.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\sample.csv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\sample_1h.csv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\sample_alt.csv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\sample_alt_1h.csv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\data\tournament_datasets.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\ARCHITECTURE_AUDIT.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\autonomy-shakedown.template.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\AUTONOMY.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\LISTED_ASSETS.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\RESEARCH_CANDIDATES.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\TERMINAL_PERFORMANCE.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\TERMINAL_REDESIGN_PLAN.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\VANTAGE_NEXT_VERSION_PLAN.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\docs\WINDOWS_APP_CONTROL.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\google\_upb\_message.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\MetaTrader5\_core.cp312-win_amd64.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\entry_points.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\INSTALLER
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\METADATA
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\RECORD
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\WHEEL
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\opentelemetry_api-1.45.1.dist-info\licenses\LICENSE
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\INSTALLER
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\METADATA
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\RECORD
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\REQUESTED
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\WHEEL
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic-2.14.1.dist-info\licenses\LICENSE
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\pydantic_core\_pydantic_core.cp312-win_amd64.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\setuptools\_vendor\jaraco\text\Lorem ipsum.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zones
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\CET
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\CST6CDT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Cuba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\EET
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Egypt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Eire
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\EST
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\EST5EDT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Factory
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GB
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GB-Eire
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GMT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GMT+0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GMT-0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\GMT0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Greenwich
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Hongkong
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\HST
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Iceland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Iran
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\iso3166.tab
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Israel
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Jamaica
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Japan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Kwajalein
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\leapseconds
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Libya
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\MET
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\MST
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\MST7MDT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Navajo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\NZ
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\NZ-CHAT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Poland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Portugal
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\PRC
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\PST8PDT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\ROC
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\ROK
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Singapore
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Turkey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\tzdata.zi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\UCT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Universal
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\UTC
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\W-SU
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\WET
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\zone.tab
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\zone1970.tab
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\zonenow.tab
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Zulu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Abidjan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Accra
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Addis_Ababa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Algiers
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Asmara
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Asmera
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Bamako
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Bangui
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Banjul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Bissau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Blantyre
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Brazzaville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Bujumbura
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Cairo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Casablanca
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Ceuta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Conakry
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Dakar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Dar_es_Salaam
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Djibouti
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Douala
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\El_Aaiun
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Freetown
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Gaborone
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Harare
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Johannesburg
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Juba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Kampala
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Khartoum
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Kigali
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Kinshasa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Lagos
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Libreville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Lome
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Luanda
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Lubumbashi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Lusaka
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Malabo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Maputo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Maseru
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Mbabane
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Mogadishu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Monrovia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Nairobi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Ndjamena
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Niamey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Nouakchott
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Ouagadougou
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Porto-Novo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Sao_Tome
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Timbuktu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Tripoli
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Tunis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Africa\Windhoek
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Adak
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Anchorage
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Anguilla
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Antigua
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Araguaina
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Aruba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Asuncion
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Atikokan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Atka
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Bahia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Bahia_Banderas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Barbados
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Belem
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Belize
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Blanc-Sablon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Boa_Vista
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Bogota
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Boise
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Buenos_Aires
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cambridge_Bay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Campo_Grande
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cancun
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Caracas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Catamarca
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cayenne
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cayman
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Chicago
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Chihuahua
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Ciudad_Juarez
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Coral_Harbour
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cordoba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Costa_Rica
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Coyhaique
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Creston
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Cuiaba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Curacao
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Danmarkshavn
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Dawson
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Dawson_Creek
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Denver
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Detroit
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Dominica
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Edmonton
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Eirunepe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\El_Salvador
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Ensenada
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Fortaleza
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Fort_Nelson
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Fort_Wayne
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Glace_Bay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Godthab
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Goose_Bay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Grand_Turk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Grenada
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Guadeloupe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Guatemala
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Guayaquil
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Guyana
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Halifax
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Havana
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Hermosillo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indianapolis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Inuvik
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Iqaluit
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Jamaica
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Jujuy
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Juneau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Knox_IN
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Kralendijk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\La_Paz
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Lima
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Los_Angeles
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Louisville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Lower_Princes
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Maceio
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Managua
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Manaus
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Marigot
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Martinique
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Matamoros
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Mazatlan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Mendoza
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Menominee
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Merida
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Metlakatla
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Mexico_City
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Miquelon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Moncton
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Monterrey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Montevideo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Montreal
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Montserrat
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Nassau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\New_York
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Nipigon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Nome
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Noronha
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Nuuk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Ojinaga
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Panama
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Pangnirtung
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Paramaribo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Phoenix
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Port-au-Prince
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Porto_Acre
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Porto_Velho
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Port_of_Spain
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Puerto_Rico
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Punta_Arenas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Rainy_River
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Rankin_Inlet
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Recife
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Regina
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Resolute
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Rio_Branco
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Rosario
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Santarem
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Santa_Isabel
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Santiago
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Santo_Domingo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Sao_Paulo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Scoresbysund
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Shiprock
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Sitka
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Barthelemy
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Johns
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Kitts
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Lucia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Thomas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\St_Vincent
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Swift_Current
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Tegucigalpa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Thule
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Thunder_Bay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Tijuana
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Toronto
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Tortola
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Vancouver
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Virgin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Whitehorse
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Winnipeg
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Yakutat
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Yellowknife
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Buenos_Aires
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Catamarca
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\ComodRivadavia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Cordoba
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Jujuy
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\La_Rioja
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Mendoza
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Rio_Gallegos
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Salta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\San_Juan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\San_Luis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Tucuman
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Argentina\Ushuaia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Indianapolis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Knox
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Marengo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Petersburg
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Tell_City
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Vevay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Vincennes
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Indiana\Winamac
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Kentucky\Louisville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\Kentucky\Monticello
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\North_Dakota\Beulah
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\North_Dakota\Center
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\America\North_Dakota\New_Salem
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Casey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Davis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\DumontDUrville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Macquarie
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Mawson
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\McMurdo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Palmer
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Rothera
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\South_Pole
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Syowa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Troll
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Antarctica\Vostok
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Arctic\Longyearbyen
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Aden
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Almaty
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Amman
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Anadyr
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Aqtau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Aqtobe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ashgabat
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ashkhabad
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Atyrau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Baghdad
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Bahrain
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Baku
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Bangkok
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Barnaul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Beirut
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Bishkek
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Brunei
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Calcutta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Chita
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Choibalsan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Chongqing
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Chungking
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Colombo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Dacca
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Damascus
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Dhaka
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Dili
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Dubai
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Dushanbe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Famagusta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Gaza
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Harbin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Hebron
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Hong_Kong
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Hovd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ho_Chi_Minh
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Irkutsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Istanbul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Jakarta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Jayapura
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Jerusalem
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kabul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kamchatka
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Karachi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kashgar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kathmandu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Katmandu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Khandyga
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kolkata
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Krasnoyarsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kuala_Lumpur
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kuching
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Kuwait
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Macao
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Macau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Magadan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Makassar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Manila
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Muscat
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Nicosia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Novokuznetsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Novosibirsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Omsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Oral
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Phnom_Penh
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Pontianak
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Pyongyang
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Qatar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Qostanay
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Qyzylorda
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Rangoon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Riyadh
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Saigon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Sakhalin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Samarkand
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Seoul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Shanghai
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Singapore
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Srednekolymsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Taipei
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tashkent
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tbilisi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tehran
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tel_Aviv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Thimbu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Thimphu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tokyo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Tomsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ujung_Pandang
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ulaanbaatar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ulan_Bator
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Urumqi
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Ust-Nera
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Vientiane
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Vladivostok
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Yakutsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Yangon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Yekaterinburg
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Asia\Yerevan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Azores
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Bermuda
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Canary
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Cape_Verde
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Faeroe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Faroe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Jan_Mayen
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Madeira
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Reykjavik
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\South_Georgia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\Stanley
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Atlantic\St_Helena
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\ACT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Adelaide
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Brisbane
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Broken_Hill
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Canberra
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Currie
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Darwin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Eucla
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Hobart
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\LHI
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Lindeman
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Lord_Howe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Melbourne
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\North
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\NSW
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Perth
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Queensland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\South
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Sydney
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Tasmania
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Victoria
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\West
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Australia\Yancowinna
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Brazil\Acre
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Brazil\DeNoronha
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Brazil\East
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Brazil\West
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Atlantic
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Central
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Eastern
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Mountain
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Newfoundland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Pacific
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Saskatchewan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Canada\Yukon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Chile\Continental
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Chile\EasterIsland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+1
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+10
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+11
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+12
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+2
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+3
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+4
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+5
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+6
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+7
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+8
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT+9
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-1
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-10
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-11
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-12
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-13
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-14
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-2
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-3
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-4
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-5
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-6
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-7
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-8
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT-9
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\GMT0
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\Greenwich
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\UCT
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\Universal
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\UTC
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Etc\Zulu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Amsterdam
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Andorra
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Astrakhan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Athens
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Belfast
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Belgrade
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Berlin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Bratislava
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Brussels
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Bucharest
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Budapest
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Busingen
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Chisinau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Copenhagen
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Dublin
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Gibraltar
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Guernsey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Helsinki
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Isle_of_Man
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Istanbul
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Jersey
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Kaliningrad
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Kiev
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Kirov
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Kyiv
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Lisbon
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Ljubljana
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\London
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Luxembourg
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Madrid
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Malta
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Mariehamn
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Minsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Monaco
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Moscow
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Nicosia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Oslo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Paris
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Podgorica
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Prague
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Riga
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Rome
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Samara
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\San_Marino
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Sarajevo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Saratov
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Simferopol
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Skopje
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Sofia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Stockholm
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Tallinn
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Tirane
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Tiraspol
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Ulyanovsk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Uzhgorod
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Vaduz
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Vatican
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Vienna
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Vilnius
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Volgograd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Warsaw
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Zagreb
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Zaporozhye
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Europe\Zurich
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Antananarivo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Chagos
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Christmas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Cocos
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Comoro
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Kerguelen
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Mahe
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Maldives
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Mauritius
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Mayotte
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Indian\Reunion
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Mexico\BajaNorte
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Mexico\BajaSur
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Mexico\General
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Apia
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Auckland
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Bougainville
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Chatham
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Chuuk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Easter
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Efate
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Enderbury
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Fakaofo
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Fiji
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Funafuti
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Galapagos
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Gambier
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Guadalcanal
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Guam
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Honolulu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Johnston
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Kanton
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Kiritimati
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Kosrae
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Kwajalein
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Majuro
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Marquesas
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Midway
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Nauru
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Niue
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Norfolk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Noumea
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Pago_Pago
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Palau
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Pitcairn
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Pohnpei
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Ponape
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Port_Moresby
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Rarotonga
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Saipan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Samoa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Tahiti
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Tarawa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Tongatapu
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Truk
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Wake
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Wallis
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\Pacific\Yap
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Alaska
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Aleutian
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Arizona
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Central
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\East-Indiana
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Eastern
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Hawaii
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Indiana-Starke
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Michigan
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Mountain
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Pacific
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\tzdata\zoneinfo\US\Samoa
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets\speedups.cp312-win_amd64.pyd
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\entry_points.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\INSTALLER
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\LICENSE
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\METADATA
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\RECORD
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\REQUESTED
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\top_level.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist-onedir\AXIOM-Operator\_internal\websockets-15.0.1.dist-info\WHEEL
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\dist\SOURCE_COMMIT.txt
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\WINDOWS_INSTALL_MANUAL.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\USER_MANUAL.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\US_EQUITIES_PAPER.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\VANTAGE_NEXT_VERSION_PLAN.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\TERMINAL_REDESIGN_PLAN.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\TERMINAL_PERFORMANCE.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\LISTED_ASSETS.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\RESEARCH_CANDIDATES.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\..\..\docs\WINDOWS_APP_CONTROL.md
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\TERMINAL_BENCHMARK.json
+   Compressing: D:\a\AXIOM\AXIOM\src\packaging\windows\TERMINAL_UI_BENCHMARK.json
+
+
+Successful compile (6.547 sec). Resulting Setup program filename is:
+D:\a\AXIOM\AXIOM\src\packaging\windows\dist\AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup.exe
+built loaderless AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup.exe with 2 required BIN sidecars
+
+=== 7b. Package the loaderless installer and onedir portable ZIPs ===
+loaderless installer ZIP and onedir portable ZIP structure verified
+
+=== 7c. Inspect final installer and portable ZIP payloads (hard gate) ===
+PASS payload hygiene: zip: 16 ZIP entries; no forbidden names or SQLite payloads
+PASS payload hygiene: zip: 767 ZIP entries; no forbidden names or SQLite payloads
+
+=== 8. Checksums and build metadata ===
+
+=== Done ===
+AXIOM-Chart.exe                                              20,588.0 KB
+AXIOM-Operator-3.7.0a4-windows-x64-no-temp-install.zip       18,679.6 KB
+AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup-0.bin           55.5 KB
+AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup-1.bin       16,817.3 KB
+AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup.exe          4,322.0 KB
+AXIOM-Operator-3.7.0a4-windows-x64-portable.zip              21,009.4 KB
+BUILD_METADATA.json                                              12.6 KB
+install-test-log.txt                                              2.7 KB
+SHA256SUMS.txt                                                    0.4 KB
+SOURCE_COMMIT.txt                                                 0.2 KB
+10257ca6224e60186113ea6aec774af61e4d18db5b9a9ddaf1209cd4459ca09a  AXIOM-Chart.exe
+ce8a3f5bfdc9ab11dd50e7a63ed49dd22d3678d63be9b7ecf6a11ff485a4b168  AXIOM-Operator-3.7.0a4-windows-x64-no-temp-install.zip
+1774b4194ca257b6a87e0ea9b211d43ee7198ef3f06db727dd3ad49bb41ff91c  AXIOM-Operator-3.7.0a4-windows-x64-portable.zip
+cff89c04d8cdc139ae0f241ce0ab052cd1716b06201db50dde6d74a9193148b5  BUILD_METADATA.json
