@@ -40,6 +40,7 @@ def test_autonomy_page_status_and_manual_are_local_and_credentialed(tmp_path):
 def test_kronos_setup_routes_are_authenticated_fixed_actions(tmp_path, monkeypatch):
     with client(tmp_path) as web:
         assert web.get("/api/autonomy/kronos").status_code == 401
+        assert web.post("/api/autonomy/kronos/python", json={"executable": "python.exe"}).status_code == 401
         headers = {"Authorization": "Bearer local-api-test"}
         response = web.get("/api/autonomy/kronos", headers=headers)
         assert response.status_code == 200, response.text
@@ -57,6 +58,21 @@ def test_kronos_setup_routes_are_authenticated_fixed_actions(tmp_path, monkeypat
         monkeypatch.setattr(service, "kronos_install", lambda: calls.append("install") or {"fixed": True})
         monkeypatch.setattr(service, "kronos_self_test", lambda: calls.append("self-test") or {"fixed": True})
         monkeypatch.setattr(service, "kronos_cancel", lambda: calls.append("cancel") or {"fixed": True})
+        selected = []
+        monkeypatch.setattr(
+            service, "kronos_python",
+            lambda executable: selected.append(executable) or {"fixed": True},
+        )
+        python_path = r"C:\Users\operator\AppData\Local\Programs\Python\Python311\python.exe"
+        result = web.post(
+            "/api/autonomy/kronos/python", headers=headers, json={"executable": python_path},
+        )
+        assert result.status_code == 200 and result.json() == {"fixed": True}
+        assert selected == [python_path] and python_path not in result.text
+        rejected = web.post("/api/autonomy/kronos/python", headers=headers, json={
+            "executable": python_path, "arguments": ["-c", "must-not-run"],
+        })
+        assert rejected.status_code == 422 and selected == [python_path]
         for action in ("install", "self-test"):
             result = web.post(f"/api/autonomy/kronos/{action}", headers=headers, json={
                 "url": "https://evil.example/weights", "revision": "latest",

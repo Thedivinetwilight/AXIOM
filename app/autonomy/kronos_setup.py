@@ -75,6 +75,14 @@ class KronosSetupManager:
     def start_self_test(self) -> dict:
         return self._start("OFFLINE_SELF_TEST")
 
+    def select_python(self, executable: str | None) -> dict:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise ArtifactError("Python selection is locked during Kronos setup/self-test")
+        refreshed = self.service.select_python(executable)
+        self.on_status(refreshed)
+        return self.status()
+
     def cancel(self) -> dict:
         self._cancel.set()
         self._update(cancel_requested=True)

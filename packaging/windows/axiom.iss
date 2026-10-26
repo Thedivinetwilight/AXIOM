@@ -4,7 +4,7 @@
 ; credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
 ; live in %LOCALAPPDATA%\AXIOM, preserved on upgrade and silent uninstall.
 ;
-; Build with:  ISCC.exe /DMyAppVersion=3.7.0a4 axiom.iss
+; Build with:  ISCC.exe /DMyAppVersion=3.7.0a5 axiom.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"

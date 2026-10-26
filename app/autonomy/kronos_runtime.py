@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -29,6 +30,11 @@ _ALLOWED_INDEXES = {
     "https://pypi.org/simple",
     "https://download.pytorch.org/whl/cpu",
 }
+_SELECTION_SCHEMA = "axiom.kronos.python-selection.v1"
+_PY_LAUNCHER_ROW = re.compile(
+    r"^\s*-V:(?P<major>\d+)\.(?P<minor>\d+)(?P<arch>-32)?\s+"
+    r"(?:\*\s*)?(?P<executable>.+?)\s*$"
+)
 
 
 def runtime_lock(path: Path) -> dict:
@@ -62,13 +68,25 @@ def runtime_lock(path: Path) -> dict:
     }
 
 
-def applicable_packages(lock: dict) -> list[dict]:
+def applicable_packages(lock: dict, *, python: dict | None = None) -> list[dict]:
+    """Evaluate the two lock markers for the interpreter that will run Kronos.
+
+    A frozen application's own Python can differ from the selected system
+    interpreter, so parent-side probe validation must not use host defaults.
+    """
+    if python is None:
+        version = sys.version_info[:2]
+        platform_name = sys.platform
+    else:
+        version = tuple(python["version"][:2])
+        system = str(python["system"]).lower()
+        platform_name = {"windows": "win32", "darwin": "darwin"}.get(system, system)
     result = []
     for item in lock["packages"]:
         marker = item["marker"]
-        if marker == 'sys_platform == "win32"' and sys.platform != "win32":
+        if marker == 'sys_platform == "win32"' and platform_name != "win32":
             continue
-        if marker == 'python_version >= "3.12"' and sys.version_info[:2] < (3, 12):
+        if marker == 'python_version >= "3.12"' and version < (3, 12):
             continue
         result.append(item)
     return result
@@ -101,10 +119,123 @@ class KronosRuntimeManager:
         self.lock_path = Path(lock_path)
         self.worker_path = Path(worker_path)
         self.application_root = Path(application_root)
-        self.python_command = python_command
+        self.python_command = list(python_command) if python_command else None
+        self._fixed_python_command = self.python_command is not None
+        self._manual_python = False
+        self._selection_path = self.artifact_root / "python-selection.json"
+        if self.python_command is None:
+            selected = self._read_python_selection()
+            if selected:
+                self.python_command = [selected]
+                self._manual_python = True
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
         self._python: dict | None = None
+        self._candidate_sources: dict[tuple[str, ...], str] = {}
+        self._python_diagnostics: list[str] = []
+        self._last_probe_error = "Python identity probe was not run"
+
+    def _read_python_selection(self) -> str | None:
+        try:
+            raw = json.loads(self._selection_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            if raw.get("schema") != _SELECTION_SCHEMA:
+                return None
+            executable = raw.get("executable")
+            if isinstance(executable, str) and executable and len(executable) <= 1024:
+                return executable
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        return None
+
+    def _write_python_selection(self, executable: str | None) -> None:
+        temporary = self.artifact_root / f".python-selection-{uuid4().hex}.tmp"
+        try:
+            self.artifact_root.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(canonical({
+                "schema": _SELECTION_SCHEMA, "executable": executable,
+            }), encoding="utf-8")
+            with temporary.open("r+b") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._selection_path)
+        except OSError:
+            raise ArtifactError("Could not save the Kronos Python selection in per-user storage") from None
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+    def select_python(self, executable: str | None) -> dict | None:
+        """Validate and prefer one Python executable, or restore auto-discovery."""
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise ArtifactError("Python selection is locked while a Kronos runtime operation is active")
+            text = (executable or "").strip()
+            if not text:
+                self._write_python_selection(None)
+                self.python_command = None
+                self._manual_python = False
+                self._python = None
+                return self.python(refresh=True)
+            if len(text) > 1024 or "\x00" in text:
+                raise ArtifactError("Select one full Python executable path without command-line arguments")
+            if len(text) >= 2 and text[0] == text[-1] == '"':
+                text = text[1:-1].strip()
+            try:
+                path = Path(text).expanduser()
+                if not path.is_absolute() or not path.is_file():
+                    raise ValueError("not an executable file")
+                resolved = str(path.resolve(strict=True))
+            except (OSError, ValueError, RuntimeError):
+                raise ArtifactError(
+                    "Select an existing full CPython 3.11/3.12 x64 executable path with pip; no arguments"
+                ) from None
+            info = self._python_probe([resolved])
+            if info is None:
+                raise ArtifactError(
+                    "Selected Python is not CPython 3.11/3.12 x64 with pip: "
+                    + self._last_probe_error
+                )
+            try:
+                if not os.path.samefile(resolved, info["executable"]):
+                    raise ValueError("launcher is not the selected executable")
+            except (OSError, ValueError):
+                raise ArtifactError(
+                    "Select the CPython executable itself, not a launcher or command wrapper"
+                ) from None
+            self._write_python_selection(resolved)
+            self.python_command = [resolved]
+            self._manual_python = True
+            info["selection"] = "manual"
+            info["command_label"] = "manual selection"
+            self._python = info
+            return dict(info)
+
+    def _py_launcher_candidates(self) -> list[list[str]]:
+        """Enumerate registered x64 interpreters without invoking a shell."""
+        try:
+            result = subprocess.run(
+                ["py", "-0p"], capture_output=True, text=True, timeout=10,
+                env=_environment(), check=False, shell=False,
+            )
+            if result.returncode:
+                return []
+        except (OSError, subprocess.SubprocessError):
+            return []
+        candidates = []
+        for line in result.stdout.splitlines():
+            match = _PY_LAUNCHER_ROW.match(line)
+            if not match:
+                continue
+            version = (int(match.group("major")), int(match.group("minor")))
+            executable = match.group("executable").strip()
+            if len(executable) >= 2 and executable[0] == executable[-1] == '"':
+                executable = executable[1:-1].strip()
+            if version in {(3, 11), (3, 12)} and match.group("arch") is None and executable:
+                command = [executable]
+                if command not in candidates:
+                    candidates.append(command)
+        return candidates
 
     @staticmethod
     def required_free_bytes() -> int:
@@ -125,54 +256,120 @@ class KronosRuntimeManager:
         }
 
     def _candidates(self) -> list[list[str]]:
-        if self.python_command:
-            return [list(self.python_command)]
-        candidates = []
+        candidates: list[list[str]] = []
+        sources: dict[tuple[str, ...], str] = {}
+
+        def add(command: list[str], label: str) -> None:
+            if command and command[0] and command not in candidates:
+                candidates.append(list(command))
+                sources[tuple(command)] = label
+
+        if self._fixed_python_command and self.python_command:
+            add(list(self.python_command), "configured Python")
+            self._candidate_sources = sources
+            return candidates
+        if self._manual_python and self.python_command:
+            add(list(self.python_command), "manual selection")
         if not getattr(sys, "frozen", False) and sys.version_info[:2] in {(3, 11), (3, 12)}:
-            candidates.append([sys.executable])
+            add([sys.executable], "current Python")
         if sys.platform == "win32":
-            candidates.extend([["py", "-3.11"], ["py", "-3.12"], ["python"]])
+            # Some py-launcher installations select no interpreter for the bare
+            # version selector but work with the explicit 64-bit selector.
+            for version in ("3.11", "3.12"):
+                add(["py", f"-{version}-64"], f"py -{version}-64")
+            for command in self._py_launcher_candidates():
+                add(command, "py launcher catalog")
+            for version in ("3.11", "3.12"):
+                add(["py", f"-{version}"], f"py -{version}")
+            add(["python"], "python on PATH")
         else:
-            candidates.extend([["python3.11"], ["python3.12"], ["python3"], ["python"]])
-        result = []
-        for command in candidates:
-            if command and command[0] and command not in result:
-                result.append(command)
-        return result
+            for command in (["python3.11"], ["python3.12"], ["python3"], ["python"]):
+                add(command, "python on PATH")
+        self._candidate_sources = sources
+        return candidates
 
     def _python_probe(self, command: list[str]) -> dict | None:
         code = (
-            "import json,platform,sys,pip;print(json.dumps({"
+            "import json,platform,sys\n"
+            "try:\n"
+            " import pip\n"
+            " pip_version=pip.__version__\n"
+            "except Exception:\n"
+            " pip_version=None\n"
+            "print(json.dumps({"
             "'version':list(sys.version_info[:3]),'machine':platform.machine(),"
-            "'system':platform.system(),'executable':sys.executable,'pip':pip.__version__}))"
+            "'implementation':platform.python_implementation(),"
+            "'bits':64 if sys.maxsize>2**32 else 32,"
+            "'system':platform.system(),'executable':sys.executable,'pip':pip_version}))"
         )
         try:
             result = subprocess.run(
                 [*command, "-I", "-c", code], capture_output=True, text=True,
-                timeout=20, env=_environment(), check=False,
+                errors="replace", timeout=20, env=_environment(), check=False, shell=False,
             )
-            if result.returncode:
-                return None
+        except subprocess.TimeoutExpired:
+            self._last_probe_error = "Python/pip probe timed out"
+            return None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self._last_probe_error = "Python/pip probe could not be started"
+            return None
+        if result.returncode:
+            self._last_probe_error = f"Python/pip probe exited with status {result.returncode}"
+            return None
+        self._last_probe_error = "probe returned invalid Python identity data"
+        try:
             info = json.loads(result.stdout.strip())
             version = tuple(info["version"])
             if version[:2] not in {(3, 11), (3, 12)}:
+                self._last_probe_error = "Python version is not 3.11 or 3.12"
                 return None
             if info["machine"].lower() not in {"amd64", "x86_64"}:
+                self._last_probe_error = "Python machine architecture is not AMD64/x86_64"
+                return None
+            if info.get("implementation") != "CPython" or info.get("bits") != 64:
+                self._last_probe_error = "interpreter is not 64-bit CPython"
+                return None
+            if not isinstance(info.get("pip"), str) or not info["pip"]:
+                self._last_probe_error = "pip is unavailable or did not report its version"
+                return None
+            if not isinstance(info.get("executable"), str) or not info["executable"]:
+                self._last_probe_error = "Python did not report its executable identity"
                 return None
             info["command"] = command
+            self._last_probe_error = ""
             return info
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        except (ValueError, TypeError, KeyError, AttributeError):
             return None
+
+    def _python_requirement_error(self) -> str:
+        message = "CPython 3.11/3.12 x64 with pip is required for the optional runtime"
+        if not self._python_diagnostics:
+            return message
+        details = "; ".join(self._python_diagnostics[:8])
+        omitted = len(self._python_diagnostics) - 8
+        if omitted > 0:
+            details += f"; {omitted} additional probe failures omitted"
+        return message + ". Discovery: " + details
 
     def python(self, *, refresh: bool = False) -> dict | None:
         with self._lock:
             if self._python is not None and not refresh:
                 return dict(self._python)
+            self._python = None
+            self._python_diagnostics = []
             for command in self._candidates():
+                label = self._candidate_sources.get(tuple(command), "Python executable")
                 info = self._python_probe(command)
-                if info is not None:
-                    self._python = info
-                    return dict(info)
+                if info is None:
+                    self._python_diagnostics.append(f"{label}: {self._last_probe_error}")
+                    continue
+                info["selection"] = (
+                    "manual" if self._manual_python and command == self.python_command
+                    else "automatic"
+                )
+                info["command_label"] = label
+                self._python = info
+                return dict(info)
             return None
 
     def runtime_dir(self, python: dict) -> Path:
@@ -260,8 +457,11 @@ class KronosRuntimeManager:
         return result
 
     @staticmethod
-    def _validate_probe(result: dict, lock: dict) -> None:
-        expected = {item["normalized_name"]: item["version"] for item in applicable_packages(lock)}
+    def _validate_probe(result: dict, lock: dict, python: dict) -> None:
+        expected = {
+            item["normalized_name"]: item["version"]
+            for item in applicable_packages(lock, python=python)
+        }
         versions = result.get("package_versions") or {}
         normalized = {key.lower().replace("_", "-"): str(value) for key, value in versions.items()}
         if normalized != expected:
@@ -279,7 +479,7 @@ class KronosRuntimeManager:
             "installed": False, "python": python, "issues": [], "device": "cpu",
         }
         if python is None:
-            base["issues"] = ["CPython 3.11/3.12 x64 with pip is required for the optional runtime"]
+            base["issues"] = [self._python_requirement_error()]
             return base
         lock = runtime_lock(self.lock_path)
         directory = self.runtime_dir(python)
@@ -296,7 +496,7 @@ class KronosRuntimeManager:
         base["installed"] = True
         try:
             result = self._worker(python, directory / "site", timeout=90, cancel=cancel)
-            self._validate_probe(result, lock)
+            self._validate_probe(result, lock, python)
             return {**base, **result, "status": "READY", "verified": True,
                     "python": python, "issues": [], "lock_sha256": lock["sha256"]}
         except (ArtifactError, OSError) as exc:
@@ -307,7 +507,7 @@ class KronosRuntimeManager:
                 progress: Callable[[dict], None]) -> dict:
         python = self.python(refresh=True)
         if python is None:
-            raise ArtifactError("CPython 3.11/3.12 x64 with pip is required for the optional runtime")
+            raise ArtifactError(self._python_requirement_error())
         lock = runtime_lock(self.lock_path)
         target = self.runtime_dir(python)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -353,7 +553,7 @@ class KronosRuntimeManager:
                     raise ArtifactError("Locked CPU runtime installation failed; no fallback was installed")
             progress({"phase": "RUNTIME_PROBE", "runtime_lock_sha256": lock["sha256"]})
             result = self._worker(python, site, timeout=120, cancel=cancel)
-            self._validate_probe(result, lock)
+            self._validate_probe(result, lock, python)
             (staging / "axiom-runtime.json").write_text(canonical({
                 "schema": _RUNTIME_SCHEMA, "lock_sha256": lock["sha256"],
                 "python_version": python["version"], "device": "cpu",

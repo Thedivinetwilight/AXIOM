@@ -200,6 +200,11 @@ class AutonomyService:
         self.kronos_status = self.kronos.status()
         return result
 
+    def kronos_python(self, executable: str | None) -> dict:
+        result = self.kronos_setup.select_python(executable)
+        self.kronos_status = self.kronos.status()
+        return result
+
     def kronos_cancel(self) -> dict:
         result = self.kronos_setup.cancel()
         self.kronos_status = self.kronos.status()

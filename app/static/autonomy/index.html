@@ -17,6 +17,9 @@
 <div class="row spread"><h2>Optional Kronos setup & offline verification</h2><span id="kronosSetupPill" class="pill">NOT CHECKED</span></div>
 <p class="muted">Kronos is optional. Setup changes no trading session or execution state. Downloads use only the pinned official artifacts and exact CPU runtime lock; weights/runtime stay in the per-user AXIOM data directory. No mock forecast is produced on failure.</p>
 <div id="kronosInstallPlan" class="scroll"></div>
+<label for="kronosPythonExecutable">Optional Python executable fallback (full path to python.exe, no arguments)</label>
+<div class="row"><input id="kronosPythonExecutable" autocomplete="off" spellcheck="false" placeholder="C:\Users\you\AppData\Local\Programs\Python\Python311\python.exe"><button id="selectKronosPython">Validate & use Python</button><button id="autoKronosPython">Auto-detect Python</button></div>
+<p class="muted">Automatic discovery includes the Windows py launcher’s explicit 64-bit selectors and registered-interpreter catalog. Selection accepts only CPython 3.11/3.12 x64 with pip, affects Kronos inference only, and never changes trading or execution state.</p>
 <div class="row"><button id="installKronos" class="primary">Download & install pinned Kronos</button><button id="testKronos">Offline verify + real inference self-test</button><button id="cancelKronos" class="warn">Cancel setup</button></div>
 <div id="kronosOperation" class="notice" role="status" aria-live="polite"></div>
 <div id="kronosSetupStatus"></div>

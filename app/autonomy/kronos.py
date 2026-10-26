@@ -74,15 +74,26 @@ class KronosService:
             self._manifest_file_digest = sha256_file(self.manifest_path)
         return self._manifest
 
+    def _python_identity(self) -> dict:
+        python = self._runtime_status.get("python") or {}
+        return {
+            "python_version": python.get("version"),
+            "python_machine": python.get("machine"),
+            "python_system": python.get("system"),
+        }
+
     def _load_recorded_self_test(self) -> None:
         self._last_self_test = None
         try:
             raw = json.loads((self.artifact_root / "self-test.json").read_text(encoding="utf-8"))
             runtime_lock = self._runtime_status.get("runtime_lock_sha256") \
                 or self._runtime_status.get("lock_sha256")
+            identity = self._python_identity()
             if raw.get("status") == "PASSED" and raw.get("manifest_sha256") == self._digest \
                     and raw.get("manifest_file_sha256") == self._manifest_file_digest \
-                    and raw.get("runtime_lock_sha256") == runtime_lock:
+                    and raw.get("runtime_lock_sha256") == runtime_lock \
+                    and all(value is not None for value in identity.values()) \
+                    and all(raw.get(key) == value for key, value in identity.items()):
                 self._last_self_test = raw
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return
@@ -120,6 +131,14 @@ class KronosService:
             self._load_recorded_self_test()
             return self.status()
 
+    def select_python(self, executable: str | None) -> dict:
+        """Select only the inference interpreter; never touch execution state."""
+        with self._lock:
+            self.runtime.select_python(executable)
+            self._last_inference = None
+            self._last_self_test = None
+            return self.verify()
+
     def install_plan(self) -> dict:
         manifest = self.manifest
         components = {}
@@ -156,7 +175,10 @@ class KronosService:
         python = runtime.get("python")
         if python:
             result["python"] = {
-                key: python.get(key) for key in ("version", "machine", "system", "pip")
+                key: python.get(key) for key in (
+                    "version", "machine", "system", "pip", "implementation", "bits",
+                    "selection", "command_label",
+                )
             }
         return result
 
@@ -309,6 +331,7 @@ class KronosService:
                 "manifest_sha256": self._digest,
                 "runtime_lock_sha256": (self._last_inference or {}).get("runtime_lock_sha256"),
                 "source_commit": self._manifest["source"]["commit"],
+                **self._python_identity(),
                 "artifacts": {
                     component: {
                         relative: view["actual_sha256"]

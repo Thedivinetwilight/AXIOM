@@ -41,6 +41,11 @@ class CancelBody(BaseModel):
     instrument_key: str = Field(min_length=3, max_length=160)
 
 
+class KronosPythonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    executable: str = Field(default="", max_length=1024)
+
+
 def service(request: Request):
     value = getattr(request.app.state, "autonomy", None)
     if value is None:
@@ -90,6 +95,12 @@ def status(request: Request):
 def kronos_status(request: Request):
     # Read-only setup/artifact/runtime view; no account or execution state.
     return service(request).kronos_view()
+
+
+@api.post("/kronos/python")
+def kronos_python(body: KronosPythonBody, request: Request):
+    # One validated executable path only; no arguments, packages or credentials.
+    return call(request, lambda value: value.kronos_python(body.executable))
 
 
 @api.post("/kronos/install", status_code=202)

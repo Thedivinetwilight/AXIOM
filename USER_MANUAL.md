@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a4**
+**Current source version: 3.7.0a5**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -20,7 +20,7 @@ For Windows download, installation and upgrade steps, read `packaging/windows/WI
 
 Version 3.7.0a1 also includes a **separate Daily Upstox Autonomy** boundary at `/autonomy`. Its live-market local PAPER, default-disabled UPSTOX_LIVE real-money path, exact listed-equity/currency-derivative catalog, unattended daily-session rules, three-leg GTT protection, reconciliation, Kronos artifacts and paired-ablation research are documented in `docs/AUTONOMY.md` (also served at `/autonomy/manual`). It does not alter the Vantage rules above. No Upstox account-specific or external DEMO/LIVE verification is implied.
 
-In 3.7.0a4, optional Kronos setup is an explicit button on that page. Review the complete pinned sources, revisions, sizes, hashes and CPU runtime lock before confirming. Weights/runtime install only into per-user autonomy data storage, never the application directory. Cancellation removes partial setup files; failure remains `UNAVAILABLE` with no mock forecast. The separate offline self-test performs real inference on synthetic smoke bars only—it is not market/profitability evidence and does not create, Arm or Activate a trading session.
+Optional Kronos setup is an explicit button on that page. Review the complete pinned sources, revisions, sizes, hashes and CPU runtime lock before confirming. Windows discovery includes `py -3.11-64` / `py -3.12-64` and the `py -0p` registered-interpreter catalog. If needed, use **Validate & use Python** with one full `python.exe` path (no arguments), or **Auto-detect Python** to clear that preference. Only the CPython 3.11/3.12 x64 executable itself with pip is accepted (not a launcher or command line); safe probe diagnostics omit local paths and raw stderr. Selection is stored in per-user Kronos data and does not alter trading state. Weights/runtime install only into per-user autonomy data storage, never the application directory. Cancellation removes partial setup files; failure remains `UNAVAILABLE` with no mock forecast. The separate offline self-test performs real inference on synthetic smoke bars only—it is not market/profitability evidence and does not create, Arm or Activate a trading session.
 
 For that autonomy boundary, **Scan once is read-only in both PAPER and LIVE**; only the background worker executes orders for an explicitly ACTIVE daily session. Emergency stop blocks new entries before cleanup, attempts managed unfilled-entry cancellation without requiring ACTIVE, preserves open-position protection, and remains prominently unresolved when cancellation/reconciliation is uncertain—it never claims the account is clear. Restart/browser recovery exposes durable sessions, positions, intents, and orders as HALTED read-only views, never restores ARMED/ACTIVE, and requires fresh authorization/risk/reconciliation/approval. Synthetic research evidence cannot execute even in PAPER; operator-supplied provenance is not independent verification.
 

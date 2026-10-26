@@ -10,6 +10,7 @@ import shutil
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -260,6 +261,167 @@ def test_exact_runtime_lock_and_platform_markers(monkeypatch):
     assert "setuptools" in python312
 
 
+def test_probe_markers_use_selected_python_not_frozen_host(monkeypatch):
+    import app.autonomy.kronos_runtime as runtime_module
+    lock = runtime_lock(ROOT / "config" / "kronos-runtime-requirements.txt")
+    monkeypatch.setattr(runtime_module.sys, "version_info", (3, 12, 10))
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    selected = {"version": [3, 11, 9], "system": "Windows"}
+    versions = {
+        item["normalized_name"]: item["version"]
+        for item in applicable_packages(lock, python=selected)
+    }
+    assert "setuptools" not in versions and versions["colorama"] == "0.4.6"
+    result = {
+        "package_versions": versions, "device": "cpu", "cuda_available": False,
+        "torch_cuda_build": None, "status": "READY",
+    }
+    runtime_module.KronosRuntimeManager._validate_probe(result, lock, selected)
+    result["package_versions"] = {**versions, "setuptools": "80.9.0"}
+    with pytest.raises(ArtifactError, match="exactly match the lock"):
+        runtime_module.KronosRuntimeManager._validate_probe(result, lock, selected)
+
+
+def test_frozen_windows_discovery_has_explicit_x64_py_selectors(tmp_path, monkeypatch):
+    import app.autonomy.kronos_runtime as runtime_module
+    manager = runtime_module.KronosRuntimeManager(
+        tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+        tmp_path / "worker.py", application_root=ROOT,
+    )
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(manager, "_py_launcher_candidates", lambda: [[r"C:\Python311\python.exe"]])
+    commands = manager._candidates()
+    assert commands[:3] == [
+        ["py", "-3.11-64"], ["py", "-3.12-64"], [r"C:\Python311\python.exe"],
+    ]
+    assert ["py", "-3.11"] in commands and ["py", "-3.12"] in commands
+    assert manager._candidate_sources[("py", "-3.11-64")] == "py -3.11-64"
+
+
+def test_py_launcher_catalog_accepts_only_supported_x64_rows(tmp_path, monkeypatch):
+    import app.autonomy.kronos_runtime as runtime_module
+    manager = runtime_module.KronosRuntimeManager(
+        tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+        tmp_path / "worker.py", application_root=ROOT,
+    )
+    output = """
+ -V:3.13 *        C:\\Python313\\python.exe
+ -V:3.12          C:\\Python312\\python.exe
+ -V:3.11-32       C:\\Python311-32\\python.exe
+ -V:3.11 *        \"C:\\Program Files\\Python311\\python.exe\"
+"""
+    calls = []
+
+    def listed(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=output)
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", listed)
+    assert manager._py_launcher_candidates() == [
+        [r"C:\Python312\python.exe"], [r"C:\Program Files\Python311\python.exe"],
+    ]
+    assert calls[0][0] == ["py", "-0p"]
+    assert calls[0][1]["shell"] is False
+
+
+def test_reported_py_311_64_python_3119_pip_240_is_accepted(tmp_path, monkeypatch):
+    import app.autonomy.kronos_runtime as runtime_module
+    manager = runtime_module.KronosRuntimeManager(
+        tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+        tmp_path / "worker.py", application_root=ROOT,
+    )
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(manager, "_py_launcher_candidates", lambda: [])
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            "version": [3, 11, 9], "machine": "AMD64", "implementation": "CPython",
+            "bits": 64, "system": "Windows", "executable": r"C:\Python311\python.exe",
+            "pip": "24.0",
+        }))
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", probe)
+    selected = manager.python(refresh=True)
+    assert selected is not None
+    assert selected["version"] == [3, 11, 9] and selected["pip"] == "24.0"
+    assert selected["selection"] == "automatic"
+    assert selected["command_label"] == "py -3.11-64"
+    assert calls[0][:2] == ["py", "-3.11-64"]
+
+
+def test_discovery_reports_bounded_safe_probe_failure_reasons(tmp_path, monkeypatch):
+    import app.autonomy.kronos_runtime as runtime_module
+    manager = runtime_module.KronosRuntimeManager(
+        tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+        tmp_path / "worker.py", application_root=ROOT,
+    )
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        manager, "_py_launcher_candidates", lambda: [[r"C:\\registered\\python.exe"]],
+    )
+    monkeypatch.setattr(
+        runtime_module.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="secret path"),
+    )
+    status = manager.probe()
+    message = status["issues"][0]
+    assert "py -3.11-64: Python/pip probe exited with status 1" in message
+    assert "py launcher catalog: Python/pip probe exited with status 1" in message
+    assert "secret path" not in message and "C:\\" not in message
+
+
+def test_manual_python_selection_persists_and_auto_reset(tmp_path):
+    from app.autonomy.kronos_runtime import KronosRuntimeManager
+
+    def manager():
+        return KronosRuntimeManager(
+            tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+            ROOT / "app" / "autonomy" / "kronos_worker.py", application_root=ROOT,
+        )
+
+    selection_path = tmp_path / "kronos" / "python-selection.json"
+    selection_path.parent.mkdir(parents=True)
+    selection_path.write_text("[]", encoding="utf-8")
+    assert manager().python_command is None  # malformed saved state falls back safely
+    selected = manager().select_python(sys.executable)
+    assert selected is not None and selected["selection"] == "manual"
+    assert selected["implementation"] == "CPython" and selected["bits"] == 64
+    saved = json.loads(selection_path.read_text(encoding="utf-8"))
+    assert saved["executable"] == str(Path(sys.executable).resolve())
+    restored = manager()
+    assert restored.python(refresh=True)["command_label"] == "manual selection"
+    with pytest.raises(ArtifactError, match="no arguments"):
+        restored.select_python(sys.executable + " --version")
+    assert json.loads(selection_path.read_text(encoding="utf-8")) == saved
+    restored.select_python("")
+    assert json.loads(selection_path.read_text(encoding="utf-8"))["executable"] is None
+
+
+def test_manual_selection_rejects_launcher_instead_of_python_executable(tmp_path, monkeypatch):
+    from app.autonomy.kronos_runtime import KronosRuntimeManager
+    manager = KronosRuntimeManager(
+        tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
+        ROOT / "app" / "autonomy" / "kronos_worker.py", application_root=ROOT,
+    )
+    launcher = tmp_path / "py.exe"
+    interpreter = tmp_path / "python.exe"
+    launcher.write_bytes(b"fixture")
+    interpreter.write_bytes(b"fixture")
+    monkeypatch.setattr(manager, "_python_probe", lambda command: {
+        "version": [3, 11, 9], "machine": "AMD64", "implementation": "CPython",
+        "bits": 64, "system": "Windows", "executable": str(interpreter), "pip": "24.0",
+        "command": command,
+    })
+    with pytest.raises(ArtifactError, match="not a launcher"):
+        manager.select_python(str(launcher))
+    assert not (tmp_path / "kronos" / "python-selection.json").exists()
+
+
 def test_pip_commands_are_isolated_exact_and_index_scoped(tmp_path, monkeypatch):
     import app.autonomy.kronos_runtime as runtime_module
     manager = runtime_module.KronosRuntimeManager(
@@ -272,7 +434,10 @@ def test_pip_commands_are_isolated_exact_and_index_scoped(tmp_path, monkeypatch)
     commands = []
     monkeypatch.setattr(manager, "_run", lambda command, **kwargs: (commands.append(command) or (0, "", "")))
     lock = runtime_lock(manager.lock_path)
-    versions = {item["normalized_name"]: item["version"] for item in applicable_packages(lock)}
+    versions = {
+        item["normalized_name"]: item["version"]
+        for item in applicable_packages(lock, python=python)
+    }
     monkeypatch.setattr(manager, "_worker", lambda *args, **kwargs: {
         "package_versions": versions, "device": "cpu", "cuda_available": False,
         "torch_cuda_build": None, "status": "READY",
@@ -364,12 +529,18 @@ class FakeRuntime:
     def __init__(self, *, ready=True, worker_error=False):
         self.ready = ready
         self.worker_error = worker_error
+        self.python_info = {
+            "version": [3, 11, 9], "machine": "AMD64", "system": "Windows",
+            "pip": "24.0", "implementation": "CPython", "bits": 64,
+            "selection": "automatic", "command_label": "py -3.11-64",
+        }
 
     def probe(self):
         return {"status": "READY" if self.ready else "UNAVAILABLE", "verified": self.ready,
                 "issues": [] if self.ready else ["MISSING: exact runtime"],
                 "runtime_lock_sha256": "f" * 64, "package_versions": {"torch": "2.7.1+cpu"},
-                "direct_versions": {"torch": "2.7.1+cpu"}, "cuda_available": False}
+                "direct_versions": {"torch": "2.7.1+cpu"}, "cuda_available": False,
+                "python": dict(self.python_info)}
 
     def install_plan(self):
         return {"lock_sha256": "f" * 64, "packages": [], "python": "3.11/3.12",
@@ -421,7 +592,14 @@ def test_service_requires_runtime_and_has_no_fallback(tmp_path):
     assert record["market_evaluation"] is False and record["profitability_evidence"] is False
     assert record["inference_ms"] > 0 and record["load_ms"] > 0
     assert set(record["artifacts"]) == {"model", "tokenizer"}
+    assert record["python_version"] == [3, 11, 9]
     assert json.loads((tmp_path / "off" / "self-test.json").read_text())["status"] == "PASSED"
+    service.runtime.python_info["version"] = [3, 12, 0]
+    service.verify()
+    assert service.status()["last_self_test"] is None
+    service.runtime.python_info["version"] = [3, 11, 9]
+    service.verify()
+    assert service.status()["last_self_test"]["status"] == "PASSED"
     service.runtime.worker_error = True
     with pytest.raises(ArtifactError, match="RUNTIME_IMPORT_ERROR"):
         service.forecast("TEST", candles(), timeframe="1m")

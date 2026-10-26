@@ -1,6 +1,6 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.7.0a4`.** AXIOM provides an eight-page Operator
+**Current source version: `3.7.0a5`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
@@ -52,6 +52,13 @@ cancellation/cleanup, and an isolated offline inference worker. The Windows rele
 gate must run a genuine installed-app inference self-test and publish its sanitized
 evidence; source code or synthetic fixtures alone are not such evidence. No paired
 ON/OFF profitability result is supplied without suitable licensed chronological data.
+
+Version 3.7.0a5 makes packaged-Windows Kronos Python discovery explicit: it tries
+64-bit `py -3.11-64` / `py -3.12-64` selectors and the registered `py -0p` catalog,
+and also accepts a validated full `python.exe` path through the authenticated setup
+UI. Selection accepts only CPython 3.11/3.12 x64 with pip, remains in per-user data,
+and never changes trading state. The existing manifest, exact CPU lock, and genuine
+offline self-test remain mandatory; fake discovery tests are not inference evidence.
 
 Version 3.6.0a2's research candidate repairs are retained:
 independent instrument runs, chronological prior-only warmup,

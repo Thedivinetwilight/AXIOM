@@ -72,6 +72,22 @@ window.fetch = (url, options = {}) => {
   const path = String(url);
   calls.push({ path, options });
   if (path === "/api/autonomy/kronos" && !options.method) return response(kronos);
+  if (path === "/api/autonomy/kronos/python" && options.method === "POST") {
+    const selection = JSON.parse(options.body);
+    const automatic = selection.executable === "";
+    kronos = {
+      ...kronos,
+      runtime: {
+        ...kronos.runtime,
+        python: {
+          version: [3, 11, 9], machine: "AMD64", system: "Windows", implementation: "CPython",
+          bits: 64, pip: "24.0", selection: automatic ? "automatic" : "manual",
+          command_label: automatic ? "py -3.11-64" : "manual selection",
+        },
+      },
+    };
+    return response(kronos);
+  }
   if (path === "/api/autonomy/kronos/install" && options.method === "POST") {
     kronos = {
       ...kronos, status: "READY", available_for_inference: true, issues: [],
@@ -171,6 +187,19 @@ assert.match(window.document.getElementById("emergencyStatus").textContent, /Acc
 assert.match(window.document.getElementById("intents").textContent, /UNRESOLVED/);
 
 assert.match(window.document.getElementById("kronosInstallPlan").textContent, new RegExp(manifestFile));
+const sessionBeforePython = JSON.stringify(session);
+const pythonPath = "C:\\Users\\operator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe";
+window.document.getElementById("kronosPythonExecutable").value = pythonPath;
+await click("selectKronosPython");
+const manualPython = calls.find(call => call.path === "/api/autonomy/kronos/python");
+assert.deepEqual(JSON.parse(manualPython.options.body), { executable: pythonPath });
+assert.match(window.document.getElementById("kronosSetupStatus").textContent, /3.11.9 AMD64 64-bit · pip 24.0 · manual selection/);
+assert(!window.document.getElementById("kronosSetupStatus").textContent.includes(pythonPath));
+assert.equal(window.document.getElementById("kronosPythonExecutable").value, "");
+assert.equal(JSON.stringify(session), sessionBeforePython);
+await click("autoKronosPython");
+assert.match(window.document.getElementById("kronosSetupStatus").textContent, /py -3.11-64/);
+assert.equal(JSON.stringify(session), sessionBeforePython);
 await click("installKronos");
 assert(confirmations.some(text => text.includes("pinned model/tokenizer") && text.includes("No GPU/CUDA stack")));
 assert(calls.some(call => call.path === "/api/autonomy/kronos/install" && call.options.method === "POST" && !call.options.body));

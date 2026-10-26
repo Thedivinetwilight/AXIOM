@@ -359,6 +359,26 @@ try {
     }
     Check ($anonymousKronos -eq 401) ('Kronos setup status refuses anonymous access (got {0})' -f $anonymousKronos)
     $beforeKronos = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/status' -f $base) -TimeoutSec 15
+    $discoveredPython = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/kronos' -f $base) -TimeoutSec 30
+    Check ($null -ne $discoveredPython.runtime.python -and $discoveredPython.runtime.python.implementation -eq 'CPython' -and $discoveredPython.runtime.python.bits -eq 64 -and $discoveredPython.runtime.python.pip) 'installed app automatically discovers CPython x64 with pip'
+    $pythonExe = (Get-Command python -ErrorAction Stop).Source
+    $explicitLauncherCoverage = $false
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher) {
+        $launcherPython = & $launcher.Source -3.11-64 -I -c "import sys,pip;print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $launcherPython) {
+            $pythonExe = $launcherPython.Trim()
+            $explicitLauncherCoverage = $true
+            Check ($discoveredPython.runtime.python.command_label -eq 'py -3.11-64') 'installed app used the explicit py -3.11-64 x64 selector'
+        }
+    }
+    if (-not $explicitLauncherCoverage) { Say 'py -3.11-64 with pip is unavailable on this runner; explicit-selector coverage is fake-probe only' }
+    $pythonBody = @{ executable = $pythonExe } | ConvertTo-Json
+    $selectedPython = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $pythonBody ('{0}/api/autonomy/kronos/python' -f $base) -TimeoutSec 30
+    Check ($selectedPython.runtime.python.selection -eq 'manual' -and $selectedPython.runtime.python.command_label -eq 'manual selection' -and $selectedPython.runtime.python.bits -eq 64) 'installed app accepts one validated full Python executable path'
+    Check (-not (($selectedPython | ConvertTo-Json -Depth 12 -Compress).Contains($pythonExe))) 'Python selection response does not disclose the per-user executable path'
+    $afterPythonSelection = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/status' -f $base) -TimeoutSec 15
+    Check ($afterPythonSelection.sessions.Count -eq $beforeKronos.sessions.Count) 'Python selection creates no autonomy session or execution state'
     $null = Invoke-RestMethod -Method Post -Headers $headers ('{0}/api/autonomy/kronos/install' -f $base) -TimeoutSec 30
     $kronos = $null
     $lastKronosPhase = ''
@@ -383,10 +403,12 @@ try {
         }
     }
     Check ($kronos.runtime.status -eq 'READY' -and $kronos.runtime.device -eq 'cpu' -and -not $kronos.runtime.cuda_available -and $null -eq $kronos.runtime.torch_cuda_build) 'isolated Windows runtime is exact, imported and CPU-only'
+    Check ($kronos.runtime.python.selection -eq 'manual' -and $kronos.runtime.python.implementation -eq 'CPython' -and $kronos.runtime.python.bits -eq 64) 'pinned install and inference retained the validated Python selection'
     Check ($kronos.runtime.runtime_lock_sha256 -eq $kronos.install_plan.runtime.lock_sha256) 'runtime evidence matches the exact shipped lock'
     Check ($kronos.available_for_inference -and $kronos.last_self_test.status -eq 'PASSED') 'real offline Kronos inference self-test passed in the installed app'
     Check ($kronos.last_self_test.mock_outputs_used -eq $false -and $kronos.last_self_test.model_loaded -and $kronos.last_self_test.forecast_validated) 'self-test loaded the real model and used no mock forecast'
     Check ($kronos.last_self_test.manifest_file_sha256 -eq $kronos.install_plan.manifest_file_sha256 -and $kronos.last_self_test.manifest_sha256 -eq $kronos.install_plan.manifest_sha256) 'self-test artifact identity matches the reviewed manifest file'
+    Check (($kronos.last_self_test.python_version -join '.') -eq ($kronos.runtime.python.version -join '.') -and $kronos.last_self_test.python_machine -eq $kronos.runtime.python.machine -and $kronos.last_self_test.python_system -eq $kronos.runtime.python.system) 'self-test is bound to the selected Python version and platform'
     Check ($kronos.last_self_test.model_revision -eq $kronos.install_plan.model.revision -and $kronos.last_self_test.tokenizer_revision -eq $kronos.install_plan.tokenizer.revision) 'self-test model/tokenizer revisions match the immutable pins'
     Check ([double]$kronos.last_self_test.inference_ms -gt 0 -and [double]$kronos.last_self_test.load_ms -gt 0) 'self-test reports genuine positive load and inference latency'
     Check ($kronos.last_self_test.input_label -match 'SYNTHETIC_INFERENCE_SMOKE_ONLY' -and -not $kronos.last_self_test.market_evaluation -and -not $kronos.last_self_test.profitability_evidence) 'self-test is explicitly separated from market/profitability evidence'
