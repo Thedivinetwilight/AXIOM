@@ -7,6 +7,7 @@ No AXIOM server, broker, account, credential, or network client is imported.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.metadata
 import json
 import os
@@ -149,26 +150,27 @@ def main() -> int:
     # target and reviewed application resources are admitted.
     sys.path.insert(0, str(args.app_root))
     sys.path.insert(0, str(args.runtime))
+    result_stream = sys.stdout
     try:
-        runtime = _runtime_probe(args.runtime, args.lock)
-        if runtime["status"] != "READY":
-            print(json.dumps(runtime, allow_nan=False))
-            return 0
-        if args.probe_only:
-            print(json.dumps(runtime, allow_nan=False))
-            return 0
-        payload = json.load(sys.stdin)
-        if payload.get("offline") is not True:
-            raise ValueError("Kronos worker requires explicit offline mode")
-        result = _forecast(payload, runtime)
-        print(json.dumps(result, allow_nan=False))
+        # huggingface_hub 0.33.1 prints local weight-loading notices to stdout.
+        # Keep every library notice away from the single-record JSON IPC channel.
+        with contextlib.redirect_stdout(sys.stderr):
+            runtime = _runtime_probe(args.runtime, args.lock)
+            if runtime["status"] != "READY" or args.probe_only:
+                result = runtime
+            else:
+                payload = json.load(sys.stdin)
+                if payload.get("offline") is not True:
+                    raise ValueError("Kronos worker requires explicit offline mode")
+                result = _forecast(payload, runtime)
     except Exception as exc:
         # Never return raw exception text, paths, URLs, environment or stderr.
-        print(json.dumps({
+        result = {
             "status": "ERROR", "error_type": type(exc).__name__,
             "message": "Real Kronos runtime/inference failed; no forecast was produced",
             "real_forecast": False, "mock_outputs_used": False,
-        }, allow_nan=False))
+        }
+    print(json.dumps(result, allow_nan=False), file=result_stream)
     return 0
 
 

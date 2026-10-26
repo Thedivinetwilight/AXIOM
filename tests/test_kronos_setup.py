@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -334,6 +335,29 @@ def test_isolated_worker_probe_only_contract(tmp_path):
     assert result["package_versions"] == expected
     assert result["device"] == "cpu" and result["cuda_available"] is False
     assert result["installed"] is True and result["verified"] is True
+
+
+def test_worker_ipc_isolates_hub_loader_stdout(tmp_path, monkeypatch, capsys):
+    """A stdout notice must not corrupt JSON; this is not an inference test."""
+    import app.autonomy.kronos_worker as worker
+    monkeypatch.setattr(sys, "argv", [
+        "kronos_worker.py", "--runtime", str(tmp_path / "runtime"),
+        "--lock", str(tmp_path / "lock"), "--app-root", str(ROOT),
+    ])
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"offline": true}'))
+    monkeypatch.setattr(worker, "_runtime_probe", lambda *_args: {"status": "READY"})
+
+    def loader_notice_then_result(_payload, _runtime):
+        print("Loading weights from local directory")
+        return {"status": "FORECAST", "real_forecast": True, "mock_outputs_used": False}
+
+    monkeypatch.setattr(worker, "_forecast", loader_notice_then_result)
+    assert worker.main() == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["status"] == "FORECAST" and result["real_forecast"] is True
+    assert "Loading weights from local directory" not in captured.out
+    assert "Loading weights from local directory" in captured.err
 
 
 class FakeRuntime:
