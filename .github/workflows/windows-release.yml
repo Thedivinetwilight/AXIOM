@@ -117,7 +117,9 @@ jobs:
           foreach ($a in $meta.artifacts) {
             $path = Join-Path dist $a.name
             if (-not (Test-Path $path)) { throw "missing artifact $($a.name)" }
-            $hash = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLower()
+            $item = Get-Item $path
+            if ($item.Length -ne $a.bytes) { throw "byte-length mismatch for $($a.name)" }
+            $hash = (Get-FileHash -Algorithm SHA256 $item.FullName).Hash.ToLower()
             if ($hash -ne $a.sha256) { throw "hash mismatch for $($a.name)" }
             Write-Host ("verified {0}  {1}" -f $a.name, $hash)
           }
@@ -188,6 +190,14 @@ jobs:
           foreach ($file in $files) {
             if (-not (Test-Path $file)) { throw "missing release file $file" }
             $sums += ('{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Split-Path $file -Leaf))
+          }
+          $sumNames = @($sums | ForEach-Object { ($_ -split '  ', 2)[1] })
+          $expectedNames = @($files | ForEach-Object { Split-Path $_ -Leaf })
+          if ($sumNames.Count -ne $files.Count -or @($sumNames | Sort-Object -Unique).Count -ne $files.Count) {
+            throw 'checksum manifest has missing or duplicate release filenames'
+          }
+          foreach ($name in $expectedNames) {
+            if ($sumNames -notcontains $name) { throw "checksum manifest does not cover $name" }
           }
           $sums | Set-Content dist\SHA256SUMS.txt -Encoding ascii
           foreach ($line in $sums) { Write-Host $line }
@@ -431,6 +441,19 @@ jobs:
             (Join-Path (Get-Location) '..\..\docs\AUTONOMY.md')
             (Join-Path (Get-Location) '..\..\docs\autonomy-shakedown.template.json')
           )
+          $assetNames = @($assets | ForEach-Object { Split-Path $_ -Leaf })
+          $sumNames = @($sums | ForEach-Object { ($_ -split '  ', 2)[1] })
+          if ($assetNames.Count -ne $sumNames.Count -or
+              @($assetNames | Sort-Object -Unique).Count -ne $assetNames.Count -or
+              @($sumNames | Sort-Object -Unique).Count -ne $sumNames.Count) {
+            throw 'release assets and checksum manifest must be unique and one-to-one'
+          }
+          foreach ($name in $assetNames) {
+            if ($sumNames -notcontains $name) { throw "release asset is not checksummed: $name" }
+          }
+          foreach ($name in $sumNames) {
+            if ($assetNames -notcontains $name) { throw "checksummed file is not a release asset: $name" }
+          }
           foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {

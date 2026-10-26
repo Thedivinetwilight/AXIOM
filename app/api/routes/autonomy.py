@@ -118,6 +118,13 @@ def get_session(session_id: str, request: Request):
     return call(request, lambda value: value.public(session_id))
 
 
+@api.post("/sessions/{session_id}/recover-view")
+def recover_view(session_id: str, request: Request):
+    # Browser/session restoration is a local lifecycle stop, never a broker
+    # order action. It clears approval and exposes only the durable view.
+    return call(request, lambda value: value.recover_view(session_id))
+
+
 @api.post("/sessions/{session_id}/authorize")
 def authorize(session_id: str, request: Request):
     # No body, no credential field, no credential in logs/responses.
@@ -154,7 +161,9 @@ def emergency_stop(session_id: str, request: Request):
 
 
 @api.post("/sessions/{session_id}/scan")
-def scan(session_id: str, request: Request):
+def scan_read_only(session_id: str, request: Request):
+    # This route is deliberately bound only to the read-only service method.
+    # The worker's order-eligible execute_once method is not exposed by any API.
     return call(request, lambda value: value.scan_once(session_id))
 
 

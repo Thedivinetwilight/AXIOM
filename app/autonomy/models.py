@@ -37,6 +37,7 @@ class Fault(str, Enum):
     INVALID_DATA = "INVALID_DATA"
     MANUAL_STOP = "MANUAL_STOP"
     RECOVERY = "RECOVERY"
+    PERMISSION_REVOKED = "PERMISSION_REVOKED"
 
 
 @dataclass(frozen=True)
@@ -179,12 +180,31 @@ class StrategyEvidence:
     upstox_authoritative: bool
     holdout_locked: bool
     synthetic: bool = False
+    # This is a trust boundary, not another operator attestation.  Production
+    # JSON loading rejects ``provenance_verified=True`` because a file supplied
+    # by an operator cannot independently verify its own Upstox provenance.
+    # Trusted in-process tests may inject it to exercise LIVE guard logic.
+    provenance_verified: bool = False
     kronos_required: bool = False
     kronos_artifact_digest: str = ""
     breakdown: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def provenance_class(self) -> str:
+        if self.synthetic:
+            return "SYNTHETIC_RESEARCH_ONLY"
+        if self.provenance_verified:
+            return "UPSTOX_INDEPENDENTLY_VERIFIED"
+        return "UPSTOX_JSON_OPERATOR_ATTESTED"
+
     def executable(self, instrument_key: str, family: str, side: str, timeframe: str,
                    regime: str, *, live: bool, kronos_digest: str = "") -> tuple[bool, str]:
+        # Synthetic data remains useful for research/unit tests, but is not an
+        # accepted production PAPER or LIVE evidence source.  This deliberately
+        # does not relax the prior chronological/cost/provenance gates to force
+        # a paper order to occur.
+        if self.synthetic:
+            return False, "Synthetic evidence is research-only and cannot execute PAPER or LIVE"
         exact = (
             self.instrument_key == instrument_key,
             self.strategy_family == family,
@@ -200,10 +220,12 @@ class StrategyEvidence:
             self.net_expectancy > 0,
             self.risk_adjusted_score > self.baseline_risk_adjusted_score,
             self.max_drawdown >= 0,
-            not (live and self.synthetic),
+            not (live and not self.provenance_verified),
             not (live and self.breakdown.get("data_gaps", 0) != 0),
         )
         if not all(exact):
+            if live and not self.provenance_verified:
+                return False, "LIVE requires independently verified Upstox provenance; operator attestation is insufficient"
             return False, "Missing exact chronological net-of-cost evidence"
         if self.kronos_required and self.kronos_artifact_digest != kronos_digest:
             return False, "Kronos evidence does not match the verified artifact"

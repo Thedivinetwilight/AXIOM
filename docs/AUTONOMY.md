@@ -31,6 +31,8 @@ No agent or CI job may log into a real account, Arm/Activate LIVE, or place a re
 
 Legacy settings remain paper-only (`MODE=PAPER`, `LIVE_TRADING=false`, `BROKER=LOCAL_PAPER`). Do not use them as the autonomy LIVE switch.
 
+Order-capable network paths are pinned to official Upstox endpoints. The autonomy LIVE/read-only adapter accepts only its fixed `https://api.upstox.com` base and relative API paths. The separate sandbox broker accepts only `https://api-hft.upstox.com` order paths and `https://api.upstox.com/v2/order/history`; settings, constructor values, absolute-URL overrides, and post-construction endpoint tampering are rejected before network I/O. These checks do not verify account permissions or external availability.
+
 The autonomy-specific environment settings include:
 
 | Setting | Default | Meaning |
@@ -41,7 +43,7 @@ The autonomy-specific environment settings include:
 | `AUTONOMY_UPSTOX_ALGO_NAME` | empty | Required LIVE `X-Algo-Name`; newline values rejected |
 | `AUTONOMY_EXPECTED_PUBLIC_IP` | empty | Required registered static public IP for LIVE |
 | `AUTONOMY_WRITE_RATE_PER_SECOND` | `5` | Process-wide live write guard; kept below regular 10/s guidance |
-| `AUTONOMY_WORKER_ENABLED` | `true` | Background scanning only; never lifecycle approval |
+| `AUTONOMY_WORKER_ENABLED` | `true` | Order-eligible execution scans only for already ACTIVE sessions; never lifecycle approval |
 | `AUTONOMY_SCAN_INTERVAL_SECONDS` | `5` | Worker interval |
 | `AUTONOMY_MAX_PARTICIPATION` | `0.10` | Maximum fraction of observed bar volume |
 | `AUTONOMY_MAX_SPREAD_BPS` | `50` | Fresh executable-spread bound |
@@ -55,16 +57,16 @@ Runtime journals, catalog cache, research output, and optional artifacts belong 
 
 ## 4. Daily startup sequence
 
-1. Start AXIOM. Startup loads public metadata and recovers interrupted journals to `HALTED`; it does not create an active session.
+1. Start AXIOM. Startup loads public metadata plus durable session, account, intent, order, and PAPER snapshots into a read-only `HALTED` view. It clears prior approval, never restores ARMED/ACTIVE, and never constructs a LIVE executor during recovery. Recovered sessions require fresh daily authorization, new risk values, successful reconciliation, Arm, and Activate.
 2. Open **Terminal → Daily Upstox autonomy**, or `/autonomy`. The page contains no broker credential. Protected API calls use the separate local AXIOM bearer token.
 3. Refresh the current-day Upstox BOD catalog. Search by exact key, trading symbol, or underlying and select exact keys. Review tick, step, multiplier, expiry, and route warnings. Refresh is refused while a session is ARMED/ACTIVE.
 4. Create either a PAPER or UPSTOX_LIVE session. Creating it changes no execution state beyond `UNCONFIGURED`.
-5. Generate a fresh daily token locally using the existing OAuth helper, normally `python -m app upstox-login`, with the operator's own registered OAuth settings. Keep the resulting `.env` private. Then click **Authorize read-only today**. The API has no token input field and never returns the token; only a fingerprint and day are journaled.
+5. Generate a fresh daily token locally using the existing OAuth helper, normally `python -m app upstox-login`, with the operator's own registered OAuth settings. Keep the resulting `.env` private. Then click **Authorize read-only today**. The API has no token input field and never returns the token; only a fingerprint and day are journaled. LIVE setup/risk/recovery account and GTT reads use an adapter with no place/modify/cancel methods; the order writer is not constructed by Authorize.
 6. Enter **new** daily maximum loss and per-trade equity risk. PAPER also requires explicit starting equity. LIVE equity comes from the current Upstox account snapshot, not a typed approximation. Values are bounded and are not silently reused on another day.
 7. Review readiness blockers. Missing current BOD metadata, daily authorization/risk, active profile, static IP, exact permissions, or unresolved outcomes blocks activation.
 8. Click **Arm**. This is only the first approval and issues no entry permit.
-9. Click **Activate** separately. Activation repeats account, profile, IP, exchange-session, completed-bar, quote, margin/account, existing-position, and conflict preflights. Only now can the in-memory service issue short-lived permits. LIVE activation asks for confirmation of the session boundary, not confirmation of each subsequent strategy order.
-10. The background worker scans only sessions already ACTIVE in this process. “Scan once” is an operator diagnostic action, not an order-approval workaround.
+9. Click **Activate** separately. Activation repeats account, profile, IP, exchange-session, completed-bar, quote, margin/account, existing-position, and conflict preflights. Only now is the LIVE writer constructed and can the in-memory service issue short-lived permits. LIVE activation asks for confirmation of the session boundary, not confirmation of each subsequent strategy order.
+10. The background worker calls the separate order-eligible execution method only for sessions already ACTIVE in this process. **Scan once is strictly read-only**: it reads completed bars/account/order state and produces candidate diagnostics, but does not simulate fills, submit, modify, trail, or cancel any order in PAPER or LIVE. It cannot be used as an order-approval or execution workaround.
 
 There is no API endpoint that accepts a broker token, and there is no per-order confirmation endpoint. Unattended orders are possible only inside this explicitly authorized daily ACTIVE session.
 
@@ -74,8 +76,9 @@ Each selected instrument is scanned independently. Trend/momentum, moving-averag
 
 Execution requires all of the following:
 
-* Exact validated chronological research evidence for the instrument/family/side/timeframe/regime. Synthetic evidence can support PAPER tests but cannot enable LIVE.
-* At least two walk-forward runs and one locked holdout, with costs, gaps, partial fills, rejections, and survivorship/source requirements satisfied. Missing/gapped live research data fails the evidence gate.
+* A fresh active account profile and exact exchange/product/order-type permissions (`LIMIT` and `SL` for the three-leg route), plus exact product-I short-route metadata for equity shorts. These are checked during readiness, again at activation, and immediately before each LIVE submission; collected profile fields alone are never treated as permission.
+* Exact validated chronological research evidence for the instrument/family/side/timeframe/regime. **Synthetic evidence is research-only and cannot execute PAPER or LIVE orders.** Operator-supplied Upstox JSON provenance is an attestation, not independently verified account evidence; eligible non-synthetic files can support PAPER only after every quality gate. LIVE additionally requires independently verified provenance, which the production JSON loader does not accept from an operator `provenance_verified` flag.
+* At least two walk-forward runs and one locked holdout, with costs, gaps, partial fills, rejections, and survivorship/source requirements satisfied. Missing/gapped live research data fails the evidence gate. Evidence gates are never relaxed merely to produce a paper order.
 * A completed-bar confirmed swing stop. The final forming bar is never used. Stops only tighten; they never loosen.
 * Stop-distance sizing with contract multiplier, cost and gap allowance, liquidity participation, freeze/lot limits, remaining daily loss budget, fresh bid/ask, current broker margin, aggregate margin, and correlation-aware portfolio risk. Unknown correlation is treated as concentrated risk, not free diversification.
 * One active intent per instrument/session and cross-session LIVE conflict checks. Intent is durably recorded before submission. Signals and bars are deduplicated.
@@ -89,9 +92,11 @@ GTT `IMMEDIATE` entry is a limit order at the specified price, not a guaranteed 
 * A trailing modification reads the existing GTT, preserves its actual target, includes the required ENTRY rule, validates tick/direction, and never cancel/recreates protection. Local state changes only after reconciliation confirms the broker result.
 * Stale/future/crossed/invalid/out-of-order/missing data, token expiry, disconnect, rejected protection, ambiguous submission, unknown positions, quantity mismatch, and reconciliation failure stop entries and create an alert. Existing confirmed protection is preserved. No blind retry, fill assumption, cancellation assumption, or provider substitution occurs.
 * A network timeout after a write is **ambiguous**. The intent remains unresolved until exact reconciliation proves a terminal outcome. A matching-order search is not a resubmission.
-* **Reconcile read-only** is available while halted. It does not Arm or Activate. If GTT/order/position evidence is insufficient, the session remains halted and unresolved; external owner reconciliation is required.
-* **Pause**, **Emergency stop**, shutdown, restart, and recovery revoke in-memory permits and require fresh Arm + Activate. Emergency stop does not force-liquidate or cancel confirmed protection.
-* **Cancel unfilled** is a separate explicit ACTIVE-session operation. It is refused for an open position. Upstox GTT cancellation discards all associated legs/triggers, so it is never an automatic fault response.
+* **Reconcile read-only** is available while halted. It does not Arm or Activate. If GTT/order/position evidence is insufficient, it returns a conflict/error rather than success, preserves `UNRESOLVED` journal state, and keeps fresh approval blocked; external owner reconciliation is required.
+* **Browser reload / Load read-only** calls the authenticated recovery-view boundary before displaying a stored session. Even if the process session was ARMED/ACTIVE, it is changed to HALTED (an existing EMERGENCY_STOPPED state is preserved), prior authorization/risk/Arm/Activate approval is cleared, and a LIVE writer is detached. Last-known positions, intents, orders, and PAPER protection remain visible. This local lifecycle stop does not cancel or modify broker orders; use Reconcile or Emergency deliberately afterward.
+* **Pause**, **Emergency stop**, shutdown, restart, and recovery revoke in-memory permits and require fresh approval. Emergency sets its preemption flag before broker cleanup, so a blocked feed read does not hold the global service lock or prevent entry blocking. It then makes a best-effort fresh reconciliation and cancels managed unfilled entry GTTs where supported, without requiring ACTIVE. It never force-liquidates or knowingly cancels protection for an open position. A read-only LIVE recovery adapter cannot cancel; Emergency reports that limitation as unresolved rather than pretending cleanup occurred.
+* Cancellation acknowledgements are not proof of completion. Failed/ambiguous cancellation or incomplete final reconciliation leaves prominent emergency `UNRESOLVED` status and blocks Arm until terminal broker evidence is reconciled. AXIOM never claims the account is clear. Confirmed managed-entry cleanup is not an account-flat claim; open positions and unrelated/external orders remain outside that statement.
+* **Cancel unfilled** is a separate explicit risk-reducing operation available after Pause/Halt/Emergency as well as ACTIVE. It refreshes account/order state immediately before cancellation and is refused when reconciliation is incomplete or an open position needs protection. Upstox GTT cancellation discards all associated legs/triggers. Retrying an ambiguous cancellation requires a fresh read; terminal broker proof alone clears its durable uncertainty metadata.
 
 ## 7. Kronos artifacts and fallback
 
@@ -105,7 +110,7 @@ Validated non-Kronos families can continue only with their own exact evidence. A
 
 ## 8. Research and evidence
 
-Use `app.autonomy.research` or its CLI with exact instrument metadata. Raw Upstox JSON must come from `api.upstox.com` and identify the exact instrument in the source URL. CSV input is research-only and cannot become authoritative Upstox LIVE evidence; `data/sample.csv` is synthetic demonstration data.
+Use `app.autonomy.research` or its CLI with exact instrument metadata. Raw Upstox JSON must declare `api.upstox.com` and identify the exact instrument in the source URL. That URL is an **operator-supplied provenance claim**; the offline research runner does not independently authenticate the download or account. CSV input is research-only and cannot become authoritative Upstox LIVE evidence; `data/sample.csv` is synthetic demonstration data.
 
 Example shape (paths are operator-selected; this does not download data):
 
@@ -123,13 +128,15 @@ Reports include per-family/side and instrument/regime net-of-cost expectancy, dr
 
 To enable real Kronos research, add `--kronos` and provide verified local artifacts. Without them the report says `NO_REAL_FORECAST`; it never invents predictions.
 
-Install only reviewed evidence JSON files into the per-user autonomy evidence directory. Review `data_sha256`, `config_sha256`, holdout lock, source, survivorship, gaps, costs, and artifact attribution. Evidence is a gate, not a promise of future returns.
+Install only reviewed evidence JSON files into the per-user autonomy evidence directory. Review `data_sha256`, `config_sha256`, holdout lock, source, survivorship, gaps, costs, and artifact attribution. Production loading rejects a JSON `provenance_verified: true` claim: independent verification must come from a separately reviewed trusted evidence process, not an operator editing a flag. The UI/API expose the provenance class and explicit PAPER/LIVE execution effect. Evidence is a gate, not a promise of future returns.
 
 ## 9. Audit and data protection
 
-The SQLite journal uses WAL and FULL synchronous mode. It stores session state, risk values, token fingerprints (not tokens), intent-before-submission transitions, broker IDs, reconciliation metadata, and a SHA-256 audit hash chain. Sensitive-looking fields are redacted. Execution permits are in-memory only and are never accepted from JSON or persisted.
+The SQLite journal uses WAL and FULL synchronous mode. It stores session state, risk values, token fingerprints (not tokens), intent-before-submission transitions, broker IDs, cancellation/reconciliation metadata, versioned last-known order/account views, PAPER cash/positions/GTT snapshots, and a SHA-256 audit hash chain. Recovery validates snapshot consistency and blocks execution on incomplete/corrupt state rather than silently losing paper positions or protection. Credential tokens are redacted while the public Upstox `instrument_token` contract identifier is preserved. Execution permits are in-memory only and are never accepted from JSON or persisted.
 
-Audit events can be downloaded/viewed through the authenticated UI. Verify the hash-chain indicator after recovery or suspected tampering. Do not export raw account profiles, access tokens, private IPs, or unredacted broker responses.
+Audit events can be downloaded/viewed through the authenticated UI. Verify the hash-chain indicator after recovery or suspected tampering. Do not export raw account profiles, access tokens, private IPs, or unredacted broker responses. Public/durable last-known GTT views use an allowlist of order/rule fields rather than copying arbitrary broker identity fields.
+
+Windows application packages do not recursively include `data/`. They include only eight reviewed synthetic DEMO CSV/JSON fixtures and run hard payload guards against credential/environment files, SQLite databases, autonomy/cache/results state, local logs/locks and model-weight files. Runtime journals and evidence stay in the per-user data directory and are not release fixtures.
 
 ## 10. Owner-run complete-session PAPER shakedown
 

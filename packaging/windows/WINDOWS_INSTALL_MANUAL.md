@@ -39,7 +39,7 @@ TERMINAL_PERFORMANCE.md
 SHA256SUMS.txt
 ```
 
-The release also includes test logs/manuals. Read `BUILD_METADATA.json` for the runner, commands, actual test outcomes, skipped demo/live checks and signing status.
+The release also includes test logs/manuals. Read `BUILD_METADATA.json` for the runner, commands, actual test outcomes, skipped demo/live checks and signing status. Application payloads use an explicit list of eight reviewed synthetic DEMO CSV/JSON fixtures; the build does not recursively bundle `data/`. It inspects the onefile archive, onedir tree and final ZIPs for credential/environment files, SQLite payloads, autonomy/cache/results state, local logs/locks and model weights. Per-user journals, credentials, evidence and settings remain outside the package.
 
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 

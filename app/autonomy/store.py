@@ -54,9 +54,16 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_session_seq ON audit(session_id, seq);
 CREATE INDEX IF NOT EXISTS intents_state ON intents(state);
+CREATE TABLE IF NOT EXISTS runtime_snapshots (
+    session_id TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+);
 """
 
-SENSITIVE = ("token", "secret", "password", "authorization", "credential", "access_key")
+SENSITIVE = ("secret", "password", "authorization", "credential", "access_key")
+PUBLIC_TOKEN_KEYS = {"instrument_token"}  # Upstox's public contract identifier, not a credential.
 UNRESOLVED = {"RECORDED", "SUBMISSION_ATTEMPTED", "ACKNOWLEDGED_UNRECONCILED",
               "UNRESOLVED", "MODIFICATION_ATTEMPTED", "CANCEL_ATTEMPTED"}
 
@@ -66,7 +73,10 @@ def _json(value: Any) -> str:
 
 
 def redact(value: Any, key: str = "") -> Any:
-    if any(part in key.lower() for part in SENSITIVE):
+    normalized = key.lower()
+    if normalized not in PUBLIC_TOKEN_KEYS and (
+            any(part in normalized for part in SENSITIVE)
+            or normalized == "token" or normalized.endswith("_token")):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {str(k): redact(v, str(k)) for k, v in value.items()}
@@ -142,9 +152,40 @@ class AutonomyStore:
                 ),
             )
 
+    def clear_session_approval(self, session_id: str) -> None:
+        """Recovered views never reuse a prior day's risk or authorization."""
+        with self.transaction() as db:
+            db.execute(
+                "UPDATE sessions SET risk_json=NULL,auth_fingerprint=NULL,updated_at=? WHERE session_id=?",
+                (self.now(), session_id),
+            )
+
     def session(self, session_id: str) -> sqlite3.Row | None:
         with self._lock:
             return self.db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+
+    def save_runtime(self, session_id: str, snapshot: dict) -> None:
+        """Persist last-known view separately from executable authorization."""
+        if self.session(session_id) is None:
+            raise KeyError("Unknown autonomy session")
+        with self.transaction() as db:
+            db.execute(
+                "INSERT INTO runtime_snapshots(session_id,payload_json,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET payload_json=excluded.payload_json,"
+                "updated_at=excluded.updated_at",
+                (session_id, _json(redact(snapshot)), self.now()),
+            )
+
+    def runtime_snapshot(self, session_id: str) -> dict | None:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT payload_json FROM runtime_snapshots WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+    def sessions(self) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(self.db.execute("SELECT * FROM sessions ORDER BY created_at").fetchall())
 
     def recover_interrupted_sessions(self) -> None:
         """Durable recovery marker; never restores ARMED/ACTIVE execution state."""

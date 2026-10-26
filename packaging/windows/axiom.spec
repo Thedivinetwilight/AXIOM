@@ -4,7 +4,8 @@
 Bundle contents that matter at runtime:
 
 * ``app/static``      - the chart terminal's own CSS/JS (no CDN, no remote asset)
-* ``data``            - the bundled DEMO sample CSVs the chart can preview
+* explicit ``data`` fixtures - reviewed synthetic DEMO CSV/JSON only; never
+  autonomy journals, caches, evidence, weights, credentials, or operator state
 * ``app/data/upstox_proto`` - generated protobuf bindings imported dynamically
 
 Everything writable (config, database, logs) lives in the per-user data
@@ -30,9 +31,16 @@ for _ in range(4):
 else:  # pragma: no cover - build-time guard
     raise SystemExit("cannot locate the repository root from %s" % HERE)
 
+sys.path.insert(0, str(HERE))
+from payload_guard import demo_data_sources
+
+# Never recursively collect data/: tests and normal operation create ignored
+# autonomy SQLite/evidence/weight state there before this spec is executed.
+demo_datas = [(str(source), destination) for source, destination in demo_data_sources(ROOT)]
+
 datas = [
     (str(ROOT / "app" / "static"), "app/static"),
-    (str(ROOT / "data"), "data"),
+] + demo_datas + [
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
     (str(ROOT / "app" / "autonomy" / "vendor" / "kronos"), "app/autonomy/vendor/kronos"),
     (str(ROOT / "config" / "kronos-small.json"), "config"),

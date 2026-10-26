@@ -12,6 +12,7 @@
 <div class="row spread"><div><h1>AXIOM · Daily Autonomy</h1><div class="muted">Upstox authoritative data · separately gated local paper / real-money execution</div></div><div><a href="/terminal">Terminal</a> · <a href="/manual">Manual</a> · <a href="/health">Health</a></div></div>
 <div id="modeBanner" class="banner">No autonomy session selected. Startup is disconnected and disarmed.</div>
 <div id="notice" class="notice" role="status" aria-live="polite"></div>
+<section class="panel"><div class="row"><div style="flex:1;min-width:280px"><label for="existingSessions">Loaded / recovered sessions (read-only until fresh setup)</label><select id="existingSessions"><option value="">Select a session</option></select></div><button id="loadSession">Load read-only / revoke approval</button></div></section>
 <div class="grid">
 <section class="panel"><h2>1 · Exact instruments & mode</h2>
 <p class="muted">Only exact BOD instrument keys are accepted. Currency rows are exchange-listed futures/options, <b>not spot forex</b>. A quote or chart never changes execution mode.</p>
@@ -32,17 +33,17 @@
 <p class="muted">No previous-day risk is silently reused. At the loss cap, entries stop but confirmed exits remain protected; there is no forced close solely for reaching the cap.</p>
 <h3>3 · Explicit operator gates</h3><div class="row"><button id="arm" class="warn">Arm</button><button id="activate" class="primary">Activate</button><button id="pause">Pause</button><button id="emergency" class="danger">Emergency stop</button></div>
 <p class="muted">Arm and Activate are separate actions. Activation permits unattended strategy orders within this daily session; it is not a per-order confirmation. Restart, recovery, faults, and background jobs cannot Arm or Activate.</p>
-<div class="row"><button id="scan">Scan once now</button><button id="reconcile">Reconcile read-only</button><span class="muted">The background scanner only scans an already ACTIVE session.</span></div>
+<div class="row"><button id="scan">Scan once · read-only, no orders</button><button id="reconcile">Reconcile read-only</button><button id="cancelUnfilled" class="warn">Cancel selected unfilled entry</button></div><p class="muted">Only the background worker can execute eligible candidates in an already ACTIVE session. Read-only Scan never submits, fills, modifies or cancels. Emergency preempts entries and attempts managed unfilled-entry cancellation; unresolved orders remain prominent.</p>
 </section>
 </div>
-<section id="sessionPanel" class="panel hidden"><div class="row spread"><h2>Session status</h2><code id="sessionId"></code></div><div id="statusMetrics"></div><div id="fault" class="notice"></div><div id="readiness"></div><div id="account"></div></section>
+<section id="sessionPanel" class="panel hidden"><div class="row spread"><h2>Session status</h2><code id="sessionId"></code></div><div id="statusMetrics"></div><div id="fault" class="notice"></div><div id="emergencyStatus" class="notice" role="alert"></div><div id="readiness"></div><div id="account"></div></section>
 <div class="grid">
 <section class="panel"><h2>Positions & confirmed protection</h2><div class="scroll"><table><thead><tr><th>Exact key</th><th>Qty</th><th>Average / last</th><th>Stop / target</th><th>Protection</th></tr></thead><tbody id="positions"></tbody></table></div><p class="muted">A position without confirmed broker protection is a halt condition, not a reason to guess that the account is flat.</p></section>
-<section class="panel"><h2>Working / audited intents</h2><div class="row"><button id="loadAudit">Reload audit</button><span id="chain" class="muted"></span></div><div class="scroll"><table><thead><tr><th>Event</th><th>Time</th><th>Safe detail</th></tr></thead><tbody id="audit"></tbody></table></div></section>
+<section class="panel"><h2>Recovered orders & intents</h2><div class="scroll"><table><thead><tr><th>Intent</th><th>Instrument</th><th>State</th><th>Broker IDs</th></tr></thead><tbody id="intents"></tbody></table><table><thead><tr><th>Last-known GTT</th><th>Instrument</th><th>Rules</th></tr></thead><tbody id="orders"></tbody></table></div><h3>Audit events</h3><div class="row"><button id="loadAudit">Reload audit</button><span id="chain" class="muted"></span></div><div class="scroll"><table><thead><tr><th>Event</th><th>Time</th><th>Safe detail</th></tr></thead><tbody id="audit"></tbody></table></div></section>
 </div>
 <section class="panel"><div class="row spread"><h2>Upstox completed bars · display only</h2><select id="chartInstrument" aria-label="Chart instrument"></select></div><div id="chart"></div><small>Rendered locally with the pinned Lightweight Charts library. TradingView supplies no market data here; no TradingView alerts or data drive automation.</small></section>
 <div class="grid">
-<section class="panel"><h2>Strategy evidence & fallback</h2><div id="kronos"></div><div class="scroll"><table><thead><tr><th>Family / side</th><th>Instrument</th><th>OOS evidence</th><th>Live structure</th></tr></thead><tbody id="evidence"></tbody></table></div></section>
+<section class="panel"><h2>Strategy evidence & fallback</h2><div id="kronos"></div><div class="scroll"><table><thead><tr><th>Family / side</th><th>Instrument</th><th>OOS evidence</th><th>Provenance / execution effect</th></tr></thead><tbody id="evidence"></tbody></table></div></section>
 <section class="panel"><h2>Latest explainable diagnostics</h2><div class="scroll"><table><thead><tr><th>Instrument</th><th>Family / side</th><th>Explanation</th></tr></thead><tbody id="diagnostics"></tbody></table></div></section>
 </div>
 <p class="foot">Research, paper fills, sandbox availability, and tests do not establish profitability, account eligibility, compliance, external DEMO verification, or live readiness. Real-money behavior requires owner-run account verification and operational acceptance. <a href="/autonomy/manual">Operator manual</a></p>

@@ -20,6 +20,8 @@ For Windows download, installation and upgrade steps, read `packaging/windows/WI
 
 Version 3.7.0a1 also includes a **separate Daily Upstox Autonomy** boundary at `/autonomy`. Its live-market local PAPER, default-disabled UPSTOX_LIVE real-money path, exact listed-equity/currency-derivative catalog, unattended daily-session rules, three-leg GTT protection, reconciliation, Kronos artifacts and paired-ablation research are documented in `docs/AUTONOMY.md` (also served at `/autonomy/manual`). It does not alter the Vantage rules above. No Upstox account-specific or external DEMO/LIVE verification is implied.
 
+For that autonomy boundary, **Scan once is read-only in both PAPER and LIVE**; only the background worker executes orders for an explicitly ACTIVE daily session. Emergency stop blocks new entries before cleanup, attempts managed unfilled-entry cancellation without requiring ACTIVE, preserves open-position protection, and remains prominently unresolved when cancellation/reconciliation is uncertain—it never claims the account is clear. Restart/browser recovery exposes durable sessions, positions, intents, and orders as HALTED read-only views, never restores ARMED/ACTIVE, and requires fresh authorization/risk/reconciliation/approval. Synthetic research evidence cannot execute even in PAPER; operator-supplied provenance is not independent verification.
+
 ---
 
 ## 1. Safety model — read before connecting an account

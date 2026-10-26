@@ -3,7 +3,13 @@
 These tests do not emulate Smart App Control and are not a substitute for the
 Windows install/portable gates or the owner's device verification.
 """
+import importlib.util
 from pathlib import Path
+import sys
+import types
+import zipfile
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +18,13 @@ KIT = ROOT / "packaging" / "windows"
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def payload_guard():
+    spec = importlib.util.spec_from_file_location("axiom_payload_guard", KIT / "payload_guard.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
@@ -40,6 +53,9 @@ def test_spec_retains_legacy_onefile_and_has_explicit_onedir_branch():
     assert "exclude_binaries=True" in spec
     assert 'COLLECT(' in spec and 'name="AXIOM-Operator"' in spec
     assert "RESEARCH_CANDIDATES.md" in spec
+    assert "from payload_guard import demo_data_sources" in spec
+    assert '(str(ROOT / "data"), "data")' not in spec
+    assert "demo_datas" in spec
     # The default EXE still contains binaries directly for upgrade compatibility.
     default = spec.rsplit("else:", 1)[-1]
     assert "a.binaries" in default and "runtime_tmpdir=None" in default
@@ -59,6 +75,80 @@ def test_build_packages_sidecars_and_both_zip_alternatives():
     assert "UNSIGNED workaround only" in build
     assert "RESEARCH_CANDIDATES.md" in build
     assert "tests/test_research_candidate_cli.py" in build
+    for kind in ("source", "onefile", "tree", "zip"):
+        assert f"$PayloadGuard {kind}" in build
+    assert "node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs" in build
+    assert "--output `\"$BenchmarkOutput`\"" in build
+    assert "installer_test" in build and "payload_hygiene" in build
+
+
+def test_demo_allowlist_ignores_local_autonomy_state(tmp_path):
+    guard = payload_guard()
+    data = tmp_path / "data"
+    autonomy = data / "autonomy"
+    autonomy.mkdir(parents=True)
+    for name in guard.DEMO_DATA_FILES:
+        (data / name).write_text("synthetic demo fixture\n", encoding="utf-8")
+    journal = autonomy / "journal.sqlite3"
+    journal.write_bytes(guard.SQLITE_MAGIC + b"local-only-state")
+    sources = guard.demo_data_sources(tmp_path)
+    assert [source.name for source, destination in sources] == list(guard.DEMO_DATA_FILES)
+    assert all(destination == "data" for source, destination in sources)
+    assert journal not in [source for source, destination in sources]
+
+
+def test_forbidden_payload_names_and_sqlite_magic_fail_closed(tmp_path):
+    guard = payload_guard()
+    for name in (
+        ".env", "axiom.env", "data/autonomy/journal.sqlite3",
+        "data/cache/user.json", "results/report.json", "model.safetensors",
+        "operator.paper.lock", "logs/session.jsonl",
+    ):
+        with pytest.raises(guard.PayloadError):
+            guard.check_payload(name)
+    for name in ("data/sample.csv", "_internal/sqlite3.dll", "_internal/certifi/cacert.pem"):
+        guard.check_payload(name)
+    with pytest.raises(guard.PayloadError, match="SQLite"):
+        guard.check_payload("otherwise-benign.bin", guard.SQLITE_MAGIC + b"state")
+
+    root = tmp_path / "onedir"
+    root.mkdir()
+    (root / "AXIOM-Chart.exe").write_bytes(b"safe test placeholder")
+    (root / "state.bin").write_bytes(guard.SQLITE_MAGIC + b"state")
+    with pytest.raises(guard.PayloadError, match="SQLite"):
+        guard.assert_tree_clean(root)
+
+    archive_path = tmp_path / "portable.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("AXIOM-Operator/_internal/data/sample.csv", "synthetic")
+        archive.writestr("AXIOM-Operator/_internal/data/autonomy/evidence/user.json", "{}")
+    with pytest.raises(guard.PayloadError, match="operator state"):
+        guard.assert_zip_clean(archive_path)
+
+
+def test_onefile_guard_checks_every_carchive_payload_with_a_fake_reader(tmp_path, monkeypatch):
+    guard = payload_guard()
+    executable = tmp_path / "AXIOM-Chart.exe"
+    executable.write_bytes(b"fake archive for unit test")
+
+    class Reader:
+        def __init__(self, path):
+            self.toc = {"data/sample.csv": object(), "state.bin": object()}
+
+        def extract(self, name):
+            return guard.SQLITE_MAGIC + b"state" if name == "state.bin" else b"synthetic"
+
+    package = types.ModuleType("PyInstaller")
+    archive = types.ModuleType("PyInstaller.archive")
+    readers = types.ModuleType("PyInstaller.archive.readers")
+    readers.CArchiveReader = Reader
+    package.archive = archive
+    archive.readers = readers
+    monkeypatch.setitem(sys.modules, "PyInstaller", package)
+    monkeypatch.setitem(sys.modules, "PyInstaller.archive", archive)
+    monkeypatch.setitem(sys.modules, "PyInstaller.archive.readers", readers)
+    with pytest.raises(guard.PayloadError, match="state.bin.*SQLite"):
+        guard.assert_onefile_clean(executable)
 
 
 def test_install_and_portable_acceptance_are_separate_hard_gates():
@@ -72,6 +162,9 @@ def test_install_and_portable_acceptance_are_separate_hard_gates():
     assert "*-portable.zip" in workflow
     assert "(Get-ChildItem dist -Filter '*-setup.exe'" not in workflow
     assert workflow.count("RESEARCH_CANDIDATES.md") >= 3
+    assert "byte-length mismatch" in workflow
+    assert "checksum manifest does not cover" in workflow
+    assert "release assets and checksum manifest must be unique and one-to-one" in workflow
 
     install = read(KIT / "install_test.ps1")
     assert "refusing to run an incomplete loaderless installer" in install

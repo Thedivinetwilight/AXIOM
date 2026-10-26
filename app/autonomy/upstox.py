@@ -27,7 +27,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Callable
-from urllib.parse import quote as url_quote
+from urllib.parse import quote as url_quote, urlsplit
 
 import httpx
 
@@ -37,8 +37,26 @@ from app.autonomy.models import (
 )
 from app.autonomy.risk import floor_tick, ceil_tick
 
-API_BASE = "https://api.upstox.com"
+OFFICIAL_API_BASE = "https://api.upstox.com"
+API_BASE = OFFICIAL_API_BASE
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def validate_official_upstox_request(path: str) -> None:
+    """Reject forged bases/absolute URLs before credentials or network are used."""
+    try:
+        base = urlsplit(API_BASE)
+        relative = urlsplit(str(path))
+        base_port = base.port
+    except (TypeError, ValueError):
+        raise ValueError("Official Upstox API endpoint and relative path are required") from None
+    if (API_BASE != OFFICIAL_API_BASE or base.scheme != "https"
+            or base.hostname != "api.upstox.com" or base_port not in {None, 443}
+            or base.username or base.password or base.path or base.query or base.fragment):
+        raise ValueError("Upstox order/history requests require the official https://api.upstox.com base")
+    if (relative.scheme or relative.netloc or relative.query or relative.fragment
+            or not relative.path.startswith("/") or not relative.path.startswith("/v")):
+        raise ValueError("Upstox order/history requests require a relative API path beginning /v")
 
 
 class UpstoxError(RuntimeError):
@@ -91,6 +109,7 @@ class UpstoxReadOnly:
     def _request(self, method: str, path: str, *, params: dict | None = None,
                  json_body: dict | None = None, write: bool = False,
                  not_found_ok: bool = False, extra_headers: dict | None = None) -> dict:
+        validate_official_upstox_request(path)
         try:
             with httpx.Client(base_url=API_BASE, transport=self._transport,
                               timeout=self._timeout) as client:
@@ -492,6 +511,21 @@ class UpstoxLiveBroker(UpstoxReadOnly):
         if not isinstance(data, list) or not data:
             raise ReconciliationFailure("Order history is missing")
         return data
+
+
+class UpstoxRecoveryReadOnly(UpstoxReadOnly):
+    """Account/GTT reads for recovered sessions; no order-write methods exist."""
+    broker_mutations_reachable = False
+    authoritative = True
+    _order_payload = staticmethod(UpstoxLiveBroker._order_payload)
+    _positions_from_raw = staticmethod(UpstoxLiveBroker._positions_from_raw)
+    get_gtt = UpstoxLiveBroker.get_gtt
+    list_gtt = UpstoxLiveBroker.list_gtt
+    find_matching_gtt = UpstoxLiveBroker.find_matching_gtt
+    _positions = UpstoxLiveBroker._positions
+    account = UpstoxLiveBroker.account
+    orders = UpstoxLiveBroker.orders
+    order_history = UpstoxLiveBroker.order_history
 
 
 class InstrumentCatalog:

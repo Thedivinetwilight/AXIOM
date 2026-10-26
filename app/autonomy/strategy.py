@@ -222,8 +222,23 @@ class EvidenceRegistry:
             "risk_adjusted_score": item.risk_adjusted_score,
             "baseline_risk_adjusted_score": item.baseline_risk_adjusted_score,
             "synthetic": item.synthetic,
+            "provenance_class": item.provenance_class,
+            "provenance_verified": item.provenance_verified,
+            "provenance_effect": (
+                "research only; no PAPER or LIVE execution" if item.synthetic else
+                "PAPER structure only; LIVE blocked" if not item.provenance_verified else
+                "trusted in-process verification; all other gates still apply"
+            ),
+            "paper_eligible_structure": not item.synthetic,
+            "paper_execution_effect": (
+                "BLOCKED_SYNTHETIC_RESEARCH_ONLY" if item.synthetic
+                else "PAPER_ONLY_AFTER_ALL_QUALITY_GATES"
+            ),
             "kronos_required": item.kronos_required,
-            "live_eligible_structure": not item.synthetic,
+            "live_eligible_structure": not item.synthetic and item.provenance_verified,
+            "live_execution_effect": (
+                "BLOCKED_UNLESS_INDEPENDENTLY_VERIFIED_AND_ALL_QUALITY_GATES_PASS"
+            ),
         } for item in self._items.values()]
 
     @classmethod
@@ -235,6 +250,10 @@ class EvidenceRegistry:
             raw = json.loads(path.read_text(encoding="utf-8"))
             if raw.get("schema") != "axiom.autonomy.evidence.v1":
                 raise ValueError(f"Unsupported evidence schema in {path.name}")
+            if raw.get("provenance_verified") is True:
+                raise ValueError(
+                    f"Independently verified provenance cannot be asserted by operator JSON: {path.name}"
+                )
             item = StrategyEvidence(
                 evidence_id=raw["evidence_id"], instrument_key=raw["instrument_key"],
                 strategy_family=raw["strategy_family"], side=raw["side"],

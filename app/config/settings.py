@@ -182,6 +182,11 @@ class Settings:
             raise ValueError("LIVE trading is not enabled in V1")
         if broker not in {"LOCAL_PAPER", "UPSTOX_SANDBOX"}:
             raise ValueError("BROKER must be LOCAL_PAPER or UPSTOX_SANDBOX")
+        if broker == "UPSTOX_SANDBOX":
+            from app.brokers.sandbox import validate_official_sandbox_endpoints
+            validate_official_sandbox_endpoints(
+                self.upstox_sandbox_base_url, self.upstox_sandbox_order_history_url
+            )
         if broker == "UPSTOX_SANDBOX" and not self.upstox_sandbox_access_token.strip():
             raise ValueError(
                 "BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN in the environment"

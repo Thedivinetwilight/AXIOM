@@ -7,8 +7,9 @@ stream supplied by the session engine; every fill is local and labeled PAPER.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import copy
 import hashlib
 import math
 
@@ -16,7 +17,7 @@ from app.autonomy.models import (
     AccountProfile, AccountSnapshot, ExecutionPermit, Instrument, Position,
     ProtectedOrder, Submission, validate_order_route,
 )
-from app.data.models import Candle
+from app.data.models import Candle, parse_timestamp
 
 
 @dataclass
@@ -61,6 +62,75 @@ class PaperExecution:
         self.gtt: dict[str, dict] = {}
         self.intent_for_id: dict[str, str] = {}
         self._now = datetime.now(timezone.utc)
+
+    def snapshot(self) -> dict:
+        """Return a JSON-safe durable copy; no credentials or permits exist here."""
+        positions = []
+        for position in self.positions.values():
+            raw = asdict(position)
+            raw["entry_time"] = position.entry_time.isoformat() if position.entry_time else ""
+            positions.append(raw)
+        return {
+            "schema": "axiom.autonomy.paper-state.v1",
+            "instrument_keys": sorted(self.instruments),
+            "starting_equity": self.starting_equity,
+            "cash": self.cash,
+            "day_realised": self.day_realised,
+            "commission_rate": self.commission_rate,
+            "slippage_rate": self.slippage_rate,
+            "spread_rate": self.spread_rate,
+            "max_participation": self.max_participation,
+            "rejection_rate": self.rejection_rate,
+            "rejections": self.rejections,
+            "trade_log": copy.deepcopy(self.trade_log),
+            "positions": positions,
+            "gtt": copy.deepcopy(self.gtt),
+            "intent_for_id": dict(self.intent_for_id),
+            "now": self._now.isoformat(),
+        }
+
+    @classmethod
+    def from_snapshot(cls, instruments: dict[str, Instrument], snapshot: dict) -> "PaperExecution":
+        """Restore a halted paper runtime, rejecting incomplete/inconsistent state."""
+        if not isinstance(snapshot, dict) or snapshot.get("schema") != "axiom.autonomy.paper-state.v1":
+            raise ValueError("Unsupported or missing durable paper state")
+        if set(snapshot.get("instrument_keys") or []) != set(instruments):
+            raise ValueError("Durable paper instruments do not match the recovered session")
+        paper = cls(
+            instruments,
+            starting_equity=float(snapshot["starting_equity"]),
+            commission_rate=float(snapshot["commission_rate"]),
+            slippage_rate=float(snapshot["slippage_rate"]),
+            spread_rate=float(snapshot["spread_rate"]),
+            max_participation=float(snapshot["max_participation"]),
+            rejection_rate=float(snapshot["rejection_rate"]),
+        )
+        paper.cash = float(snapshot["cash"])
+        paper.day_realised = float(snapshot["day_realised"])
+        if not all(math.isfinite(value) for value in (paper.cash, paper.day_realised)):
+            raise ValueError("Durable paper cash/P&L is invalid")
+        paper.rejections = int(snapshot["rejections"])
+        paper.trade_log = copy.deepcopy(snapshot["trade_log"])
+        paper.gtt = copy.deepcopy(snapshot["gtt"])
+        paper.intent_for_id = dict(snapshot["intent_for_id"])
+        paper._now = parse_timestamp(snapshot["now"])
+        for raw in snapshot["positions"]:
+            values = dict(raw)
+            values["entry_time"] = parse_timestamp(values["entry_time"]) if values.get("entry_time") else None
+            position = PaperPosition(**values)
+            if position.instrument_key not in instruments:
+                raise ValueError("Durable paper position has an unknown instrument")
+            paper.positions[position.instrument_key] = position
+        for identifier, record in paper.gtt.items():
+            if record.get("instrument_token") not in instruments:
+                raise ValueError("Durable paper GTT has an unknown instrument")
+            if identifier not in paper.intent_for_id:
+                raise ValueError("Durable paper GTT lacks its intent mapping")
+        for position in paper.positions.values():
+            if position.protection_id not in paper.gtt:
+                raise ValueError("Durable paper position lacks protection state")
+        paper.account().validate()
+        return paper
 
     def _check_permit(self, permit: ExecutionPermit | None, kind: str,
                       session_id: str | None = None) -> None:

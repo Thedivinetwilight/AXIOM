@@ -62,3 +62,97 @@ def test_no_generic_order_or_credential_api_is_exposed(tmp_path):
         health = web.get("/health").json()
         assert health["mode"] == "PAPER" and health["live_trading"] is False
         assert health["autonomy"]["live_active"] is False
+
+
+def test_live_scan_route_cannot_reach_execution_or_broker_mutation(tmp_path, monkeypatch):
+    from tests.test_autonomy_service import activate, make_service
+
+    live_dir = tmp_path / "live"
+    live_dir.mkdir()
+    service, store, feed, clock, session_id = make_service(live_dir, live=True)
+    activate(service, session_id)
+    runtime = service._runtime(session_id)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Scan route reached an execution/broker mutation")
+
+    monkeypatch.setattr(service, "execute_once", forbidden)
+    for name in ("on_bar", "margin_for", "place_protected_entry", "modify_stop", "cancel_gtt"):
+        monkeypatch.setattr(runtime.executor, name, forbidden)
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    with client(app_dir) as web:
+        web.app.state.autonomy = service
+        response = web.post(
+            f"/api/autonomy/sessions/{session_id}/scan",
+            headers={"Authorization": "Bearer local-api-test"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "ACTIVE"
+        assert body["last_scan_kind"] == "READ_ONLY"
+        assert body["scan_endpoint_effect"] == "READ_ONLY_NO_ORDER_MUTATIONS"
+        assert body["intents"] == [] and runtime.executor.gtt == {}
+        schema = web.get("/openapi.json").json()
+        assert not any(path.endswith("/execute") or path.endswith("/execute-once")
+                       for path in schema["paths"])
+    store.close()
+
+
+def test_incomplete_reconcile_returns_409_and_preserves_unresolved_intent(tmp_path, monkeypatch):
+    from tests.test_autonomy_service import activate, make_service
+
+    paper_dir = tmp_path / "paper"
+    paper_dir.mkdir()
+    service, store, feed, clock, session_id = make_service(paper_dir)
+    activate(service, session_id)
+    service.execute_once(session_id)
+    runtime = service._runtime(session_id)
+    monkeypatch.setattr(runtime.executor, "get_gtt", lambda identifier: None)
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    with client(app_dir) as web:
+        web.app.state.autonomy = service
+        response = web.post(
+            f"/api/autonomy/sessions/{session_id}/reconcile",
+            headers={"Authorization": "Bearer local-api-test"},
+        )
+        assert response.status_code == 409, response.text
+        assert "incomplete" in response.json()["detail"]
+        assert service.public(session_id)["state"] == "HALTED"
+        assert store.intents(session_id)[0]["state"] == "UNRESOLVED"
+        arm = web.post(
+            f"/api/autonomy/sessions/{session_id}/arm",
+            headers={"Authorization": "Bearer local-api-test"},
+        )
+        assert arm.status_code == 409
+    store.close()
+
+
+def test_browser_recovery_route_revokes_active_approval_without_cancel(tmp_path):
+    from tests.test_autonomy_service import activate, make_service
+
+    paper_dir = tmp_path / "paper"
+    paper_dir.mkdir()
+    service, store, feed, clock, session_id = make_service(paper_dir)
+    activate(service, session_id)
+    service.execute_once(session_id)
+    runtime = service._runtime(session_id)
+    before = runtime.executor.gtt
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    with client(app_dir) as web:
+        web.app.state.autonomy = service
+        response = web.post(
+            f"/api/autonomy/sessions/{session_id}/recover-view",
+            headers={"Authorization": "Bearer local-api-test"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "HALTED" and body["recovered"] is True
+        assert body["authorized_day"] == "" and body["risk"] is None
+        assert body["stop_requested"] is True and body["orders"] and body["intents"]
+        assert runtime.executor.gtt == before
+        assert all(rule["status"] != "CANCELLED"
+                   for record in runtime.executor.gtt.values() for rule in record["rules"])
+    store.close()

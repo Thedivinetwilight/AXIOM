@@ -26,7 +26,7 @@ class AutonomyRunner:
                 session_ids = [runtime.session_id for runtime in list(self.service.runtimes.values())
                                if runtime.state == "ACTIVE"]
                 for session_id in session_ids:
-                    await asyncio.to_thread(self.service.scan_once, session_id)
+                    await asyncio.to_thread(self.service.execute_once, session_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

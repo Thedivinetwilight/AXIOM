@@ -20,6 +20,7 @@ from app.autonomy.risk import initial_stop, trailing_stop
 from app.autonomy.store import AutonomyStore
 from app.autonomy.upstox import (
     AmbiguousSubmission, InstrumentCatalog, Quote, UpstoxLiveBroker, UpstoxReadOnly,
+    UpstoxRecoveryReadOnly,
 )
 from app.data.models import Candle
 
@@ -247,3 +248,59 @@ def test_catalog_normalizes_paise_ticks_and_rejects_unknown_contract_multiplier(
     with pytest.raises(ValueError):
         catalog.instruments["NCD_FO|1"].validate()
     assert catalog.load_cache(require_current_day=False)
+
+
+def test_live_order_history_reject_forged_base_or_absolute_url_before_network(monkeypatch):
+    import app.autonomy.upstox as upstox_module
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500)
+
+    broker = UpstoxLiveBroker(
+        lambda: "not-a-real-token", algo_name="AXIOM-TEST",
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(upstox_module, "API_BASE", "https://api.upstox.com.evil.example")
+    for path in ("/v2/order/history", "/v3/order/gtt/cancel"):
+        with pytest.raises(ValueError, match="official"):
+            broker._request("GET", path)
+    monkeypatch.setattr(upstox_module, "API_BASE", upstox_module.OFFICIAL_API_BASE)
+    with pytest.raises(ValueError, match="relative API path"):
+        broker._request("GET", "https://example.invalid/v2/order/history")
+    assert calls == []
+
+
+def test_production_recovery_adapter_has_no_writes_and_reads_mocked_account_gtt():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path == "/v3/user/get-funds-and-margin":
+            return httpx.Response(200, json={"status": "success", "data": {
+                "available_to_trade": {
+                    "total": 1000,
+                    "cash_available_to_trade": {"margin_used": {"total": 100}},
+                    "pledge_available_to_trade": {"margin_used": {"total": 0}},
+                }
+            }})
+        if request.url.path == "/v2/portfolio/short-term-positions":
+            return httpx.Response(200, json={"status": "success", "data": []})
+        if request.url.path == "/v3/order/gtt":
+            return httpx.Response(200, json={"status": "success", "data": [{
+                "gtt_order_id": "GTT-READ-ONLY", "instrument_token": KEY,
+                "quantity": 1, "product": "I", "rules": [],
+            }]})
+        raise AssertionError(request.url.path)
+
+    reader = UpstoxRecoveryReadOnly(
+        lambda: "not-a-real-token", transport=httpx.MockTransport(handler), clock=lambda: NOW
+    )
+    assert reader.broker_mutations_reachable is False
+    for name in ("_write", "place_protected_entry", "modify_stop", "cancel_gtt", "margin_for"):
+        assert not hasattr(reader, name)
+    assert reader.account().available_margin == 1000
+    assert reader.get_gtt("GTT-READ-ONLY")["gtt_order_id"] == "GTT-READ-ONLY"
+    assert requests and all(request.method == "GET" for request in requests)

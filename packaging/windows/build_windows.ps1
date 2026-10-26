@@ -8,7 +8,7 @@
 
       1. verify the source commit matches what was asked for, tree clean
       2. install runtime + pinned build requirements
-      3. run focused + full Python and both JavaScript suites (all hard gates)
+      3. run focused + full Python and all three JavaScript harnesses (all hard gates)
       4. freeze the application with PyInstaller (onefile AXIOM-Chart.exe)
       5. smoke-test the frozen executable: /terminal, legacy /chart, assets,
          token gate, disconnected Vantage default, DEMO data and paper controls
@@ -43,6 +43,7 @@ function Fail($text) {
 # The script lives in packaging/windows/; the repository root is two levels up.
 $Kit = $PSScriptRoot
 $RepoRoot = (Resolve-Path (Join-Path $Kit '..\..')).Path
+$PayloadGuard = Join-Path $Kit 'payload_guard.py'
 
 trap {
     # Named Fail gates already have annotations. Capture unexpected strict-mode,
@@ -135,9 +136,11 @@ if ($FullExit -ne 0) {
 Write-Host "full suite passed ($FullSummary)"
 
 Step '3c. Exact-commit fake-provider performance benchmarks (hard gate)'
-& python scripts/benchmark_terminal.py --output (Join-Path $Kit 'TERMINAL_BENCHMARK.json') 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'benchmark-python.log')
+$BenchmarkOutput = Join-Path $Kit 'TERMINAL_BENCHMARK.json'
+$UiBenchmarkOutput = Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json'
+& python scripts/benchmark_terminal.py --output $BenchmarkOutput 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'benchmark-python.log')
 if ($LASTEXITCODE -ne 0) { Fail 'fake-provider backend benchmark failed on Windows' }
-$env:AXIOM_UI_BENCHMARK_OUTPUT = Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json'
+$env:AXIOM_UI_BENCHMARK_OUTPUT = $UiBenchmarkOutput
 & node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal-benchmark.log')
 $BenchmarkUiExit = $LASTEXITCODE
 Remove-Item Env:AXIOM_UI_BENCHMARK_OUTPUT -ErrorAction SilentlyContinue
@@ -148,6 +151,10 @@ if ($Benchmark.commit -ne $Head -or $UiBenchmark.commit -ne $Head) { Fail 'bench
 if ($Benchmark.working_tree_dirty_at_measurement -or $UiBenchmark.working_tree_dirty_at_measurement) { Fail 'benchmarks must run from the exact clean source tree' }
 if ($Benchmark.assertions.order_send_calls -ne $Benchmark.assertions.expected_order_send_calls) { Fail 'benchmark order_send count mismatch' }
 Write-Host 'exact-commit fake-only backend and UI benchmarks passed; no real DEMO/LIVE latency measured'
+
+Step '3d. Explicit DEMO source payload allowlist (hard gate)'
+& python $PayloadGuard source $RepoRoot
+if ($LASTEXITCODE -ne 0) { Fail 'reviewed DEMO source payload validation failed' }
 
 # ------------------------------------------------------------------ 4. freeze
 Step '4. Freeze with PyInstaller'
@@ -164,6 +171,10 @@ $Exe = Join-Path $Dist 'AXIOM-Chart.exe'
 if (-not (Test-Path $Exe)) { Fail "expected $Exe" }
 $ExeItem = Get-Item $Exe
 Write-Host ("built {0} ({1:N1} MB)" -f $ExeItem.Name, ($ExeItem.Length / 1MB))
+
+Step '4a. Inspect every legacy onefile CArchive payload (hard gate)'
+& python $PayloadGuard onefile $Exe
+if ($LASTEXITCODE -ne 0) { Fail 'legacy onefile contains forbidden database/user-state/weight payloads' }
 
 Step '4b. Freeze the no-TEMP onedir runtime'
 $OnedirDist = Join-Path $Kit 'dist-onedir'
@@ -184,6 +195,10 @@ $OnedirExe = Join-Path $OnedirRoot 'AXIOM-Chart.exe'
 if (-not (Test-Path $OnedirExe)) { Fail 'expected onedir AXIOM-Chart.exe' }
 if (-not (Test-Path (Join-Path $OnedirRoot '_internal'))) { Fail 'onedir _internal dependency directory is missing' }
 Write-Host 'onedir runtime built; it does not use PyInstaller onefile TEMP extraction'
+
+Step '4c. Inspect every onedir payload file (hard gate)'
+& python $PayloadGuard tree $OnedirRoot
+if ($LASTEXITCODE -ne 0) { Fail 'onedir runtime contains forbidden database/user-state/weight payloads' }
 
 # ------------------------------------------------------- 5. smoke the build
 Step '5. Smoke-test the frozen executable on this machine'
@@ -492,6 +507,12 @@ foreach ($check in @(
 }
 Write-Host 'loaderless installer ZIP and onedir portable ZIP structure verified'
 
+Step '7c. Inspect final installer and portable ZIP payloads (hard gate)'
+foreach ($package in @($InstallZip, $PortableZip)) {
+    & python $PayloadGuard zip $package
+    if ($LASTEXITCODE -ne 0) { Fail "final ZIP contains forbidden database/user-state/weight payloads: $package" }
+}
+
 Step '8. Checksums and build metadata'
 $Log | Set-Content -Path (Join-Path $Dist 'install-test-log.txt') -Encoding utf8
 
@@ -524,19 +545,22 @@ $Meta = [ordered]@{
     commands      = [ordered]@{
         focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py'
         full_tests    = 'python -m pytest -q'
-        javascript_tests = 'node --check app/static/autonomy/autonomy.js; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs; node tests/js/autonomy_smoke.mjs'
-        performance_benchmarks = 'python scripts/benchmark_terminal.py; AXIOM_UI_BENCHMARK_OUTPUT=TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs'
+        javascript_tests = 'node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
+        performance_benchmarks = "python scripts/benchmark_terminal.py --output `"$BenchmarkOutput`"; `$env:AXIOM_UI_BENCHMARK_OUTPUT = `"$UiBenchmarkOutput`"; node tests/js/terminal_smoke.mjs"
+        payload_hygiene = "python `"$PayloadGuard`" source `"$RepoRoot`"; python `"$PayloadGuard`" onefile `"$Exe`"; python `"$PayloadGuard`" tree `"$OnedirRoot`"; python `"$PayloadGuard`" zip `"$InstallZip`"; python `"$PayloadGuard`" zip `"$PortableZip`""
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'
-        freeze_onedir = 'AXIOM_ONEDIR=1; python -m PyInstaller --noconfirm --clean --distpath dist-onedir --workpath build-onedir axiom.spec'
-        installer     = "ISCC.exe /DMyAppVersion=$Version axiom.iss (UseSetupLdr=no; onedir runtime)"
-        portable_test = 'pwsh packaging/windows/portable_test.ps1 -PackagePath <release-portable.zip> -ExpectedCommit <exact-commit>'
+        freeze_onedir = '$env:AXIOM_ONEDIR = ''1''; python -m PyInstaller --noconfirm --clean --distpath dist-onedir --workpath build-onedir axiom.spec'
+        installer     = "`"$Iscc`" `"/DMyAppVersion=$Version`" axiom.iss (UseSetupLdr=no; onedir runtime)"
+        installer_test = './install_test.ps1 -DistDir dist -SetupPath <extracted-no-temp-setup.exe> (workflow hard gate; includes upgrade and uninstall)'
+        portable_test = './portable_test.ps1 -PackagePath <release-portable.zip> -ExpectedCommit <exact-commit> (workflow hard gate)'
     }
     test_results  = [ordered]@{
         focused_windows = 'passed'
         full_windows    = $(if ($FullExit -eq 0) { 'passed' } else { 'failed' })
         full_summary    = $FullSummary
         full_failures   = @($FullFailures)
-        javascript      = 'chart + terminal + autonomy interaction suites passed with local DOM/fetch fakes'
+        javascript      = 'chart + terminal + autonomy syntax checks and all three interaction harnesses passed with local DOM/fetch fakes'
+        payload_hygiene = 'passed: explicit DEMO allowlist plus onefile CArchive, onedir tree, installer ZIP and portable ZIP forbidden-name/SQLite-header checks; exact clean source and no broker credentials supplied'
         autonomy        = 'autonomy Python/API/fault/research/shakedown suites and frozen safe-default/manual/asset gates passed; no Upstox account, external order, Kronos inference or complete-session shakedown tested'
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
@@ -571,6 +595,8 @@ $Meta = [ordered]@{
         portable_runtime = 'extract entire onedir ZIP and keep AXIOM-Chart.exe beside _internal'
         legacy_onefile = 'AXIOM-Chart.exe retained for compatibility; it can use TEMP extraction'
         app_control_boundary = 'UNSIGNED workaround only; no policy is disabled or bypassed and enforced on-device acceptance is not claimed'
+        demo_data = 'eight explicit reviewed synthetic DEMO CSV/JSON fixtures; recursive data/ collection is prohibited'
+        payload_exclusions = 'credentials/environment files, SQLite databases and sidecars, autonomy/cache/results state, local logs/locks, and model-weight files'
         setup_sidecars = @($SetupParts | ForEach-Object { Split-Path $_ -Leaf })
     }
     signing       = [ordered]@{

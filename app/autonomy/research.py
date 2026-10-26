@@ -442,6 +442,16 @@ class ResearchRunner:
             "data_sha256": dataset.data_sha256, "config_sha256": self.config.sha256,
             "source": dataset.source, "synthetic": dataset.synthetic,
             "upstox_authoritative": dataset.upstox_authoritative,
+            "provenance_class": (
+                "SYNTHETIC_RESEARCH_ONLY" if dataset.synthetic else
+                "UPSTOX_JSON_OPERATOR_ATTESTED" if dataset.source == "upstox" else
+                "CSV_RESEARCH_ONLY"
+            ),
+            "provenance_verified": False,
+            "provenance_note": (
+                "Operator-supplied files and source arguments are not independent Upstox verification; "
+                "they can never establish LIVE evidence."
+            ),
             "survivorship_aware": dataset.survivorship_aware, "data_gaps": dataset.data_gaps,
             "walk_forward_runs": len(folds), "holdout_runs": 1 if holdout else 0,
             "holdout_locked": bool(holdout), "results": results, "incremental_value": incremental,
@@ -538,7 +548,9 @@ def main(argv: list[str] | None = None) -> int:
     report = ResearchRunner(forecast_provider=provider).run(dataset, output_dir=args.output)
     print(json.dumps({"report": str(args.output / "report.json"),
                       "holdout_locked": report["holdout_locked"],
-                      "live_eligible": False if not dataset.upstox_authoritative else "gated by evidence"}, indent=2))
+                      "provenance_verified": False,
+                      "paper_evidence_structure": not dataset.synthetic and dataset.upstox_authoritative,
+                      "live_eligible": False}, indent=2))
     return 0
 
 
