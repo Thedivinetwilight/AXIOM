@@ -469,9 +469,23 @@ def test_pip_commands_are_isolated_exact_and_index_scoped(tmp_path, monkeypatch)
 def test_isolated_worker_probe_only_contract(tmp_path):
     """Fake import stubs test process mechanics, never model inference."""
     import app.autonomy.kronos_runtime as runtime_module
+    app_root = tmp_path / "frozen-resources"
+    for relative in (
+        "app/__init__.py", "app/autonomy/__init__.py",
+        "app/autonomy/kronos_artifacts.py", "app/autonomy/kronos_runtime.py",
+    ):
+        destination = app_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    # A frozen app's stdlib/extension files can target another CPython ABI.
+    # This poison would be imported if app resources preceded the selected stdlib.
+    (app_root / "ssl.py").write_text(
+        "raise ImportError('incompatible frozen ssl must not shadow selected Python')\n",
+        encoding="utf-8",
+    )
     manager = runtime_module.KronosRuntimeManager(
         tmp_path / "kronos", ROOT / "config" / "kronos-runtime-requirements.txt",
-        ROOT / "app/autonomy/kronos_worker.py", application_root=ROOT,
+        ROOT / "app/autonomy/kronos_worker.py", application_root=app_root,
         python_command=[sys.executable],
     )
     python = manager.python()

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import sysconfig
 import time
 import traceback
 
@@ -193,10 +194,23 @@ def main() -> int:
     parser.add_argument("--app-root", type=Path, required=True)
     parser.add_argument("--probe-only", action="store_true")
     args = parser.parse_args()
-    # Isolated mode ignores PYTHONPATH/user site.  Only the explicit locked
-    # target and reviewed application resources are admitted.
-    sys.path.insert(0, str(args.app_root))
-    sys.path.insert(0, str(args.runtime))
+    # Isolated mode ignores PYTHONPATH/user site.  Keep the selected
+    # interpreter's stdlib (including DLLs/) ahead of frozen app resources:
+    # the frozen app's extension modules can target a different CPython ABI.
+    # The locked runtime and reviewed app files still precede global site-packages.
+    def normalized(path) -> str:
+        return os.path.normcase(os.path.normpath(os.fspath(path)))
+
+    site_directories = {
+        normalized(sysconfig.get_path(name)) for name in ("purelib", "platlib")
+        if sysconfig.get_path(name)
+    }
+    insertion = next((
+        index for index, entry in enumerate(sys.path)
+        if entry and normalized(entry) in site_directories
+    ), len(sys.path))
+    sys.path.insert(insertion, str(args.app_root))
+    sys.path.insert(insertion, str(args.runtime))
     result_stream = sys.stdout
     stage = "RUNTIME_PROBE"
     try:
