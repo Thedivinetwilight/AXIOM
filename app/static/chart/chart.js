@@ -1064,7 +1064,7 @@
     button.disabled = current === "STARTING";
     button.title = running
       ? "Stop the simulated paper session (cancels resting simulated orders)"
-      : "Start a paper session from the configured data source";
+      : "Start automated moving_average replay; simulated strategy orders may be created";
     button.dataset.running = running ? "1" : "";
   }
 
@@ -1089,8 +1089,9 @@
     button.textContent = "STARTING…";
     api("/api/paper/start-default", { method: "POST", body: {} })
       .then(function (result) {
-        toast("ok", "Paper session starting",
-          "State: " + (result && result.state ? result.state : "accepted") +
+        toast("ok", "Automated replay starting",
+          "moving_average automation is ON and may create simulated orders. State: " +
+          (result && result.state ? result.state : "accepted") +
           ". Bars appear as the feed delivers them.");
         window.setTimeout(function () {
           loadSymbols(true).then(refreshAll).catch(refreshAll);
@@ -1101,7 +1102,7 @@
       })
       .then(function () {
         button.disabled = false;
-        button.textContent = "START PAPER SESSION";
+        button.textContent = "START AUTOMATED REPLAY";
       });
   }
 

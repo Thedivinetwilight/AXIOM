@@ -325,6 +325,9 @@ function renderAll() {
 function badgeClass(mode) { return mode === "VANTAGE_LIVE" ? "live" : mode === "VANTAGE_DEMO" ? "demo" : "paper"; }
 function renderMode() {
   const status = currentStatus(); const mode = status.mode; const label = MODE_LABELS[mode] || mode;
+  const paperSession = state.workspace.paper_session || {};
+  const paperState = paperSession.state || "STOPPED";
+  const automatedPaper = mode === "AXIOM_PAPER" && paperSession.automation_enabled === true;
   for (const id of ["global-mode", "overview-mode"]) {
     $(id).className = `mode-badge ${badgeClass(mode)}`; $(id).textContent = label;
   }
@@ -335,14 +338,21 @@ function renderMode() {
   $("global-connection-dot").className = `connection-dot ${connectionKind}`;
   $("global-server").textContent = status.server || (mode === "AXIOM_PAPER" ? "AXIOM local only" : "No MT5 server");
   $("global-account").textContent = status.account_login_masked || status.account_label || (mode === "AXIOM_PAPER" ? "Local paper" : "No verified account");
-  const lifecycle = status.emergency_stop ? "EMERGENCY STOP" : status.lifecycle || "DISARMED";
+  const lifecycle = status.emergency_stop ? "EMERGENCY STOP" : mode === "AXIOM_PAPER" ? `PAPER ${paperState}` : status.lifecycle || "DISARMED";
   $("global-lifecycle").textContent = lifecycle;
-  $("global-lifecycle").className = `status-pill ${status.emergency_stop ? "err" : status.active ? "ok" : status.armed ? "warn" : ""}`;
+  $("global-lifecycle").className = `status-pill ${status.emergency_stop || paperState === "ERROR" ? "err" : status.active || paperState === "RUNNING" ? "ok" : status.armed || paperState === "PAUSED" ? "warn" : ""}`;
   $("global-lock-note").textContent = status.emergency_stop
     ? "Durable stop blocks new entries across restart."
     : mode === "VANTAGE_LIVE"
       ? (status.active ? "Real order placement explicitly activated; automation remains OFF." : "Real order placement blocked until Arm and separate Activate.")
-      : mode === "VANTAGE_DEMO" ? "Demo orders only; demo results do not prove live readiness." : "Independent local paper; no Vantage order routing.";
+      : mode === "VANTAGE_DEMO" ? "Demo orders only; demo results do not prove live readiness."
+        : automatedPaper ? `${paperSession.strategy} can create local simulated orders automatically; no broker routing.`
+          : paperSession.review_policy === "MANUAL_ORDER_REVIEW" ? "Manual-only local paper; this console reviews each manual order." : "Independent local paper; no Vantage order routing.";
+  $("sidebar-automation").textContent = mode !== "AXIOM_PAPER"
+    ? "Vantage strategy automation OFF. No profitability claim."
+    : automatedPaper ? `${paperSession.strategy} automation ON · local simulated orders only.`
+      : paperSession.review_policy === "MANUAL_ORDER_REVIEW" ? "manual_only automation OFF · this console reviews manual orders."
+        : "No active paper strategy. Default replay enables moving_average automation.";
   $("ticket-mode").textContent = label; $("ticket-mode").className = `status-pill ${status.active ? "ok" : "warn"}`;
   $("deals-label").textContent = mode === "AXIOM_PAPER" ? "LOCAL SIMULATED FILLS" : mode === "VANTAGE_DEMO" ? "MT5 DEMO DEALS" : "MT5 LIVE DEALS";
   document.body.dataset.mode = mode || "AXIOM_PAPER";
@@ -351,19 +361,35 @@ function renderMode() {
 function renderBoundary() {
   if (!state.workspace) return;
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
+  const session = state.workspace.paper_session || {};
+  const paperState = session.state || "STOPPED";
+  const stop = session.stop_reason ? ` · ${session.stop_reason}` : "";
+  const automated = paper && session.automation_enabled === true;
+  const manualOnly = paper && session.review_policy === "MANUAL_ORDER_REVIEW";
   $("boundary-execution").textContent = paper ? "LOCAL PAPER · SIMULATED" : `${MODE_LABELS[status.mode]} · ${status.connected ? "MT5 CONNECTED" : "DISCONNECTED"}`;
-  $("boundary-execution-note").textContent = paper ? "Local reviewed fills only; no Vantage order routing" : status.mode === "VANTAGE_LIVE" ? "Real-money capability remains separately locked" : "Demo orders only; no live-readiness inference";
+  $("boundary-execution-note").textContent = paper ? "Local simulated strategy/manual fills only; no Vantage order routing" : status.mode === "VANTAGE_LIVE" ? "Real-money capability remains separately locked" : "Demo orders only; no live-readiness inference";
   if (paper) {
     const connected = Boolean(state.marketData?.authenticated);
-    $("boundary-data").textContent = connected ? "VANTAGE DEMO · READ-ONLY" : "LOCAL REPLAY / DISCONNECTED";
-    $("boundary-data-note").textContent = connected ? "Independent data interface; execution remains LOCAL PAPER" : "Replay is labeled sample data, never silent fallback";
+    const replay = session.feed_kind === "LOCAL_REPLAY" && session.strategy;
+    $("boundary-data").textContent = connected ? "VANTAGE DEMO · READ-ONLY"
+      : replay ? `LOCAL REPLAY · ${paperState}${stop}`
+        : session.strategy ? `READ-ONLY STREAM · ${paperState}${stop}` : "LOCAL PAPER / NO ACTIVE FEED";
+    $("boundary-data-note").textContent = connected ? "Independent data interface; execution remains LOCAL PAPER"
+      : replay ? `Sample data only · ${session.strategy} · ${session.automation_enabled ? "automated local simulation" : "manual-only"}`
+        : session.strategy ? "Read-only input feeding local simulation; not a broker execution session" : "Default replay is sample data and enables moving_average automation";
   } else {
     $("boundary-data").textContent = status.connected ? "SAME VANTAGE MT5 ACCOUNT" : "NO CURRENT BROKER FEED";
     $("boundary-data-note").textContent = "Quote connectivity alone never grants order permission";
   }
   const lifecycle = status.emergency_stop ? "EMERGENCY STOP" : status.lifecycle || "DISARMED";
-  $("boundary-auth").textContent = paper ? (status.emergency_stop ? "EMERGENCY STOP" : "LOCAL REVIEW · AUTOMATION OFF") : lifecycle;
-  $("boundary-auth-note").textContent = paper ? "Every simulated fill requires manual review" : status.active ? "Explicitly active; every order still requires review + final phrase" : "Readiness → Arm → Activate → reviewed order required";
+  $("boundary-auth").textContent = !paper ? lifecycle : status.emergency_stop ? "EMERGENCY STOP"
+    : automated ? (session.feed_kind === "LOCAL_REPLAY" ? "REPLAY STRATEGY · AUTOMATION ON" : "LOCAL STRATEGY · AUTOMATION ON")
+      : manualOnly ? "LOCAL REVIEW · AUTOMATION OFF" : "LOCAL PAPER · NO ACTIVE STRATEGY";
+  $("boundary-auth-note").textContent = !paper ? (status.active ? "Explicitly active; every order still requires review + final phrase" : "Readiness → Arm → Activate → reviewed order required")
+    : status.emergency_stop ? "Durable stop blocks new entries and strategy resume"
+      : automated ? `${session.strategy} can create simulated orders/fills automatically · ${paperState}${stop} · no broker routing`
+        : manualOnly ? "manual_only creates no strategy orders; this console reviews each manual simulated order"
+          : "Default replay enables moving_average automation; manual tickets are separately reviewed";
 }
 function renderFreshness() {
   if (!state.workspace) return;
@@ -407,8 +433,9 @@ function renderOverview() {
       : positions.reduce((sum, item) => sum + Number(item.unrealized_pnl ?? item.profit ?? 0) + Number(item.swap || 0), 0)
   );
   $("metric-unrealized").textContent = money(unrealized, currency);
+  $("metric-unrealized-note").textContent = status.mode === "AXIOM_PAPER" ? "All current local open positions · not this run only" : "broker-confirmed current view";
   $("metric-realized").textContent = money(workspace.pnl?.realized_visible_history, currency);
-  $("realized-window").textContent = workspace.pnl?.history_window_days ? `${workspace.pnl.history_window_days}-day visible broker history` : "visible local/broker history only";
+  $("realized-window").textContent = status.mode === "AXIOM_PAPER" ? "All persisted local history · survives restart" : workspace.pnl?.history_window_days ? `${workspace.pnl.history_window_days}-day visible broker history` : "visible local/broker history only";
   $("metric-margin").textContent = money(account.margin_free ?? account.cash, currency);
   $("metric-margin-note").textContent = status.mode === "AXIOM_PAPER" ? "local simulated cash" : status.connected ? "MT5 free margin" : "unavailable while disconnected";
   const connectionRows = [
@@ -423,8 +450,12 @@ function renderOverview() {
   const limits = status.risk_limits || {};
   const configured = Object.values(limits).filter((value) => Number(value) > 0).length;
   const unresolved = (workspace.intents || []).filter((item) => UNRESOLVED.has(item.status)).length;
+  const session = workspace.paper_session || {};
+  const guardLabel = status.emergency_stop ? "Durable emergency stop is SET"
+    : status.mode === "AXIOM_PAPER" ? `${session.state || "STOPPED"} · ${session.automation_enabled ? `${session.strategy} automation ON` : session.review_policy === "MANUAL_ORDER_REVIEW" ? "manual-only · automation OFF" : "no active strategy"}`
+      : `${status.lifecycle || "DISARMED"} · automation OFF`;
   $("overview-risk").innerHTML = `
-    <div class="inline-status ${status.emergency_stop ? "err" : status.active ? "ok" : "warn"}">${escapeHtml(status.emergency_stop ? "Durable emergency stop is SET" : `${status.lifecycle || "DISARMED"} · automation OFF`)}</div>
+    <div class="inline-status ${status.emergency_stop ? "err" : status.active ? "ok" : "warn"}">${escapeHtml(guardLabel)}</div>
     <dl class="detail-list"><dt>Vantage risk fields</dt><dd>${status.mode === "AXIOM_PAPER" ? "Separate legacy paper limits" : `${configured}/${Object.keys(limits).length} above zero`}</dd><dt>Unresolved intents</dt><dd>${unresolved}</dd><dt>Live placement</dt><dd>${status.mode === "VANTAGE_LIVE" && status.active ? "Explicitly active" : "Blocked"}</dd></dl>`;
   const quotes = workspace.quotes || {};
   const quoteEntries = Object.entries(quotes);
@@ -434,7 +465,45 @@ function renderOverview() {
   }).join("") : `<p class="empty-state">${status.mode === "AXIOM_PAPER" ? "Open Charts to load the independent paper feed." : status.connected ? "Select instruments and reload quotes/charts." : "No broker quotes while disconnected."}</p>`;
   const checks = operatorChecklist();
   $("overview-checklist").innerHTML = checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-  renderOverviewActivity();
+  renderPaperRun(); renderOverviewActivity();
+}
+function renderPaperRun() {
+  const panel = $("paper-run-panel");
+  if (!panel) return;
+  const paper = currentStatus().mode === "AXIOM_PAPER";
+  panel.hidden = !paper;
+  if (!paper) return;
+  const session = state.workspace.paper_session || {};
+  const current = session.current_run;
+  const run = current || session.last_run;
+  const currency = state.workspace.account?.currency || "";
+  if (!run) {
+    $("paper-run-title").textContent = "No current paper run";
+    $("paper-run-state").textContent = session.state || "STOPPED";
+    $("paper-run-summary").textContent = "No current or persisted run summary. Account cards above are persisted local totals, not a new run result.";
+    $("paper-run-details").innerHTML = "";
+    $("paper-run-pnl-note").textContent = "Start automated replay or the separate manual-only paper flow to create a run-scoped result. No profitability claim.";
+    return;
+  }
+  const currentProcessRun = Boolean(current);
+  const active = currentProcessRun && run.active;
+  $("paper-run-title").textContent = active ? "Current paper run" : currentProcessRun ? "Last run in this process" : "Last persisted run · not active";
+  $("paper-run-state").textContent = `${run.state || "STOPPED"}${run.stop_reason ? ` · ${run.stop_reason}` : ""}`;
+  $("paper-run-state").className = `status-pill ${run.state === "ERROR" ? "err" : active ? "ok" : "warn"}`;
+  $("paper-run-summary").textContent = `${run.feed_kind || "LOCAL PAPER"} · ${run.strategy || "no strategy"} · ${run.automation_enabled ? "AUTOMATION ON · automatic simulated orders possible" : "MANUAL-ONLY · automation OFF"}`;
+  const scope = currentProcessRun ? "Current-run" : "Last-run";
+  const fields = [
+    ["Run scope", currentProcessRun ? "This process only" : "Persisted completed run; no active process run"],
+    ["Started / stopped", `${timeText(run.started_at)} / ${timeText(run.stopped_at)}`],
+    ["Stop reason", run.stop_reason || "Not stopped"],
+    ["Bars / actionable signals", `${run.processed_bars ?? 0} / ${run.actionable_signals ?? 0}`],
+    ["Simulated orders / fills", `${run.orders_created ?? 0} / ${run.fills ?? 0}`],
+    [`${scope} realized P&L`, money(run.realized_pnl, currency)],
+    [`${scope} unrealized P&L Δ`, money(run.unrealized_pnl_delta, currency)],
+    ["Ending unrealized · open positions", money(run.ending_unrealized_pnl, currency)],
+  ];
+  $("paper-run-details").innerHTML = fields.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+  $("paper-run-pnl-note").textContent = "Run values are account-level deltas from that run’s start, not per-trade attribution. Realized/unrealized cards above include persisted local history/current open positions. All values are simulated—not broker or profitability evidence.";
 }
 function operatorChecklist() {
   const status = currentStatus();
@@ -446,9 +515,10 @@ function operatorChecklist() {
       "If the feed degrades, new BUY entries block; existing local paper records remain available.",
     ];
     return [
-      "For fresh MT5 prices, save VANTAGE_DEMO locally and connect independent market data on Connections; execution stays LOCAL PAPER.",
-      "Or start/load the legacy local paper session. Replay data is sample data, not market data.",
-      "Use a reviewed manual ticket; no Vantage order is routed and fills are always simulated.",
+      "Default replay is sample data with moving_average automation ON: it can create simulated strategy orders/fills without reviewing each one.",
+      "For reviewed-only manual fills, use the separate manual-only MT5 paper flow or a manual ticket; no Vantage order is routed.",
+      "For fresh MT5 prices, save VANTAGE_DEMO locally and connect independent read-only market data on Connections; execution stays LOCAL PAPER.",
+      "Daily Upstox live-market PAPER is a separate /autonomy workflow; replay results are not live-market or Kronos evidence.",
     ];
   }
   const steps = [];
@@ -504,7 +574,8 @@ function renderRisk() {
   const status = currentStatus(); const paper = status.mode === "AXIOM_PAPER";
   $("risk-emergency").textContent = status.emergency_stop ? "EMERGENCY STOP SET" : "STOP CLEAR";
   $("risk-emergency").className = `status-pill ${status.emergency_stop ? "err" : "ok"}`;
-  $("lifecycle-current").textContent = paper ? `PAPER · ${state.workspace.paper_session?.state || "STOPPED"}` : status.lifecycle || "DISARMED";
+  const paperSession = state.workspace.paper_session || {};
+  $("lifecycle-current").textContent = paper ? `PAPER · ${paperSession.state || "STOPPED"}${paperSession.stop_reason ? ` · ${paperSession.stop_reason}` : ""}` : status.lifecycle || "DISARMED";
   const limits = status.risk_limits || {};
   if (!state.riskDirty) for (const [key, value] of Object.entries(limits)) {
     const input = $(`risk-${key}`); if (input && document.activeElement !== input) input.value = value ?? 0;
@@ -682,7 +753,7 @@ function renderChartContext() {
   if (paper) {
     const paperState = state.workspace.paper_session?.state;
     const mt5 = state.chart.feed === "vantage_mt5" && state.marketData?.authenticated;
-    $("start-paper").textContent = paperState === "RUNNING" ? "Stop paper session" : paperState === "PAUSED" ? "Resume paper session" : mt5 ? "Start manual-only MT5 paper" : "Start configured paper session";
+    $("start-paper").textContent = paperState === "RUNNING" ? "Stop paper session" : paperState === "PAUSED" ? "Resume paper session" : mt5 ? "Start manual-only MT5 paper" : "Start automated replay (moving_average)";
   }
   const feedContext = $("chart-feed-context");
   if (feedContext) {
@@ -691,7 +762,7 @@ function renderChartContext() {
     feedContext.textContent = !paper ? "This chart belongs to the selected Vantage execution session; it is separate from LOCAL PAPER market data."
       : mt5Payload ? `${state.chart.payload.note || "Read-only MT5 closed bars and current tick."} Automation OFF; local reviewed fills only.`
       : state.marketData?.authenticated ? "Choose an account-discovered symbol and reload the MT5 chart. No DEMO/replay symbol is substituted."
-      : "Replay/CSV is sample data, not market data. Connect the separate VANTAGE DEMO read-only feed on Connections for fresh MT5 prices.";
+      : "Replay/CSV is sample data, not market data. Default start enables moving_average automation and simulated strategy orders; manual-only MT5 paper and Daily Upstox PAPER are separate workflows.";
   }
   const noSymbol = !$("order-symbol").value;
   const disabledReason = state.submissionUncertain ? "An action outcome is uncertain. Reconcile before another order." : noSymbol ? "Load/select an instrument first." : !paper && !status.connected ? "Connect to the selected MT5 account first." : "";
@@ -1475,7 +1546,7 @@ function stopSession() {
     onConfirm: async () => {
       const result = await api(paper ? "/paper/stop" : "/api/trading/stop", { body: {} });
       state.activation = null; state.readiness = null; closeDialog(); await loadWorkspace();
-      toast("Stop result recorded", paper ? "Local paper session stopped." : result.note || "Inspect broker-reported remainder.", "warn", 10000);
+      toast("Stop result recorded", paper ? `Local paper session stopped · ${result.stop_reason || "OPERATOR_STOP"}.` : result.note || "Inspect broker-reported remainder.", "warn", 10000);
     },
   });
 }
@@ -1627,7 +1698,7 @@ async function paperSessionControl() {
       } });
     } else result = await api("/api/paper/start-default", { body: {} });
     await loadWorkspace(); await loadMarketData(); await loadChartSymbols();
-    toast("Paper session updated", `${result.state || "RUNNING"} · ${result.strategy === "manual_only" ? "manual-only · automation OFF · " : ""}local simulated execution only`, "ok");
+    toast("Paper session updated", `${result.state || "RUNNING"} · ${result.strategy || "strategy"} · ${result.automation_enabled ? "AUTOMATION ON · automatic simulated orders possible" : "manual-only · automation OFF"} · local simulated execution only`, "ok");
   } catch (error) { toast("Paper session failed", error.message, "err"); }
 }
 

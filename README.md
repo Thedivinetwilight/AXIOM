@@ -1,11 +1,19 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.7.0a2`.** AXIOM provides an eight-page Operator
+**Current source version: `3.7.0a3`.** AXIOM provides an eight-page Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping
 or coordinate automation. Only instruments exposed by the connected account are
 discovered; share/ETF CFDs are not represented as owned underlying assets.
+
+Version 3.7.0a3 makes legacy replay behavior explicit: the default replay runs
+`moving_average` with **local strategy automation ON** and can create simulated
+orders/fills without per-ticket review. Durable allowlisted audit events record
+session start/running, actionable signals, simulated orders/fills and stop reasons
+including `END_OF_DATA`. The Operator separates current-run deltas from persisted
+realized history and current open-position unrealized P&L. This does not change the
+separate `manual_only` MT5 paper or Daily Upstox live-market PAPER boundaries.
 
 LOCAL PAPER can now use an independent authenticated **VANTAGE DEMO MT5 read-only
 market-data service** for fresh prices while retaining local simulated fills. Its

@@ -29,15 +29,15 @@ def payload_guard():
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.7.0a2"
+    assert version == "3.7.0a3"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f'version = "{version}"' in read(ROOT / "pyproject.toml")
     assert f"**Current source version: `{version}`.**" in read(ROOT / "README.md")
     assert f"**Current source version: {version}**" in read(ROOT / "USER_MANUAL.md")
     version_info = read(KIT / "version_info.txt")
-    assert "filevers=(3, 7, 0, 2)" in version_info
-    assert "prodvers=(3, 7, 0, 2)" in version_info
-    assert "StringStruct('FileVersion', '3.7.0.2')" in version_info
+    assert "filevers=(3, 7, 0, 3)" in version_info
+    assert "prodvers=(3, 7, 0, 3)" in version_info
+    assert "StringStruct('FileVersion', '3.7.0.3')" in version_info
     assert f"StringStruct('ProductVersion', '{version}')" in version_info
     manual = read(KIT / "WINDOWS_INSTALL_MANUAL.md")
     assert f"**Version:** {version}" in manual
@@ -46,8 +46,8 @@ def test_version_is_consistent_across_frozen_and_operator_metadata():
     assert f"AXIOM-Operator-{version}-windows-x64-portable.zip" in manual
 
 
-def test_release_workflow_derives_the_a2_prerelease_tag_from_version_metadata():
-    assert read(KIT / "VERSION").strip() == "3.7.0a2"
+def test_release_workflow_derives_the_a3_prerelease_tag_from_version_metadata():
+    assert read(KIT / "VERSION").strip() == "3.7.0a3"
     workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
     assert "Get-Content _kit/packaging/windows/VERSION" in workflow
     assert '$tag = "v$($env:VERSION)"' in workflow
@@ -95,6 +95,7 @@ def test_build_packages_sidecars_and_both_zip_alternatives():
     assert "UNSIGNED workaround only" in build
     assert "RESEARCH_CANDIDATES.md" in build
     assert "tests/test_research_candidate_cli.py" in build
+    assert "tests/test_paper_replay_audit.py" in build
     for kind in ("source", "onefile", "tree", "zip"):
         assert f"$PayloadGuard {kind}" in build
     assert "node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs" in build

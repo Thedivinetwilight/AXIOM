@@ -347,6 +347,12 @@ jobs:
           was available to CI, so account eligibility, compliance, production protection and live readiness
           remain unverified.
 
+          **Replay truth and audit.** Default replay explicitly runs moving_average with local strategy
+          automation ON and can create simulated orders/fills without per-ticket review. It remains
+          separate from manual-only MT5 paper and Daily Upstox live-market PAPER. Durable redacted events
+          cover run start/running, actionable signals, simulated orders/fills and stop reasons including
+          END_OF_DATA. Current-run P&L deltas are separate from persisted local history/current positions.
+
           **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
           uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
           selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an

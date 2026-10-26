@@ -5,12 +5,25 @@ from enum import Enum
 import logging
 import time
 from datetime import datetime, timezone, timedelta
+from uuid import uuid4
 from app.data.models import Candle, parse_timestamp
 from app.data.realtime import ReplayStream
 from app.data.validator import validate
 from app.strategies.base import Signal
 
 logger = logging.getLogger("bot.controller")
+
+# Audit payloads are allowlisted, scalar and provider-independent. In particular,
+# never serialize provider.__dict__, request settings, exception text or feed URLs:
+# those can contain access tokens, passwords or account-specific secret material.
+_AUDIT_FIELDS = {
+    "provider", "feed_kind", "strategy", "review_policy", "automation_enabled",
+    "symbol", "symbols", "timeframe", "state", "stop_reason", "error_type",
+    "signal", "market_timestamp", "order_id", "fill_id", "side", "quantity",
+    "price", "fee", "status", "reason", "processed_bars", "actionable_signals",
+    "orders_created", "fills", "realized_pnl", "unrealized_pnl_delta",
+    "ending_unrealized_pnl", "equity_delta",
+}
 
 
 class BotState(str, Enum):
@@ -49,6 +62,110 @@ class PaperSimulator:
         }
         # V0.6.2: risk-decision counters for live pipeline observability.
         self.risk_counters = {"actionable_signals": 0, "orders_created": 0, "skipped": 0}
+        # A run is process-local. Its final summary is persisted separately from
+        # account-wide P&L, which deliberately survives process restart.
+        self.stop_reason: str | None = None
+        self.run: dict | None = None
+        self.last_run: dict | None = (
+            dict(broker.context["last_paper_run"])
+            if isinstance(broker.context.get("last_paper_run"), dict) else None
+        )
+        self._event_sequence = 0
+
+    def _automation_enabled(self) -> bool:
+        return bool(self.strategy and self.strategy.name != "manual_only")
+
+    def _review_policy(self) -> str:
+        if not self.strategy:
+            return "NO_ACTIVE_STRATEGY"
+        return (
+            "MANUAL_ORDER_REVIEW" if self.strategy.name == "manual_only"
+            else "AUTOMATED_LOCAL_SIMULATION"
+        )
+
+    def _feed_kind(self) -> str | None:
+        if not self.provider:
+            return None
+        if isinstance(self.provider, ReplayStream):
+            return "LOCAL_REPLAY"
+        if getattr(self.provider, "requires_fresh_live", False):
+            return "MT5_READ_ONLY_LOCAL_PAPER"
+        return "READ_ONLY_STREAM_LOCAL_PAPER"
+
+    def _run_view(self) -> dict | None:
+        if not self.run:
+            return None
+        realized = float(self.broker.portfolio.realized_pnl)
+        unrealized = float(self.broker.portfolio.unrealized_pnl)
+        return {
+            "run_id": self.run["run_id"],
+            "state": self.state.value,
+            "active": self.state in {BotState.STARTING, BotState.RUNNING, BotState.PAUSED},
+            "provider": type(self.provider).__name__ if self.provider else None,
+            "feed_kind": self._feed_kind(),
+            "strategy": self.strategy.name if self.strategy else None,
+            "automation_enabled": self._automation_enabled(),
+            "review_policy": self._review_policy(),
+            "started_at": self.run["started_at"],
+            "stopped_at": self.run.get("stopped_at"),
+            "stop_reason": self.stop_reason,
+            "processed_bars": self.processed,
+            "actionable_signals": self.run["actionable_signals"],
+            "orders_created": self.run["orders_created"],
+            "fills": self.run["fills"],
+            "realized_pnl": realized - self.run["realized_baseline"],
+            "unrealized_pnl_delta": unrealized - self.run["unrealized_baseline"],
+            "ending_unrealized_pnl": unrealized,
+            "equity_delta": float(self.broker.portfolio.equity) - self.run["equity_baseline"],
+            "pnl_basis": "LOCAL_SIMULATED_CURRENT_RUN",
+        }
+
+    def _audit(self, kind: str, **payload):
+        """Append one durable, redacted event for the current local-paper run."""
+        repository = getattr(self.broker, "repository", None)
+        if repository is None or not self.run:
+            return
+        self._event_sequence += 1
+        safe = {}
+        for key, value in payload.items():
+            if key not in _AUDIT_FIELDS:
+                continue
+            if key == "symbols" and isinstance(value, (list, tuple)):
+                safe[key] = [str(item)[:40] for item in value[:50]]
+            elif value is None or isinstance(value, (str, int, float, bool)):
+                safe[key] = value
+        repository.record_system_event(kind, {
+            "run_id": self.run["run_id"],
+            "sequence": self._event_sequence,
+            "simulated": True,
+            "execution_mode": "AXIOM_PAPER",
+            **safe,
+        })
+
+    def _audit_new_execution(self, orders_before: int, fills_before: int):
+        """Journal new local orders/fills exactly once and update run counters."""
+        orders = list(self.broker.orders.values())[orders_before:]
+        fills = self.broker.fills[fills_before:]
+        for order in orders:
+            self._audit(
+                "PAPER_ORDER_SIMULATED",
+                order_id=order.id, symbol=order.symbol, side=order.side,
+                quantity=order.quantity, price=order.average_price or order.limit_price,
+                status=order.status, reason=order.reason, strategy=order.strategy,
+                market_timestamp=order.timestamp,
+            )
+        for fill in fills:
+            self._audit(
+                "PAPER_FILL_SIMULATED",
+                fill_id=fill.id, order_id=fill.order_id, symbol=fill.symbol,
+                side=fill.side, quantity=fill.quantity, price=fill.price,
+                fee=fill.fee, status="FILLED", reason=fill.reason,
+                strategy=fill.strategy, market_timestamp=fill.timestamp,
+            )
+        if self.run:
+            self.run["orders_created"] += len(orders)
+            self.run["fills"] += len(fills)
+        return len(orders), len(fills)
 
     def status(self):
         status = {
@@ -64,6 +181,14 @@ class PaperSimulator:
             "signals": self.signals,
             "processed_bars": self.processed,
             "error": self.error,
+            "provider": type(self.provider).__name__ if self.provider else None,
+            "feed_kind": self._feed_kind(),
+            "automation_enabled": self._automation_enabled(),
+            "review_policy": self._review_policy(),
+            "stop_reason": self.stop_reason,
+            "current_run": self._run_view(),
+            "last_run": dict(self.last_run) if self.last_run else None,
+            "audit_enabled": getattr(self.broker, "repository", None) is not None,
         }
         # V0.6.1: live data adapters expose health/monitoring fields; secrets are
         # never included (see UpstoxStream.metrics). Existing keys are unchanged.
@@ -129,7 +254,7 @@ class PaperSimulator:
             "provider": getattr(provider, "provider_name", type(provider).__name__),
             "requires_fresh_live": bool(getattr(provider, "requires_fresh_live", False)),
             "started_at": datetime.now(timezone.utc).isoformat(),
-            "automation_enabled": False,
+            "automation_enabled": strategy.name != "manual_only",
         }
         old = self.broker.context.get("selection")
         if (
@@ -156,18 +281,47 @@ class PaperSimulator:
         previous_market_data = self.broker.context.get("market_data", missing)
         previous = (
             self.provider, self.strategy, self.symbols, self.state, self.error,
-            self._history,
+            self._history, self.processed, dict(self.signals), dict(self.risk_counters),
+            dict(self.latency), self.run, self.stop_reason, self._event_sequence, self.task,
         )
+        new_task = None
         try:
             self.broker.context["selection"] = config
             self.broker.context["market_data"] = market_data_context
             self.provider, self.strategy, self.symbols = provider, strategy, symbols
             self.error, self.state = None, BotState.STARTING
-            # No exception is allowed after the replacement task exists. This
-            # makes pre-task rollback sufficient and avoids cancelling orders.
+            self.stop_reason = None
+            self.processed = 0
+            self.signals = {}
+            self.risk_counters = {"actionable_signals": 0, "orders_created": 0, "skipped": 0}
+            self.latency = {
+                "bars": 0, "avg_total_ms": 0.0, "max_total_ms": 0.0,
+                "avg_strategy_ms": 0.0, "avg_order_ms": 0.0,
+            }
+            self._event_sequence = 0
+            self.run = {
+                "run_id": uuid4().hex,
+                "started_at": market_data_context["started_at"],
+                "realized_baseline": float(self.broker.portfolio.realized_pnl),
+                "unrealized_baseline": float(self.broker.portfolio.unrealized_pnl),
+                "equity_baseline": float(self.broker.portfolio.equity),
+                "actionable_signals": 0,
+                "orders_created": 0,
+                "fills": 0,
+            }
             result = self.status()
             new_task = asyncio.create_task(self._run())
+            self.task = new_task
+            self._audit(
+                "PAPER_SESSION_STARTED",
+                provider=type(provider).__name__, feed_kind=self._feed_kind(),
+                strategy=strategy.name, review_policy=self._review_policy(),
+                automation_enabled=self._automation_enabled(), symbols=symbols,
+                timeframe=self.broker.timeframe, state=self.state.value,
+            )
         except Exception:
+            if new_task is not None:
+                new_task.cancel()
             for key, value in (
                 ("selection", previous_selection), ("market_data", previous_market_data),
             ):
@@ -177,10 +331,10 @@ class PaperSimulator:
                     self.broker.context[key] = value
             (
                 self.provider, self.strategy, self.symbols, self.state, self.error,
-                self._history,
+                self._history, self.processed, self.signals, self.risk_counters,
+                self.latency, self.run, self.stop_reason, self._event_sequence, self.task,
             ) = previous
             raise
-        self.task = new_task
         return result
 
     def process_bar(self, candle):
@@ -221,9 +375,14 @@ class PaperSimulator:
         provenance = get_provenance(candle) if callable(get_provenance) else None
         if getattr(self.provider, "requires_fresh_live", False) and not provenance:
             raise ValueError("Fresh live bar is missing durable quote provenance")
+        execution_orders_before = len(self.broker.orders)
+        execution_fills_before = len(self.broker.fills)
         snapshot = self.broker.on_bar(candle, persist=False, provenance=provenance)
         if snapshot is None:
             return
+        # Resting entries and protective exits fill before this bar's new
+        # strategy decision. Journal that execution before the next signal.
+        self._audit_new_execution(execution_orders_before, execution_fills_before)
         history.append(candle)
         history[:] = history[-self.strategy.history_limit :]
         drawn = self.chart_bars.setdefault(candle.symbol, [])
@@ -251,12 +410,19 @@ class PaperSimulator:
         )
         orders_before = len(self.broker.orders)
         fills_before = len(self.broker.fills)
+        if signal != Signal.HOLD:
+            self._audit(
+                "PAPER_STRATEGY_SIGNAL",
+                symbol=candle.symbol, signal=signal.value, strategy=self.strategy.name,
+                market_timestamp=snapshot["timestamp"],
+            )
         self.broker.handle_signal(
             signal, candle.symbol, snapshot["timestamp"], self.strategy.name, persist=False
         )
-        created = len(self.broker.orders) - orders_before
-        new_fills = len(self.broker.fills) - fills_before
+        created, new_fills = self._audit_new_execution(orders_before, fills_before)
         if signal != Signal.HOLD:
+            if self.run:
+                self.run["actionable_signals"] += 1
             # V0.6.2 structured pipeline events (paper-only; never any order routing).
             logger.info(
                 "STRATEGY_SIGNAL",
@@ -320,8 +486,43 @@ class PaperSimulator:
             },
         )
 
+    async def _finish_run(self):
+        """Idempotent cleanup/final audit, including cancellation before first run."""
+        if self.run and self.run.get("stopped_at"):
+            return
+        self.broker.cancel_all()
+        if self.provider:
+            await self.provider.close()
+        if self.state != BotState.ERROR:
+            self.state = BotState.STOPPED
+        if self.run:
+            self.run["stopped_at"] = datetime.now(timezone.utc).isoformat()
+            summary = self._run_view()
+            self.last_run = summary
+            # Keep a completed run summary for restart display, but never
+            # restore it as an active run or as account-wide current P&L.
+            self.broker.context["last_paper_run"] = summary
+            self.broker._persist()
+            self._audit(
+                "PAPER_SESSION_STOPPED",
+                state=summary["state"], stop_reason=self.stop_reason,
+                error_type=self.error, feed_kind=summary["feed_kind"],
+                strategy=summary["strategy"], processed_bars=summary["processed_bars"],
+                actionable_signals=summary["actionable_signals"],
+                orders_created=summary["orders_created"], fills=summary["fills"],
+                realized_pnl=summary["realized_pnl"],
+                unrealized_pnl_delta=summary["unrealized_pnl_delta"],
+                ending_unrealized_pnl=summary["ending_unrealized_pnl"],
+                equity_delta=summary["equity_delta"],
+            )
+
     async def _run(self):
         self.state = BotState.RUNNING
+        self._audit(
+            "PAPER_SESSION_RUNNING", state=self.state.value,
+            feed_kind=self._feed_kind(), strategy=self.strategy.name,
+            automation_enabled=self._automation_enabled(),
+        )
         try:
             async for candle in self.provider.stream(self.symbols, self.broker.timeframe):
                 # Replay resumes after the committed cursor. Live out-of-order data fails closed.
@@ -334,17 +535,21 @@ class PaperSimulator:
                     continue
                 self.process_bar(candle)
         except asyncio.CancelledError:
-            pass  # documented: loop exits on task cancellation
+            if self.stop_reason is None:
+                self.stop_reason = "CANCELLED"
         except Exception as exc:
             self.state = BotState.ERROR
+            self.stop_reason = "ERROR"
             self.error = type(exc).__name__  # Never echo provider URLs/auth payloads.
             logger.error("paper_failed", extra={"error": type(exc).__name__})
         finally:
-            self.broker.cancel_all()
-            await self.provider.close()
-            if self.state != BotState.ERROR:
-                self.state = BotState.STOPPED
-            logger.info("paper_stopped")
+            if self.state != BotState.ERROR and self.stop_reason is None:
+                self.stop_reason = (
+                    "END_OF_DATA" if isinstance(self.provider, ReplayStream)
+                    else "STREAM_ENDED"
+                )
+            await self._finish_run()
+            logger.info("paper_stopped", extra={"stop_reason": self.stop_reason})
 
     async def pause(self):
         if self.state != BotState.RUNNING:
@@ -354,6 +559,10 @@ class PaperSimulator:
         for order in self.broker.get_orders():
             if order["side"] == "BUY" and order["status"] in {"NEW", "PARTIALLY_FILLED"}:
                 self.broker.cancel_order(order["id"])
+        self._audit(
+            "PAPER_SESSION_PAUSED", state=self.state.value,
+            processed_bars=self.processed, strategy=self.strategy.name,
+        )
         return self.status()
 
     async def resume(self):
@@ -363,12 +572,30 @@ class PaperSimulator:
         if callable(readiness):
             readiness()
         self.state, self.error = BotState.RUNNING, None
+        self._audit(
+            "PAPER_SESSION_RESUMED", state=self.state.value,
+            processed_bars=self.processed, strategy=self.strategy.name,
+        )
         return self.status()
 
-    async def stop(self):
+    async def stop(self, reason: str = "OPERATOR_STOP"):
         if self.task and not self.task.done():
+            if self.stop_reason is None:
+                self.stop_reason = reason
             self.task.cancel()
-            await self.task
-        self.broker.cancel_all()
-        self.state = BotState.STOPPED
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                # Cancellation before the coroutine's first step is delivered
+                # to the awaiter; _finish_run below still journals the stop.
+                pass
+        if self.run and not self.run.get("stopped_at"):
+            # A task cancelled before its first _run step has no finally block.
+            if self.stop_reason is None:
+                self.stop_reason = reason
+            await self._finish_run()
+        else:
+            self.broker.cancel_all()
+            if self.state != BotState.ERROR:
+                self.state = BotState.STOPPED
         return self.status()

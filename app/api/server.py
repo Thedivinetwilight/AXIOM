@@ -124,7 +124,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 app.state.autonomy.close()
             if autonomy_store is not None:
                 autonomy_store.close()
-            await app.state.simulator.stop()
+            await app.state.simulator.stop(reason="APPLICATION_SHUTDOWN")
             app.state.market_data.disconnect("Application shutdown")
             if app.state.vantage.connector:
                 app.state.vantage.connector.disconnect()

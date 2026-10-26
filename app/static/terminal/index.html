@@ -44,7 +44,7 @@
     <div class="sidebar-foot">
       <span class="status-pill" id="global-lifecycle">DISARMED</span>
       <p id="global-lock-note">No broker session is active.</p>
-      <p class="small muted">Automation <strong>OFF</strong><br>No profitability claim.</p>
+      <p class="small muted" id="sidebar-automation">No paper strategy active. Vantage automation OFF. No profitability claim.</p>
     </div>
   </aside>
 
@@ -83,10 +83,16 @@
         <div class="page-intro"><div><p class="eyebrow">ACCOUNT AT A GLANCE</p><h2 id="overview-title">Good decisions start with known state.</h2><p>Account identity, broker truth, data freshness and risk blockers—before any order control.</p></div><span class="mode-badge paper" id="overview-mode">PAPER</span></div>
         <div class="metric-grid">
           <article class="metric-card"><span>Equity</span><strong id="metric-equity">—</strong><small id="metric-currency">account currency</small></article>
-          <article class="metric-card"><span>Unrealized P&amp;L</span><strong id="metric-unrealized">—</strong><small>broker/local confirmed view</small></article>
+          <article class="metric-card"><span>Unrealized P&amp;L</span><strong id="metric-unrealized">—</strong><small id="metric-unrealized-note">broker/local confirmed view</small></article>
           <article class="metric-card"><span>Realized P&amp;L</span><strong id="metric-realized">—</strong><small id="realized-window">visible history</small></article>
           <article class="metric-card"><span>Available margin</span><strong id="metric-margin">—</strong><small id="metric-margin-note">paper cash / MT5 free margin</small></article>
         </div>
+        <article class="panel" id="paper-run-panel" hidden>
+          <div class="panel-head"><div><p class="eyebrow">RUN-SCOPED SIMULATION</p><h3 id="paper-run-title">Paper run</h3></div><span class="status-pill" id="paper-run-state">STOPPED</span></div>
+          <div class="inline-status" id="paper-run-summary">No paper run has started in this process.</div>
+          <dl class="detail-list" id="paper-run-details"></dl>
+          <p class="muted small" id="paper-run-pnl-note">Current-run results are separate from persisted account totals. All values are simulated.</p>
+        </article>
         <div class="content-grid two">
           <article class="panel">
             <div class="panel-head"><div><p class="eyebrow">SESSION</p><h3>Connection &amp; identity</h3></div><button type="button" class="text-button" data-go="connections">Manage</button></div>

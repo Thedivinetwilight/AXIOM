@@ -328,7 +328,7 @@ class _V1RepositoryBase:
             return [
                 dict(row, payload=json.loads(row["payload"]))
                 for row in db.execute(
-                    "SELECT * FROM system_events ORDER BY ts DESC LIMIT ?", (limit,)
+                    "SELECT * FROM system_events ORDER BY ts DESC, rowid DESC LIMIT ?", (limit,)
                 ).fetchall()
             ]
 

@@ -95,7 +95,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -543,7 +543,7 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         performance_benchmarks = "python scripts/benchmark_terminal.py --output `"$BenchmarkOutput`"; `$env:AXIOM_UI_BENCHMARK_OUTPUT = `"$UiBenchmarkOutput`"; node tests/js/terminal_smoke.mjs"

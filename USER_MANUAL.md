@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a2**
+**Current source version: 3.7.0a3**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
@@ -307,7 +307,7 @@ Externally created/manual MT5 orders and positions are reported where possible b
 
 Vantage account snapshots, working orders, order history, positions and deals are read from MT5. P&L includes available broker-reported components; the UI distinguishes realized history, unrealized position P&L and data availability. A disconnected view cannot provide current broker P&L.
 
-**Activity / Audit** records redacted events such as mode selection, credential metadata changes, connection tests, readiness/lifecycle transitions, reviews, intents, broker results, reconciliation and emergency actions. Secrets and full logins are excluded. Local event persistence is not an external notification service.
+**Activity / Audit** records redacted events such as mode selection, credential metadata changes, connection tests, readiness/lifecycle transitions, reviews, intents, broker results, reconciliation and emergency actions. Local replay additionally records run-scoped start/running, actionable strategy signals, simulated orders/fills and explicit stop reasons as described in section 13. Secrets and full logins are excluded. Local event persistence is not an external notification service.
 
 Keep the console and local logs available for diagnosis, but inspect any file before sharing it. Never share `axiom.env`, DPAPI credential files, screenshots containing account details, or unreviewed support bundles.
 
@@ -353,6 +353,12 @@ Do not “fix” a blocker by deleting journals, editing intents, disabling risk
 ## 13. LOCAL PAPER and legacy chart
 
 LOCAL PAPER execution remains independent of MT5: its account, orders, positions and P&L are local simulation outputs. The optional DEMO market-data connection changes only the source of prices, never the execution mode or broker state. It uses VANTAGE DEMO credentials only when the operator explicitly saves/connects that read-only feed.
+
+**Default replay is automated.** **Start automated replay (moving_average)** and the legacy **START AUTOMATED REPLAY** control run the configured local `moving_average` strategy with automation ON. Actionable strategy signals can create simulated orders and later simulated fills without reviewing each ticket. The banner, sidebar, run panel and start result identify this behavior; it is not the `manual_only` workflow and not Daily Upstox live-market PAPER. All orders/fills remain local simulation and no broker order is routed.
+
+**Replay audit and stop reasons are durable.** Activity / Audit records allowlisted `PAPER_SESSION_STARTED`, `PAPER_SESSION_RUNNING`, actionable `PAPER_STRATEGY_SIGNAL`, `PAPER_ORDER_SIMULATED`, `PAPER_FILL_SIMULATED`, pause/resume and `PAPER_SESSION_STOPPED` events with a run ID and per-run sequence. Normal finite replay completion reports `END_OF_DATA`; operator stop, execution-mode change, emergency stop, application shutdown and errors have distinct reasons. Immediate stop is also journaled. Provider objects, URLs, credentials, tokens, exception text and arbitrary settings are not exported. Market timestamps are data fields inside redacted payloads; event timestamps remain local audit times.
+
+**P&L scopes are separate.** Overview's realized card is all persisted local history, while unrealized is all current local open positions. The run panel reports the current/last run's bars, actionable signals, simulated orders/fills, stop reason, realized delta, unrealized delta and ending open-position unrealized P&L. Run deltas are account-level changes from that run's start, not per-trade attribution. After process restart there is no active current run; the last completed run summary can remain visible, but persisted account P&L is not reset or presented as a new run result. These are simulated accounting values, not money earned or profitability evidence.
 
 On **Charts**, **Start manual-only MT5 paper** requires the selected exact symbol, configured timeframe, authenticated DEMO feed, complete contract metadata, and fresh advancing quotes. It stages only newly closed bars for the always-HOLD `manual_only` strategy. Automation remains off; startup itself creates no order. A manual order still requires Review, an idempotency key, and Confirm. The saved order/fill includes quote source, source timestamp, receive timestamp and stable closed-bar provenance.
 
@@ -416,7 +422,7 @@ This procedure verifies a **real Vantage DEMO terminal/feed with local AXIOM sim
 ### 15.2 Connect and inspect the real feed
 
 4. In `/terminal`, verify the global execution badge is **LOCAL PAPER**. Open **Connections**. The credential editor in this mode is explicitly DEMO-only. Enter the numeric demo login, demo password, exact demo server and terminal path locally; save/replace the protected profile. Do not use **VANTAGE LIVE**, the execution mode selector, **Test connection**, Arm or Activate.
-5. Choose **Connect demo market data — read-only**. Verify provider `VANTAGE_DEMO_MT5`, masked login, exact server, account type `DEMO`, and currency. Execution must still say LOCAL PAPER, automation OFF, and no order may appear. A module-installed indicator or saved credential alone is not a successful feed test.
+5. Choose **Connect demo market data — read-only**. Verify provider `VANTAGE_DEMO_MT5`, masked login, exact server, account type `DEMO`, and currency. Execution must still say LOCAL PAPER, no strategy may be started by the connection, and no order may appear. A module-installed indicator or saved credential alone is not a successful feed test.
 6. Open **Charts** and choose an exact symbol returned by this account. Check the broker description/path, product classification, currencies, contract size, tick/point metadata and volume limits. A share/ETF CFD must be labeled as a CFD, not owned shares. If a desired symbol is absent or unsupported, record that limitation; do not substitute a hard-coded ticker.
 7. Load the chart. Required evidence is the **FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS** label, a fresh advancing quote, separate source/receive timestamps, validated closed bars, and broker tick-volume labeling. Compare a few prices/times with the MT5 terminal. If the label says disconnected, degraded, stale, not advancing, replay or unavailable, stop and resolve that reason; do not record a pass.
 

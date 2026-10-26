@@ -151,7 +151,13 @@ def paper_workspace(request: Request) -> dict:
         "pnl": {
             "realized_visible_history": account.get("realized_pnl"),
             "unrealized": sum(float(item.get("unrealized_pnl") or 0) for item in positions),
-            "note": "Local simulated paper accounting only.",
+            "realized_scope": "PERSISTED_LOCAL_HISTORY",
+            "unrealized_scope": "CURRENT_OPEN_POSITIONS",
+            "current_run_scope": "paper_session.current_run",
+            "note": (
+                "Local simulated accounting only. These totals persist across runs/restarts; "
+                "current-run deltas are reported separately under paper_session.current_run."
+            ),
         },
         "simulated": True, "paper_only": True, "live_trading": False,
         "source": "AXIOM_LOCAL_PAPER",
@@ -170,7 +176,7 @@ async def select_session(body: ModeRequest, request: Request):
     # A paper engine cannot keep producing orders while a Vantage session is
     # selected. Stop it first, then switch the one execution session identity.
     if mode != SessionMode.PAPER:
-        await simulator.stop()
+        await simulator.stop(reason="EXECUTION_MODE_CHANGED")
         # The independent demo quote terminal is not shared with an execution
         # session. Selecting another execution mode tears down only this feed.
         request.app.state.market_data.disconnect(
@@ -298,7 +304,7 @@ async def emergency(request: Request):
     # One operator control covers the mutually exclusive execution session.
     # Stopping local paper also cancels its working orders; Vantage Stop
     # performs its own broker-truthful managed-order cancellation/reconcile.
-    await request.app.state.simulator.stop()
+    await request.app.state.simulator.stop(reason="EMERGENCY_STOP")
     return service(request).emergency("operator API emergency stop")
 
 

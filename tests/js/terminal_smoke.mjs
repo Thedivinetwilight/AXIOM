@@ -66,11 +66,19 @@ function makeWorkspace(mode, connected = false) {
   const currentStatus = status(mode, connected);
   return {
     status: currentStatus,
-    paper_session: paper ? { state: "STOPPED", provider: "replay", timeframe: "1m" } : undefined,
+    paper_session: paper ? {
+      state: "STOPPED", provider: null, feed_kind: null, timeframe: "1m", strategy: null,
+      automation_enabled: false, review_policy: "NO_ACTIVE_STRATEGY", stop_reason: null,
+      current_run: null, last_run: null,
+    } : undefined,
     account: paper ? { currency: "USD", cash: 100000, balance: 100000, equity: 100000, margin_free: 100000 } : connected ? currentStatus.account : null,
     positions: [], orders: [], intents: [], deals: [], quotes: {},
     market_data: paper ? marketData : undefined,
-    pnl: paper || connected ? { realized_visible_history: 0, unrealized: 0, history_window_days: 90 } : null,
+    pnl: paper || connected ? {
+      realized_visible_history: 0, unrealized: 0, history_window_days: 90,
+      realized_scope: paper ? "PERSISTED_LOCAL_HISTORY" : "VISIBLE_BROKER_HISTORY",
+      unrealized_scope: "CURRENT_OPEN_POSITIONS",
+    } : null,
     simulated: mode !== "VANTAGE_LIVE", paper_only: paper, live_trading: false,
     broker_state_available: paper || connected,
     reconciled_at: connected ? now() : null,
@@ -284,13 +292,53 @@ async function fetchFake(url, options = {}) {
     current.orders.push(order); return response({ order, status: "FILLED", simulated: true, paper_only: true });
   }
   if (path === "/paper/start") {
+    const run = {
+      run_id: "manual-run-0001", state: "RUNNING", active: true, provider: "MT5PaperProvider",
+      feed_kind: "MT5_READ_ONLY_LOCAL_PAPER", strategy: body.strategy, automation_enabled: false,
+      review_policy: "MANUAL_ORDER_REVIEW", started_at: now(), stopped_at: null, stop_reason: null,
+      processed_bars: 1, actionable_signals: 0, orders_created: 0, fills: 0,
+      realized_pnl: 0, unrealized_pnl_delta: 0, ending_unrealized_pnl: 0, equity_delta: 0,
+    };
     current.paper_session = {
-      state: "RUNNING", provider: body.source, strategy: body.strategy, timeframe: body.timeframe,
-      automation_enabled: false, processed_bars: 1,
+      state: "RUNNING", provider: "MT5PaperProvider", feed_kind: run.feed_kind,
+      strategy: body.strategy, timeframe: body.timeframe, automation_enabled: false,
+      review_policy: "MANUAL_ORDER_REVIEW", stop_reason: null, processed_bars: 1,
+      current_run: run, last_run: current.paper_session?.last_run || null,
     };
     return response({ ...current.paper_session, execution_mode: "AXIOM_PAPER" });
   }
-  if (path === "/api/paper/start-default" || path === "/paper/stop" || path === "/paper/pause" || path === "/paper/resume") return response({ state: path === "/paper/stop" ? "STOPPED" : path === "/paper/pause" ? "PAUSED" : "RUNNING" });
+  if (path === "/api/paper/start-default") {
+    const run = {
+      run_id: "replay-run-0001", state: "RUNNING", active: true, provider: "ReplayStream",
+      feed_kind: "LOCAL_REPLAY", strategy: "moving_average", automation_enabled: true,
+      review_policy: "AUTOMATED_LOCAL_SIMULATION", started_at: now(), stopped_at: null, stop_reason: null,
+      processed_bars: 0, actionable_signals: 0, orders_created: 0, fills: 0,
+      realized_pnl: 0, unrealized_pnl_delta: 0, ending_unrealized_pnl: 0, equity_delta: 0,
+    };
+    current.paper_session = {
+      state: "RUNNING", provider: "ReplayStream", feed_kind: "LOCAL_REPLAY", timeframe: "1D",
+      strategy: "moving_average", automation_enabled: true,
+      review_policy: "AUTOMATED_LOCAL_SIMULATION", stop_reason: null, processed_bars: 0,
+      current_run: run, last_run: current.paper_session?.last_run || null,
+    };
+    return response(current.paper_session);
+  }
+  if (path === "/paper/stop" || path === "/paper/pause" || path === "/paper/resume") {
+    const session = current.paper_session;
+    const next = path === "/paper/stop" ? "STOPPED" : path === "/paper/pause" ? "PAUSED" : "RUNNING";
+    session.state = next;
+    session.stop_reason = path === "/paper/stop" ? "OPERATOR_STOP" : null;
+    if (session.current_run) {
+      session.current_run.state = next;
+      session.current_run.active = next !== "STOPPED";
+      session.current_run.stop_reason = session.stop_reason;
+      if (path === "/paper/stop") {
+        session.current_run.stopped_at = now();
+        session.last_run = { ...session.current_run };
+      }
+    }
+    return response(session);
+  }
   return response({ detail: `Unhandled fake route: ${method} ${path}` }, 404);
 }
 
@@ -386,6 +434,23 @@ try {
     }`);
     assert.equal(calls.length, chartOnlyCallCount, "render benchmark remains local and creates no API/order requests");
   }
+  await click("start-paper");
+  assert.equal(calls.filter((call) => call.path === "/api/paper/start-default").length, 1);
+  assert.equal(element("boundary-auth").textContent, "REPLAY STRATEGY · AUTOMATION ON");
+  assert.match(element("boundary-auth-note").textContent, /moving_average can create simulated orders\/fills automatically/);
+  assert.doesNotMatch(element("boundary-auth-note").textContent, /every simulated fill requires manual review/i);
+  assert.match(element("sidebar-automation").textContent, /moving_average automation ON/);
+  assert.match(element("paper-run-summary").textContent, /LOCAL_REPLAY · moving_average · AUTOMATION ON/);
+  assert.match(element("paper-run-details").textContent, /Current-run realized P&L/);
+  assert.match(element("realized-window").textContent, /persisted local history/i);
+  assert.match(element("metric-unrealized-note").textContent, /open positions/i);
+  assert.match(element("overview-checklist").textContent, /Daily Upstox live-market PAPER/);
+  await click("start-paper");
+  await click("modal-confirm");
+  assert.equal(element("global-lifecycle").textContent, "PAPER STOPPED");
+  assert.match(element("paper-run-state").textContent, /OPERATOR_STOP/);
+  assert.match(element("boundary-data").textContent, /LOCAL REPLAY · STOPPED · OPERATOR_STOP/);
+
   element("order-volume").value = "2";
   await submit("order-form");
   assert.equal(element("modal").hidden, false, "paper order has a review dialog");
@@ -431,6 +496,10 @@ try {
   assert.equal(livePaperStart.body.source, "vantage_mt5");
   assert.equal(livePaperStart.body.symbol, "AAPL");
   assert.equal(livePaperStart.body.strategy, "manual_only");
+  assert.equal(element("boundary-auth").textContent, "LOCAL REVIEW · AUTOMATION OFF");
+  assert.match(element("boundary-auth-note").textContent, /manual_only creates no strategy orders/);
+  assert.match(element("sidebar-automation").textContent, /manual_only automation OFF/);
+  assert.match(element("paper-run-summary").textContent, /MANUAL-ONLY · automation OFF/);
   assert.equal(calls.filter((call) => call.path === "/paper/order").length, 1, "starting live prices creates no order");
   element("order-volume").value = "0.25";
   await submit("order-form");
