@@ -4,6 +4,7 @@ Line |
  402 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
      | Kronos setup failed closed: Installed Kronos runtime does not exactly match the lock
+     | (missing=certifi,charset-normalizer,colorama,einops,filelock,fsspec,huggingface-hub,idna; omitted=19)
 stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 402
-at <ScriptBlock>, D:\a\_temp\82ef2a2c-c044-4a44-9281-8ab6bcb32572.ps1: line 8
+at <ScriptBlock>, D:\a\_temp\65bb5c26-0702-4dcf-9433-a9d21d5a6ecb.ps1: line 8
 at <ScriptBlock>, <No file>: line 1
