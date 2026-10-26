@@ -1,4 +1,4 @@
-"""Arena — quantitative research & paper-trading platform."""
+"""AXIOM — research, local paper and separately guarded operator execution."""
 
 __title__ = "arena"
-__version__ = "3.0.5"
+__version__ = "3.7.0a6"
