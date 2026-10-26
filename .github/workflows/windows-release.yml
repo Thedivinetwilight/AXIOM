@@ -441,7 +441,8 @@ jobs:
             (Join-Path (Get-Location) '..\..\docs\AUTONOMY.md')
             (Join-Path (Get-Location) '..\..\docs\autonomy-shakedown.template.json')
           )
-          $assetNames = @($assets | ForEach-Object { Split-Path $_ -Leaf })
+          # The manifest is uploaded too, but cannot contain its own hash.
+          $assetNames = @($assets | ForEach-Object { Split-Path $_ -Leaf } | Where-Object { $_ -ne 'SHA256SUMS.txt' })
           $sumNames = @($sums | ForEach-Object { ($_ -split '  ', 2)[1] })
           if ($assetNames.Count -ne $sumNames.Count -or
               @($assetNames | Sort-Object -Unique).Count -ne $assetNames.Count -or
