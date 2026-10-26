@@ -167,7 +167,7 @@
   "last_inference": {
     "status": "ERROR",
     "error_type": "ArtifactError",
-    "generated_at": "2026-10-26T09:22:48.703479+00:00",
+    "generated_at": "2026-10-26T09:34:55.592913+00:00",
     "manifest_sha256": "6d7d65b5a78103fdf8b1431aa5938574f600a930e269b23995bf621fe453e397",
     "mock_outputs_used": false
   },
@@ -177,17 +177,17 @@
   "mock_outputs_used": false,
   "device": "cpu",
   "operation": {
-    "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+    "operation_id": "0612b87395c7466782eb7a74000f5f3f",
     "kind": "INSTALL_PINNED",
     "state": "ERROR",
     "cancel_requested": false,
     "phase": "ERROR",
     "error": {
       "code": "SETUP_UNAVAILABLE",
-      "message": "Kronos worker returned no safe JSON result"
+      "message": "Real Kronos inference failed: AttributeError"
     },
-    "started_at": "2026-10-26T09:21:12.158182+00:00",
-    "completed_at": "2026-10-26T09:22:48.703479+00:00",
+    "started_at": "2026-10-26T09:32:52.76158+00:00",
+    "completed_at": "2026-10-26T09:34:55.592913+00:00",
     "bytes": 114823553,
     "total_bytes": 114823553,
     "component": "tokenizer",
@@ -409,107 +409,107 @@
   "audit_events": [
     {
       "seq": 7,
-      "ts": "2026-10-26T09:22:48.703479+00:00",
+      "ts": "2026-10-26T09:34:55.592913+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_ERROR",
       "payload": {
         "code": "SETUP_UNAVAILABLE",
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350"
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f"
       },
-      "prev_hash": "057ffb6f19ca6621c7990aa83b3c354a4e2638ad4851e91aca19cc85cb1a1e45",
-      "event_hash": "176980bbb61ccfbc0d8903ceaa05f709d7468dc70ab5374449ed813e85bf4030"
+      "prev_hash": "30ee933ae18cc7ed42cdc93fa5328af7e4d973483ce653b01d8e2c62097b4a9b",
+      "event_hash": "a79013516531ea89ac98e8364a9127cdc467b7017777bc636de05a67834c217f"
     },
     {
       "seq": 6,
-      "ts": "2026-10-26T09:22:37.409314+00:00",
+      "ts": "2026-10-26T09:34:43.783613+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": null,
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
         "phase": "RUNTIME_VERIFIED",
         "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
       },
-      "prev_hash": "a0eaa940b7ca5ec696a05dd9c188c93b379a7f040ff2cab0a548eb5bd8f66e4a",
-      "event_hash": "057ffb6f19ca6621c7990aa83b3c354a4e2638ad4851e91aca19cc85cb1a1e45"
+      "prev_hash": "023659fe57e14a67675013d3563947c1be8e0c51acfc7703fc65694ac9d9a900",
+      "event_hash": "30ee933ae18cc7ed42cdc93fa5328af7e4d973483ce653b01d8e2c62097b4a9b"
     },
     {
       "seq": 5,
-      "ts": "2026-10-26T09:22:34.821277+00:00",
+      "ts": "2026-10-26T09:34:40.383202+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": null,
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
         "phase": "RUNTIME_PROBE",
         "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
       },
-      "prev_hash": "ca935bb8fa0f0b1a0ab7163254f9fdba7ab2be6b00645e039b3720ecdf4e754c",
-      "event_hash": "a0eaa940b7ca5ec696a05dd9c188c93b379a7f040ff2cab0a548eb5bd8f66e4a"
+      "prev_hash": "5193af19c9c784b633548eda5a9e693a506e6fad1eb160392584d3903bceaee8",
+      "event_hash": "023659fe57e14a67675013d3563947c1be8e0c51acfc7703fc65694ac9d9a900"
     },
     {
       "seq": 4,
-      "ts": "2026-10-26T09:21:16.336469+00:00",
+      "ts": "2026-10-26T09:33:31.348395+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": null,
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
         "phase": "RUNTIME_INSTALL",
         "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
       },
-      "prev_hash": "07ecb9e69470114031f3cf8c7d41ecd555dff9e347ccb89d8a28993e96fad9e2",
-      "event_hash": "ca935bb8fa0f0b1a0ab7163254f9fdba7ab2be6b00645e039b3720ecdf4e754c"
+      "prev_hash": "1a940cecee189cbf04a586242d2b7cc54050ad308a7b28129b98fde07bccbd9c",
+      "event_hash": "5193af19c9c784b633548eda5a9e693a506e6fad1eb160392584d3903bceaee8"
     },
     {
       "seq": 3,
-      "ts": "2026-10-26T09:21:16.12426+00:00",
+      "ts": "2026-10-26T09:33:31.132119+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": "6d7d65b5a78103fdf8b1431aa5938574f600a930e269b23995bf621fe453e397",
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
         "phase": "ARTIFACTS_VERIFIED",
         "runtime_lock_sha256": null
       },
-      "prev_hash": "d1cd348d4c3092544f9c6a3588f60a351f51c7c1384a95445ec57411f1f65244",
-      "event_hash": "07ecb9e69470114031f3cf8c7d41ecd555dff9e347ccb89d8a28993e96fad9e2"
+      "prev_hash": "4ffaee1c5b38e6a3c9b67ef52d268b1d8b7b888ececed2d97409a515100feed6",
+      "event_hash": "1a940cecee189cbf04a586242d2b7cc54050ad308a7b28129b98fde07bccbd9c"
     },
     {
       "seq": 2,
-      "ts": "2026-10-26T09:21:12.165245+00:00",
+      "ts": "2026-10-26T09:32:52.768146+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": "model",
         "file": "config.json",
         "manifest_sha256": null,
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350",
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
         "phase": "DOWNLOAD",
         "runtime_lock_sha256": null
       },
-      "prev_hash": "569d63e4a9370e1f37ad3a49fc91a35d3184b320169267f2c7109a271c83185c",
-      "event_hash": "d1cd348d4c3092544f9c6a3588f60a351f51c7c1384a95445ec57411f1f65244"
+      "prev_hash": "3e3b68307e96bc9f7afd84e9f5356feb7fef6dec71c92a1993d0c99068a00497",
+      "event_hash": "4ffaee1c5b38e6a3c9b67ef52d268b1d8b7b888ececed2d97409a515100feed6"
     },
     {
       "seq": 1,
-      "ts": "2026-10-26T09:21:12.158182+00:00",
+      "ts": "2026-10-26T09:32:52.761904+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_STARTED",
       "payload": {
         "kind": "INSTALL_PINNED",
-        "operation_id": "a7cf84b5ed5a4262b0d9442f915cf350"
+        "operation_id": "0612b87395c7466782eb7a74000f5f3f"
       },
       "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-      "event_hash": "569d63e4a9370e1f37ad3a49fc91a35d3184b320169267f2c7109a271c83185c"
+      "event_hash": "3e3b68307e96bc9f7afd84e9f5356feb7fef6dec71c92a1993d0c99068a00497"
     }
   ]
 }
