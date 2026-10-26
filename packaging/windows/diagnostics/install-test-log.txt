@@ -34,7 +34,7 @@ PASS  symbols listed (2)
 PASS  DEMO preview drew 60 bars from bundled data
 PASS  DEMO bars labelled 'DEMO REPLAY SAMPLE DATA · NOT MARKET DATA'
 PASS  paper session start reported PAPER / live_trading=false
-PASS  session RUNNING, 74 bars processed, paper_mode=true
+PASS  session RUNNING, 104 bars processed, paper_mode=true
 PASS  chart then drew bars the engine processed (source=engine)
 PASS  paper session stopped
 PASS  ticket reports paper_only=true, live_trading=false
