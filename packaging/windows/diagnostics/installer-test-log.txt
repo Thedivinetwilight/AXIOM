@@ -1,9 +1,9 @@
-AXIOM installer test  2026-10-26T09:32:45.7308234+00:00
+AXIOM installer test  2026-10-26T12:10:39.6498635+00:00
 [install] locating the installer
-installer: C:\Users\runneradmin\AppData\Local\Temp\axiom-installer-799bbcdeabdf45fab3a94b11db13609e\AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup.exe (4.2 MB)
+installer: C:\Users\runneradmin\AppData\Local\Temp\axiom-installer-e7bc251f589640ffb0e6919701e8b3f2\AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup.exe (4.2 MB)
 PASS  acceptance uses the loaderless no-TEMP installer
-PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup-0.bin
-PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a4-windows-x64-no-temp-setup-1.bin
+PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-0.bin
+PASS  required installer sidecar exists: AXIOM-Operator-3.7.0a5-windows-x64-no-temp-setup-1.bin
 PASS  legacy onefile remains available but is not the installed runtime
 install dir: C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart
 install log: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-install.log
@@ -12,18 +12,18 @@ arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="C:\Users\runneradmin\A
 installer exit code: 0
 PASS  silent install reported success
 [installed files] verifying what the installer placed on disk
-  inno| 2026-10-26 09:32:50.032   Dest filename: C:\Users\runneradmin\Desktop\AXIOM Operator.lnk
-  inno| 2026-10-26 09:32:50.034   Creating the icon.
-  inno| 2026-10-26 09:32:50.038   Successfully created the icon.
-  inno| 2026-10-26 09:32:50.052   Saving uninstall information.
-  inno| 2026-10-26 09:32:50.052   Creating new uninstall key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1E4A52-9F3B-4E6C-9A18-2B5D7E0C4F31}_is1
-  inno| 2026-10-26 09:32:50.054   Writing uninstall key values.
-  inno| 2026-10-26 09:32:50.054   Detected previous administrative 64-bit install? No
-  inno| 2026-10-26 09:32:50.054   Detected previous administrative 32-bit install? No
-  inno| 2026-10-26 09:32:50.073   Installation process succeeded.
-  inno| 2026-10-26 09:32:50.073   Need to restart Windows? No
-  inno| 2026-10-26 09:32:50.077   Deinitializing Setup.
-  inno| 2026-10-26 09:32:50.093   Log closed.
+  inno| 2026-10-26 12:10:43.478   Dest filename: C:\Users\runneradmin\Desktop\AXIOM Operator.lnk
+  inno| 2026-10-26 12:10:43.478   Creating the icon.
+  inno| 2026-10-26 12:10:43.482   Successfully created the icon.
+  inno| 2026-10-26 12:10:43.496   Saving uninstall information.
+  inno| 2026-10-26 12:10:43.496   Creating new uninstall key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1E4A52-9F3B-4E6C-9A18-2B5D7E0C4F31}_is1
+  inno| 2026-10-26 12:10:43.496   Writing uninstall key values.
+  inno| 2026-10-26 12:10:43.498   Detected previous administrative 64-bit install? No
+  inno| 2026-10-26 12:10:43.498   Detected previous administrative 32-bit install? No
+  inno| 2026-10-26 12:10:43.508   Installation process succeeded.
+  inno| 2026-10-26 12:10:43.508   Need to restart Windows? No
+  inno| 2026-10-26 12:10:43.512   Deinitializing Setup.
+  inno| 2026-10-26 12:10:43.526   Log closed.
 PASS  the installer placed AXIOM-Chart.exe in C:\Users\runneradmin\AppData\Local\Programs\AXIOM-Chart
 PASS  the user manual was installed next to the executable
 PASS  the source commit record was installed
@@ -35,8 +35,8 @@ PASS  installer included docs\TERMINAL_UI_BENCHMARK.json
 PASS  installer included docs\WINDOWS_APP_CONTROL.md
 PASS  the uninstaller was installed
 [launch] starting the installed copy and waiting for /health
-data dir: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-f6a17b89ecf34b41be7721e967b68f74
-port:     62260
+data dir: C:\Users\RUNNER~1\AppData\Local\Temp\axiom-installed-61b9518672204fd0b2ff74b11f1d6b1e
+port:     51223
 PASS  the installed copy answered /health on loopback
 [operator-and-chart] checking installed pages, assets and token gates
 PASS  /terminal returns 200 (got 200)
@@ -75,19 +75,16 @@ PASS  installed launcher does not print the local API token
 no config.json was written; nothing to inspect for live credentials
 [kronos] installing only pinned public artifacts/runtime and running real offline inference
 PASS  Kronos setup status refuses anonymous access (got 401)
-  kronos| state=RUNNING phase=DOWNLOAD bytes=5243108/114823553
-  kronos| state=RUNNING phase=RUNTIME_INSTALL bytes=114823553/114823553
-  kronos| state=RUNNING phase=RUNTIME_PROBE bytes=114823553/114823553
-  kronos| state=RUNNING phase=RUNTIME_VERIFIED bytes=114823553/114823553
-  kronos| state=ERROR phase=ERROR bytes=114823553/114823553
-FAIL  pinned Kronos setup completed (state ERROR; Real Kronos inference failed: AttributeError)
+PASS  installed app automatically discovers CPython x64 with pip
+FAIL  installed app used the explicit py -3.11-64 x64 selector
 
 FAILED in phase [kronos]
-Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:377
+Invoke-RestMethod: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:377
 Line |
- 377 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
+ 377 |  … tedPython = Invoke-RestMethod -Method Post -Headers $headers -Content …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Kronos setup failed closed: Real Kronos inference failed: AttributeError
+     |  {   "detail": "Selected Python is not CPython 3.11/3.12 x64 with pip: Python machine architecture is not
+     | AMD64/x86_64" }
 stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 377
-at <ScriptBlock>, D:\a\_temp\7e9b6fb0-1447-4df5-96f8-e87ce96e185c.ps1: line 8
+at <ScriptBlock>, D:\a\_temp\bf56f4e8-5b80-4862-a7a2-9b7fc819d2d4.ps1: line 8
 at <ScriptBlock>, <No file>: line 1

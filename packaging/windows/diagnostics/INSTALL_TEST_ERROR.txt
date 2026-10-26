@@ -1,9 +1,10 @@
 phase: kronos
-Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:377
+Invoke-RestMethod: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:377
 Line |
- 377 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
+ 377 |  … tedPython = Invoke-RestMethod -Method Post -Headers $headers -Content …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Kronos setup failed closed: Real Kronos inference failed: AttributeError
+     |  {   "detail": "Selected Python is not CPython 3.11/3.12 x64 with pip: Python machine architecture is not
+     | AMD64/x86_64" }
 stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 377
-at <ScriptBlock>, D:\a\_temp\7e9b6fb0-1447-4df5-96f8-e87ce96e185c.ps1: line 8
+at <ScriptBlock>, D:\a\_temp\bf56f4e8-5b80-4862-a7a2-9b7fc819d2d4.ps1: line 8
 at <ScriptBlock>, <No file>: line 1
