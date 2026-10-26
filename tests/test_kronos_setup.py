@@ -278,8 +278,14 @@ def test_probe_markers_use_selected_python_not_frozen_host(monkeypatch):
     }
     runtime_module.KronosRuntimeManager._validate_probe(result, lock, selected)
     result["package_versions"] = {**versions, "setuptools": "80.9.0"}
-    with pytest.raises(ArtifactError, match="exactly match the lock"):
+    with pytest.raises(ArtifactError, match="exactly match the lock") as failure:
         runtime_module.KronosRuntimeManager._validate_probe(result, lock, selected)
+    assert "unexpected=setuptools" in str(failure.value)
+    result["package_versions"] = {**versions, "../../secret-path": "1"}
+    with pytest.raises(ArtifactError) as sanitized:
+        runtime_module.KronosRuntimeManager._validate_probe(result, lock, selected)
+    assert "../../secret-path" not in str(sanitized.value)
+    assert "unexpected=<nonconforming>" in str(sanitized.value)
 
 
 def test_frozen_windows_discovery_has_explicit_x64_py_selectors(tmp_path, monkeypatch):

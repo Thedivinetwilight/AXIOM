@@ -468,7 +468,34 @@ class KronosRuntimeManager:
         versions = result.get("package_versions") or {}
         normalized = {key.lower().replace("_", "-"): str(value) for key, value in versions.items()}
         if normalized != expected:
-            raise ArtifactError("Installed Kronos runtime does not exactly match the lock")
+            def safe(value: object) -> str:
+                text = str(value)
+                return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+!-]{0,63}", text) \
+                    else "<nonconforming>"
+
+            missing = sorted(set(expected) - set(normalized))
+            unexpected = sorted(set(normalized) - set(expected))
+            mismatched = sorted(
+                name for name in set(expected) & set(normalized)
+                if expected[name] != normalized[name]
+            )
+            details = []
+            if missing:
+                details.append("missing=" + ",".join(missing[:8]))
+            if unexpected:
+                details.append("unexpected=" + ",".join(safe(name) for name in unexpected[:8]))
+            if mismatched:
+                details.append("versions=" + ",".join(
+                    f"{name}:expected={expected[name]},actual={safe(normalized[name])}"
+                    for name in mismatched[:8]
+                ))
+            omitted = sum(max(0, len(values) - 8) for values in (missing, unexpected, mismatched))
+            if omitted:
+                details.append(f"omitted={omitted}")
+            raise ArtifactError(
+                "Installed Kronos runtime does not exactly match the lock ("
+                + "; ".join(details) + ")"
+            )
         if result.get("device") != "cpu" or result.get("cuda_available") is not False \
                 or result.get("torch_cuda_build") is not None:
             raise ArtifactError("Kronos runtime is not the required CPU-only build")
