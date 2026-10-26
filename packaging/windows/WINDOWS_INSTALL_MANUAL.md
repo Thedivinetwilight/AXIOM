@@ -1,6 +1,6 @@
 # AXIOM Operator — Windows x64 Install Guide
 
-**Version:** 3.7.0a5
+**Version:** 3.7.0a6
 
 **Applies to:** the AXIOM Operator loaderless installer and portable onedir folder built from the exact commit named in `BUILD_METADATA.json`.
 
@@ -47,8 +47,8 @@ The release also includes test logs/manuals. Read `BUILD_METADATA.json` for the 
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AXIOM-Operator-3.7.0a5-windows-x64-no-temp-install.zip -Algorithm SHA256
-Get-FileHash .\AXIOM-Operator-3.7.0a5-windows-x64-portable.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a6-windows-x64-no-temp-install.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a6-windows-x64-portable.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -58,7 +58,7 @@ The file name and full 64-character hash must match the same release. Do not use
 
 ### 2.1 Error 4551 / Application Control
 
-The 3.5.0a1 single installer was blocked on the reporting device while Inno Setup tried to execute its unsigned temporary `setup.tmp`. The workaround introduced in 3.5.0a2 is retained in 3.7.0a5: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids the identified setup-loader and onefile runtime TEMP paths.
+The 3.5.0a1 single installer was blocked on the reporting device while Inno Setup tried to execute its unsigned temporary `setup.tmp`. The workaround introduced in 3.5.0a2 is retained in 3.7.0a6: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids the identified setup-loader and onefile runtime TEMP paths.
 
 It is a packaging workaround, **not a policy bypass**. The packages are still unsigned. If an enforced Smart App Control or organization policy still blocks them, keep Windows security enabled and obtain trusted signing or administrator approval. Do not disable Application Control to install AXIOM. See `WINDOWS_APP_CONTROL.md`.
 
@@ -181,6 +181,16 @@ An upgrade never means prior readiness/Arm/Activate survives. Startup is disconn
 
 **Rollback:** uninstall without deleting user data, then install the older verified package. A rollback does not reconcile broker orders and cannot make an unknown outcome safe. Preserve the journal and reconcile in MT5/AXIOM before any new order.
 
+### 8.1 a6 candidate over a5, and rollback to a5
+
+1. Keep the existing v3.7.0a5 release and its verified hashes unchanged. Close every installed or portable AXIOM process; do not run two writers against the same data folder.
+2. Hash-verify the a6 installer ZIP and all sidecars against the a6 `SHA256SUMS.txt`. Confirm `SOURCE_COMMIT.txt` and `BUILD_METADATA.json` name the same a6 source commit.
+3. Install a6 over the existing per-user installation. Do not delete, move, or rename `%LOCALAPPDATA%\AXIOM`; the upgrade must preserve `axiom.env`, SQLite journals, PAPER state, protected credentials, evidence, optional Kronos files, and logs. Startup remains disconnected/disarmed and prior authorization/Arm/Activate does not carry over.
+4. To roll back, close AXIOM and uninstall a6. At the interactive data-deletion prompt choose **No** (silent uninstall preserves data). Reinstall the original hash-verified v3.7.0a5 package without deleting `%LOCALAPPDATA%\AXIOM`. Do not install over or delete the a5 release assets themselves.
+5. After either direction, inspect the retained journals and reconcile any unresolved intent before new activity. Rollback does not cancel orders, close positions, establish account flatness, or certify LIVE/unattended operation.
+
+The portable a6 ZIP uses the same per-user data folder; extract it to a separate folder and do not run it concurrently with the installed copy. Owner-device Smart App Control, real-Upstox behavior, and a complete market session remain separate unproven checks even when CI installation and rollback-related preservation gates pass.
+
 ## 9. Uninstall and data deletion
 
 Use **Settings → Apps → Installed apps → AXIOM Operator → Uninstall** or the Start Menu uninstall entry.
@@ -201,10 +211,10 @@ Maintainers can reproduce the build on a real Windows x64 machine with the pinne
 ```powershell
 cd packaging\windows
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
-  -ExpectedCommit <full-source-commit> -Version 3.7.0a5
+  -ExpectedCommit <full-source-commit> -Version 3.7.0a6
 ```
 
-The script requires a clean source tree, runs focused and full Python tests, both pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller onefile/onedir frozen-app checks, loaderless Inno packaging and ZIP structure checks. The release workflow separately extracts and tests both release ZIPs, including install/upgrade/uninstall and the portable no-`_MEI` runtime check. It refuses to produce a success result when a hard gate fails.
+The script requires a clean source tree, runs focused and full Python tests, all three pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller onefile/onedir frozen-app checks, loaderless Inno packaging and ZIP structure checks. The release workflow separately extracts and tests both release ZIPs, including install/upgrade/uninstall and the portable no-`_MEI` runtime check. It refuses to produce a success result when a hard gate fails.
 
 Run the separate installed-copy acceptance test against the generated setup file:
 

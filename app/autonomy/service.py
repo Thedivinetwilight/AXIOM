@@ -18,12 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import hashlib
 import ipaddress
 import json
 import math
 import os
 from pathlib import Path
+import sqlite3
 import statistics
 import threading
 from typing import Any, Callable
@@ -93,6 +95,9 @@ class Runtime:
     recovered: bool = False
     recovery_reconciled: bool = False
     recovery_error: str = ""
+    persistence_degraded: bool = False
+    persistence_reason: str = ""
+    durable_view_stale: bool = False
     emergency: dict = field(default_factory=dict)
     # Emergency sets this event without waiting for the scan/service lock.
     # Only actual broker mutations use order_lock, so a slow feed read does not
@@ -100,6 +105,22 @@ class Runtime:
     stop_requested: threading.Event = field(default_factory=threading.Event, repr=False)
     control_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     order_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+
+PERSISTENCE_ERRORS = (sqlite3.Error,)
+
+
+def _persistence_boundary(operation):
+    """Latch execution off before propagating a critical storage failure."""
+    @wraps(operation)
+    def guarded(self, session_id: str, *args, **kwargs):
+        try:
+            return operation(self, session_id, *args, **kwargs)
+        except PERSISTENCE_ERRORS as exc:
+            runtime = self._runtime(session_id)
+            self._persistence_halt(runtime, exc)
+            raise
+    return guarded
 
 
 def _token_from_environment() -> str:
@@ -184,10 +205,27 @@ class AutonomyService:
 
     def kronos_view(self) -> dict:
         result = self.kronos_setup.status()
-        result["audit_events"] = [
+        events = [
             event for event in self.store.events(limit=300)
             if event["session_id"] is None and event["event_type"].startswith("KRONOS_")
         ][:30]
+        result["audit_events"] = events
+        degraded = [event for event in events if event["payload_status"] != "OK"]
+        result["audit_status"] = (
+            "DEGRADED" if degraded else "OK" if events else "NO_EVENTS"
+        )
+        result["audit_degraded_events"] = [
+            {"seq": event["seq"], "payload_status": event["payload_status"]}
+            for event in degraded
+        ]
+        if degraded:
+            # Artifact/runtime capability remains a separate, truthful field.
+            # Corrupt optional history must not crash status or be presented as
+            # a healthy setup/self-test record.
+            result["status"] = "DEGRADED"
+            result["issues"] = list(result.get("issues") or []) + [
+                "Kronos audit state is missing or corrupt; no inference success is inferred from it"
+            ]
         return result
 
     def kronos_install(self) -> dict:
@@ -295,6 +333,9 @@ class AutonomyService:
             "scan_count": runtime.scan_count,
             "last_scan": runtime.last_scan.isoformat() if runtime.last_scan else None,
             "last_scan_kind": runtime.last_scan_kind,
+            "persistence_degraded": runtime.persistence_degraded,
+            "persistence_reason": runtime.persistence_reason,
+            "durable_view_stale": runtime.durable_view_stale,
             "emergency": runtime.emergency,
         })
 
@@ -333,6 +374,17 @@ class AutonomyService:
                 runtime.scan_count = int(snapshot.get("scan_count") or 0)
                 runtime.last_scan = parse_timestamp(snapshot["last_scan"]) if snapshot.get("last_scan") else None
                 runtime.last_scan_kind = str(snapshot.get("last_scan_kind") or "")
+                interruption = str(row["interruption_reason"] or "")
+                runtime.persistence_reason = str(snapshot.get("persistence_reason") or (
+                    interruption if interruption.startswith("PERSISTENCE_FAILED:") else ""
+                ))
+                runtime.durable_view_stale = bool(
+                    snapshot.get("durable_view_stale") or runtime.persistence_reason
+                )
+                # Storage may be healthy again after restart.  Recovery and
+                # reconciliation, not an automatic in-process retry, clear the
+                # stale-view marker after a successful durable write.
+                runtime.persistence_degraded = False
                 runtime.emergency = dict(snapshot.get("emergency") or {})
                 if runtime.mode == "PAPER":
                     paper_snapshot = snapshot.get("paper_state")
@@ -446,6 +498,7 @@ class AutonomyService:
         self.store.update_session(runtime.session_id, state=state, interruption_reason=reason)
         self.store.audit("STATE", {"state": state, "reason": reason or ""}, runtime.session_id)
 
+    @_persistence_boundary
     def authorize(self, session_id: str) -> dict:
         """Refresh daily read-only authorization; request body contains no secret."""
         with self._lock:
@@ -471,6 +524,7 @@ class AutonomyService:
             self._persist(runtime)
             return self.public(session_id)
 
+    @_persistence_boundary
     def set_risk(self, session_id: str, *, max_daily_loss: float,
                  per_trade_risk_fraction: float, equity_at_entry: float | None = None) -> dict:
         with self._lock:
@@ -558,6 +612,12 @@ class AutonomyService:
         blockers: list[str] = []
         if runtime.recovery_error:
             blockers.append(runtime.recovery_error)
+        if runtime.persistence_degraded:
+            blockers.append(
+                "Critical journal persistence is degraded; restart after storage recovery"
+            )
+        if runtime.durable_view_stale and not runtime.recovery_reconciled:
+            blockers.append("Potentially stale durable view requires successful reconciliation")
         if runtime.recovered and not runtime.recovery_reconciled:
             blockers.append("Recovered session requires successful read-only reconciliation")
         if runtime.emergency.get("cleanup_status") in {"IN_PROGRESS", "UNRESOLVED", "ADAPTER_UNAVAILABLE"}:
@@ -595,6 +655,7 @@ class AutonomyService:
         return {"ready": not blockers, "blockers": list(dict.fromkeys(blockers)),
                 "checked_at": self.now().isoformat()}
 
+    @_persistence_boundary
     def arm(self, session_id: str) -> dict:
         with self._lock:
             runtime = self._runtime(session_id)
@@ -698,6 +759,7 @@ class AutonomyService:
                 or quote.ask < quote.bid or quote.volume < 0:
             raise ReconciliationFailure("Quote failed executable-price validation")
 
+    @_persistence_boundary
     def activate(self, session_id: str) -> dict:
         with self._lock:
             runtime = self._runtime(session_id)
@@ -721,6 +783,7 @@ class AutonomyService:
                 self._persist(runtime)
                 return self.public(session_id)
 
+    @_persistence_boundary
     def pause(self, session_id: str) -> dict:
         with self._lock:
             runtime = self._runtime(session_id)
@@ -733,6 +796,7 @@ class AutonomyService:
                 self._persist(runtime)
                 return self.public(session_id)
 
+    @_persistence_boundary
     def recover_view(self, session_id: str) -> dict:
         """Browser/session reload boundary: durable read-only view, never approval."""
         runtime = self._runtime(session_id)
@@ -772,6 +836,7 @@ class AutonomyService:
                 self._persist(runtime)
                 return self.public(session_id)
 
+    @_persistence_boundary
     def emergency_stop(self, session_id: str) -> dict:
         # Deliberately do not wait for self._lock: a worker may hold it during
         # a slow feed read.  The event immediately prevents subsequent permits;
@@ -853,6 +918,8 @@ class AutonomyService:
                 account = runtime.executor.account()
                 runtime.account = account
                 self._reconcile(runtime, account)
+            except PERSISTENCE_ERRORS:
+                raise
             except Exception as exc:
                 cleanup_failed = True
                 for row in self._active_intents(runtime):
@@ -898,6 +965,58 @@ class AutonomyService:
                             reason=runtime.fault_reason)
             self.store.audit("EMERGENCY_CLEANUP", runtime.emergency, runtime.session_id)
 
+    def _persistence_halt(self, runtime: Runtime, error: BaseException) -> None:
+        """Revoke execution before best-effort diagnostics; never hide the error."""
+        reason = (
+            f"Critical journal persistence failed ({type(error).__name__}); "
+            "all permits are blocked, the durable view may be stale, and restart/"
+            "reconciliation is required after storage recovery"
+        )
+        runtime.stop_requested.set()
+        runtime.entries_blocked = True
+        runtime.state = Lifecycle.HALTED.value
+        runtime.fault = Fault.PERSISTENCE_FAILED.value
+        runtime.fault_reason = reason
+        runtime.persistence_degraded = True
+        runtime.persistence_reason = reason
+        runtime.durable_view_stale = True
+        runtime.recovered = True
+        runtime.recovery_reconciled = False
+        if runtime.mode == "PAPER" and runtime.executor is not None:
+            # Keep the best available local view visible and internally
+            # consistent, but label it unpersisted.  No position, GTT, fill, or
+            # working intent is deleted or declared reconciled by this step.
+            runtime.account = runtime.executor.account()
+            runtime.orders = {
+                str(record["gtt_order_id"]): record
+                for record in runtime.executor.orders()
+                if record.get("gtt_order_id")
+            }
+        # Each marker is independent best effort.  The original exception is
+        # re-raised by the boundary even when every one of these writes fails.
+        for marker, operation in (
+            ("session", lambda: self.store.update_session(
+                runtime.session_id, state=Lifecycle.HALTED.value,
+                interruption_reason="PERSISTENCE_FAILED: " + reason,
+            )),
+            ("audit", lambda: self.store.audit("PERSISTENCE_FAILURE", {
+                "error_type": type(error).__name__, "entries_blocked": True,
+                "all_permits_blocked": True, "durable_view_stale": True,
+                "reconciliation_claimed": False,
+            }, runtime.session_id)),
+            ("snapshot", lambda: self._persist(runtime)),
+        ):
+            try:
+                operation()
+            except PERSISTENCE_ERRORS as marker_error:
+                # The primary exception still propagates.  Preserve a safe,
+                # explicit in-memory marker that durable diagnostics also
+                # failed rather than silently swallowing that second failure.
+                runtime.persistence_reason += (
+                    f"; durable {marker} marker failed ({type(marker_error).__name__})"
+                )
+                runtime.fault_reason = runtime.persistence_reason
+
     def _halt(self, runtime: Runtime, fault: Fault | str, reason: str) -> None:
         runtime.entries_blocked = True
         runtime.fault = str(fault.value if isinstance(fault, Fault) else fault)
@@ -909,6 +1028,8 @@ class AutonomyService:
         self._persist(runtime)
 
     def _permit(self, runtime: Runtime, kind: str) -> ExecutionPermit:
+        if runtime.persistence_degraded:
+            raise PermissionError("No execution permit while journal persistence is degraded")
         if kind == "CANCEL_UNFILLED":
             # Risk-reducing cancellation is valid after Pause/Halt/Emergency;
             # it never requires reactivation.  All exposure-increasing kinds
@@ -1061,6 +1182,8 @@ class AutonomyService:
             self._enforce_daily_loss(runtime)
             runtime.recovery_reconciled = True
             self._refresh_emergency_reconciliation(runtime)
+            runtime.durable_view_stale = False
+            runtime.persistence_reason = ""
             self._persist(runtime)
             return True
         except (UpstoxAuthError, ReconciliationFailure, ValueError, KeyError, TypeError) as exc:
@@ -1172,6 +1295,8 @@ class AutonomyService:
             self.store.transition_intent(row["intent_id"], "UNRESOLVED")
             fault = Fault.TOKEN_EXPIRED if isinstance(exc, UpstoxAuthError) else Fault.PROTECTION_REJECTED
             self._halt(runtime, fault, f"Protection modification failed: {type(exc).__name__}")
+        except PERSISTENCE_ERRORS:
+            raise
         except Exception as exc:
             self.store.transition_intent(row["intent_id"], "UNRESOLVED")
             self._halt(runtime, Fault.AMBIGUOUS_SUBMISSION,
@@ -1331,6 +1456,8 @@ class AutonomyService:
                     fault = Fault.TOKEN_EXPIRED if isinstance(exc, UpstoxAuthError) else Fault.RECONCILIATION_FAILED
                     self._halt(runtime, fault, f"Entry submission requires reconciliation: {type(exc).__name__}")
                     return
+                except PERSISTENCE_ERRORS:
+                    raise
                 except Exception as exc:
                     # A caller/adapter bug after the intent boundary is not proof
                     # that no request reached the broker.  Fail closed.
@@ -1360,6 +1487,107 @@ class AutonomyService:
         """Worker-only execution scan for an explicitly ACTIVE daily session."""
         return self._scan(session_id, execute=True)
 
+    def _market_close(self, runtime: Runtime, *, execute: bool) -> None:
+        """End the daily execution lifecycle without inventing fills or flatness."""
+        runtime.entries_blocked = True
+        runtime.stop_requested.set()
+        runtime.state = Lifecycle.HALTED.value
+        runtime.fault = Fault.MARKET_CLOSED.value
+        runtime.fault_reason = "Exchange market close; entries halted and end-of-day reconciliation started"
+        cancellation_attempts = 0
+        cancellation_errors = []
+        try:
+            account = runtime.executor.account()
+            runtime.account = account
+            if runtime.mode == "PAPER" and execute:
+                for row in list(self._active_intents(runtime)):
+                    key = row["instrument_key"]
+                    if any(position.instrument_key == key and position.quantity
+                           for position in account.positions):
+                        continue  # Never cancel an open position's protection.
+                    if not json.loads(row["broker_ids_json"]):
+                        self.store.transition_intent(
+                            row["intent_id"], "UNRESOLVED",
+                            event_payload={"reason": "Market close without a confirmed local GTT id"},
+                        )
+                        continue
+                    try:
+                        self._cancel_unfilled_runtime(runtime, key)
+                        cancellation_attempts += 1
+                    except PERSISTENCE_ERRORS:
+                        raise
+                    except (SessionError, AmbiguousSubmission, UpstoxRejected,
+                            ReconciliationFailure) as exc:
+                        cancellation_errors.append({
+                            "intent_id": row["intent_id"], "instrument_key": key,
+                            "error_type": type(exc).__name__,
+                        })
+            account = runtime.executor.account()
+            runtime.account = account
+            reconciled = self._reconcile(runtime, account)
+            unresolved = list(self.store.unresolved(runtime.session_id))
+            reconciled = reconciled and not unresolved and not cancellation_errors
+            position_keys = {
+                position.instrument_key for position in (runtime.account.positions if runtime.account else ())
+                if position.quantity
+            }
+            cleanup_pending = any(
+                row["instrument_key"] not in position_keys
+                for row in self._active_intents(runtime)
+            )
+            positions = sorted(
+                position.instrument_key for position in (runtime.account.positions if runtime.account else ())
+                if position.quantity
+            )
+            if not reconciled:
+                runtime.fault = Fault.RECONCILIATION_FAILED.value
+                runtime.fault_reason = (
+                    "Market-close reconciliation is incomplete; working intents/positions "
+                    "remain preserved and fresh approval is blocked"
+                )
+            else:
+                runtime.fault = Fault.MARKET_CLOSED.value
+                runtime.fault_reason = (
+                    "Market closed; entries halted, unfilled PAPER entries reconciled/cancelled, "
+                    "open positions and protection preserved without forced liquidation"
+                    if not cleanup_pending else
+                    "Market closed; entries halted and account/order state reconciled, but "
+                    "unfilled intents remain for explicit operator cancellation; no automatic "
+                    "cancellation was performed by this read-only or non-PAPER transition"
+                )
+            self._set_state(runtime, Lifecycle.HALTED.value, reason=runtime.fault_reason)
+            self.store.audit("MARKET_CLOSE", {
+                "mode": runtime.mode, "entries_blocked": True,
+                "scan_kind": "EXECUTION" if execute else "READ_ONLY",
+                "automatic_unfilled_paper_cancellation": runtime.mode == "PAPER" and execute,
+                "cleanup_pending": cleanup_pending,
+                "cancellation_attempts": cancellation_attempts,
+                "cancellation_errors": cancellation_errors,
+                "reconciled": reconciled,
+                "unresolved_intent_ids": [row["intent_id"] for row in unresolved],
+                "open_positions": positions, "protection_preserved": True,
+                "forced_close": False, "account_clear": False,
+                "broker_mutation": False if runtime.mode == "PAPER" else None,
+            }, runtime.session_id)
+            self._persist(runtime)
+        except PERSISTENCE_ERRORS:
+            raise
+        except (UpstoxAuthError, ReconciliationFailure, SessionError, ValueError,
+                KeyError, TypeError) as exc:
+            runtime.fault = Fault.RECONCILIATION_FAILED.value
+            runtime.fault_reason = (
+                f"Market-close cleanup/reconciliation failed ({type(exc).__name__}); "
+                "positions and intents are preserved and no successful cleanup is claimed"
+            )
+            self._set_state(runtime, Lifecycle.HALTED.value, reason=runtime.fault_reason)
+            self.store.audit("MARKET_CLOSE", {
+                "mode": runtime.mode, "entries_blocked": True, "reconciled": False,
+                "error_type": type(exc).__name__, "protection_preserved": True,
+                "forced_close": False, "account_clear": False,
+            }, runtime.session_id)
+            self._persist(runtime)
+
+    @_persistence_boundary
     def _scan(self, session_id: str, *, execute: bool) -> dict:
         with self._lock:
             runtime = self._runtime(session_id)
@@ -1375,11 +1603,18 @@ class AutonomyService:
             runtime.scan_count += 1
             new_bars: list[str] = []
             try:
+                open_instruments = []
                 for instrument in runtime.instruments.values():
                     if runtime.stop_requested.is_set():
                         return self.public(session_id)
-                    if not runtime.calendar.is_open(instrument, self.now()):
-                        continue
+                    if runtime.calendar.is_open(instrument, self.now()):
+                        open_instruments.append(instrument)
+                if not open_instruments:
+                    self._market_close(runtime, execute=execute)
+                    return self.public(session_id)
+                for instrument in open_instruments:
+                    if runtime.stop_requested.is_set():
+                        return self.public(session_id)
                     bars = runtime.feed.completed(instrument, self.settings.timeframe)
                     # Emergency may have completed cleanup while this read was
                     # blocked.  Do not process a bar or issue a later write.
@@ -1467,6 +1702,7 @@ class AutonomyService:
                 self._halt(runtime, Fault.INVALID_DATA, f"Invalid market/session data: {type(exc).__name__}")
             return self.public(session_id)
 
+    @_persistence_boundary
     def reconcile(self, session_id: str) -> dict:
         """Read-only broker/account reconciliation; never Arms or Activates."""
         with self._lock:
@@ -1571,6 +1807,15 @@ class AutonomyService:
                 "authoritative": account.authoritative, "observed_at": account.observed_at.isoformat(),
                 "positions": [position.public() for position in account.positions],
             }
+        order_records = list(runtime.orders.values())
+        working = set(runtime.working)
+        if runtime.persistence_degraded and runtime.mode == "PAPER":
+            active_statuses = {"OPEN", "PENDING", "SCHEDULED", "PARTIALLY_FILLED", "TRIGGERED"}
+            for record in order_records:
+                if any(str(rule.get("status") or "").upper() in active_statuses
+                       for rule in record.get("rules") or []):
+                    working.add(str(record.get("instrument_token") or ""))
+            working.discard("")
         return {
             "session_id": session_id, "mode": runtime.mode, "state": runtime.state,
             "paper_only": runtime.mode == "PAPER", "simulated": runtime.mode == "PAPER",
@@ -1584,6 +1829,14 @@ class AutonomyService:
             "risk": runtime.risk.public() if runtime.risk else None,
             "entries_blocked": runtime.entries_blocked,
             "fault": runtime.fault, "fault_reason": runtime.fault_reason,
+            "persistence_degraded": runtime.persistence_degraded,
+            "durable_view_stale": runtime.durable_view_stale,
+            "persistence_reason": runtime.persistence_reason,
+            "persistence_status": (
+                "DEGRADED" if runtime.persistence_degraded
+                else "STALE_UNTIL_RECONCILED" if runtime.durable_view_stale
+                else "OK"
+            ),
             "fresh_approval_required": runtime.state in {Lifecycle.HALTED.value,
                                                            Lifecycle.EMERGENCY_STOPPED.value,
                                                            Lifecycle.PAUSED.value},
@@ -1592,8 +1845,8 @@ class AutonomyService:
             "kronos": self.kronos_status,
             "evidence": self.evidence.public(),
             "diagnostics": runtime.diagnostics[-100:],
-            "working_instruments": sorted(runtime.working),
-            "orders": [self._order_view(record) for record in runtime.orders.values()],
+            "working_instruments": sorted(working),
+            "orders": [self._order_view(record) for record in order_records],
             "intents": self._public_intents(session_id),
             "emergency": runtime.emergency,
             "recovered": runtime.recovered,
@@ -1620,12 +1873,19 @@ class AutonomyService:
 
     def close(self) -> None:
         self.kronos_setup.close()
+        persistence_error = None
         with self._lock:
             for runtime in self.runtimes.values():
-                runtime.stop_requested.set()
-                if runtime.state in {Lifecycle.ACTIVE.value, Lifecycle.ARMED.value, Lifecycle.PAUSED.value}:
-                    self._set_state(runtime, Lifecycle.HALTED.value,
-                                    reason="Service shutdown; fresh operator approval required")
-                runtime.entries_blocked = True
-                self._persist(runtime)
+                try:
+                    runtime.stop_requested.set()
+                    if runtime.state in {Lifecycle.ACTIVE.value, Lifecycle.ARMED.value, Lifecycle.PAUSED.value}:
+                        self._set_state(runtime, Lifecycle.HALTED.value,
+                                        reason="Service shutdown; fresh operator approval required")
+                    runtime.entries_blocked = True
+                    self._persist(runtime)
+                except PERSISTENCE_ERRORS as exc:
+                    self._persistence_halt(runtime, exc)
+                    persistence_error = persistence_error or exc
             self._closed = True
+        if persistence_error is not None:
+            raise persistence_error

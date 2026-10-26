@@ -35,6 +35,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'PaperSmoke.ps1')
 
 $script:Phase = 'start'
 $script:LogPath = Join-Path $DistDir 'installer-test-log.txt'
@@ -190,6 +192,12 @@ try {
     }
     $uninstaller = Join-Path $installDir 'unins000.exe'
     Check (Test-Path $uninstaller) 'the uninstaller was installed'
+
+    # --------------------------------------------------------------- phase 3a
+    Step 'paper-blockers' 'running the installed frozen PAPER blocker diagnostics'
+    $installedBlockers = Test-AxiomPaperBlockerSmoke $installedExe
+    Check $installedBlockers 'installed frozen PAPER blocker fixes: candles, null event, persistence and market close'
+    if (-not $installedBlockers) { throw 'installed frozen PAPER blocker diagnostics failed' }
 
     # ---------------------------------------------------------------- phase 4
     Step 'launch' 'starting the installed copy and waiting for /health'
@@ -457,6 +465,9 @@ try {
     if (-not $upgradeHealthy) { throw 'the upgraded installed copy did not launch' }
     $upgradedTerminal = Invoke-WebRequest -UseBasicParsing ('{0}/terminal' -f $base) -TimeoutSec 20
     Check ($upgradedTerminal.StatusCode -eq 200) 'upgraded installed copy serves the operator console'
+    $upgradedBlockers = Test-AxiomPaperBlockerSmoke $installedExe
+    Check $upgradedBlockers 'upgraded installed frozen PAPER blocker fixes remain active'
+    if (-not $upgradedBlockers) { throw 'upgraded frozen PAPER blocker diagnostics failed' }
 
     # ---------------------------------------------------------------- phase 6
     Step 'uninstall' 'stopping the application and removing it'

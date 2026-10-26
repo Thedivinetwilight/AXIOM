@@ -32,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 # Expected non-zero exits (the fail-closed cases) must not throw.
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'PaperSmoke.ps1')
 
 function Step($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
 function Fail($text) {
@@ -78,6 +79,25 @@ if ($Dirty) { Fail "working tree is not clean:`n$Dirty" }
 Write-Host "commit  $Head"
 Write-Host "subject $((& git log -1 --format=%s).Trim())"
 
+# Bind the eight reviewed a5 blocker-fix files to this exact build. Test files
+# remain source evidence, not production payloads; runtime files are exercised
+# below from the frozen onefile/onedir/installed/portable executables.
+$BlockerFixPaths = @(
+    'app/autonomy/models.py', 'app/autonomy/upstox.py', 'app/autonomy/store.py',
+    'app/autonomy/service.py', 'app/static/autonomy/autonomy.js', 'docs/AUTONOMY.md',
+    'tests/js/autonomy_smoke.mjs', 'tests/test_autonomy_release_blockers.py'
+)
+$BlockerFixFiles = @($BlockerFixPaths | ForEach-Object {
+    $sourcePath = Join-Path $RepoRoot $_
+    if (-not (Test-Path $sourcePath)) { Fail "missing reviewed blocker-fix file $_" }
+    [ordered]@{
+        path = $_
+        sha256 = (Get-FileHash -Algorithm SHA256 $sourcePath).Hash.ToLower()
+        production_payload = ($_ -notlike 'tests/*')
+    }
+})
+if ($BlockerFixFiles.Count -ne 8) { Fail 'the blocker-fix source manifest must contain eight files' }
+
 # ------------------------------------------------------------ 2. environment
 Step '2. Build environment'
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail 'python is not on PATH' }
@@ -95,7 +115,7 @@ $PipFreeze = @(& python -m pip freeze)
 
 # ------------------------------------------------------------------ 3. tests
 Step '3. Focused Python test suites (hard gate)'
-& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_kronos_setup.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
+& python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_kronos_setup.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py tests/test_autonomy_release_blockers.py 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-focused.log')
 $FocusedExit = $LASTEXITCODE
 if ($FocusedExit -ne 0) { Fail 'focused Vantage/US/chart suites failed on Windows' }
 Write-Host 'focused suites passed, including real DPAPI round-trips with dummy values'
@@ -345,6 +365,8 @@ try {
     catch { $Missing = [int]$_.Exception.Response.StatusCode }
     $Ok = (Check ($Missing -eq 422) "unknown symbol refused with an explanation ($Missing)") -and $Ok
 
+    $Ok = (Check (Test-AxiomPaperBlockerSmoke $Exe) 'onefile frozen PAPER blocker fixes: candles, null event, persistence and market close') -and $Ok
+    $Ok = (Check (Test-AxiomPaperBlockerSmoke $OnedirExe) 'onedir frozen PAPER blocker fixes: candles, null event, persistence and market close') -and $Ok
     if (-not $Ok) { Fail 'one or more smoke checks failed; see the log above' }
 }
 finally {
@@ -531,6 +553,7 @@ $Meta = [ordered]@{
     commit        = $Head
     commit_subject = (& git log -1 --format=%s).Trim()
     commit_date   = (& git log -1 --format=%cI).Trim()
+    blocker_fix_files = $BlockerFixFiles
     built_utc     = (Get-Date).ToUniversalTime().ToString('o')
     platform      = 'Windows x64'
     build_environment = [ordered]@{
@@ -543,7 +566,7 @@ $Meta = [ordered]@{
         workflow_ref = $env:GITHUB_WORKFLOW_REF
     }
     commands      = [ordered]@{
-        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_kronos_setup.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py'
+        focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_kronos_setup.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py tests/test_autonomy_release_blockers.py'
         full_tests    = 'python -m pytest -q'
         javascript_tests = 'node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
         performance_benchmarks = "python scripts/benchmark_terminal.py --output `"$BenchmarkOutput`"; `$env:AXIOM_UI_BENCHMARK_OUTPUT = `"$UiBenchmarkOutput`"; node tests/js/terminal_smoke.mjs"
@@ -561,7 +584,8 @@ $Meta = [ordered]@{
         full_failures   = @($FullFailures)
         javascript      = 'chart + terminal + autonomy syntax checks and all three interaction harnesses passed with local DOM/fetch fakes'
         payload_hygiene = 'passed: explicit DEMO allowlist plus onefile CArchive, onedir tree, installer ZIP and portable ZIP forbidden-name/SQLite-header checks; exact clean source and no broker credentials supplied'
-        autonomy        = 'autonomy Python/API/fault/research/shakedown suites and frozen safe-default/manual/asset gates passed; no Upstox account, external order or complete-session shakedown tested; genuine Kronos inference is a separate installed-app hard gate'
+        autonomy        = 'autonomy Python/API/fault/research/shakedown/blocker suites and frozen safe-default/manual/asset gates passed; onefile and onedir PAPER diagnostics exercised candle ordering, null-event status, persistence halt and market-close cleanup with zero broker order calls; no Upstox account, external order or complete-session shakedown tested; genuine Kronos inference is a separate installed-app hard gate'
+        blocker_fix_smoke = 'onefile + onedir passed; installed + upgraded + portable results are appended by the separate workflow acceptance gates; synthetic temporary PAPER state only'
         dpapi           = 'real Windows DPAPI round-trips passed with dummy values only'
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'

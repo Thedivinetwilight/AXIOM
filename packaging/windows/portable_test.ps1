@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'PaperSmoke.ps1')
 $Package = (Resolve-Path $PackagePath).Path
 $DistDir = Split-Path $Package -Parent
 $LogPath = Join-Path $DistDir 'portable-test-log.txt'
@@ -68,6 +69,9 @@ try {
     if (Test-Path $CommitFile) {
         Check ((Get-Content $CommitFile -Raw) -match [regex]::Escape($ExpectedCommit)) 'portable source record matches the requested commit'
     }
+    $PortableBlockers = Test-AxiomPaperBlockerSmoke $script:Exe
+    Check $PortableBlockers 'portable frozen PAPER blocker fixes: candles, null event, persistence and market close'
+    if (-not $PortableBlockers) { throw 'portable frozen PAPER blocker diagnostics failed' }
 
     $TempBefore = @(Get-ChildItem $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     if ($Port -le 0) { $Port = Get-FreePort }

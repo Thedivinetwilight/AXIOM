@@ -236,6 +236,14 @@ def open_when_ready(url: str, port: int, server_ready: threading.Event) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Build/acceptance-only diagnostic: it exits before reading or creating any
+    # operator configuration and uses isolated fake PAPER fixtures only.
+    if "--autonomy-blocker-smoke" in argv:
+        if argv != ["--autonomy-blocker-smoke"]:
+            print("--autonomy-blocker-smoke cannot be combined with other arguments", file=sys.stderr)
+            return 2
+        from frozen_blocker_smoke import run
+        return run()
     no_browser = "--no-browser" in argv
     print(BANNER.format(title=APP_TITLE, label=BUILD_LABEL))
     try:

@@ -41,7 +41,7 @@ jobs:
       - name: Vantage connector, service and authenticated API (fake MT5)
         run: python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py
       - name: Upstox autonomy boundaries, faults, research and shakedown (fakes only)
-        run: python -m pytest -q tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py
+        run: python -m pytest -q tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py tests/test_autonomy_release_blockers.py
       - name: Independent read-only MT5 market data and local paper (fake provider)
         run: python -m pytest -q tests/test_mt5_market_data.py
       - name: Bounded performance and listed-asset routing boundaries

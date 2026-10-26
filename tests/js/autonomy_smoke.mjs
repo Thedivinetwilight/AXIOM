@@ -206,9 +206,13 @@ assert(calls.some(call => call.path === "/api/autonomy/kronos/install" && call.o
 assert.match(window.document.getElementById("kronosSetupStatus").textContent, /model.safetensors: present, SHA-256 verified/);
 assert.match(window.document.getElementById("kronosSetupStatus").textContent, /REAL_FORECAST/);
 assert.equal(window.document.getElementById("testKronos").disabled, false);
+kronos = { ...kronos, status: "DEGRADED", audit_status: "DEGRADED", issues: ["corrupt optional audit history"] };
 await click("testKronos");
 assert(calls.some(call => call.path === "/api/autonomy/kronos/self-test" && call.options.method === "POST" && !call.options.body));
 assert.match(window.document.getElementById("kronosOperation").textContent, /OFFLINE_SELF_TEST · COMPLETED/);
+assert.match(window.document.getElementById("kronosSetupPill").textContent, /DEGRADED/);
+assert.match(window.document.getElementById("kronosSetupPill").className, /warn/);
+assert.equal(window.document.getElementById("testKronos").disabled, false);
 
 const create = calls.find(call => call.path === "/api/autonomy/sessions");
 assert.deepEqual(JSON.parse(create.options.body).instrument_keys, [key]);

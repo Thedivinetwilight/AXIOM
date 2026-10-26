@@ -235,7 +235,7 @@ class UpstoxReadOnly:
 
     def intraday_candles(self, instrument_key: str, display_symbol: str,
                          timeframe: str) -> list:
-        from app.data.models import Candle, TIMEFRAMES
+        from app.data.models import Candle, TIMEFRAMES, parse_timestamp
         if timeframe not in TIMEFRAMES or timeframe == "1D":
             raise ValueError("Unsupported intraday timeframe")
         minutes = TIMEFRAMES[timeframe] // 60
@@ -246,24 +246,45 @@ class UpstoxReadOnly:
         if not isinstance(rows, list):
             raise ReconciliationFailure("Intraday candle response is incomplete")
         now = self._clock().astimezone(timezone.utc)
-        bars = []
+        parsed_bars = []
         for row in rows:
             if not isinstance(row, (list, tuple)) or len(row) < 6:
                 raise ReconciliationFailure("Intraday candle row is malformed")
             try:
+                timestamp = row[0]
+                if timestamp is None or timestamp == "":
+                    raise ValueError("missing candle timestamp")
+                parsed_timestamp = parse_timestamp(timestamp)
+            except (KeyError, TypeError, ValueError):
+                raise ReconciliationFailure(
+                    "Intraday candle timestamp is missing or invalid"
+                ) from None
+            try:
                 bar = Candle.from_dict({
-                    "timestamp": row[0], "open": row[1], "high": row[2], "low": row[3],
+                    "timestamp": parsed_timestamp, "open": row[1], "high": row[2], "low": row[3],
                     "close": row[4], "volume": row[5], "symbol": display_symbol,
                 })
             except (KeyError, TypeError, ValueError) as exc:
                 raise ReconciliationFailure("Intraday candle values are invalid") from exc
             if bar.timestamp > now + timedelta(seconds=5):
                 raise ReconciliationFailure("Future candle received")
-            # The final provider row may still be forming.  It is never fed to
-            # strategy, forecast, stops, or execution.
-            if bar.available_at(timeframe) <= now:
-                bars.append(bar)
-        return bars
+            parsed_bars.append(bar)
+
+        # V3 examples may return newest-first rows while the engine requires
+        # ascending OPEN timestamps.  Normalize only after every timestamp has
+        # parsed; never deduplicate or repair provider data at this boundary.
+        parsed_bars.sort(key=lambda bar: bar.timestamp)
+        for previous, current in zip(parsed_bars, parsed_bars[1:]):
+            if current.timestamp == previous.timestamp:
+                raise ReconciliationFailure("Duplicate candle timestamp received")
+
+        # Any provider row may still be forming, regardless of whether it was
+        # first or last on the wire.  Forming rows never reach strategy,
+        # forecast, stops, execution, or downstream chronological validation.
+        return [
+            bar for bar in parsed_bars
+            if bar.available_at(timeframe) <= now
+        ]
 
 
 class UpstoxLiveBroker(UpstoxReadOnly):

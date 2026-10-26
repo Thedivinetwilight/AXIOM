@@ -4,6 +4,7 @@ These tests do not emulate Smart App Control and are not a substitute for the
 Windows install/portable gates or the owner's device verification.
 """
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import types
@@ -29,15 +30,15 @@ def payload_guard():
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.7.0a5"
+    assert version == "3.7.0a6"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f'version = "{version}"' in read(ROOT / "pyproject.toml")
     assert f"**Current source version: `{version}`.**" in read(ROOT / "README.md")
     assert f"**Current source version: {version}**" in read(ROOT / "USER_MANUAL.md")
     version_info = read(KIT / "version_info.txt")
-    assert "filevers=(3, 7, 0, 5)" in version_info
-    assert "prodvers=(3, 7, 0, 5)" in version_info
-    assert "StringStruct('FileVersion', '3.7.0.5')" in version_info
+    assert "filevers=(3, 7, 0, 6)" in version_info
+    assert "prodvers=(3, 7, 0, 6)" in version_info
+    assert "StringStruct('FileVersion', '3.7.0.6')" in version_info
     assert f"StringStruct('ProductVersion', '{version}')" in version_info
     manual = read(KIT / "WINDOWS_INSTALL_MANUAL.md")
     assert f"**Version:** {version}" in manual
@@ -46,13 +47,17 @@ def test_version_is_consistent_across_frozen_and_operator_metadata():
     assert f"AXIOM-Operator-{version}-windows-x64-portable.zip" in manual
 
 
-def test_release_workflow_derives_the_prerelease_tag_from_version_metadata():
-    assert read(KIT / "VERSION").strip() == "3.7.0a5"
+def test_release_workflow_derives_a_new_tag_and_requires_explicit_publication():
+    assert read(KIT / "VERSION").strip() == "3.7.0a6"
     workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
     assert "Get-Content _kit/packaging/windows/VERSION" in workflow
     assert '$tag = "v$($env:VERSION)"' in workflow
     assert "gh release create $tag --prerelease --target $meta.commit" in workflow
-    assert "gh release delete $tag --yes --cleanup-tag" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish" in workflow
+    assert "default: false" in workflow and "type: boolean" in workflow
+    assert "gh release delete" not in workflow
+    assert "refusing to replace existing release/tag" in workflow
+    assert "git -C $kit push" not in workflow
     assert "v3.7.0a1" not in workflow
 
 
@@ -231,6 +236,45 @@ def test_install_and_portable_acceptance_are_separate_hard_gates():
     assert "if ($script:ExitCode -ne 0) { exit 1 }" in portable
     assert portable.rstrip().endswith("exit 0")
     assert "-UseBasicRequest" not in portable
+
+
+def test_a5_blocker_repairs_have_explicit_frozen_package_acceptance():
+    smoke = read(KIT / "frozen_blocker_smoke.py")
+    assert "PaperExecution" in smoke and "MockTransport" in smoke
+    assert "UpstoxLiveBroker" not in smoke
+    assert "broker_order_endpoint_calls" in smoke
+    assert "--autonomy-blocker-smoke" in read(KIT / "axiom_launcher.py")
+    assert '"frozen_blocker_smoke"' in read(KIT / "axiom.spec")
+    helper = ". (Join-Path $PSScriptRoot 'PaperSmoke.ps1')"
+    for name in ("build_windows.ps1", "install_test.ps1", "portable_test.ps1"):
+        script = read(KIT / name)
+        assert helper in script
+        assert "Test-AxiomPaperBlockerSmoke" in script
+    build = read(KIT / "build_windows.ps1")
+    assert "$BlockerFixFiles.Count -ne 8" in build
+    assert "tests/test_autonomy_release_blockers.py" in build
+    workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
+    assert "$meta.blocker_fix_files.Count -ne 8" in workflow
+    assert "installed/upgraded frozen PAPER blocker diagnostics are missing" in workflow
+    assert "portable frozen PAPER blocker diagnostics are missing" in workflow
+    linux = read(ROOT / ".github" / "workflows" / "paper-checks.yml")
+    assert "tests/test_autonomy_release_blockers.py" in linux
+
+
+def test_paper_blocker_diagnostic_source_contract(capsys):
+    path = KIT / "frozen_blocker_smoke.py"
+    spec = importlib.util.spec_from_file_location("axiom_paper_blocker_smoke_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.run() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "PASS"
+    assert result["mode"] == "PAPER" and result["live_enabled"] is False
+    assert result["broker_order_endpoint_calls"] == 0
+    assert set(result["checks"]) == {
+        "candle_ordering", "null_event_status",
+        "database_failure_fail_closed", "market_close_cleanup",
+    }
 
 
 def test_documentation_does_not_claim_unsigned_policy_bypass():

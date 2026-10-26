@@ -1,6 +1,6 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a5**
+**Current source version: 3.7.0a6**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 

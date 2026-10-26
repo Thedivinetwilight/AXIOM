@@ -92,6 +92,9 @@ hiddenimports = (
         "httpcore",
         "httpx",
         "zoneinfo",
+        # Explicit local/fake PAPER diagnostic used by frozen, installer and
+        # portable acceptance.  It contains no broker credential or order route.
+        "frozen_blocker_smoke",
     ]
 )
 
@@ -118,7 +121,7 @@ excludes = [
 
 a = Analysis(
     [str(HERE / "axiom_launcher.py")],
-    pathex=[str(ROOT)],
+    pathex=[str(ROOT), str(HERE)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

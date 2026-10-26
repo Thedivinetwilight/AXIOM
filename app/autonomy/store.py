@@ -89,6 +89,21 @@ def redact(value: Any, key: str = "") -> Any:
     return str(value)
 
 
+def _audit_payload(raw: Any) -> tuple[Any, str, str]:
+    """Decode legacy/corrupt payloads without exposing raw journal content."""
+    if raw is None:
+        return None, "SQL_NULL", "Stored event payload is missing (SQL NULL)"
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, "MALFORMED", "Stored event payload is malformed"
+    if payload is None:
+        return None, "JSON_NULL", "Stored event payload is JSON null"
+    if not isinstance(payload, dict):
+        return payload, "NON_OBJECT", "Stored event payload is not a JSON object"
+    return payload, "OK", ""
+
+
 class AutonomyStore:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -303,11 +318,16 @@ class AutonomyStore:
             ).fetchall()
         else:
             rows = self.db.execute("SELECT * FROM audit ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()
-        return [{
-            "seq": row["seq"], "ts": row["ts"], "session_id": row["session_id"],
-            "event_type": row["event_type"], "payload": json.loads(row["payload_json"]),
-            "prev_hash": row["prev_hash"], "event_hash": row["event_hash"],
-        } for row in rows]
+        events = []
+        for row in rows:
+            payload, payload_status, payload_error = _audit_payload(row["payload_json"])
+            events.append({
+                "seq": row["seq"], "ts": row["ts"], "session_id": row["session_id"],
+                "event_type": row["event_type"], "payload": payload,
+                "payload_status": payload_status, "payload_error": payload_error,
+                "prev_hash": row["prev_hash"], "event_hash": row["event_hash"],
+            })
+        return events
 
     def verify_chain(self) -> bool:
         with self._lock:
@@ -316,8 +336,11 @@ class AutonomyStore:
         for row in rows:
             if row["prev_hash"] != expected_previous:
                 return False
+            payload, payload_status, _ = _audit_payload(row["payload_json"])
+            if payload_status in {"SQL_NULL", "MALFORMED"}:
+                return False
             body = {"ts": row["ts"], "session_id": row["session_id"],
-                    "event_type": row["event_type"], "payload": json.loads(row["payload_json"]),
+                    "event_type": row["event_type"], "payload": payload,
                     "prev_hash": row["prev_hash"]}
             if hashlib.sha256(_json(body).encode()).hexdigest() != row["event_hash"]:
                 return False

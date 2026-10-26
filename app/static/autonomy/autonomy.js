@@ -68,7 +68,7 @@ function render(){
   $('positions').innerHTML=(a?.positions||[]).map(p=>`<tr><td><code>${esc(p.instrument_key)}</code></td><td>${esc(p.quantity)}</td><td>${esc(p.average_price)} / ${esc(p.last_price)}</td><td>${esc(p.stop_price)} / ${esc(p.target_price)}</td><td>${p.protection_id?pill('confirmed','good'):pill('UNCONFIRMED','bad')}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No open positions reported.</td></tr>';
   $('intents').innerHTML=(session.intents||[]).map(i=>`<tr><td><code>${esc(i.intent_id)}</code><br><small>${esc(i.state)}${i.recovered_view?' · last-known':''}</small></td><td><code>${esc(i.instrument_key)}</code></td><td>${esc(i.state)}</td><td><code>${esc((i.broker_ids||[]).join(', '))}</code></td></tr>`).join('')||'<tr><td colspan="4" class="muted">No durable intents.</td></tr>';
   $('orders').innerHTML=(session.orders||[]).map(o=>`<tr><td><code>${esc(o.gtt_order_id||'')}</code></td><td><code>${esc(o.instrument_token||'')}</code></td><td><code>${esc((o.rules||[]).map(rule=>`${rule.strategy}:${rule.status}@${rule.trigger_price}`).join(' · '))}</code></td></tr>`).join('')||'<tr><td colspan="3" class="muted">No last-known GTT records.</td></tr>';
-  $('kronos').innerHTML=`<p>${pill('Kronos '+session.kronos.status,session.kronos.available_for_inference?'good':'warn')} <small>${esc((session.kronos.issues||[]).join(' · ')||session.kronos.fallback)}</small></p><small>Verified artifacts only; no mock forecast or Kronos attribution on fallback.</small>`;
+  $('kronos').innerHTML=`<p>${pill('Kronos '+session.kronos.status,session.kronos.available_for_inference&&session.kronos.audit_status!=='DEGRADED'?'good':'warn')} <small>${esc((session.kronos.issues||[]).join(' · ')||session.kronos.fallback)}</small></p><small>Verified artifacts only; no mock forecast or Kronos attribution on fallback.</small>`;
   $('evidence').innerHTML=(session.evidence||[]).map(e=>`<tr><td>${esc(e.strategy_family)} / ${esc(e.side)}</td><td><code>${esc(e.instrument_key)}</code></td><td>${esc(e.trades)} trades · expectancy ${esc(e.net_expectancy)} · DD ${esc(e.max_drawdown)}</td><td>${pill(e.provenance_class||'unknown',e.live_eligible_structure?'warn':'bad')}<br><small>${esc(e.provenance_effect||'')}. ${esc(e.paper_execution_effect||'PAPER and LIVE execution blocked')}.</small></td></tr>`).join('')||'<tr><td colspan="4" class="muted">No research evidence installed; candidates remain non-executable.</td></tr>';
   $('diagnostics').innerHTML=(session.diagnostics||[]).slice(-40).reverse().map(d=>`<tr><td><code>${esc(d.instrument_key)}</code></td><td>${esc(d.family)} ${esc(d.side||'')}</td><td>${esc(d.explanation||d.rejected||d.status||'')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">No completed-bar diagnostics yet.</td></tr>';
   const select=$('chartInstrument');
@@ -83,8 +83,9 @@ function renderKronos(){
   if(!kronosData)return;
   const d=kronosData,plan=d.install_plan||{},op=d.operation||{};
   const available=d.available_for_inference===true;
-  $('kronosSetupPill').textContent=available?'READY · REAL INFERENCE AVAILABLE':(d.status||'UNAVAILABLE');
-  $('kronosSetupPill').className='pill '+(available?'good':op.state==='ERROR'?'bad':'warn');
+  const healthy=available&&d.audit_status!=='DEGRADED';
+  $('kronosSetupPill').textContent=healthy?'READY · REAL INFERENCE AVAILABLE':(d.status||'UNAVAILABLE');
+  $('kronosSetupPill').className='pill '+(healthy?'good':op.state==='ERROR'?'bad':'warn');
   const component=name=>{
     const item=plan[name]||{};
     return `<h3>${esc(name)} · ${esc(item.repository||'')} @ <code>${esc(item.revision||'')}</code></h3><p><small>Expected ${bytes(item.expected_bytes)} · pinned HTTPS revision</small></p>`+(item.files||[]).map(file=>`<p><code>${esc(file.name)}</code><br><small>${bytes(file.size)} · SHA-256 ${esc(file.sha256)}<br>${esc(file.url)}</small></p>`).join('');
