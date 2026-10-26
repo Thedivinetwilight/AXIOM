@@ -244,6 +244,7 @@ def test_exact_runtime_lock_and_platform_markers(monkeypatch):
     import app.autonomy.kronos_runtime as runtime_module
     lock = runtime_lock(ROOT / "config" / "kronos-runtime-requirements.txt")
     assert len(lock["sha256"]) == 64
+    monkeypatch.setattr(runtime_module.sys, "version_info", (3, 11, 0))
     monkeypatch.setattr(runtime_module.sys, "platform", "linux")
     linux = {item["name"]: item["version"] for item in applicable_packages(lock)}
     monkeypatch.setattr(runtime_module.sys, "platform", "win32")

@@ -102,6 +102,9 @@ def test_kronos_frozen_resources_and_installed_inference_release_gate():
         assert asset in workflow
     build = read(KIT / "build_windows.ps1")
     assert "tests/test_kronos_setup.py" in build
+    attributes = read(ROOT / ".gitattributes")
+    assert "config/kronos-small.json text eol=lf" in attributes
+    assert "config/kronos-runtime-requirements.txt text eol=lf" in attributes
 
 
 def test_build_packages_sidecars_and_both_zip_alternatives():

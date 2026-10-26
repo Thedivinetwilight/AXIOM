@@ -452,7 +452,8 @@ class KronosArtifactInstaller:
             pointer.write_text(canonical({
                 "schema": CURRENT_SCHEMA, "manifest_sha256": digest, "generation": digest,
             }), encoding="utf-8")
-            with pointer.open("rb") as handle:
+            # Windows requires a writable handle for fsync, unlike POSIX.
+            with pointer.open("r+b") as handle:
                 os.fsync(handle.fileno())
             os.replace(pointer, self.store.current_path)
             progress({"phase": "ARTIFACTS_VERIFIED", "bytes": total, "total_bytes": total,
