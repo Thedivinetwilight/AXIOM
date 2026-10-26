@@ -534,6 +534,18 @@ def test_worker_import_failure_keeps_safe_module_and_package_evidence(tmp_path, 
         )
     assert "sensitive local path" not in str(failure.value)
 
+    def fail_distribution_scan(path):
+        raise ImportError("raw scan failure must not be disclosed")
+
+    monkeypatch.setattr(worker.importlib.metadata, "distributions", fail_distribution_scan)
+    scan = worker._runtime_probe(tmp_path / "runtime", tmp_path / "lock")
+    assert scan["stage"] == "DISTRIBUTION_SCAN"
+    with pytest.raises(ArtifactError, match="DISTRIBUTION_SCAN.*ImportError") as scan_failure:
+        runtime_module.KronosRuntimeManager._validate_probe(
+            scan, {"packages": []}, {"version": [3, 11, 9], "system": "Windows"},
+        )
+    assert "raw scan failure" not in str(scan_failure.value)
+
 
 def test_worker_ipc_isolates_hub_loader_stdout(tmp_path, monkeypatch, capsys):
     """A stdout notice must not corrupt JSON; this is not an inference test."""

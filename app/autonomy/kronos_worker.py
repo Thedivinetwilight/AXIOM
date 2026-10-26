@@ -16,16 +16,33 @@ import sys
 import time
 
 
-def _runtime_probe(site: Path, lock_path: Path) -> dict:
-    from app.autonomy.kronos_runtime import applicable_packages, runtime_lock
+def _probe_stage_error(stage: str, exc: Exception, versions: dict | None = None) -> dict:
+    return {
+        "status": "UNAVAILABLE", "error_type": "RUNTIME_PROBE_STAGE_ERROR",
+        "stage": stage, "exception_type": type(exc).__name__,
+        "exception_name": getattr(exc, "name", None),
+        "package_versions": versions or {},
+    }
 
-    lock = runtime_lock(lock_path)
-    expected = {item["normalized_name"]: item["version"] for item in applicable_packages(lock)}
+
+def _runtime_probe(site: Path, lock_path: Path) -> dict:
+    try:
+        from app.autonomy.kronos_runtime import applicable_packages, runtime_lock
+    except Exception as exc:
+        return _probe_stage_error("SUPPORT_IMPORT", exc)
+    try:
+        lock = runtime_lock(lock_path)
+        expected = {item["normalized_name"]: item["version"] for item in applicable_packages(lock)}
+    except Exception as exc:
+        return _probe_stage_error("LOCK_READ", exc)
     versions = {}
-    for distribution in importlib.metadata.distributions(path=[str(site)]):
-        name = distribution.metadata.get("Name")
-        if name:
-            versions[name.lower().replace("_", "-")] = distribution.version
+    try:
+        for distribution in importlib.metadata.distributions(path=[str(site)]):
+            name = distribution.metadata.get("Name")
+            if name:
+                versions[name.lower().replace("_", "-")] = distribution.version
+    except Exception as exc:
+        return _probe_stage_error("DISTRIBUTION_SCAN", exc, versions)
     if versions != expected:
         return {"status": "UNAVAILABLE", "error_type": "RUNTIME_LOCK_MISMATCH",
                 "package_versions": versions}
@@ -47,20 +64,25 @@ def _runtime_probe(site: Path, lock_path: Path) -> dict:
     huggingface_hub = modules["huggingface_hub"]
     torch = modules["torch"]
 
-    threads = max(1, min(4, os.cpu_count() or 1))
-    torch.set_num_threads(threads)
-    torch.set_num_interop_threads(1)
-    return {
-        "status": "READY", "schema": "axiom.kronos.runtime-probe.v1",
-        "package_versions": versions,
-        "direct_versions": {
+    try:
+        threads = max(1, min(4, os.cpu_count() or 1))
+        torch.set_num_threads(threads)
+        torch.set_num_interop_threads(1)
+        direct_versions = {
             "torch": torch.__version__, "numpy": numpy.__version__,
             "pandas": pandas.__version__, "einops": einops.__version__,
             "safetensors": safetensors.__version__,
             "huggingface_hub": huggingface_hub.__version__,
-        },
-        "device": "cpu", "cuda_available": bool(torch.cuda.is_available()),
-        "torch_cuda_build": torch.version.cuda,
+        }
+        cuda_available = bool(torch.cuda.is_available())
+        torch_cuda_build = torch.version.cuda
+    except Exception as exc:
+        return _probe_stage_error("RUNTIME_READY_PROBE", exc, versions)
+    return {
+        "status": "READY", "schema": "axiom.kronos.runtime-probe.v1",
+        "package_versions": versions, "direct_versions": direct_versions,
+        "device": "cpu", "cuda_available": cuda_available,
+        "torch_cuda_build": torch_cuda_build,
         "cpu_threads": threads, "runtime_lock_sha256": lock["sha256"],
     }
 

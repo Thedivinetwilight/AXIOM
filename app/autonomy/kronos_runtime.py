@@ -486,6 +486,17 @@ class KronosRuntimeManager:
             if missing_name != "unknown" and missing_name != module:
                 detail += ":" + missing_name
             raise ArtifactError(f"Kronos runtime import failed for {module} ({detail})")
+        if result.get("status") == "UNAVAILABLE" \
+                and result.get("error_type") == "RUNTIME_PROBE_STAGE_ERROR":
+            stage = result.get("stage")
+            if stage not in {"SUPPORT_IMPORT", "LOCK_READ", "DISTRIBUTION_SCAN",
+                             "RUNTIME_READY_PROBE"}:
+                stage = "UNKNOWN"
+            detail = safe(result.get("exception_type"))
+            missing_name = safe(result.get("exception_name"))
+            if missing_name != "unknown":
+                detail += ":" + missing_name
+            raise ArtifactError(f"Kronos runtime stage {stage} failed ({detail})")
         if result.get("status") == "ERROR":
             detail = safe(result.get("error_type"))
             missing_name = safe(result.get("error_name"))
