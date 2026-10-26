@@ -475,6 +475,26 @@ class KronosRuntimeManager:
             return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+!-]{0,63}", text) \
                 else "<nonconforming>"
 
+        def trace_detail() -> str:
+            frames = result.get("trace")
+            if not isinstance(frames, list):
+                return ""
+            locations = []
+            for frame in frames[-4:]:
+                if not isinstance(frame, dict):
+                    continue
+                module = safe(frame.get("module"))
+                function = frame.get("function")
+                if function != "<module>" and not re.fullmatch(
+                        r"[A-Za-z_][A-Za-z0-9_]{0,63}", str(function)):
+                    function = "<nonconforming>"
+                line = frame.get("line")
+                if isinstance(line, bool) or not isinstance(line, int) \
+                        or not 0 < line < 10_000_000:
+                    line = 0
+                locations.append(f"{module}.{function}:{line}")
+            return " at " + " <- ".join(locations) if locations else ""
+
         if result.get("status") == "UNAVAILABLE" \
                 and result.get("error_type") == "RUNTIME_IMPORT_ERROR":
             module = result.get("module")
@@ -496,7 +516,9 @@ class KronosRuntimeManager:
             missing_name = safe(result.get("exception_name"))
             if missing_name != "unknown":
                 detail += ":" + missing_name
-            raise ArtifactError(f"Kronos runtime stage {stage} failed ({detail})")
+            raise ArtifactError(
+                f"Kronos runtime stage {stage} failed ({detail}){trace_detail()}"
+            )
         if result.get("status") == "ERROR":
             detail = safe(result.get("error_type"))
             missing_name = safe(result.get("error_name"))
@@ -505,7 +527,9 @@ class KronosRuntimeManager:
             stage = result.get("stage")
             if stage not in {"RUNTIME_PROBE", "OPERATOR_PAYLOAD", "REAL_INFERENCE"}:
                 stage = "UNKNOWN"
-            raise ArtifactError(f"Kronos runtime worker failed during {stage} ({detail})")
+            raise ArtifactError(
+                f"Kronos runtime worker failed during {stage} ({detail}){trace_detail()}"
+            )
         if normalized != expected:
             missing = sorted(set(expected) - set(normalized))
             unexpected = sorted(set(normalized) - set(expected))

@@ -545,6 +545,7 @@ def test_worker_import_failure_keeps_safe_module_and_package_evidence(tmp_path, 
             scan, {"packages": []}, {"version": [3, 11, 9], "system": "Windows"},
         )
     assert "raw scan failure" not in str(scan_failure.value)
+    assert "fail_distribution_scan" in str(scan_failure.value)
 
 
 def test_worker_ipc_isolates_hub_loader_stdout(tmp_path, monkeypatch, capsys):

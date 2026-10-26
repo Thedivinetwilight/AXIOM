@@ -14,13 +14,26 @@ import os
 from pathlib import Path
 import sys
 import time
+import traceback
+
+
+def _error_trace(exc: Exception) -> list[dict]:
+    """Return code identity only: no paths, messages, locals or environment."""
+    frames = []
+    for frame, lineno in traceback.walk_tb(exc.__traceback__):
+        frames.append({
+            "module": frame.f_globals.get("__name__"),
+            "function": frame.f_code.co_name,
+            "line": lineno,
+        })
+    return frames[-4:]
 
 
 def _probe_stage_error(stage: str, exc: Exception, versions: dict | None = None) -> dict:
     return {
         "status": "UNAVAILABLE", "error_type": "RUNTIME_PROBE_STAGE_ERROR",
         "stage": stage, "exception_type": type(exc).__name__,
-        "exception_name": getattr(exc, "name", None),
+        "exception_name": getattr(exc, "name", None), "trace": _error_trace(exc),
         "package_versions": versions or {},
     }
 
@@ -205,6 +218,7 @@ def main() -> int:
         result = {
             "status": "ERROR", "error_type": type(exc).__name__,
             "error_name": getattr(exc, "name", None), "stage": stage,
+            "trace": _error_trace(exc),
             "message": "Real Kronos runtime/inference failed; no forecast was produced",
             "real_forecast": False, "mock_outputs_used": False,
         }
