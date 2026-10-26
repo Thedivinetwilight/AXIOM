@@ -481,13 +481,20 @@ class KronosRuntimeManager:
             if module not in {"numpy", "pandas", "einops", "safetensors",
                               "huggingface_hub", "tqdm", "torch"}:
                 module = "unknown"
-            raise ArtifactError(
-                f"Kronos runtime import failed for {module} ({safe(result.get('exception_type'))})"
-            )
+            detail = safe(result.get("exception_type"))
+            missing_name = safe(result.get("exception_name"))
+            if missing_name != "unknown" and missing_name != module:
+                detail += ":" + missing_name
+            raise ArtifactError(f"Kronos runtime import failed for {module} ({detail})")
         if result.get("status") == "ERROR":
-            raise ArtifactError(
-                "Kronos runtime worker failed (" + safe(result.get("error_type")) + ")"
-            )
+            detail = safe(result.get("error_type"))
+            missing_name = safe(result.get("error_name"))
+            if missing_name != "unknown":
+                detail += ":" + missing_name
+            stage = result.get("stage")
+            if stage not in {"RUNTIME_PROBE", "OPERATOR_PAYLOAD", "REAL_INFERENCE"}:
+                stage = "UNKNOWN"
+            raise ArtifactError(f"Kronos runtime worker failed during {stage} ({detail})")
         if normalized != expected:
             missing = sorted(set(expected) - set(normalized))
             unexpected = sorted(set(normalized) - set(expected))

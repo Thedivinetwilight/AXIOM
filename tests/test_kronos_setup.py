@@ -520,13 +520,14 @@ def test_worker_import_failure_keeps_safe_module_and_package_evidence(tmp_path, 
     monkeypatch.setattr(worker.importlib.metadata, "distributions", lambda path: [])
 
     def fail_import(name):
-        raise ImportError("sensitive local path must not be disclosed")
+        raise ImportError("sensitive local path must not be disclosed", name=name)
 
     monkeypatch.setattr(worker.importlib, "import_module", fail_import)
     result = worker._runtime_probe(tmp_path / "runtime", tmp_path / "lock")
     assert result["status"] == "UNAVAILABLE"
     assert result["error_type"] == "RUNTIME_IMPORT_ERROR"
     assert result["module"] == "numpy" and result["package_versions"] == {}
+    assert result["exception_name"] == "numpy"
     with pytest.raises(ArtifactError, match="numpy.*ImportError") as failure:
         runtime_module.KronosRuntimeManager._validate_probe(
             result, {"packages": []}, {"version": [3, 11, 9], "system": "Windows"},

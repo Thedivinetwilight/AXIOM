@@ -37,6 +37,7 @@ def _runtime_probe(site: Path, lock_path: Path) -> dict:
             return {
                 "status": "UNAVAILABLE", "error_type": "RUNTIME_IMPORT_ERROR",
                 "module": name, "exception_type": type(exc).__name__,
+                "exception_name": getattr(exc, "name", None),
                 "package_versions": versions,
             }
     numpy = modules["numpy"]
@@ -162,6 +163,7 @@ def main() -> int:
     sys.path.insert(0, str(args.app_root))
     sys.path.insert(0, str(args.runtime))
     result_stream = sys.stdout
+    stage = "RUNTIME_PROBE"
     try:
         # huggingface_hub 0.33.1 prints local weight-loading notices to stdout.
         # Keep every library notice away from the single-record JSON IPC channel.
@@ -170,14 +172,17 @@ def main() -> int:
             if runtime["status"] != "READY" or args.probe_only:
                 result = runtime
             else:
+                stage = "OPERATOR_PAYLOAD"
                 payload = json.load(sys.stdin)
                 if payload.get("offline") is not True:
                     raise ValueError("Kronos worker requires explicit offline mode")
+                stage = "REAL_INFERENCE"
                 result = _forecast(payload, runtime)
     except Exception as exc:
         # Never return raw exception text, paths, URLs, environment or stderr.
         result = {
             "status": "ERROR", "error_type": type(exc).__name__,
+            "error_name": getattr(exc, "name", None), "stage": stage,
             "message": "Real Kronos runtime/inference failed; no forecast was produced",
             "real_forecast": False, "mock_outputs_used": False,
         }
