@@ -98,8 +98,10 @@ def _forecast(payload: dict, runtime: dict) -> dict:
         "open": bar["open"], "high": bar["high"], "low": bar["low"],
         "close": bar["close"], "volume": bar["volume"],
     } for bar in bars])
-    x_timestamp = pd.DatetimeIndex(payload["x_timestamp"])
-    y_timestamp = pd.DatetimeIndex(payload["y_timestamp"])
+    # Upstream calc_time_stamps uses the Series `.dt` accessor; DatetimeIndex
+    # exposes calendar fields directly and raises AttributeError for `.dt`.
+    x_timestamp = pd.Series(pd.to_datetime(payload["x_timestamp"]))
+    y_timestamp = pd.Series(pd.to_datetime(payload["y_timestamp"]))
     horizon = int(payload["horizon"])
     samples = int(payload["samples"])
     seed_base = int(payload["seed_base"])
