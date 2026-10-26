@@ -16,4 +16,4 @@ C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\starlette\testcl
     _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-841 passed, 1 warning in 174.20s (0:02:54)
+841 passed, 1 warning in 184.06s (0:03:04)
