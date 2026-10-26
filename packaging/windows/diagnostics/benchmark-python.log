@@ -3,43 +3,43 @@
   "http": {
     "http.chart.update": {
       "samples": 120,
-      "p50_ms": 32.851,
-      "p95_ms": 47.539,
-      "p99_ms": 53.056,
-      "max_ms": 56.313,
-      "mean_ms": 34.519
+      "p50_ms": 24.288,
+      "p95_ms": 35.417,
+      "p99_ms": 49.387,
+      "max_ms": 60.495,
+      "mean_ms": 26.052
     },
     "http.feed.quotes": {
       "samples": 120,
-      "p50_ms": 32.348,
-      "p95_ms": 43.43,
-      "p99_ms": 49.894,
-      "max_ms": 67.813,
-      "mean_ms": 31.775
+      "p50_ms": 22.576,
+      "p95_ms": 33.377,
+      "p99_ms": 51.247,
+      "max_ms": 63.051,
+      "mean_ms": 22.192
     },
     "http.order.review": {
       "samples": 12,
-      "p50_ms": 4.109,
-      "p95_ms": 4.508,
-      "p99_ms": 4.624,
-      "max_ms": 4.653,
-      "mean_ms": 4.066
+      "p50_ms": 2.973,
+      "p95_ms": 3.454,
+      "p99_ms": 3.472,
+      "max_ms": 3.477,
+      "mean_ms": 3.016
     },
     "http.order.submit": {
       "samples": 12,
-      "p50_ms": 5.527,
-      "p95_ms": 6.526,
-      "p99_ms": 6.592,
-      "max_ms": 6.609,
-      "mean_ms": 5.589
+      "p50_ms": 3.853,
+      "p95_ms": 4.744,
+      "p99_ms": 4.814,
+      "max_ms": 4.831,
+      "mean_ms": 3.973
     },
     "http.reconcile": {
       "samples": 6,
-      "p50_ms": 4.291,
-      "p95_ms": 4.501,
-      "p99_ms": 4.514,
-      "max_ms": 4.517,
-      "mean_ms": 4.311
+      "p50_ms": 2.992,
+      "p95_ms": 3.072,
+      "p99_ms": 3.077,
+      "max_ms": 3.079,
+      "mean_ms": 2.987
     }
   },
   "order_send_calls": 12
