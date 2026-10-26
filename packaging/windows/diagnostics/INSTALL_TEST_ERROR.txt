@@ -1,10 +1,9 @@
 phase: kronos
-Invoke-RestMethod: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:382
+Exception: D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1:402
 Line |
- 382 |  … tedPython = Invoke-RestMethod -Method Post -Headers $headers -Content …
+ 402 |  … MPLETED') { throw ('Kronos setup failed closed: ' + $kronos.operation …
      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     |  {   "detail": "Selected Python is not CPython 3.11/3.12 x64 with pip: Python machine architecture is not
-     | AMD64/x86_64" }
-stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 382
-at <ScriptBlock>, D:\a\_temp\9cb5d244-9694-448c-bc0e-608c2c2d2e3f.ps1: line 8
+     | Kronos setup failed closed: Installed Kronos runtime does not exactly match the lock
+stack: at <ScriptBlock>, D:\a\AXIOM\AXIOM\src\packaging\windows\install_test.ps1: line 402
+at <ScriptBlock>, D:\a\_temp\82ef2a2c-c044-4a44-9281-8ab6bcb32572.ps1: line 8
 at <ScriptBlock>, <No file>: line 1

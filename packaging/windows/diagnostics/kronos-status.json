@@ -1,9 +1,11 @@
 {
-  "status": "READY",
+  "status": "UNAVAILABLE",
   "artifact_verified": true,
-  "available_for_inference": true,
-  "inference_runtime": "READY",
-  "issues": [],
+  "available_for_inference": false,
+  "inference_runtime": "UNAVAILABLE",
+  "issues": [
+    "Locked per-user runtime is not installed for this Python/platform"
+  ],
   "artifact_digest": "6d7d65b5a78103fdf8b1431aa5938574f600a930e269b23995bf621fe453e397",
   "manifest_file_sha256": "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa",
   "model_repository": "NeoQuasar/Kronos-small",
@@ -101,93 +103,49 @@
   "artifact_layout": "ATOMIC_GENERATION",
   "partial_installs": 0,
   "runtime": {
-    "status": "READY",
-    "verified": true,
+    "status": "UNAVAILABLE",
+    "verified": false,
     "loaded": false,
-    "installed": true,
-    "issues": [],
+    "installed": false,
+    "issues": [
+      "Locked per-user runtime is not installed for this Python/platform"
+    ],
     "device": "cpu",
-    "schema": "axiom.kronos.runtime-probe.v1",
-    "package_versions": {
-      "certifi": "2025.7.14",
-      "charset-normalizer": "3.4.2",
-      "colorama": "0.4.6",
-      "einops": "0.8.1",
-      "filelock": "3.18.0",
-      "fsspec": "2025.5.1",
-      "huggingface-hub": "0.33.1",
-      "idna": "3.10",
-      "jinja2": "3.1.6",
-      "markupsafe": "3.0.2",
-      "mpmath": "1.3.0",
-      "networkx": "3.4.2",
-      "numpy": "2.2.6",
-      "packaging": "25.0",
-      "pandas": "2.2.2",
-      "python-dateutil": "2.9.0.post0",
-      "pytz": "2025.2",
-      "pyyaml": "6.0.2",
-      "requests": "2.32.4",
-      "safetensors": "0.6.2",
-      "setuptools": "80.9.0",
-      "six": "1.17.0",
-      "sympy": "1.14.0",
-      "torch": "2.7.1+cpu",
-      "tqdm": "4.67.1",
-      "typing-extensions": "4.14.0",
-      "tzdata": "2025.2",
-      "urllib3": "2.5.0"
-    },
-    "direct_versions": {
-      "torch": "2.7.1+cpu",
-      "numpy": "2.2.6",
-      "pandas": "2.2.2",
-      "einops": "0.8.1",
-      "safetensors": "0.6.2",
-      "huggingface_hub": "0.33.1"
-    },
-    "cuda_available": false,
-    "torch_cuda_build": null,
-    "cpu_threads": 4,
-    "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d",
-    "lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d",
     "python": {
       "version": [
         3,
-        12,
-        10
+        11,
+        9
       ],
       "machine": "AMD64",
       "system": "Windows",
-      "pip": "26.2.2"
+      "pip": "26.2.2",
+      "implementation": "CPython",
+      "bits": 64,
+      "selection": "manual",
+      "command_label": "manual selection"
     }
   },
   "loaded": false,
   "producing_real_forecasts": false,
-  "last_inference": {
-    "status": "ERROR",
-    "error_type": "ArtifactError",
-    "generated_at": "2026-10-26T09:34:55.592913+00:00",
-    "manifest_sha256": "6d7d65b5a78103fdf8b1431aa5938574f600a930e269b23995bf621fe453e397",
-    "mock_outputs_used": false
-  },
+  "last_inference": null,
   "last_self_test": null,
   "weights_bundled": false,
   "fallback": "Validated non-Kronos path only; no Kronos attribution",
   "mock_outputs_used": false,
   "device": "cpu",
   "operation": {
-    "operation_id": "0612b87395c7466782eb7a74000f5f3f",
+    "operation_id": "c110bab424734182be2f0ff7d35c96da",
     "kind": "INSTALL_PINNED",
     "state": "ERROR",
     "cancel_requested": false,
     "phase": "ERROR",
     "error": {
       "code": "SETUP_UNAVAILABLE",
-      "message": "Real Kronos inference failed: AttributeError"
+      "message": "Installed Kronos runtime does not exactly match the lock"
     },
-    "started_at": "2026-10-26T09:32:52.76158+00:00",
-    "completed_at": "2026-10-26T09:34:55.592913+00:00",
+    "started_at": "2026-10-26T12:33:21.789047+00:00",
+    "completed_at": "2026-10-26T12:34:43.754732+00:00",
     "bytes": 114823553,
     "total_bytes": 114823553,
     "component": "tokenizer",
@@ -408,108 +366,92 @@
   "broker_credentials_used": false,
   "audit_events": [
     {
-      "seq": 7,
-      "ts": "2026-10-26T09:34:55.592913+00:00",
+      "seq": 6,
+      "ts": "2026-10-26T12:34:43.754732+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_ERROR",
       "payload": {
         "code": "SETUP_UNAVAILABLE",
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f"
+        "operation_id": "c110bab424734182be2f0ff7d35c96da"
       },
-      "prev_hash": "30ee933ae18cc7ed42cdc93fa5328af7e4d973483ce653b01d8e2c62097b4a9b",
-      "event_hash": "a79013516531ea89ac98e8364a9127cdc467b7017777bc636de05a67834c217f"
-    },
-    {
-      "seq": 6,
-      "ts": "2026-10-26T09:34:43.783613+00:00",
-      "session_id": null,
-      "event_type": "KRONOS_SETUP_PHASE",
-      "payload": {
-        "component": null,
-        "file": null,
-        "manifest_sha256": null,
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
-        "phase": "RUNTIME_VERIFIED",
-        "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
-      },
-      "prev_hash": "023659fe57e14a67675013d3563947c1be8e0c51acfc7703fc65694ac9d9a900",
-      "event_hash": "30ee933ae18cc7ed42cdc93fa5328af7e4d973483ce653b01d8e2c62097b4a9b"
+      "prev_hash": "390d156529130e2240e9351fb9f43c875b778cc1059e5c9c8afcb6037a2c18ae",
+      "event_hash": "51946b2bc382652e6ca70c21d67cdfc73a43673cf78b7f8f85498a44b73e7809"
     },
     {
       "seq": 5,
-      "ts": "2026-10-26T09:34:40.383202+00:00",
+      "ts": "2026-10-26T12:34:35.818092+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": null,
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
+        "operation_id": "c110bab424734182be2f0ff7d35c96da",
         "phase": "RUNTIME_PROBE",
         "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
       },
-      "prev_hash": "5193af19c9c784b633548eda5a9e693a506e6fad1eb160392584d3903bceaee8",
-      "event_hash": "023659fe57e14a67675013d3563947c1be8e0c51acfc7703fc65694ac9d9a900"
+      "prev_hash": "6abd8530b5b7c7956a5319890ddda65523522153da1ed657c90a3963c7bed6eb",
+      "event_hash": "390d156529130e2240e9351fb9f43c875b778cc1059e5c9c8afcb6037a2c18ae"
     },
     {
       "seq": 4,
-      "ts": "2026-10-26T09:33:31.348395+00:00",
+      "ts": "2026-10-26T12:33:25.22241+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": null,
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
+        "operation_id": "c110bab424734182be2f0ff7d35c96da",
         "phase": "RUNTIME_INSTALL",
         "runtime_lock_sha256": "fcc686b5337ac56b5536df157e10f37d4affd2e6db75f5e1f8ad63e7f5d2b55d"
       },
-      "prev_hash": "1a940cecee189cbf04a586242d2b7cc54050ad308a7b28129b98fde07bccbd9c",
-      "event_hash": "5193af19c9c784b633548eda5a9e693a506e6fad1eb160392584d3903bceaee8"
+      "prev_hash": "cacc59290916e2b6f24b4a31c4af0c8a18d3f50f8d83e7396e85c9d26459ee1a",
+      "event_hash": "6abd8530b5b7c7956a5319890ddda65523522153da1ed657c90a3963c7bed6eb"
     },
     {
       "seq": 3,
-      "ts": "2026-10-26T09:33:31.132119+00:00",
+      "ts": "2026-10-26T12:33:25.137757+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": null,
         "file": null,
         "manifest_sha256": "6d7d65b5a78103fdf8b1431aa5938574f600a930e269b23995bf621fe453e397",
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
+        "operation_id": "c110bab424734182be2f0ff7d35c96da",
         "phase": "ARTIFACTS_VERIFIED",
         "runtime_lock_sha256": null
       },
-      "prev_hash": "4ffaee1c5b38e6a3c9b67ef52d268b1d8b7b888ececed2d97409a515100feed6",
-      "event_hash": "1a940cecee189cbf04a586242d2b7cc54050ad308a7b28129b98fde07bccbd9c"
+      "prev_hash": "9e05377a1e5091ce45f0cdc0928c8ee6c0276b98fa8a5aae760ca0375fdd838b",
+      "event_hash": "cacc59290916e2b6f24b4a31c4af0c8a18d3f50f8d83e7396e85c9d26459ee1a"
     },
     {
       "seq": 2,
-      "ts": "2026-10-26T09:32:52.768146+00:00",
+      "ts": "2026-10-26T12:33:21.794517+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_PHASE",
       "payload": {
         "component": "model",
         "file": "config.json",
         "manifest_sha256": null,
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f",
+        "operation_id": "c110bab424734182be2f0ff7d35c96da",
         "phase": "DOWNLOAD",
         "runtime_lock_sha256": null
       },
-      "prev_hash": "3e3b68307e96bc9f7afd84e9f5356feb7fef6dec71c92a1993d0c99068a00497",
-      "event_hash": "4ffaee1c5b38e6a3c9b67ef52d268b1d8b7b888ececed2d97409a515100feed6"
+      "prev_hash": "4dd5018d5a9408f0aff9309a6c779bbd16075f73b7260a74f802e021f341053a",
+      "event_hash": "9e05377a1e5091ce45f0cdc0928c8ee6c0276b98fa8a5aae760ca0375fdd838b"
     },
     {
       "seq": 1,
-      "ts": "2026-10-26T09:32:52.761904+00:00",
+      "ts": "2026-10-26T12:33:21.789047+00:00",
       "session_id": null,
       "event_type": "KRONOS_SETUP_STARTED",
       "payload": {
         "kind": "INSTALL_PINNED",
-        "operation_id": "0612b87395c7466782eb7a74000f5f3f"
+        "operation_id": "c110bab424734182be2f0ff7d35c96da"
       },
       "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-      "event_hash": "3e3b68307e96bc9f7afd84e9f5356feb7fef6dec71c92a1993d0c99068a00497"
+      "event_hash": "4dd5018d5a9408f0aff9309a6c779bbd16075f73b7260a74f802e021f341053a"
     }
   ]
 }
