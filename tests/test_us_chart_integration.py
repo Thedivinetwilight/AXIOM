@@ -357,10 +357,16 @@ class TestNoOrderSurfaceWasPorted:
         source = (REPO / "app" / "data" / "alpaca.py").read_text(encoding="utf-8")
         assert "https://data.alpaca.markets" in source
         assert "wss://stream.data.alpaca.markets" in source
-        # The trading host, an order endpoint, or a trading SDK would mean this
-        # port crossed from market data into order routing.
-        for forbidden in ("api.alpaca.markets", "/v2/orders", "TradingClient",
-                          "submit_order", "cancel_order("):
+        # The trading host appears once, for the read-only listing-metadata
+        # lookup (`/v1/assets/{symbol}`): symbol lookup/instrument metadata is
+        # an explicit product requirement. An order endpoint, a trading SDK, or
+        # any second use of the trading host would mean this port crossed from
+        # market data into order routing.
+        assert source.count("api.alpaca.markets") == 1
+        assert '_ASSET_HOST = "https://api.alpaca.markets"' in source
+        assert 'f"{_ASSET_HOST}/v1/assets/{symbol}"' in source
+        for forbidden in ("/v2/orders", "/v1/orders", "TradingClient",
+                          "submit_order", "cancel_order(", "place_order("):
             assert forbidden not in source
 
     def test_settings_carry_no_alpaca_order_configuration(self):
@@ -372,8 +378,16 @@ class TestNoOrderSurfaceWasPorted:
 
     def test_repository_never_names_a_real_order_host(self):
         offenders = []
+        metadata_module = "app/data/alpaca.py"
+        # Alpaca's order surface specifically. Generic order words belong to
+        # the separately guarded Vantage/MT5 module and are out of scope here.
         for path in (REPO / "app").rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if "api.alpaca.markets" in text or "alpaca.markets/v2/orders" in text:
-                offenders.append(str(path.relative_to(REPO)))
+            relative = str(path.relative_to(REPO))
+            if "alpaca.markets/v2/orders" in text or "alpaca.markets/v1/orders" in text:
+                offenders.append(relative)
+            # The broker-API host is permitted only in the market-data module's
+            # read-only listing-metadata lookup (see the test above).
+            if "api.alpaca.markets" in text and relative != metadata_module:
+                offenders.append(relative)
         assert offenders == []

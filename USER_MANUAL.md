@@ -504,3 +504,110 @@ python run.py --mode validate --csv data/sample.csv --symbol DEMO --timeframe 1D
 Instruments are evaluated separately; at least 60 candles are required per key. Validation/locked-test warmup uses only earlier candles. A baseline is never promoted merely because it is the baseline, and validation promotion requires positive expectancy and strict baseline improvement in addition to the other gates. Discovery also requires present, positive walk-forward-proxy expectancy; missing evidence cannot pass. Zero profit factor is penalized, robustness is measured against each baseline return, and invalid/non-finite router evidence fails closed.
 
 The bundled sample CSV is synthetic. Qualified candidates, positive backtests and paper results are not guarantees of profit or LIVE readiness. Generic OHLCV research does not verify Vantage lot/tick/margin/session/CFD financing rules and never becomes an order instruction automatically. These commands do not change execution mode, Arm/Activate, automation or emergency stop. All reviewed-order and reconciliation controls remain separate.
+
+## 21. Connecting live market data — Upstox (India) and Alpaca (U.S.)
+
+This section connects **real market data** to the local PAPER engine for Indian
+equities (Upstox) and U.S.-listed stocks/ETFs (Alpaca). Every fill stays
+simulated inside AXIOM: the app contains no Upstox or Alpaca order client, and
+the read-only probes below never touch an order endpoint. No profitability or
+LIVE-readiness claim is made.
+
+India and the U.S. are kept separate: different currencies (INR/USD),
+calendars, credentials, instrument formats and local PAPER portfolios. A
+combined view appears only when both markets are explicitly selected. When a
+provider connection fails, AXIOM fails closed — it never silently substitutes
+the bundled `DEMO` sample data (which is synthetic and labelled as such).
+
+### 21.1 Upstox (India, NSE/BSE)
+
+1. Create an Upstox developer app and obtain its API key and redirect URI.
+2. Run the built-in OAuth helper to obtain a daily access token; it stores the
+   token in the local `.env` (`MARKET_DATA_ACCESS_TOKEN`) with owner-only file
+   permissions and never prints it:
+
+   ```bash
+   python -c "from app.data.upstox_auth import run_login_flow; run_login_flow()"
+   ```
+
+3. Configure `.env` (exact instrument keys only, `SEGMENT|ISIN` format):
+
+   ```dotenv
+   DATA_SOURCE=upstox
+   MARKET_DATA_PROVIDER=upstox
+   MARKET=india
+   CURRENCY=INR
+   MARKET_CALENDAR=nse-session
+   MARKET_DATA_SYMBOLS=NSE_EQ|INE002A01018
+   MARKET_DATA_TIMEFRAME=1m
+   MARKET_DATA_MODE=ltpc
+   MARKET_DATA_ACCESS_TOKEN=...
+   ```
+
+4. Test the connection (read-only; market-data authorize probe only):
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $AXIOM_API_TOKEN" \
+     http://127.0.0.1:8000/api/connections/upstox/test
+   ```
+
+   `verdict: feed_ok` means the token is authorized for Market Data Feed V3.
+   Upstox access tokens expire daily: after expiry the probe reports
+   `rejected` with re-authorization guidance — rerun step 2. A `403` means the
+   account is not entitled to the feed; an `unreachable` verdict means network
+   connectivity failed first and nothing has been verified.
+5. Start the local PAPER session from the terminal or `POST /paper/start` with
+   `source=upstox`. Stop it with `POST /paper/stop`. Session state, simulated
+   fills and audit events are visible in the terminal and `/paper/status`.
+
+### 21.2 Alpaca (U.S. stocks and ETFs)
+
+1. Create an Alpaca account and generate **market-data** API keys on the
+   dashboard. AXIOM uses only read-only market-data endpoints; the keys can
+   never place, modify or cancel an order through this app.
+2. Configure `.env` for the U.S. market:
+
+   ```dotenv
+   DATA_SOURCE=alpaca
+   MARKET=us
+   CURRENCY=USD
+   MARKET_CALENDAR=us-equities
+   DEFAULT_TIMEFRAME=1m
+   ALPACA_API_KEY=...
+   ALPACA_API_SECRET=...
+   ALPACA_DATA_FEED=iex
+   ALPACA_SYMBOLS=AAPL,MSFT,SPY
+   ```
+
+3. **Feed entitlements are labelled exactly, never upgraded.** `iex` is the
+   IEX single-venue feed (roughly 2–3% of U.S. volume) and is never described
+   as the consolidated tape; `sip` is the all-exchange consolidated feed (paid
+   plan); `delayed_sip` is SIP delayed 15 minutes. Set `ALPACA_DATA_FEED` to
+   what your account is actually entitled to — the free Basic plan includes
+   IEX only. Plan rate limits apply (Basic: 200 data calls/minute); AXIOM
+   fails closed on HTTP 429 and never retries silently.
+4. Test the connection (read-only latest-bar probe plus listing metadata):
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $AXIOM_API_TOKEN" \
+     "http://127.0.0.1:8000/api/connections/alpaca/test?symbol=AAPL"
+   ```
+
+   The response reports the entitlement verdict, the feed label for your
+   configured feed, and listing metadata (venue, class, status) for the
+   ticker. `forbidden` means the credential lacks the requested feed
+   entitlement; switch `ALPACA_DATA_FEED` to your entitled feed. U.S. session
+   rules (09:30–16:00 America/New_York, standard holidays, 13:00 early closes,
+   daylight-saving changes) are applied by the local `us-equities` calendar.
+5. Start/stop the local PAPER session as in step 5 above with `source=alpaca`.
+
+### 21.3 What "connected" means here
+
+`POST /api/connections` lists both markets with credential-presence booleans
+(secrets are never returned). Automated tests exercise these flows with mocked
+provider responses and are **not** proof of real provider connectivity — the
+owner must run the two connection tests above on a networked machine with real
+credentials. Real-connection verification is the owner's step; without it the
+connections remain BLOCKED / NOT VERIFIED regardless of how many mock tests
+pass. Historical data caching, when enabled, is stored per-user locally from
+the licensed provider APIs and is never committed to the repository.

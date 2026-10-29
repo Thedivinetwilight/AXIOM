@@ -23,6 +23,37 @@ _TF_API = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "30m": "30Min",
            "1h": "1Hour", "1D": "1Day"}
 _TICKER = re.compile(r"^[A-Z][A-Z0-9.\-]{0,14}$")
 _DATA_HOST = "https://data.alpaca.markets"
+_ASSET_HOST = "https://api.alpaca.markets"
+
+# Honest feed identity. IEX is a single venue (~2-3% of US volume) and must
+# never be described as the consolidated tape; SIP is the all-exchange feed.
+FEED_NOTES = {
+    "iex": "IEX single-venue feed — NOT the consolidated SIP tape",
+    "sip": "SIP consolidated feed (all US exchanges)",
+    "delayed_sip": "SIP consolidated feed delayed 15 minutes — NOT real-time",
+}
+
+# Listing venues accepted for "U.S.-listed stocks and ETFs".
+_EQUITY_EXCHANGES = frozenset({
+    "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS", "IEX", "EDGX",
+    "NYSEAMERICAN", "NYSEARCA", "NYSENAT", "OTC",
+})
+
+
+def feed_label(feed: str) -> str:
+    """Entitlement label for the configured feed; never upgrades IEX wording."""
+    note = FEED_NOTES.get(feed)
+    if note is None:
+        raise ValueError("ALPACA_DATA_FEED must be iex, sip or delayed_sip")
+    return note
+
+
+def _rate_limit_error(feed: str) -> ValueError:
+    return ValueError(
+        "Alpaca market-data rate limit reached (HTTP 429); AXIOM fails closed and "
+        "never retries silently. Wait, then request at the documented plan rate "
+        f"(Basic: 200 calls/min). Requested feed: {feed}"
+    )
 
 
 def validate_us_symbol(symbol: str) -> str:
@@ -72,6 +103,8 @@ class AlpacaHistoricalProvider(APIProvider):
             if page_token:
                 query["page_token"] = page_token
             response = self._client.get(f"{_DATA_HOST}/v2/stocks/bars", params=query)
+            if response.status_code == 429:
+                raise _rate_limit_error(self.feed)
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict) or not isinstance(payload.get("bars"), dict):
@@ -239,3 +272,65 @@ class AlpacaStream(WebSocketProvider):
         if self._socket is not None:
             await self._socket.close()
         self.status = "DISCONNECTED"
+
+
+class AlpacaAssetLookup:
+    """Read-only U.S. equity listing metadata (assets endpoint).
+
+    Used to validate that a ticker is an actual U.S.-listed stock or ETF and to
+    surface its listing venue and status. This is a metadata GET only: the
+    module contains no trading client, order URL, or order method.
+    """
+
+    def __init__(self, key: str, secret: str, *, timeout: float = 20.0,
+                 client: httpx.Client | None = None):
+        if not key.strip() or not secret.strip():
+            raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required")
+        headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+        self._client = client or httpx.Client(timeout=timeout, headers=headers)
+        if client is not None:
+            self._client.headers.update(headers)
+        self._owns_client = client is None
+
+    def lookup(self, symbol: str) -> dict:
+        symbol = validate_us_symbol(symbol)
+        response = self._client.get(f"{_ASSET_HOST}/v1/assets/{symbol}")
+        if response.status_code == 429:
+            raise _rate_limit_error("metadata")
+        if response.status_code == 404:
+            raise ValueError(f"{symbol} is not a listing known to Alpaca")
+        response.raise_for_status()
+        asset = response.json()
+        if not isinstance(asset, dict) or asset.get("symbol") != symbol:
+            raise ValueError("Alpaca returned an invalid asset response")
+        asset_class = str(asset.get("class") or "")
+        if asset_class != "us_equity":
+            raise ValueError(
+                f"{symbol} is not a U.S.-listed equity/ETF (class={asset_class or 'unknown'})"
+            )
+        exchange = str(asset.get("exchange") or "").upper()
+        if exchange not in _EQUITY_EXCHANGES:
+            raise ValueError(
+                f"{symbol} lists on unsupported venue {exchange or 'unknown'}"
+            )
+        status = str(asset.get("status") or "")
+        if status != "active":
+            raise ValueError(f"{symbol} is not an active listing (status={status or 'unknown'})")
+        return {
+            "symbol": symbol,
+            "name": asset.get("name"),
+            "listing_venue": exchange,
+            "instrument_class": "us_equity",
+            "instrument_type": (
+                "US stock or ETF (Alpaca asset metadata does not distinguish ETFs)"
+            ),
+            "currency": "USD",
+            "status": status,
+            "tradable": bool(asset.get("tradable")),
+            "source": "alpaca-assets",
+            "read_only": True,
+        }
+
+    def close(self):
+        if self._owns_client:
+            self._client.close()
