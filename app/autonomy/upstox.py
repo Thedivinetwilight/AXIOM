@@ -627,6 +627,16 @@ class InstrumentCatalog:
                     multiplier = float(multiplier_raw or 1.0)
                 else:
                     multiplier = float(multiplier_raw) if multiplier_raw is not None else None
+                # Upstox's complete.json.gz pads equity rows with an `expiry`
+                # epoch value that is NOT a contract expiry — cash equities do
+                # not expire. Only exchange-traded derivatives carry a real
+                # contract expiry; without this, every NSE/BSE equity row is
+                # silently dropped as an "expired contract" and exact keys
+                # like NSE_EQ|INE002A01018 become unknown.
+                if segment in {"NSE_EQ", "BSE_EQ"}:
+                    expiry = None
+                else:
+                    expiry = self._expiry(raw.get("expiry"))
                 instrument = Instrument(
                     instrument_key=key,
                     display_symbol=key.replace("|", "-"),
@@ -638,7 +648,7 @@ class InstrumentCatalog:
                     quantity_step=step,
                     freeze_quantity=freeze,
                     contract_multiplier=multiplier,
-                    expiry=self._expiry(raw.get("expiry")),
+                    expiry=expiry,
                     underlying_key=str(raw.get("underlying_key") or ""),
                     underlying_symbol=str(raw.get("underlying_symbol") or ""),
                     correlation_group=str(raw.get("underlying_key") or raw.get("underlying_symbol") or ""),

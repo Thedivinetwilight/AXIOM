@@ -16,6 +16,17 @@ const instrument = {
   product_label: "Upstox-listed equity", tick_size: 0.05, quantity_step: 1,
   risk_metadata_complete: true,
 };
+// Real complete.json.gz BOD row (Upstox format): the equity's padded `expiry`
+// epoch must never block it; values below are the parser's normalized output
+// for RELIANCE (raw tick_size 5.0 paise -> 0.05 rupees).
+const relianceKey = "NSE_EQ|INE002A01018";
+const reliance = {
+  instrument_key: relianceKey, display_symbol: "NSE_EQ-INE002A01018",
+  segment: "NSE_EQ", exchange: "NSE", trading_symbol: "RELIANCE",
+  instrument_type: "EQ", tick_size: 0.05, quantity_step: 1, freeze_quantity: 100000,
+  contract_multiplier: 1, expiry: null, market_kind: "EQUITY",
+  product_label: "Upstox-listed equity", risk_metadata_complete: true,
+};
 let session = {
   session_id: "ui-session", mode: "PAPER", state: "UNCONFIGURED", paper_only: true,
   simulated: true, authorized_day: "", risk: null, entries_blocked: false,
@@ -106,7 +117,11 @@ window.fetch = (url, options = {}) => {
   }
   if (path === "/api/autonomy/kronos/cancel" && options.method === "POST") return response(kronos);
   if (path.startsWith("/api/autonomy/catalog?")) {
-    return response({ total: 1, refreshed_at: "2026-10-25T00:00:00+00:00", scope: "test exact scope", instruments: [instrument], warnings: [] });
+    const query = decodeURIComponent((path.split("query=")[1] || "").split("&")[0]).trim().toUpperCase();
+    const matches = [instrument, reliance].filter(item =>
+      !query || item.instrument_key.toUpperCase().includes(query)
+        || item.trading_symbol.toUpperCase().includes(query));
+    return response({ total: matches.length, refreshed_at: "2026-10-25T00:00:00+00:00", scope: "test exact scope", instruments: matches, warnings: [] });
   }
   if (path === "/api/autonomy/status") return response({ sessions: availableSessions });
   if (path === "/api/autonomy/sessions" && options.method === "POST") return response(session, true, 201);
@@ -163,6 +178,21 @@ await click("createSession");
 assert.equal(window.document.getElementById("sessionId").textContent, "ui-session");
 assert.equal(window.sessionStorage.getItem("autonomy_session_id"), "ui-session");
 assert.match(window.document.getElementById("evidence").textContent, /BLOCKED_SYNTHETIC_RESEARCH_ONLY/);
+
+// BOD regression (real complete.json.gz format): searching the symbol renders
+// the correct NSE equity row and its Select button stores the exact key,
+// which createSession then submits unchanged.
+window.document.getElementById("catalogQuery").value = "RELIANCE";
+await click("searchCatalog");
+const rows = window.document.getElementById("catalogRows");
+assert.match(rows.textContent, /RELIANCE/);
+assert.match(rows.textContent, /NSE_EQ\|INE002A01018/);
+rows.querySelector("[data-add]").click(); await tick();
+assert.match(window.document.getElementById("selectedKeys").value, /NSE_EQ\|INE002A01018/);
+await click("createSession");
+const relianceCreate = calls.filter(call => call.path === "/api/autonomy/sessions").pop();
+assert.ok(JSON.parse(relianceCreate.options.body).instrument_keys.includes(relianceKey));
+assert.equal(JSON.parse(relianceCreate.options.body).mode, "PAPER");
 availableSessions = [{ session_id: "ui-session", mode: "PAPER", state: "UNCONFIGURED" }];
 await click("loadSession");
 assert.match(window.document.getElementById("notice").textContent, /Loaded durable read-only view/);

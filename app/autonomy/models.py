@@ -96,6 +96,11 @@ class Instrument:
         if self.expiry is not None:
             if self.expiry.tzinfo is None:
                 raise ValueError("Contract expiry must be timezone-aware")
+            if self.market_kind == "EQUITY":
+                raise ValueError(
+                    f"Cash equities do not expire; raw BOD expiry padding must not be "
+                    f"carried as a contract expiry for {self.instrument_key}"
+                )
             if now is not None and self.expiry <= now.astimezone(timezone.utc):
                 raise ValueError("Expired contracts cannot be selected")
         if self.currency_derivative and not self.underlying_symbol:
