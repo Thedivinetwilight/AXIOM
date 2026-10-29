@@ -148,6 +148,7 @@ def test_parse_stats_account_for_kept_and_dropped_rows(tmp_path):
     assert stats["kept_by_segment"] == {"NSE_EQ": 1}
     assert stats["dropped_suspended"] == 1
     assert stats["dropped_unsupported"] == 1
+    assert stats["dropped_unsupported_by"] == {"NSE_INDEX|INDEX": 1}
     assert stats["dropped_invalid"] == 2  # expired F&O + broken equity row
     assert any("BSE_EQ|BROKEN1" in sample for sample in stats["dropped_invalid_samples"])
     assert any("NCD_FO|1" in sample for sample in stats["dropped_invalid_samples"])

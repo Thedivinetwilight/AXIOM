@@ -122,7 +122,7 @@ window.fetch = (url, options = {}) => {
       !query || item.instrument_key.toUpperCase().includes(query)
         || item.trading_symbol.toUpperCase().includes(query));
     return response({ total: matches.length, refreshed_at: "2026-10-25T00:00:00+00:00", scope: "test exact scope", instruments: matches, warnings: [],
-      stats: { source_rows: 2, suspended_keys: 0, kept_by_segment: { NSE_EQ: 2 }, dropped_suspended: 0, dropped_unsupported: 0, dropped_invalid: 0, dropped_invalid_samples: [] } });
+      stats: { source_rows: 2, suspended_keys: 0, kept_by_segment: { NSE_EQ: 2 }, dropped_suspended: 0, dropped_unsupported: 0, dropped_unsupported_by: { "NSE_INDEX|INDEX": 3 }, dropped_invalid: 0, dropped_invalid_samples: [] } });
   }
   if (path === "/api/autonomy/status") return response({ sessions: availableSessions });
   if (path === "/api/autonomy/sessions" && options.method === "POST") return response(session, true, 201);
@@ -190,6 +190,7 @@ assert.match(rows.textContent, /RELIANCE/);
 assert.match(rows.textContent, /NSE_EQ\|INE002A01018/);
 assert.match(window.document.getElementById("catalogMeta").textContent, /BOD rows 2/);
 assert.match(window.document.getElementById("catalogMeta").textContent, /kept NSE_EQ 2/);
+assert.match(window.document.getElementById("catalogMeta").textContent, /unsupported rows: NSE_INDEX\|INDEX 3/);
 rows.querySelector("[data-add]").click(); await tick();
 assert.match(window.document.getElementById("selectedKeys").value, /NSE_EQ\|INE002A01018/);
 await click("createSession");

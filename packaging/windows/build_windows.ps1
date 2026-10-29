@@ -177,6 +177,29 @@ Step '3d. Explicit DEMO source payload allowlist (hard gate)'
 if ($LASTEXITCODE -ne 0) { Fail 'reviewed DEMO source payload validation failed' }
 
 # ------------------------------------------------------------------ 4. freeze
+Step '3e. Write the machine-readable build identity (hard gate)'
+$IdentityPath = Join-Path $RepoRoot 'app\_build_identity.json'
+$IdentitySourcePaths = @(
+    'app/static/autonomy/autonomy.js', 'app/autonomy/upstox.py',
+    'app/autonomy/models.py', 'app/autonomy/service.py', 'app/api/routes/autonomy.py'
+)
+$IdentityHashes = [ordered]@{}
+foreach ($rel in $IdentitySourcePaths) {
+    $abs = Join-Path $RepoRoot ($rel -replace '/', '\')
+    if (-not (Test-Path $abs)) { Fail "build identity source missing: $rel" }
+    $IdentityHashes[$rel] = (Get-FileHash -Algorithm SHA256 $abs).Hash.ToLower()
+}
+$Identity = [ordered]@{
+    commit        = $Head
+    commit_subject = (& git log -1 --format=%s).Trim()
+    commit_date   = (& git log -1 --format=%cI).Trim()
+    version       = $Version
+    built_utc     = (Get-Date).ToUniversalTime().ToString('o')
+    source_hashes = $IdentityHashes
+}
+$Identity | ConvertTo-Json -Depth 4 | Set-Content -Path $IdentityPath -Encoding utf8
+Write-Host "build identity bound to commit $Head with $($IdentityHashes.Count) source hashes"
+
 Step '4. Freeze with PyInstaller'
 $Dist = Join-Path $Kit 'dist'
 $BuildTmp = Join-Path $Kit 'build'
@@ -267,6 +290,23 @@ try {
     $Ok = (Check ($Autonomy.StatusCode -eq 200 -and $Autonomy.Content -match 'PAPER' -and $Autonomy.Content -match 'UPSTOX_LIVE' -and $Autonomy.Content -match 'static/autonomy/autonomy.js') 'autonomy page and explicit execution boundaries are bundled') -and $Ok
     $AutonomyJs = Invoke-WebRequest -UseBasicParsing "$Base/static/autonomy/autonomy.js" -TimeoutSec 10
     $Ok = (Check ($AutonomyJs.StatusCode -eq 200 -and $AutonomyJs.Content -match 'reconcile' -and $AutonomyJs.Content -match 'activate') 'autonomy JavaScript served from the bundle') -and $Ok
+    $Ok = (Check ($AutonomyJs.Content -match 'BOD rows') 'served autonomy.js carries the BOD parse diagnostics') -and $Ok
+    # Prove the frozen bundle serves exactly this commit's files: compare the
+    # served bytes against the staged source tree and the embedded identity.
+    $ServedJsPath = Join-Path $SmokeHome 'served-autonomy.js'
+    Invoke-WebRequest -UseBasicParsing "$Base/static/autonomy/autonomy.js" -OutFile $ServedJsPath -TimeoutSec 10
+    $ServedJsHash = (Get-FileHash -Algorithm SHA256 $ServedJsPath).Hash.ToLower()
+    $ExpectedJsHash = (Get-FileHash -Algorithm SHA256 (Join-Path $RepoRoot 'app\static\autonomy\autonomy.js')).Hash.ToLower()
+    $Ok = (Check ($ServedJsHash -eq $ExpectedJsHash) 'served autonomy.js bytes match the staged source exactly') -and $Ok
+    $BuildInfo = Invoke-WebRequest -UseBasicParsing "$Base/health" -TimeoutSec 10
+    $Build = ($BuildInfo.Content | ConvertFrom-Json).build
+    $Ok = (Check ($Build.commit -eq $Head) "frozen build identity names the exact commit $($Head.Substring(0, 10))") -and $Ok
+    $Ok = (Check ($Build.frozen -eq $true) 'the running app reports its frozen package identity') -and $Ok
+    foreach ($rel in $IdentitySourcePaths) {
+        $expected = $IdentityHashes[$rel]
+        $actual = $Build.source_hashes.$rel
+        $Ok = (Check ($actual -eq $expected) "build identity source hash matches: $rel") -and $Ok
+    }
     $ChartRuntime = Invoke-WebRequest -UseBasicParsing "$Base/static/vendor/lightweight-charts/lightweight-charts.standalone.production.js" -TimeoutSec 10
     $Ok = (Check ($ChartRuntime.StatusCode -eq 200) 'pinned display-only Lightweight Charts runtime is bundled') -and $Ok
     $AutonomyManual = Invoke-WebRequest -UseBasicParsing "$Base/autonomy/manual" -TimeoutSec 10
@@ -554,6 +594,7 @@ $Meta = [ordered]@{
     commit_subject = (& git log -1 --format=%s).Trim()
     commit_date   = (& git log -1 --format=%cI).Trim()
     blocker_fix_files = $BlockerFixFiles
+    build_identity = $Identity
     built_utc     = (Get-Date).ToUniversalTime().ToString('o')
     platform      = 'Windows x64'
     build_environment = [ordered]@{
@@ -636,6 +677,8 @@ $SumFiles = @($Exe, $InstallZip, $PortableZip, (Join-Path $Dist 'BUILD_METADATA.
 $SumFiles | ForEach-Object {
     "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $_).Hash.ToLower(), (Split-Path $_ -Leaf)
 } | Set-Content -Path (Join-Path $Dist 'SHA256SUMS.txt') -Encoding ascii
+
+Remove-Item -Force $IdentityPath -ErrorAction SilentlyContinue
 
 Step 'Done'
 Get-ChildItem $Dist -File | ForEach-Object { "{0,-56} {1,12:N1} KB" -f $_.Name, ($_.Length / 1KB) }

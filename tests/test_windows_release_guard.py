@@ -130,3 +130,37 @@ def test_push_trigger_covers_release_branch_and_pr_branch_artifact_only():
     # dispatch event with the explicit publish input.
     assert ("if: success() && github.event_name == 'workflow_dispatch' && inputs.publish"
             in text)
+
+
+BUILD_SCRIPT = Path(__file__).resolve().parents[1] / "packaging" / "windows" / "build_windows.ps1"
+
+
+def build_script_text() -> str:
+    return BUILD_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_build_identity_is_written_before_the_freeze_and_carried_in_metadata():
+    text = build_script_text()
+    written = text.index("Write the machine-readable build identity")
+    freeze = text.index("Step '4. Freeze with PyInstaller'")
+    assert written < freeze, "the identity file must exist before PyInstaller reads it"
+    assert "app\\_build_identity.json" in text
+    assert "build_identity = $Identity" in text  # travels in BUILD_METADATA.json
+    assert "Remove-Item -Force $IdentityPath" in text  # never dirties a local tree
+
+
+def test_frozen_smoke_gate_is_hash_anchored_to_the_staged_source():
+    text = build_script_text()
+    # Regex anchors alone accept stale bundles; the gate must compare the
+    # served bytes against the staged source and the embedded identity.
+    assert "served autonomy.js bytes match the staged source exactly" in text
+    assert "frozen build identity names the exact commit" in text
+    assert "served autonomy.js carries the BOD parse diagnostics" in text
+    assert text.index("ServedJsHash") < text.index("frozen build identity names the exact commit")
+    assert "build identity source hash matches" in text
+
+
+def test_spec_bundles_the_identity_file_when_present():
+    spec = (Path(__file__).resolve().parents[1] / "packaging" / "windows" / "axiom.spec").read_text(encoding="utf-8")
+    assert "_build_identity.json" in spec
+    assert "identity_datas" in spec

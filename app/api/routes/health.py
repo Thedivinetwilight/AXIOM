@@ -1,4 +1,5 @@
 from app import __version__
+from app.build_info import build_identity
 from fastapi import APIRouter, Request
 
 router = APIRouter()
@@ -16,6 +17,7 @@ def health(request: Request):
     return {
         "status": "ok",
         "version": __version__,
+        "build": build_identity(),
         "mode": "UPSTOX_LIVE" if live_capable else "PAPER",
         "live_trading": live_active,
         "real_order_routing": "UPSTOX_AUTONOMY_GUARDED" if live_capable else "VANTAGE_MT5_GUARDED",

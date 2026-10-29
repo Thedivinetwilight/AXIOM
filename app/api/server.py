@@ -280,10 +280,18 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections, alpaca_broker):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
-    # remote script, and nothing secret is ever placed here.
+    # remote script, and nothing secret is ever placed here. Assets are served
+    # with no-store so an upgrade can never be masked by a browser-cached UI.
     static_dir = Path(__file__).resolve().parent.parent / "static"
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.middleware("http")
+    async def no_store_static(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
     app.state.sandbox_engine = None  # set by the sandbox engine embedding
     app.state.sandbox_broker = None
     return app

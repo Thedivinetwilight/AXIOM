@@ -613,6 +613,7 @@ class InstrumentCatalog:
             "kept_by_segment": {},
             "dropped_suspended": 0,
             "dropped_unsupported": 0,
+            "dropped_unsupported_by": {},
             "dropped_invalid": 0,
             "dropped_invalid_samples": [],
         }
@@ -635,6 +636,10 @@ class InstrumentCatalog:
                 )
                 if not supported:
                     stats["dropped_unsupported"] += 1
+                    bucket = f"{segment}|{kind or '(blank)'}"
+                    by = stats["dropped_unsupported_by"]
+                    if bucket in by or len(by) < 12:
+                        by[bucket] = by.get(bucket, 0) + 1
                     continue
                 # Upstox BOD tick values are paise (5.0 => ₹0.05).
                 tick = float(raw["tick_size"]) / 100.0

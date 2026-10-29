@@ -136,6 +136,9 @@ def catalog(request: Request, query: str = "", limit: int = 100):
         "source_sha256": value.catalog.source_sha256,
         "total": len(value.catalog.instruments), "returned": len(items[:limit]),
         "warnings": value.catalog.warnings, "instruments": items[:limit],
+        # The UI's diagnostics line renders these; omitting them silently hid
+        # every parse drop from the operator (regression-pinned in tests).
+        "stats": value.catalog.stats,
     }
 
 

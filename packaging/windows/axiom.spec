@@ -38,9 +38,14 @@ from payload_guard import demo_data_sources
 # autonomy SQLite/evidence/weight state there before this spec is executed.
 demo_datas = [(str(source), destination) for source, destination in demo_data_sources(ROOT)]
 
+# Machine-readable build identity (written by build_windows.ps1 before the
+# freeze); absent in development checkouts, where /health reports commit=dev.
+_identity = ROOT / "app" / "_build_identity.json"
+identity_datas = [(str(_identity), "app")] if _identity.is_file() else []
+
 datas = [
     (str(ROOT / "app" / "static"), "app/static"),
-] + demo_datas + [
+] + demo_datas + identity_datas + [
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
     (str(ROOT / "app" / "autonomy" / "vendor" / "kronos"), "app/autonomy/vendor/kronos"),
     # The optional system-Python worker reads these small modules as files.
