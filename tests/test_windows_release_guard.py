@@ -120,3 +120,13 @@ def test_default_target_is_the_exact_workflow_commit():
     text = workflow_text()
     # The source checkout always uses the resolved target, never a branch name.
     assert "ref: ${{ steps.resolve.outputs.TARGET_COMMIT }}" in text
+
+
+def test_push_trigger_covers_release_branch_and_pr_branch_artifact_only():
+    text = workflow_text()
+    push_block = text[text.index("on:"):text.index("workflow_dispatch:")]
+    assert re.search(r"push:\n(?:.*\n)*?\s+branches:\n\s+- arena/19f4cba3-axiom\n\s+- arena/d832c9d3-axiom", push_block)
+    # A push-triggered run can never publish: the publish step is gated on a
+    # dispatch event with the explicit publish input.
+    assert ("if: success() && github.event_name == 'workflow_dispatch' && inputs.publish"
+            in text)
