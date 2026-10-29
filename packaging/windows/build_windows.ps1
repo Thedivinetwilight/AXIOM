@@ -159,7 +159,11 @@ Step '3c. Exact-commit fake-provider performance benchmarks (hard gate)'
 $BenchmarkOutput = Join-Path $Kit 'TERMINAL_BENCHMARK.json'
 $UiBenchmarkOutput = Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json'
 & python scripts/benchmark_terminal.py --output $BenchmarkOutput 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'benchmark-python.log')
-if ($LASTEXITCODE -ne 0) { Fail 'fake-provider backend benchmark failed on Windows' }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '--- benchmark-python.log tail ---' -ForegroundColor Red
+    Get-Content (Join-Path $Kit 'benchmark-python.log') -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  bench| $_" -ForegroundColor Red }
+    Fail 'fake-provider backend benchmark failed on Windows'
+}
 $env:AXIOM_UI_BENCHMARK_OUTPUT = $UiBenchmarkOutput
 & node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal-benchmark.log')
 $BenchmarkUiExit = $LASTEXITCODE
