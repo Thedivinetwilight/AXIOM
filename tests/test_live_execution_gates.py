@@ -306,3 +306,16 @@ def test_paper_execution_never_reaches_a_broker_order_write(tmp_path, monkeypatc
     view = service.public(session_id)
     assert view["paper_only"] is True and view["live_execution"] is False
     store.close()
+
+
+def test_shutdown_releases_the_lease_and_closes_its_handle(tmp_path):
+    # Windows regression: an open lock handle kept the data directory busy and
+    # tempfile cleanup failed with WinError 32 (PermissionError) at shutdown.
+    from tests.test_upstox_token_entry import client as api_client
+
+    with api_client(tmp_path) as web:
+        lease = getattr(web.app.state, "autonomy_lease", None)
+        assert lease is not None and lease.held
+    assert lease.held is False
+    assert lease._handle is None  # handle closed: the lock file is deletable
+    (tmp_path / "autonomy" / "autonomy-single-instance.lock").unlink()

@@ -145,6 +145,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             app.state.autonomy_runner = None
             app.state.autonomy_error = ""
             autonomy_store = None
+            autonomy_lease = None
             try:
                 autonomy_settings = AutonomySettings.from_env()
                 autonomy_base = Path(app.state.data_dir)
@@ -192,6 +193,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 )
                 if autonomy_store is not None:
                     autonomy_store.close()
+                if autonomy_lease is not None:
+                    autonomy_lease.release()
             yield
             if app.state.autonomy_runner is not None:
                 await app.state.autonomy_runner.stop()
@@ -199,6 +202,12 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 app.state.autonomy.close()
             if autonomy_store is not None:
                 autonomy_store.close()
+            # Release the single-instance lease explicitly: on Windows an open
+            # lock handle keeps the file locked and any later cleanup of the
+            # data directory fails with a sharing violation.
+            autonomy_lease = getattr(app.state, "autonomy_lease", None)
+            if autonomy_lease is not None:
+                autonomy_lease.release()
             await app.state.simulator.stop(reason="APPLICATION_SHUTDOWN")
             app.state.market_data.disconnect("Application shutdown")
             if app.state.vantage.connector:
