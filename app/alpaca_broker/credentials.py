@@ -66,10 +66,23 @@ class DpapiBrokerSecretStore:
         self._inner = DpapiSecretStore(Path(directory), allowed_keys=set(BROKER_KEYS))
 
     def put(self, key: str, value: dict) -> None:
-        self._inner.put(_validate_key(key), value)
+        from app.vantage.secrets import SecretStoreUnavailable
+
+        try:
+            self._inner.put(_validate_key(key), value)
+        except SecretStoreUnavailable as exc:
+            raise BrokerSecretStoreUnavailable(str(exc)) from exc
 
     def get(self, key: str) -> dict:
-        return self._inner.get(_validate_key(key))
+        from app.vantage.secrets import SecretNotFound, SecretStoreUnavailable
+
+        valid_key = _validate_key(key)
+        try:
+            return self._inner.get(valid_key)
+        except SecretNotFound as exc:
+            raise BrokerSecretNotFound(f"no stored broker credential for {valid_key}") from exc
+        except SecretStoreUnavailable as exc:
+            raise BrokerSecretStoreUnavailable(str(exc)) from exc
 
     def delete(self, key: str) -> None:
         self._inner.delete(_validate_key(key))

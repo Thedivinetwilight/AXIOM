@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config.settings import Settings
-from app.vantage.secrets import DpapiSecretStore
+from app.vantage.secrets import DpapiSecretStore, SecretNotFound, SecretStoreUnavailable
 
 SLOT_ALPACA_MARKET_DATA = "ALPACA_MARKET_DATA"
 VALID_FEEDS = frozenset({"iex", "sip", "delayed_sip"})
@@ -70,7 +70,7 @@ class DpapiAlpacaDataStore:
     backend = "windows-dpapi"
 
     def __init__(self, directory: Path) -> None:
-        self._inner = DpapiSecretStore(directory)
+        self._inner = DpapiSecretStore(directory, allowed_keys={SLOT_ALPACA_MARKET_DATA})
 
     def save(self, api_key: str, api_secret: str, feed: str = "iex") -> dict[str, Any]:
         payload = _validate_payload(api_key, api_secret, feed)
@@ -78,11 +78,16 @@ class DpapiAlpacaDataStore:
         return self.status()
 
     def load(self) -> dict[str, str] | None:
-        raw = self._inner.get(SLOT_ALPACA_MARKET_DATA)
+        try:
+            raw = self._inner.get(SLOT_ALPACA_MARKET_DATA)
+        except (SecretNotFound, SecretStoreUnavailable):
+            return None
         return dict(raw) if isinstance(raw, dict) and raw.get("api_key") else None
 
     def delete(self) -> bool:
-        return bool(self._inner.delete(SLOT_ALPACA_MARKET_DATA))
+        existed = self._inner.exists(SLOT_ALPACA_MARKET_DATA)
+        self._inner.delete(SLOT_ALPACA_MARKET_DATA)
+        return existed
 
     def status(self) -> dict[str, Any]:
         raw = self.load()

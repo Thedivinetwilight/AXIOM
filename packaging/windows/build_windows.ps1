@@ -153,7 +153,8 @@ if ($FullTail -match '(\d+) failed') { $FullSummary = "$FullSummary, $($Matches[
 if ($FullTail -match '(\d+) skipped') { $FullSummary = "$FullSummary, $($Matches[1]) skipped" }
 if ($FullExit -ne 0) {
     foreach ($f in $FullFailures) { Write-Host "  failing| $f" -ForegroundColor Red }
-    Fail "full Python suite failed on Windows: $FullSummary"
+    $failList = ($FullFailures -join ' ; ')
+    Fail "full Python suite failed on Windows: $FullSummary :: $failList"
 }
 Write-Host "full suite passed ($FullSummary)"
 
