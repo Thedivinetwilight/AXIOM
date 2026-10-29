@@ -111,6 +111,27 @@ class ReconciliationFailure(UpstoxError):
     pass
 
 
+class NoTradedQuote(ReconciliationFailure):
+    """The provider returned a snapshot for the key but no traded price.
+
+    Fail-closed: an illiquid/untraded/closed-market instrument is never
+    reported as a valid quote. The observed timestamp is carried so the
+    caller can still report freshness honestly.
+    """
+
+    def __init__(self, message: str, *, timestamp: datetime | None = None):
+        super().__init__(message)
+        self.timestamp = timestamp
+
+
+class InvalidQuote(ReconciliationFailure):
+    """The quote response shape/fields are invalid or missing."""
+
+    def __init__(self, message: str, *, timestamp: datetime | None = None):
+        super().__init__(message)
+        self.timestamp = timestamp
+
+
 @dataclass(frozen=True)
 class Quote:
     instrument_key: str
@@ -282,17 +303,57 @@ class UpstoxReadOnly:
         closed-market book is legitimate — so the connection test judges
         freshness from the quote timestamp instead. Execution flows keep the
         strict :meth:`quote` (depth and full validation required).
+
+        Fail-closed states are explicit (never fabricated or substituted):
+        - :class:`NoTradedQuote` — snapshot present but ``last_price`` is
+          missing/zero/non-positive (untraded or illiquid);
+        - :class:`InvalidQuote` — required fields missing or unparseable.
         """
         payload = self._request("GET", "/v2/market-quote/quotes",
                                 params={"instrument_key": instrument_key})
         raw = self._quote_entry(payload, instrument_key)
+        stamp: datetime | None = None
+        try:
+            stamp = self._timestamp(raw.get("timestamp") or raw.get("last_trade_time"))
+        except ReconciliationFailure:
+            stamp = None
+        volume_raw = raw.get("volume")
+        try:
+            volume = float(volume_raw) if volume_raw is not None else None
+        except (TypeError, ValueError):
+            volume = None
+        if "last_price" not in raw:
+            raise InvalidQuote(
+                f"Upstox quote snapshot for {instrument_key} is missing the "
+                "documented last_price field; fail-closed, nothing substituted",
+                timestamp=stamp,
+            )
         try:
             last = float(raw["last_price"])
-            stamp = self._timestamp(raw.get("timestamp") or raw.get("last_trade_time"))
-        except (KeyError, TypeError, ValueError):
-            raise ReconciliationFailure("Quote snapshot has invalid price/timestamp fields") from None
+        except (TypeError, ValueError):
+            raise InvalidQuote(
+                f"Upstox quote snapshot last_price={raw.get('last_price')!r} "
+                "is not numeric; fail-closed, nothing substituted",
+                timestamp=stamp,
+            ) from None
         if not (math.isfinite(last) and last > 0):
-            raise ReconciliationFailure("Quote snapshot failed validation")
+            reference = raw.get("ohlc") or {}
+            previous_close = reference.get("close") if isinstance(reference, dict) else None
+            detail = (
+                f"Upstox returned the snapshot for {instrument_key} but "
+                f"last_price={last!r} (volume={volume!r}) — no traded price "
+                "(untraded/illiquid or market closed); fail-closed, not a "
+                "valid quote"
+            )
+            if previous_close is not None:
+                detail += f"; previous close {previous_close!r} is reference only"
+            raise NoTradedQuote(detail, timestamp=stamp)
+        if stamp is None:
+            raise InvalidQuote(
+                f"Upstox quote snapshot for {instrument_key} has no usable "
+                "timestamp/last_trade_time; fail-closed, freshness unknown",
+                timestamp=None,
+            )
         depth = raw.get("depth") or {}
         buy, sell = depth.get("buy") or [], depth.get("sell") or []
         bid = ask = 0.0
@@ -301,7 +362,7 @@ class UpstoxReadOnly:
                 bid, ask = float(buy[0]["price"]), float(sell[0]["price"])
         except (KeyError, TypeError, ValueError):
             bid = ask = 0.0
-        return Quote(instrument_key, bid, ask, last, float(raw.get("volume") or 0), stamp)
+        return Quote(instrument_key, bid, ask, last, volume or 0.0, stamp)
 
     def market_timings(self, trading_day: str) -> dict[str, tuple[datetime, datetime]]:
         payload = self._request("GET", f"/v2/market/timings/{trading_day}")
@@ -699,35 +760,47 @@ class InstrumentCatalog:
             "source_rows": len(complete),
             "suspended_keys": len(suspended_keys),
             "kept_by_segment": {},
+            "kept_by_segment_and_type": {},
             "dropped_suspended": 0,
             "dropped_unsupported": 0,
             "dropped_unsupported_by": {},
             "dropped_invalid": 0,
             "dropped_invalid_samples": [],
+            "segment_field_mismatch": 0,
         }
         for raw in complete:
             try:
-                key = str(raw["instrument_key"])
-                segment = str(raw["segment"])
-                kind = str(raw.get("instrument_type") or "").strip()
+                key = str(raw["instrument_key"]).strip()
+                segment_field = str(raw.get("segment") or "").strip().upper()
+                # The official instrument_key format is SEGMENT|IDENTIFIER
+                # (upstox skills instruments reference), so the key prefix is
+                # authoritative for the segment; a drifted `segment` field is
+                # counted, never trusted over the key.
+                segment = key.split("|", 1)[0].strip().upper() if "|" in key else segment_field
+                if segment_field and segment_field != segment:
+                    stats["segment_field_mismatch"] += 1
+                kind = str(raw.get("instrument_type") or "").strip().upper()
                 if key in suspended_keys:
                     stats["dropped_suspended"] += 1
                     continue
-                # The live cash rows occasionally carry a blank series column
-                # (production loaders match NSE_EQ rows as "EQ" or ""); a blank
-                # series on an equity segment is a cash equity. Derivatives must
-                # still name their exact contract type (FUT/CE/PE).
-                if segment in {"NSE_EQ", "BSE_EQ"} and kind == "":
-                    kind = "EQ"
-                supported = (segment in {"NSE_EQ", "BSE_EQ"} and kind == "EQ") or (
-                    segment in {"NCD_FO", "BCD_FO"} and kind in {"FUT", "CE", "PE"}
-                )
+                # The official field description states instrument_type on
+                # equity segments carries the NSE/BSE share-series code (EQ,
+                # BE, BZ, SM, ST, SG, GS, N1, XT, MT, ...) — a real BOD also
+                # carries blank series rows. Every cash-market series is an
+                # equity-segment cash instrument; only real derivative
+                # contract types (FUT/CE/PE) are handled by the F&O branches.
+                if segment in {"NSE_EQ", "BSE_EQ"}:
+                    # A blank series on an equity segment is a cash equity.
+                    if kind == "":
+                        kind = "EQ"
+                    supported = kind not in {"FUT", "CE", "PE", "INDEX"}
+                else:
+                    supported = segment in {"NCD_FO", "BCD_FO"} and kind in {"FUT", "CE", "PE"}
                 if not supported:
                     stats["dropped_unsupported"] += 1
                     bucket = f"{segment}|{kind or '(blank)'}"
                     by = stats["dropped_unsupported_by"]
-                    if bucket in by or len(by) < 12:
-                        by[bucket] = by.get(bucket, 0) + 1
+                    by[bucket] = by.get(bucket, 0) + 1
                     continue
                 # Upstox BOD tick values are paise (5.0 => ₹0.05).
                 tick = float(raw["tick_size"]) / 100.0
@@ -775,6 +848,9 @@ class InstrumentCatalog:
                     raise ValueError("Equity multiplier missing")
                 parsed[key] = instrument
                 stats["kept_by_segment"][segment] = stats["kept_by_segment"].get(segment, 0) + 1
+                kept_kind = f"{segment}|{kind or '(blank)'}"
+                stats["kept_by_segment_and_type"][kept_kind] = \
+                    stats["kept_by_segment_and_type"].get(kept_kind, 0) + 1
             except (KeyError, TypeError, ValueError, OverflowError) as error:
                 # Bad/unsupported rows are not executable; keep valid exact rows.
                 # Each drop is accounted so format drift is visible in the UI

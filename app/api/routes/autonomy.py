@@ -22,7 +22,8 @@ from app.api.auth import authenticate, loopback_or_bearer
 from app.autonomy.kronos_artifacts import ArtifactError
 from app.autonomy.service import NotReady, SessionError
 from app.autonomy.upstox import (
-    Quote, ReconciliationFailure, UpstoxAuthError, UpstoxError,
+    InvalidQuote, NoTradedQuote, Quote, ReconciliationFailure, UpstoxAuthError,
+    UpstoxError,
 )
 from app.autonomy.upstox_token import resolve_token
 
@@ -279,6 +280,16 @@ def upstox_token_test(body: UpstoxTokenTestBody, request: Request):
             "revoked). Generate a new token and Save it again.",
             base,
         )
+    except (NoTradedQuote, InvalidQuote) as exc:
+        # Fail-closed, but honest and precise: the response existed and its
+        # observed fields are named. No replay/sample data is substituted.
+        if exc.timestamp is not None:
+            age = (value.clock() - exc.timestamp).total_seconds()
+            base["quote_timestamp"] = exc.timestamp.isoformat()
+            base["freshness"] = {"label": "fresh" if 0 <= age <= 90 else "stale",
+                                 "age_seconds": int(age)}
+        verdict = "no-trade" if isinstance(exc, NoTradedQuote) else "invalid-quote"
+        return _token_test_failure(verdict, str(exc), base)
     except ReconciliationFailure as exc:
         verdict = "unreachable" if "unreachable" in str(exc) else "read_failed"
         return _token_test_failure(verdict, str(exc), base)

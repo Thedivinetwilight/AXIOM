@@ -63,7 +63,12 @@ class Instrument:
 
     @property
     def market_kind(self) -> str:
-        if self.segment in {"NSE_EQ", "BSE_EQ"} and self.instrument_type == "EQ":
+        if self.segment in {"NSE_EQ", "BSE_EQ"}:
+            # The official instruments documentation states instrument_type on
+            # equity segments carries the exchange share-series code (EQ, BE,
+            # BZ, SM, ST, SG, GS, ...) — every cash series is an equity-segment
+            # cash instrument. Only real derivative contract types are routed
+            # by the F&O branches below.
             return "EQUITY"
         if self.segment in {"NCD_FO", "BCD_FO"} and self.instrument_type == "FUT":
             return "CURRENCY_FUTURE"

@@ -432,3 +432,106 @@ def test_file_store_is_owner_only_and_status_never_returns_the_token(tmp_path):
     assert store.token() == SECRET
     assert store.delete() is True
     assert store.status()["present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Equity-data path demonstration (mock-based): a BOD-backed RELIANCE key must
+# be discoverable and pass a fresh read-only quote test. Live verification
+# against the owner's account remains a separate, owner-run check.
+
+
+def test_reliance_bod_key_appears_in_search_and_passes_fresh_quote_test(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)  # real-shape RELIANCE row via the refresh route
+
+        found = web.get("/api/autonomy/catalog?query=RELIANCE", headers=headers)
+        assert found.status_code == 200
+        rows = found.json()["instruments"]
+        assert any(row["instrument_key"] == RELIANCE_KEY for row in rows), \
+            "the BOD-backed RELIANCE exact key must appear in search"
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            return httpx.Response(200, json=quote_payload(RELIANCE_KEY, NOW))
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is True and result["verdict"] == "ok"
+        assert result["authenticated"] is True
+        assert result["instrument_key"] == RELIANCE_KEY
+        assert result["quote_timestamp"] == NOW.isoformat()
+        assert result["freshness"]["label"] == "fresh"
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_zero_last_price_is_explicit_fail_closed_no_trade_not_a_validation_blur(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            payload = quote_payload(RELIANCE_KEY, NOW)
+            entry = next(iter(payload["data"].values()))
+            entry["last_price"] = 0.0
+            entry["volume"] = 0
+            entry["ohlc"] = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 100.5}
+            return httpx.Response(200, json=payload)
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False and result["verdict"] == "no-trade"
+        assert result["authenticated"] is True
+        assert result["quote_timestamp"] == NOW.isoformat()  # observed, honest
+        assert result["freshness"]["label"] == "fresh"
+        assert "last_price=0.0" in result["detail"]
+        assert "fail-closed" in result["detail"]
+        assert "previous close" in result["detail"]  # labelled reference only
+        assert SECRET not in json.dumps(result)
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_missing_or_unusable_quote_fields_fail_closed_as_invalid_quote(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def missing_price(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            payload = quote_payload(RELIANCE_KEY, NOW)
+            entry = next(iter(payload["data"].values()))
+            entry.pop("last_price")
+            return httpx.Response(200, json=payload)
+
+        transport = install_reader(web, missing_price)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False and result["verdict"] == "invalid-quote"
+        assert "missing the documented last_price field" in result["detail"]
+        assert result["freshness"]["label"] != "fresh" or result["quote_timestamp"]
+
+        def unusable_stamp(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            payload = quote_payload(RELIANCE_KEY, NOW)
+            entry = next(iter(payload["data"].values()))
+            entry["timestamp"] = ""
+            entry["last_trade_time"] = ""
+            return httpx.Response(200, json=payload)
+
+        transport2 = install_reader(web, unusable_stamp)
+        result2 = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                           json={"instrument_key": RELIANCE_KEY}).json()
+        assert result2["ok"] is False and result2["verdict"] == "invalid-quote"
+        assert "no usable timestamp" in result2["detail"]
+        assert result2["freshness"] == {"label": "no-quote", "age_seconds": None}
+        assert_read_only_and_secret_free(transport2.calls, SECRET)

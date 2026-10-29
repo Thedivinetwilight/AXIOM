@@ -235,3 +235,129 @@ def test_api_unknown_keys_still_fail_closed(tmp_path):
         })
         assert mixed.status_code >= 400
         assert "Unknown exact Upstox instrument key" in mixed.text
+
+
+# ---------------------------------------------------------------------------
+# Series-code instrument_type and authoritative key-prefix segment (2026-10).
+#
+# The official instruments documentation states instrument_type on equity
+# segments carries the NSE/BSE share-series code (the docs link the exchange
+# "legend of series" pages): EQ, BE, BZ, SM, ST, plus bond/gold series (SG,
+# GS, N1, ...) — a real instrument dump shows NSE_EQ|ST/SG/BE/GS rows. The
+# documented instrument_key format is SEGMENT|IDENTIFIER, so the key prefix is
+# authoritative for the segment. Only real derivative contract types
+# (FUT/CE/PE) may leave the cash branches. Every source row must land in
+# exactly one accounting bucket (kept / suspended / unsupported / invalid).
+
+
+def _refresh_full(rows, suspended_rows, tmp_path):
+    def handler(request):
+        if "suspended" in request.url.path:
+            body = suspended_rows
+        elif "complete" in request.url.path:
+            body = rows
+        else:
+            body = []
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    catalog = InstrumentCatalog(
+        AutonomySettings(), tmp_path / "catalog.json",
+        transport=httpx.MockTransport(handler), clock=lambda: NOW,
+    )
+    catalog.refresh()
+    return catalog
+
+
+def test_bod_cash_series_codes_are_kept_and_key_prefix_segment_is_authoritative(tmp_path):
+    def cash(key, series, symbol, segment="NSE_EQ", exchange="NSE"):
+        return {"segment": segment, "name": symbol, "exchange": exchange,
+                "isin": key.split("|", 1)[1], "instrument_type": series,
+                "instrument_key": key, "lot_size": 1,
+                "freeze_quantity": 100000.0, "exchange_token": "1",
+                "tick_size": 5.0, "trading_symbol": symbol,
+                "expiry": 1735689000000, "strike_price": 0.0}
+
+    rows = [
+        cash(RELIANCE_KEY, "EQ", "RELIANCE"),
+        cash("NSE_EQ|INE839G01010", "BE", "JOCIL"),
+        cash("NSE_EQ|INE002A01019", "", "BLANKSERIES"),
+        cash("NSE_EQ|INE002A01020", "ST", "SMESTOCK"),
+        cash("NSE_EQ|INE002A01021", "SG", "GOLDBOND"),
+        cash("NSE_EQ|INE002A01022", "GS", "GSEC"),
+        cash("BSE_EQ|INE002A01030", "A", "BSEA", segment="BSE_EQ", exchange="BSE"),
+        cash("BSE_EQ|INE002A01031", "G", "BSEG", segment="BSE_EQ", exchange="BSE"),
+        # Segment FIELD drifts to a short code; the key prefix stays official.
+        dict(cash("NSE_EQ|INE002A01040", "EQ", "DRIFTED"), segment="EQ"),
+        # Derivative contract types on a cash segment stay unsupported.
+        dict(cash("NSE_EQ|INE002A01041", "CE", "WEIRDOPT")),
+        # Present in the source file AND in the suspended list -> counted.
+        cash("NSE_EQ|INESUSP01010", "EQ", "SUSPCO"),
+    ]
+    fo = {"instrument_key": "BCD_FO|2135614", "segment": "BCD_FO", "exchange": "BCD",
+          "instrument_type": "CE", "tick_size": 0.25, "lot_size": 1,
+          "freeze_quantity": 1000, "qty_multiplier": 1,
+          "trading_symbol": "668GS2040 99.25 CE 24 JUN 27",
+          "underlying_symbol": "668GS2040", "expiry": 1800000000000}
+    rows += [
+        fo,
+        dict(fo, instrument_key="BCD_FO|2135615", instrument_type="FUT"),
+        dict(fo, instrument_key="NCD_FO|77", segment="NCD_FO", instrument_type="PE"),
+        dict(fo, instrument_key="NSE_FO|36708", segment="NSE_FO", instrument_type="CE"),
+        dict(fo, instrument_key="NSE_FO|36702", segment="NSE_FO", instrument_type="FUT"),
+        dict(fo, instrument_key="MCX_FO|434855", segment="MCX_FO", instrument_type="FUT"),
+        dict(fo, instrument_key="NSE_INDEX|Nifty 50", segment="NSE_INDEX",
+             instrument_type="INDEX"),
+    ]
+    suspended = [{"instrument_key": "NSE_EQ|INESUSP01010"}]
+    catalog = _refresh_full(rows, suspended, tmp_path)
+
+    # Every cash series on equity segments is kept with its exact key.
+    for key, series in [(RELIANCE_KEY, "EQ"), ("NSE_EQ|INE839G01010", "BE"),
+                        ("NSE_EQ|INE002A01019", "EQ"), ("NSE_EQ|INE002A01020", "ST"),
+                        ("NSE_EQ|INE002A01021", "SG"), ("NSE_EQ|INE002A01022", "GS"),
+                        ("BSE_EQ|INE002A01030", "A"), ("BSE_EQ|INE002A01031", "G"),
+                        ("NSE_EQ|INE002A01040", "EQ")]:
+        item = catalog.instruments.get(key)
+        assert item is not None, f"{key} (series {series}) must be kept"
+        assert item.instrument_type == series
+    assert catalog.instruments[RELIANCE_KEY].segment == "NSE_EQ"
+    assert catalog.instruments["NSE_EQ|INE002A01040"].segment == "NSE_EQ"
+    for key in ("BCD_FO|2135614", "BCD_FO|2135615", "NCD_FO|77"):
+        assert key in catalog.instruments, f"{key} must be kept"
+    # Unsupported rows are dropped and NAMED with complete per-bucket counts.
+    assert "NSE_EQ|INE002A01041" not in catalog.instruments
+    stats = catalog.stats
+    assert stats["dropped_unsupported_by"] == {
+        "NSE_EQ|CE": 1, "NSE_FO|CE": 1, "NSE_FO|FUT": 1,
+        "MCX_FO|FUT": 1, "NSE_INDEX|INDEX": 1,
+    }
+    assert stats["segment_field_mismatch"] == 1
+    assert stats["dropped_suspended"] == 1
+    assert stats["dropped_invalid"] == 0
+    # Complete accounting: every source row lands in exactly one bucket.
+    kept = sum(stats["kept_by_segment"].values())
+    assert stats["source_rows"] == len(rows)
+    assert kept + stats["dropped_suspended"] + stats["dropped_unsupported"] \
+        + stats["dropped_invalid"] == stats["source_rows"]
+    assert stats["kept_by_segment_and_type"]["NSE_EQ|EQ"] == 3
+    assert stats["kept_by_segment_and_type"]["NSE_EQ|SG"] == 1
+    assert stats["kept_by_segment_and_type"]["BSE_EQ|A"] == 1
+
+
+def test_bod_unsupported_breakdown_has_no_twelve_bucket_cap(tmp_path):
+    rows = []
+    for index in range(20):
+        rows.append({"instrument_key": f"NSE_FO|{index}", "segment": "NSE_FO",
+                     "exchange": "NSE", "instrument_type": "CE", "tick_size": 5.0,
+                     "lot_size": 50, "freeze_quantity": 1800, "qty_multiplier": 1,
+                     "trading_symbol": f"X{index} CE", "expiry": 1800000000000})
+    for index in range(15):
+        rows.append({"instrument_key": f"MCX_FO|{index}", "segment": "MCX_FO",
+                     "exchange": "MCX", "instrument_type": f"K{index}", "tick_size": 1.0,
+                     "lot_size": 1, "freeze_quantity": 1, "qty_multiplier": 1,
+                     "trading_symbol": f"Y{index}", "expiry": 1800000000000})
+    rows.append(dict(RELIANCE_RAW))
+    catalog = _refresh_full(rows, [], tmp_path)
+    by = catalog.stats["dropped_unsupported_by"]
+    assert by["NSE_FO|CE"] == 20
+    assert sum(by.values()) == 35  # every bucket recorded, none capped away
