@@ -3,8 +3,13 @@ name: windows release
 # Builds, tests and install-tests the Windows x64 executable and installer
 # for one exact source commit. Publication requires a separate explicit dispatch.
 #
-# workflow_dispatch may repeat the exact workflow commit; any different target
-# is refused so application and packaging files cannot come from mixed commits.
+# workflow_dispatch may repeat the exact workflow commit. One pinned exception
+# exists so a manual build of PR #9's exact commit can be run from this workflow
+# once it is registered on main: commit 3a8db0a9d7dc2e1ea7a2ff6aeb3fd20db69de190
+# is accepted as an external target, and in that case the packaging kit is
+# re-sourced from that same commit before anything is built, so application
+# source and packaging files still come from one commit. Any other target that
+# differs from the workflow commit is refused exactly as before.
 # BUILD_TARGET is retained only as a historical file, avoiding any
 # self-referential final-commit update.
 #
@@ -74,9 +79,30 @@ jobs:
           $version = '${{ inputs.version }}'.Trim()
           $workflowCommit = (git -C _kit rev-parse HEAD).Trim()
           if (-not $target) { $target = $workflowCommit }
-          if ($target -ne $workflowCommit) { throw "refusing mixed-source build: target $target differs from workflow commit $workflowCommit" }
-          if (-not $version) { $version = (Get-Content _kit/packaging/windows/VERSION -Raw).Trim() }
           if ($target -notmatch '^[0-9a-f]{40}$') { throw "invalid commit '$target'" }
+          # Pinned exception: PR #9's exact build commit may be built from a
+          # workflow run registered on main. The kit is then re-sourced from
+          # that same commit below, so packaging files and application source
+          # can never be mixed. Every other mismatch is refused.
+          $pinnedExternalTarget = '3a8db0a9d7dc2e1ea7a2ff6aeb3fd20db69de190'
+          $externalKit = $false
+          if ($target -ne $workflowCommit) {
+            if ($target -ne $pinnedExternalTarget) {
+              throw "refusing mixed-source build: target $target differs from workflow commit $workflowCommit and is not the pinned PR build commit $pinnedExternalTarget"
+            }
+            $externalKit = $true
+            Write-Host "pinned external target accepted: $target (kit will be re-sourced from the same commit)"
+          }
+          if ($externalKit) {
+            git -C _kit fetch --depth 1 origin $target
+            if ($LASTEXITCODE -ne 0) { throw "cannot fetch pinned target commit $target" }
+            git -C _kit checkout --force FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw "cannot check out pinned target commit $target" }
+            $kitCommit = (git -C _kit rev-parse HEAD).Trim()
+            if ($kitCommit -ne $target) { throw "kit re-source mismatch: kit commit $kitCommit != target $target" }
+            Write-Host "packaging kit re-sourced from pinned commit: $kitCommit"
+          }
+          if (-not $version) { $version = (Get-Content _kit/packaging/windows/VERSION -Raw).Trim() }
           "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
