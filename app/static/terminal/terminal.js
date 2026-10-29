@@ -492,18 +492,26 @@ function renderPaperRun() {
   $("paper-run-state").className = `status-pill ${run.state === "ERROR" ? "err" : active ? "ok" : "warn"}`;
   $("paper-run-summary").textContent = `${run.feed_kind || "LOCAL PAPER"} · ${run.strategy || "no strategy"} · ${run.automation_enabled ? "AUTOMATION ON · automatic simulated orders possible" : "MANUAL-ONLY · automation OFF"}`;
   const scope = currentProcessRun ? "Current-run" : "Last-run";
+  const source = run.data_source;
+  const span = run.simulated_span || {};
+  const runCurrency = run.currency || currency;
   const fields = [
     ["Run scope", currentProcessRun ? "This process only" : "Persisted completed run; no active process run"],
+    ["Data source", source ? `${source.label}${source.kind === "LOCAL_CSV_REPLAY" ? (source.synthetic ? " · SYNTHETIC · NOT MARKET DATA" : " · LOCAL CSV · PROVENANCE UNVERIFIED") : ""}` : "Not recorded"],
+    ["Simulated market span", `${timeText(span.first_bar_ts)} → ${timeText(span.last_bar_ts)}`],
+    ["Starting capital", money(run.starting_capital, runCurrency)],
+    ["Currency", runCurrency || "Not recorded"],
     ["Started / stopped", `${timeText(run.started_at)} / ${timeText(run.stopped_at)}`],
     ["Stop reason", run.stop_reason || "Not stopped"],
     ["Bars / actionable signals", `${run.processed_bars ?? 0} / ${run.actionable_signals ?? 0}`],
     ["Simulated orders / fills", `${run.orders_created ?? 0} / ${run.fills ?? 0}`],
-    [`${scope} realized P&L`, money(run.realized_pnl, currency)],
-    [`${scope} unrealized P&L Δ`, money(run.unrealized_pnl_delta, currency)],
-    ["Ending unrealized · open positions", money(run.ending_unrealized_pnl, currency)],
+    [`${scope} realized P&L`, money(run.realized_pnl, runCurrency)],
+    [`${scope} unrealized P&L Δ`, money(run.unrealized_pnl_delta, runCurrency)],
+    ["Ending unrealized · open positions", money(run.ending_unrealized_pnl, runCurrency)],
   ];
   $("paper-run-details").innerHTML = fields.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
-  $("paper-run-pnl-note").textContent = "Run values are account-level deltas from that run’s start, not per-trade attribution. Realized/unrealized cards above include persisted local history/current open positions. All values are simulated—not broker or profitability evidence.";
+  const evidence = run.evidence_label ? `${run.evidence_label}. ` : "";
+  $("paper-run-pnl-note").textContent = `${evidence}Run values are account-level deltas from that run’s start, not per-trade attribution. Realized/unrealized cards above include persisted local history/current open positions. All values are simulated—not broker or profitability evidence.`;
 }
 function operatorChecklist() {
   const status = currentStatus();

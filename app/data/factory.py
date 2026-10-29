@@ -2,9 +2,13 @@ from app.data.realtime import BinanceStream, JSONWebSocketStream, ReplayStream
 
 
 def stream_provider(settings, source, *, bars=None, delay=0.0, symbol=None,
-                    timeframe=None):
+                    timeframe=None, source_label=None, data_kind=None):
     if source == "replay":
-        return ReplayStream(bars, delay)
+        return ReplayStream(
+            bars, delay,
+            source_label=source_label or "local-csv-replay",
+            data_kind=data_kind or "local-csv",
+        )
     if source == "binance":
         if not symbol or not symbol.endswith(settings.currency):
             raise ValueError("CURRENCY must match Binance quote currency (e.g. USDT for BTCUSDT)")

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.api.schemas import ManualOrderRequest, PaperStartRequest
 from app.api.services import load_dataset
 from app.data.factory import stream_provider
+from app.data.realtime import replay_provenance
 from app.paper_trading.broker import PaperBroker
 from app.paper_trading.manual import (
     ManualLimits,
@@ -128,6 +129,8 @@ async def start(body: PaperStartRequest, request: Request):
             delay=body.replay_delay,
             symbol=body.symbol,
             timeframe=body.timeframe if body.source in {"upstox", "alpaca"} else None,
+            source_label=replay_provenance(body.dataset)[0] if body.source == "replay" else None,
+            data_kind=replay_provenance(body.dataset)[1] if body.source == "replay" else None,
         )
     if body.source == "alpaca" and getattr(provider, "supported_timeframes", None) != frozenset({"1m"}):
         raise ValueError("Alpaca paper provider timeframe contract mismatch")

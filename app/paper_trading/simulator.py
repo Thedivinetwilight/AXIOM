@@ -71,6 +71,10 @@ class PaperSimulator:
             if isinstance(broker.context.get("last_paper_run"), dict) else None
         )
         self._event_sequence = 0
+        # Simulated market-time span of the bars this run actually processed
+        # (first/last candle timestamps, ISO). Run-scoped visibility only.
+        self.first_bar_ts: str | None = None
+        self.last_bar_ts: str | None = None
 
     def _automation_enabled(self) -> bool:
         return bool(self.strategy and self.strategy.name != "manual_only")
@@ -91,6 +95,39 @@ class PaperSimulator:
         if getattr(self.provider, "requires_fresh_live", False):
             return "MT5_READ_ONLY_LOCAL_PAPER"
         return "READ_ONLY_STREAM_LOCAL_PAPER"
+
+    def _data_source_view(self) -> dict | None:
+        """What fed this run, including CSV dataset identity and synthetics.
+
+        A local CSV replay is never labelled as market data: the bundled
+        ``sample*`` datasets are synthetic DEMO prices and every other CSV has
+        unverified provenance.
+        """
+        if not self.provider:
+            return None
+        is_replay = isinstance(self.provider, ReplayStream)
+        label = getattr(self.provider, "source_label", None) or type(self.provider).__name__
+        data_kind = getattr(self.provider, "data_kind", None) if is_replay else None
+        return {
+            "label": label,
+            "kind": "LOCAL_CSV_REPLAY" if is_replay else "PROVIDER_STREAM",
+            "synthetic": data_kind == "synthetic-sample",
+            "data_kind": data_kind,
+        }
+
+    def _evidence_label(self) -> str:
+        """Standing honesty label for whatever this run consumed."""
+        if isinstance(self.provider, ReplayStream):
+            if getattr(self.provider, "data_kind", "local-csv") == "synthetic-sample":
+                return (
+                    "SYNTHETIC SAMPLE DATA — NOT REAL MARKET DATA; "
+                    "SIMULATED P&L IS NOT PROFIT EVIDENCE"
+                )
+            return (
+                "LOCAL CSV REPLAY — DATA PROVENANCE UNVERIFIED; "
+                "SIMULATED P&L IS NOT PROFIT EVIDENCE"
+            )
+        return "LOCAL PAPER SIMULATION — SIMULATED FILLS; NOT PROFIT EVIDENCE"
 
     def _run_view(self) -> dict | None:
         if not self.run:
@@ -118,6 +155,13 @@ class PaperSimulator:
             "ending_unrealized_pnl": unrealized,
             "equity_delta": float(self.broker.portfolio.equity) - self.run["equity_baseline"],
             "pnl_basis": "LOCAL_SIMULATED_CURRENT_RUN",
+            # Run provenance/visibility (task: data source, span, capital,
+            # currency must be visible; P&L is always labelled simulation).
+            "data_source": self._data_source_view(),
+            "simulated_span": {"first_bar_ts": self.first_bar_ts, "last_bar_ts": self.last_bar_ts},
+            "starting_capital": self.run["equity_baseline"],
+            "currency": str(getattr(self.broker, "currency", "") or ""),
+            "evidence_label": self._evidence_label(),
         }
 
     def _audit(self, kind: str, **payload):
@@ -183,6 +227,8 @@ class PaperSimulator:
             "error": self.error,
             "provider": type(self.provider).__name__ if self.provider else None,
             "feed_kind": self._feed_kind(),
+            "data_source": self._data_source_view(),
+            "evidence_label": self._evidence_label(),
             "automation_enabled": self._automation_enabled(),
             "review_policy": self._review_policy(),
             "stop_reason": self.stop_reason,
@@ -292,6 +338,8 @@ class PaperSimulator:
             self.error, self.state = None, BotState.STARTING
             self.stop_reason = None
             self.processed = 0
+            self.first_bar_ts = None
+            self.last_bar_ts = None
             self.signals = {}
             self.risk_counters = {"actionable_signals": 0, "orders_created": 0, "skipped": 0}
             self.latency = {
@@ -476,6 +524,10 @@ class PaperSimulator:
         # One SQLite transaction for fills, account, dedupe cursor and signal orders.
         self.broker._persist(snapshot)
         self.processed += 1
+        bar_ts = candle.timestamp.isoformat()
+        if self.first_bar_ts is None:
+            self.first_bar_ts = bar_ts
+        self.last_bar_ts = bar_ts
         logger.debug(
             "signal",
             extra={
