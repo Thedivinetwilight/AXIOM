@@ -371,23 +371,47 @@ class TestNoOrderSurfaceWasPorted:
 
     def test_settings_carry_no_alpaca_order_configuration(self):
         names = set(Settings.__dataclass_fields__)
+        # Market-data fields plus the separately gated broker fields; anything
+        # else named "alpaca" would be an undocumented configuration surface.
         assert not {name for name in names if "alpaca" in name} - {
             "alpaca_api_key", "alpaca_api_secret", "alpaca_data_feed",
             "alpaca_symbols",
+            "alpaca_broker_enabled", "alpaca_broker_environment",
+            "alpaca_broker_api_key", "alpaca_broker_api_secret",
+            "alpaca_broker_max_order_value", "alpaca_broker_max_open_positions",
+            "alpaca_broker_max_daily_orders",
         }
+        # Endpoint hosts are never configurable: no URL fields for Alpaca.
+        assert not {name for name in names if "alpaca" in name and "url" in name}
 
     def test_repository_never_names_a_real_order_host(self):
         offenders = []
         metadata_module = "app/data/alpaca.py"
-        # Alpaca's order surface specifically. Generic order words belong to
-        # the separately guarded Vantage/MT5 module and are out of scope here.
+        broker_package = "app/alpaca_broker/"
+        # The Alpaca order surface lives ONLY in the separately gated broker
+        # package (its own tests prove the LIVE gate and host confinement).
+        # Everywhere else — including the market-data module — the trading
+        # hosts and order endpoints stay forbidden, except the one read-only
+        # /v1/assets/ metadata host in app/data/alpaca.py (tested above).
         for path in (REPO / "app").rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
             relative = str(path.relative_to(REPO))
+            if relative.startswith(broker_package):
+                continue
             if "alpaca.markets/v2/orders" in text or "alpaca.markets/v1/orders" in text:
                 offenders.append(relative)
-            # The broker-API host is permitted only in the market-data module's
-            # read-only listing-metadata lookup (see the test above).
+            if "paper-api.alpaca.markets" in text:
+                offenders.append(relative)
             if "api.alpaca.markets" in text and relative != metadata_module:
                 offenders.append(relative)
         assert offenders == []
+
+    def test_order_surface_is_confined_to_the_gated_broker_package(self):
+        # Positive confinement: the order endpoints appear exactly where the
+        # gated broker client documents them — and nowhere else in app/.
+        holders = []
+        for path in (REPO / "app").rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "/v2/orders" in text:
+                holders.append(str(path.relative_to(REPO)))
+        assert holders == ["app/alpaca_broker/client.py"]

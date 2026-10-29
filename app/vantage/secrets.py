@@ -39,15 +39,18 @@ def _blob(data: bytes) -> tuple[DATA_BLOB, Any]:  # pragma: no cover - Windows
 class DpapiSecretStore:
     """Per-user DPAPI encrypted files beneath AXIOM's private data directory."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, allowed_keys: set | None = None):
         self.directory = Path(directory)
+        self.allowed_keys = set(allowed_keys) if allowed_keys is not None else {
+            "VANTAGE_DEMO", "VANTAGE_LIVE",
+        }
         if os.name != "nt":
             raise SecretStoreUnavailable(
                 "Windows DPAPI is required for Vantage credentials; no plaintext fallback exists"
             )
 
     def _path(self, key: str) -> Path:
-        if key not in {"VANTAGE_DEMO", "VANTAGE_LIVE"}:
+        if key not in self.allowed_keys:
             raise ValueError("Invalid credential environment")
         return self.directory / f"{key.lower()}.dpapi"
 

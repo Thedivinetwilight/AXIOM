@@ -151,6 +151,14 @@ async function fetchFake(url, options = {}) {
     data_configured: false, execution_supported: false, mt5_routing_allowed: false,
     cfd_substitution_allowed: false, note: "No listed execution adapter is available.",
   });
+  if (path === "/api/alpaca-broker/status") return response({
+    mode: "ALPACA_PAPER", environment: "paper", endpoint_host: "paper-api.alpaca.markets",
+    is_live: false, is_real_money: false,
+    destination_label: "ALPACA PAPER · broker-simulated fills · no real money",
+    gate: { state: "DISABLED", kill_engaged: false, live_available: false },
+    risk_limits: { configured: false }, blocked: null, client_bound: false,
+    account: null, orders: [], fills: [], positions: [],
+  });
   if (path === "/api/trading/workspace") return response(current);
   if (path === "/api/trading/activity?limit=300") return response({ events: [{ ts: now(), environment: current.status.mode, kind: "FAKE_AUDIT", payload: { safe: true } }] });
   if (path === "/api/trading/connection") return response({ status: current.status, profiles, secret_store: "Windows DPAPI · current Windows user", test_is_read_only: true });

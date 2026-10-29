@@ -17,7 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
-    market_data, listed_assets, connections,
+    market_data, listed_assets, connections, alpaca_broker,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -78,6 +78,49 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 audit=repository.record_system_event,
                 metrics=app.state.performance,
             )
+            # Alpaca broker path (separately gated; disabled by default). LIVE
+            # binds its client only after the gate's explicit Arm + Activate.
+            app.state.alpaca_broker = None
+            app.state.alpaca_broker_credential_source = "none"
+            if settings.alpaca_broker_enabled:
+                from app.alpaca_broker.client import AlpacaTradingClient
+                from app.alpaca_broker.credentials import (
+                    default_store as broker_credential_store,
+                    load_broker_credentials,
+                )
+                from app.alpaca_broker.service import AlpacaBrokerService, BrokerRiskLimits
+
+                broker_store = broker_credential_store(secret_dir)
+                broker_environment = settings.alpaca_broker_environment
+                broker_creds, credential_source = load_broker_credentials(
+                    broker_store, broker_environment, settings,
+                )
+                app.state.alpaca_broker_credential_source = credential_source
+                broker_limits = BrokerRiskLimits(
+                    settings.alpaca_broker_max_order_value,
+                    settings.alpaca_broker_max_open_positions,
+                    settings.alpaca_broker_max_daily_orders,
+                )
+                broker_client = None
+                broker_factory = None
+                if broker_creds["api_key"] and broker_creds["api_secret"]:
+                    if broker_environment == "paper":
+                        broker_client = AlpacaTradingClient(
+                            broker_creds["api_key"], broker_creds["api_secret"],
+                            environment="paper",
+                        )
+                    else:
+                        broker_factory = lambda permit: AlpacaTradingClient(  # noqa: E731
+                            broker_creds["api_key"], broker_creds["api_secret"],
+                            environment="live", live_permit=permit,
+                        )
+                app.state.alpaca_broker = AlpacaBrokerService(
+                    broker_client,
+                    environment=broker_environment,
+                    limits=broker_limits,
+                    repository=repository,
+                    client_factory=broker_factory,
+                )
             # Autonomy is an isolated boundary.  Startup may load public BOD
             # metadata and a halted journal, but never creates/Arms/Activates
             # a session and never starts with an execution permit.
@@ -234,7 +277,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
     # every data route declares its own bearer dependency.
     app.include_router(chart.router)
-    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections):
+    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections, alpaca_broker):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
     # remote script, and nothing secret is ever placed here.

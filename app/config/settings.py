@@ -118,6 +118,15 @@ class Settings:
     alpaca_api_secret: str = field(default="", repr=False)
     alpaca_data_feed: str = "iex"
     alpaca_symbols: str = ""
+    # --- Alpaca BROKER path (separate from market data; LIVE gated) ---
+    # Broker credentials never share fields with the market-data keys above.
+    alpaca_broker_enabled: bool = False
+    alpaca_broker_environment: str = "paper"  # paper | live (live is gated at runtime)
+    alpaca_broker_api_key: str = field(default="", repr=False)
+    alpaca_broker_api_secret: str = field(default="", repr=False)
+    alpaca_broker_max_order_value: float = 0.0  # 0 = unset -> orders fail closed
+    alpaca_broker_max_open_positions: int = 0
+    alpaca_broker_max_daily_orders: int = 0
     # --- V1 (Arena): explicit broker modes + sandbox + hard risk limits ---
     broker: str = "LOCAL_PAPER"  # LOCAL_PAPER | UPSTOX_SANDBOX (LIVE is not enabled)
     upstox_sandbox_access_token: str = field(default="", repr=False)
@@ -276,6 +285,18 @@ class Settings:
                 raise ValueError("US paper mode requires PAPER_MAX_DAILY_LOSS and PAPER_MAX_TRADES_PER_DAY > 0")
             if not 0 < self.paper_max_drawdown < 1:
                 raise ValueError("US paper mode requires PAPER_MAX_DRAWDOWN in (0, 1)")
+        # Alpaca BROKER path (order execution): explicit, separate, LIVE-gated.
+        if self.alpaca_broker_environment not in {"paper", "live"}:
+            raise ValueError("ALPACA_BROKER_ENVIRONMENT must be paper or live")
+        if self.alpaca_broker_enabled and self.alpaca_broker_environment == "live":
+            # LIVE stays disabled unless explicitly configured here AND armed +
+            # activated at runtime (BrokerLiveGate); config alone never suffices.
+            if not self.alpaca_broker_api_key.strip() or not self.alpaca_broker_api_secret.strip():
+                raise ValueError(
+                    "ALPACA_BROKER_ENVIRONMENT=live requires distinct ALPACA_BROKER_API_KEY/"
+                    "ALPACA_BROKER_API_SECRET (never the market-data keys); LIVE still needs "
+                    "an explicit runtime Arm + Activate"
+                )
 
     def market_data_symbol_list(self) -> list[str]:
         """Comma-separated MARKET_DATA_SYMBOLS → instrument key list."""

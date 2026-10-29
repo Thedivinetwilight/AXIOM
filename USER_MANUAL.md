@@ -611,3 +611,102 @@ credentials. Real-connection verification is the owner's step; without it the
 connections remain BLOCKED / NOT VERIFIED regardless of how many mock tests
 pass. Historical data caching, when enabled, is stored per-user locally from
 the licensed provider APIs and is never committed to the repository.
+
+## 22. U.S. brokerage path (Alpaca) — separately gated order execution
+
+This section covers AXIOM's **broker** integration for U.S.-listed stocks and
+ETFs through Alpaca's official Trading API. It is separate from market data
+(section 21) and from local PAPER. Three execution destinations are strictly
+distinct and always displayed before any action:
+
+| Destination | Endpoint | Money | What fills |
+|---|---|---|---|
+| Local PAPER | none (in-app) | none | AXIOM's local simulator |
+| **Alpaca PAPER** | `paper-api.alpaca.markets` | none | Alpaca's paper-trading environment |
+| **Alpaca LIVE** | `api.alpaca.markets` | **REAL** | Alpaca brokerage |
+
+LIVE is **disabled by default**. Configuration alone can never enable it: the
+LIVE path additionally requires every readiness check to pass and two distinct
+operator actions — **Arm**, then **Activate**. Disarm, any material change
+(credentials, risk limits, account identity, failed reconciliation, stale or
+uncertain state) or the emergency stop immediately invalidate activation. No
+environment switch is ever implicit, paper credentials are never accepted for
+LIVE (separate protected credential slots), and no sample/DEMO data is ever
+substituted while reporting a broker connection.
+
+### 22.1 Owner-side prerequisites (before anything works)
+
+1. **Account eligibility — broker approval required.** Alpaca live-account
+   availability depends on your country of residence and on Alpaca's approval
+   of your account application (identity verification/KYC, tax forms such as
+   W-8BEN, account review, funding; MFA is mandatory). See Alpaca's official
+   guidance: https://alpaca.markets/learn/live-trading-account-non-us — "we
+   support services to 195+ countries; if you don't see your country in the
+   list, reach out to support". **Do not assume your account is eligible or
+   approved until Alpaca confirms it.** AXIOM does not and cannot grant
+   eligibility. A paper account does NOT imply a live account.
+2. Create **separate broker API keys** in the Alpaca dashboard (paper keys for
+   the paper environment; live keys only after approval). These are distinct
+   from the market-data keys of section 21 and are stored separately.
+3. Store the broker credentials in the protected local store (DPAPI on
+   Windows; owner-only files elsewhere):
+
+   ```bash
+   python -m app.alpaca_broker.credentials paper --directory <data>/secrets
+   python -m app.alpaca_broker.credentials live  --directory <data>/secrets   # only after broker approval
+   ```
+
+   Environment variables `ALPACA_BROKER_API_KEY`/`ALPACA_BROKER_API_SECRET`
+   work for headless setups and are reported as `environment` (not
+   `protected-store`) in status output.
+4. Configure `.env` (broker fields are separate from market-data fields):
+
+   ```dotenv
+   ALPACA_BROKER_ENABLED=true
+   ALPACA_BROKER_ENVIRONMENT=paper        # paper | live; live needs runtime Arm+Activate
+   ALPACA_BROKER_MAX_ORDER_VALUE=1000     # all three limits are mandatory (> 0)
+   ALPACA_BROKER_MAX_OPEN_POSITIONS=2
+   ALPACA_BROKER_MAX_DAILY_ORDERS=10
+   ```
+
+   Missing or zero risk limits fail closed: orders are refused.
+
+### 22.2 Operating the broker path
+
+- `GET /api/alpaca-broker/status` — account mode, endpoint host, gate state,
+  masked account, risk limits, reconciliation state. The console header shows
+  the broker destination at all times (`ALPACA_PAPER · paper-api.alpaca.markets
+  · gate …`, and for LIVE an unmistakable real-money badge).
+- `POST /api/alpaca-broker/preview` — order preview with every check listed
+  (instrument, size, risk caps, buying power, account state, gate). Nothing is
+  submitted.
+- `POST /api/alpaca-broker/orders` — submit. Every order carries a mandatory
+  `client_order_id`; duplicates (including after a restart) are adopted or
+  refused, never re-posted. Intents, submissions, fills, rejects, cancels and
+  replaces are journaled in the local audit history.
+- `GET /api/alpaca-broker/orders`, `DELETE|PATCH /api/alpaca-broker/orders/{id}`
+  — status updates, cancellation, cancel/replace.
+- `POST /api/alpaca-broker/sync-fills`, `/reconcile`, `/recover` — fill
+  polling, reconciliation (any mismatch fails closed and blocks orders), and
+  restart recovery (broker state is re-adopted; uncertainty blocks orders).
+- `POST /api/alpaca-broker/emergency-stop` — kill switch: cancels all open
+  orders at the broker and blocks every action until an explicit reset
+  (which returns the gate to DISABLED; LIVE must be armed+activated again).
+- LIVE only: `POST /api/alpaca-broker/gate/arm` → `/gate/activate` (and
+  `/gate/disarm`). Activation issues the LIVE permit; without it a LIVE client
+  cannot even be constructed.
+
+### 22.3 What is verified and what is not
+
+- The automated tests exercise the full order lifecycle (preview, submit,
+  partial fills, completion, duplicate prevention, rejections, cancel/replace,
+  reconciliation, restart recovery, kill switch) against a **mocked** paper
+  broker, plus proof that tests cannot reach the LIVE endpoint. Mock tests are
+  **not** proof of real broker connectivity or real fills.
+- Real **Alpaca PAPER** order-flow verification requires the owner's paper
+  account and network access and remains **BLOCKED / NOT VERIFIED** until run
+  owner-side.
+- **LIVE code paths** are tested at the gate/client level only. No real-money
+  order has been placed or may be placed without broker-approved eligibility,
+  funding, readiness checks passing, and explicit Arm + Activate.
+- No profitability or readiness claim is made by any test, mock or CI run.

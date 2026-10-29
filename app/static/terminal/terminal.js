@@ -26,7 +26,7 @@ const state = {
   contracts: {}, chart: { mode: null, feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null },
   chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
   chartSymbolsLoaded: false, chartRequest: 0, riskDirty: false, credentialMode: null,
-  performance: { backend: null, browser: {} }, listedAssets: null, ticketReview: null,
+  performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -295,9 +295,16 @@ async function loadListedAssets() {
   catch (error) { state.listedAssets = { error: error.message, execution_supported: false }; }
   renderListedAssets();
 }
+
+async function loadBrokerDestination() {
+  // Broker path is optional; absence must never break the console.
+  try { state.alpacaBroker = await api("/api/alpaca-broker/status"); }
+  catch (error) { state.alpacaBroker = null; }
+  renderMode();
+}
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets(), loadBrokerDestination()]);
   if (state.page === "instruments" && currentStatus().connected) await loadInstruments();
   if (state.page === "charts") await loadChartSymbols();
 }
@@ -332,6 +339,21 @@ function renderMode() {
     $(id).className = `mode-badge ${badgeClass(mode)}`; $(id).textContent = label;
   }
   $("session-mode").value = mode;
+  // Broker destination (Alpaca PAPER / LIVE): account mode and endpoint are
+  // always visible; LIVE is unmistakably marked as real money.
+  const broker = state.alpacaBroker;
+  if ($("broker-destination")) {
+    if (!broker) {
+      $("broker-destination").textContent = "ALPACA BROKER · disabled";
+      $("broker-destination").className = "broker-destination";
+    } else {
+      const gateState = broker.gate?.state || "DISABLED";
+      $("broker-destination").textContent =
+        `${broker.mode || "ALPACA BROKER"} · ${broker.endpoint_host || "no endpoint"} · gate ${gateState}`;
+      $("broker-destination").className =
+        `broker-destination ${broker.is_real_money ? "live" : ""}`;
+    }
+  }
   const connection = status.connection?.state || "NOT_CONFIGURED";
   $("global-connection").textContent = mode === "AXIOM_PAPER" ? "Local simulated fills" : connection.replaceAll("_", " ");
   const connectionKind = status.connected ? "ok" : connection === "NOT_CONFIGURED" ? "" : "warn";
