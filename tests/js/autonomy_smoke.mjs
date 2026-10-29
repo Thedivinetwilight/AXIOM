@@ -46,6 +46,7 @@ let session = {
 };
 let availableSessions = [];
 let tokenSaved = false;
+let liveTokenSaved = false;
 const confirmations = [];
 const manifestFile = "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa";
 const installPlan = {
@@ -138,6 +139,17 @@ window.fetch = (url, options = {}) => {
   }
   if (path === "/api/autonomy/upstox-token/test" && options.method === "POST") {
     return response({ ok: true, verdict: "ok", detail: "Authenticated (read-only profile) and a fresh full quote was returned for this exact BOD key. Market data only; paper fills remain local.", instrument_key: "NSE_EQ|INE002A01018", quote_timestamp: "2026-10-29T05:00:05+00:00", freshness: { label: "fresh", age_seconds: 2 }, authenticated: true, token_source: "protected-store", checked_at: "2026-10-29T05:00:06+00:00", read_only: true, real_order_api_used: false, execution_mode: "AXIOM_PAPER", session_effect: "NONE" });
+  }
+  if (path === "/api/autonomy/upstox-live-token/status") {
+    return response({ present: liveTokenSaved, saved_at: liveTokenSaved ? "2026-10-29T05:00:00+00:00" : null, protection: "test-memory", token_returned: false, source: liveTokenSaved ? "protected-store" : "none", label: "LIVE TRADING CREDENTIAL · real money · order writes", execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
+  }
+  if (path === "/api/autonomy/upstox-live-token" && options.method === "POST") {
+    const replaced = liveTokenSaved; liveTokenSaved = true;
+    return response({ saved: true, replaced, present: true, saved_at: "2026-10-29T05:00:00+00:00", protection: "test-memory", token_returned: false, label: "LIVE TRADING CREDENTIAL · real money · order writes", execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
+  }
+  if (path === "/api/autonomy/upstox-live-token" && options.method === "DELETE") {
+    liveTokenSaved = false;
+    return response({ deleted: true, present: false, saved_at: null, token_returned: false, execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
   }
   if (path === "/api/autonomy/status") return response({ sessions: availableSessions });
   if (path === "/api/autonomy/sessions" && options.method === "POST") return response(session, true, 201);
@@ -288,10 +300,24 @@ assert.ok(!tokenTestResult.includes(secret));
 assert.ok(!tokenTestResult.includes("last_price") && !tokenTestResult.includes("bid"));
 await click("deleteToken");
 assert.match(window.document.getElementById("tokenStatus").textContent, /No saved token/);
+
+// LIVE trading credential: separate slot, body-only secret, input cleared.
+const liveSecret = "live-secret-token-value-9876543210";
+window.document.getElementById("liveTokenInput").value = liveSecret;
+await click("saveLiveToken");
+assert.equal(window.document.getElementById("liveTokenInput").value, "");
+assert.match(window.document.getElementById("liveTokenStatus").textContent, /LIVE credential present/);
+assert.match(window.document.getElementById("notice").textContent, /LIVE trading credential saved/);
+assert.ok(!window.document.getElementById("notice").textContent.includes(liveSecret));
+assert.ok(!window.document.getElementById("liveTokenStatus").textContent.includes(liveSecret));
+await click("deleteLiveToken");
+assert.match(window.document.getElementById("liveTokenStatus").textContent, /No saved LIVE credential/);
 for (const call of calls) {
   assert.ok(!String(call.path).includes(secret), "the token must never appear in a URL");
-  const inBody = String(call.options.body || "").includes(secret);
-  assert.ok(!inBody || call.path.endsWith("/upstox-token"), "the token may travel only in the save body");
+  assert.ok(!String(call.path).includes(liveSecret), "the live token must never appear in a URL");
+  const inBody = String(call.options.body || "").includes(secret) || String(call.options.body || "").includes(liveSecret);
+  const isTokenSave = call.options.method === "POST" && (call.path.endsWith("/upstox-token") || call.path.endsWith("/upstox-live-token"));
+  assert.ok(!inBody || isTokenSave, "a credential may travel only in its own save body");
 }
 for (const name of ["authorize", "risk", "arm", "activate"]) {
   assert(calls.some(call => call.path.endsWith(`/${name}`)), `missing ${name}`);
@@ -301,8 +327,8 @@ assert.equal(authorize.options.body, undefined);
 for (const call of calls) {
   assert(!call.path.includes("place-order"));
   const body = String(call.options.body || "");
-  const isTokenSave = call.path.endsWith("/upstox-token") && call.options.method === "POST";
-  assert(!body.includes("access_token") || isTokenSave, "access_token may travel only in the manual token save body");
+  const isTokenSave = call.options.method === "POST" && (call.path.endsWith("/upstox-token") || call.path.endsWith("/upstox-live-token"));
+  assert(!body.includes("access_token") || isTokenSave, "access_token may travel only in a manual token save body");
   assert(!body.includes("password"));
   assert(!call.path.includes("localhost"));
 }

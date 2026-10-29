@@ -26,6 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 TOKEN_KEY = "UPSTOX_ACCESS_TOKEN"
+# Live TRADING credentials are stored under a separate key and must never be
+# silently reused from (or for) the read-only market-data token slot.
+LIVE_TOKEN_KEY = "UPSTOX_LIVE_ACCESS_TOKEN"
 MAX_TOKEN_LENGTH = 4096
 
 
@@ -53,8 +56,9 @@ def _now() -> str:
 class MemoryUpstoxTokenStore:
     """Tests only. Never selected automatically by the application."""
 
-    def __init__(self):
+    def __init__(self, key: str = TOKEN_KEY):
         self._value: dict | None = None
+        self._key = key
 
     def save(self, token: str, *, saved_at: str | None = None) -> dict:
         self._value = {"access_token": _validate_token(token),
@@ -82,15 +86,16 @@ class MemoryUpstoxTokenStore:
 class DpapiUpstoxTokenStore:
     """Per-user DPAPI-encrypted token file (Windows). No plaintext fallback."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, key: str = TOKEN_KEY):
         if os.name != "nt":
             raise UpstoxTokenStoreUnavailable("DPAPI is only available on Windows")
         from app.vantage.secrets import DpapiSecretStore
 
-        self._inner = DpapiSecretStore(Path(directory), allowed_keys={TOKEN_KEY})
+        self._inner = DpapiSecretStore(Path(directory), allowed_keys={key})
+        self._key = key
 
     def save(self, token: str, *, saved_at: str | None = None) -> dict:
-        self._inner.put(TOKEN_KEY, {"access_token": _validate_token(token),
+        self._inner.put(self._key, {"access_token": _validate_token(token),
                                     "saved_at": saved_at or _now()})
         return self.status()
 
@@ -98,22 +103,22 @@ class DpapiUpstoxTokenStore:
         from app.vantage.secrets import SecretNotFound
 
         try:
-            value = self._inner.get(TOKEN_KEY)
+            value = self._inner.get(self._key)
         except SecretNotFound:
             raise UpstoxTokenNotFound("no stored Upstox access token") from None
         return _validate_token(str(value.get("access_token") or ""))
 
     def delete(self) -> bool:
-        existed = self._inner.exists(TOKEN_KEY)
-        self._inner.delete(TOKEN_KEY)
+        existed = self._inner.exists(self._key)
+        self._inner.delete(self._key)
         return existed
 
     def status(self) -> dict:
-        present = self._inner.exists(TOKEN_KEY)
+        present = self._inner.exists(self._key)
         saved_at = None
         if present:
             try:
-                saved_at = self._inner.get(TOKEN_KEY).get("saved_at")
+                saved_at = self._inner.get(self._key).get("saved_at")
             except Exception:  # noqa: BLE001 - status must never fail or leak
                 saved_at = None
         return {"present": present, "saved_at": saved_at,
@@ -123,12 +128,13 @@ class DpapiUpstoxTokenStore:
 class FileUpstoxTokenStore:
     """POSIX development fallback: owner-only (0600) file, explicitly not DPAPI."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, key: str = TOKEN_KEY):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._key = key
 
     def _path(self) -> Path:
-        return self.directory / "upstox_access_token.token.json"
+        return self.directory / f"{self._key.lower()}.token.json"
 
     def save(self, token: str, *, saved_at: str | None = None) -> dict:
         path = self._path()
@@ -169,6 +175,13 @@ def default_store(directory: Path):
     return FileUpstoxTokenStore(directory)
 
 
+def default_live_store(directory: Path):
+    """Separate protected slot for the LIVE trading credential."""
+    if os.name == "nt":
+        return DpapiUpstoxTokenStore(directory, key=LIVE_TOKEN_KEY)
+    return FileUpstoxTokenStore(directory, key=LIVE_TOKEN_KEY)
+
+
 def resolve_token(store) -> tuple[str, str]:
     """Resolve the active token: protected store first, then the OAuth/CLI
     environment (``UPSTOX_ACCESS_TOKEN`` / ``MARKET_DATA_ACCESS_TOKEN``).
@@ -195,5 +208,34 @@ def resolve_token_provider(store):
     """``token_provider`` chain for AutonomyService: store, then environment."""
     def provider() -> str:
         token, _ = resolve_token(store)
+        return token
+    return provider
+
+
+def resolve_live_token(store) -> tuple[str, str]:
+    """Resolve the LIVE trading credential: protected store, then the explicit
+    ``UPSTOX_LIVE_ACCESS_TOKEN`` environment variable ONLY.
+
+    The read-only market-data token is NEVER returned here: live execution
+    must never silently reuse a credential saved for read-only access.
+    """
+    if store is not None:
+        try:
+            value = store.token()
+            if value:
+                return value, "protected-store"
+        except (UpstoxTokenNotFound, UpstoxTokenStoreUnavailable, ValueError):
+            live_store_miss = True  # explicit fallthrough to the environment source
+    environment = os.getenv("UPSTOX_LIVE_ACCESS_TOKEN", "").strip()
+    if environment:
+        return environment, "environment"
+    return "", "none"
+
+
+def resolve_live_token_provider(store):
+    """``live_token_provider`` for AutonomyService: live slot, then the
+    explicit live environment variable. Never the read-only chain."""
+    def provider() -> str:
+        token, _ = resolve_live_token(store)
         return token
     return provider

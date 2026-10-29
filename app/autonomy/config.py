@@ -55,6 +55,18 @@ class AutonomySettings:
     swing_bars: int = 2
     reward_risk: float = 1.5
     write_rate_per_second: float = 5.0
+    max_write_attempts: int = 3
+    # Server-side hard limits. All must be positive and bounded: missing,
+    # zero or invalid values fail startup closed; limits are never auto-relaxed.
+    max_order_quantity: float = 1_000.0
+    max_order_notional: float = 500_000.0
+    max_per_symbol_exposure: float = 1_000_000.0
+    max_aggregate_exposure: float = 2_000_000.0
+    max_open_positions: int = 10
+    max_daily_loss_ceiling: float = 100_000.0
+    max_daily_drawdown: float = 50_000.0
+    max_daily_order_submits: int = 200
+    max_clock_skew_seconds: float = 30.0
     worker_enabled: bool = True
     scan_interval_seconds: float = 5.0
     expected_public_ip: str = ""
@@ -78,6 +90,27 @@ class AutonomySettings:
             raise ValueError("Invalid reward/risk ratio")
         if self.write_rate_per_second > 10:
             raise ValueError("Regular Upstox algos must remain below 10 order writes/second")
+        if not 1 <= self.max_write_attempts <= 5:
+            raise ValueError("max_write_attempts must be between 1 and 5")
+        hard_limits = {
+            "max_order_quantity": self.max_order_quantity,
+            "max_order_notional": self.max_order_notional,
+            "max_per_symbol_exposure": self.max_per_symbol_exposure,
+            "max_aggregate_exposure": self.max_aggregate_exposure,
+            "max_daily_loss_ceiling": self.max_daily_loss_ceiling,
+            "max_daily_drawdown": self.max_daily_drawdown,
+        }
+        for name, value in hard_limits.items():
+            if not isinstance(value, (int, float)) or not 0 < value < 1e12:
+                raise ValueError(f"{name} must be a positive bounded hard limit")
+        for name, value in (("max_open_positions", self.max_open_positions),
+                            ("max_daily_order_submits", self.max_daily_order_submits)):
+            if not isinstance(value, int) or not 0 < value <= 10_000:
+                raise ValueError(f"{name} must be a positive bounded hard limit")
+        if not 1 <= self.max_clock_skew_seconds <= 3600:
+            raise ValueError("max_clock_skew_seconds must be between 1 and 3600")
+        if self.max_per_symbol_exposure > self.max_aggregate_exposure:
+            raise ValueError("max_per_symbol_exposure may not exceed max_aggregate_exposure")
         if not 0.5 <= self.scan_interval_seconds <= 300:
             raise ValueError("Autonomy scan interval must be between 0.5 and 300 seconds")
         for name in ("expected_public_ip", "upstox_algo_name"):
@@ -103,6 +136,16 @@ class AutonomySettings:
             swing_bars=_int("AUTONOMY_SWING_BARS", 2, 1, 10),
             reward_risk=_float("AUTONOMY_REWARD_RISK", 1.5, 0.1, 10.0),
             write_rate_per_second=_float("AUTONOMY_WRITE_RATE_PER_SECOND", 5.0, 0.1, 10.0),
+            max_write_attempts=_int("AUTONOMY_MAX_WRITE_ATTEMPTS", 3, 1, 5),
+            max_order_quantity=_float("AUTONOMY_MAX_ORDER_QUANTITY", 1_000.0, 1.0, 1e9),
+            max_order_notional=_float("AUTONOMY_MAX_ORDER_NOTIONAL", 500_000.0, 1.0, 1e12),
+            max_per_symbol_exposure=_float("AUTONOMY_MAX_PER_SYMBOL_EXPOSURE", 1_000_000.0, 1.0, 1e12),
+            max_aggregate_exposure=_float("AUTONOMY_MAX_AGGREGATE_EXPOSURE", 2_000_000.0, 1.0, 1e12),
+            max_open_positions=_int("AUTONOMY_MAX_OPEN_POSITIONS", 10, 1, 500),
+            max_daily_loss_ceiling=_float("AUTONOMY_MAX_DAILY_LOSS_CEILING", 100_000.0, 1.0, 1e12),
+            max_daily_drawdown=_float("AUTONOMY_MAX_DAILY_DRAWDOWN", 50_000.0, 1.0, 1e12),
+            max_daily_order_submits=_int("AUTONOMY_MAX_DAILY_ORDER_SUBMITS", 200, 1, 10_000),
+            max_clock_skew_seconds=_float("AUTONOMY_MAX_CLOCK_SKEW_SECONDS", 30.0, 1.0, 3600.0),
             worker_enabled=_bool("AUTONOMY_WORKER_ENABLED", True),
             scan_interval_seconds=_float("AUTONOMY_SCAN_INTERVAL_SECONDS", 5.0, 0.5, 300.0),
             expected_public_ip=os.getenv("AUTONOMY_EXPECTED_PUBLIC_IP", "").strip(),

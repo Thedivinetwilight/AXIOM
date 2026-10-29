@@ -126,7 +126,7 @@ $('createSession').onclick=createSession;
 $('authorize').onclick=()=>action('authorize');
 $('saveRisk').onclick=()=>action('risk',{max_daily_loss:Number($('maxLoss').value),per_trade_risk_fraction:Number($('riskFraction').value),...( $('mode').value==='PAPER'?{equity_at_entry:Number($('equity').value)}:{})});
 $('arm').onclick=()=>action('arm');
-$('activate').onclick=()=>{if(session?.mode==='UPSTOX_LIVE'&&!window.confirm('Activate real-money autonomous orders for this daily session? No per-order confirmation will follow.'))return;action('activate');};
+$('activate').onclick=()=>{if(session?.mode==='UPSTOX_LIVE'){if(!window.confirm('Activate REAL-MONEY LIVE autonomous trading for this daily session? This clearly permits the already-reviewed strategy to run unattended with real money. No per-order confirmation will follow.'))return;action('activate',{confirm_live_trading:'ACTIVATE LIVE REAL-MONEY TRADING',strategy_acknowledged:true});return;}action('activate');};
 $('pause').onclick=()=>action('pause');
 $('emergency').onclick=()=>{if(window.confirm('Immediately block entries and attempt managed unfilled-entry cancellation? Open-position protection is preserved; unresolved orders will remain prominent.'))action('emergency-stop');};
 $('scan').onclick=()=>action('scan');
@@ -141,7 +141,13 @@ $('saveToken').onclick=saveToken;
 $('replaceToken').onclick=saveToken;
 $('deleteToken').onclick=deleteToken;
 $('testToken').onclick=testToken;
+async function loadLiveTokenStatus(){try{const s=await api('/upstox-live-token/status');$('liveTokenStatus').textContent=s.present?`LIVE credential present · ${s.protection} · saved ${s.saved_at||'unknown'} · resolves from ${s.source}`:`No saved LIVE credential · source ${s.source}`;$('saveLiveToken').hidden=s.present;$('replaceLiveToken').hidden=!s.present;$('deleteLiveToken').hidden=!s.present;}catch(error){note(error.message,true);}}
+async function saveLiveToken(){try{await ensureToken();const value=$('liveTokenInput').value;if(!value){note('Paste the Upstox LIVE trading credential first.',true);return;}const result=await api('/upstox-live-token',{method:'POST',body:JSON.stringify({access_token:value})});$('liveTokenInput').value='';note(result.replaced?'LIVE trading credential replaced · stored encrypted in its own slot. Nothing else changed.':'LIVE trading credential saved · stored encrypted in its own slot. Nothing else changed.');loadLiveTokenStatus();}catch(error){note(error.message,true);}}
+async function deleteLiveToken(){try{await ensureToken();await api('/upstox-live-token',{method:'DELETE'});note('LIVE trading credential deleted. Nothing else changed.');loadLiveTokenStatus();}catch(error){note(error.message,true);}}
+$('saveLiveToken').onclick=saveLiveToken;
+$('replaceLiveToken').onclick=saveLiveToken;
+$('deleteLiveToken').onclick=deleteLiveToken;
 $('chartInstrument').onchange=loadBars;
-if(token()){loadSessions();loadKronos();loadTokenStatus();}
+if(token()){loadSessions();loadKronos();loadTokenStatus();loadLiveTokenStatus();}
 setInterval(loadKronos,3000);
 setInterval(async()=>{if(session){await reload();await loadBars();}},7000);

@@ -75,6 +75,9 @@ class Runtime:
     risk: DailyRisk | None = None
     authorized_day: str = ""
     auth_fingerprint: str = ""
+    live_auth_fingerprint: str = ""
+    daily_submit_count: int = 0
+    daily_submit_day: str = ""
     profile: AccountProfile | None = None
     account: AccountSnapshot | None = None
     entries_blocked: bool = False
@@ -129,6 +132,12 @@ def _token_from_environment() -> str:
     return os.getenv("UPSTOX_ACCESS_TOKEN", "") or os.getenv("MARKET_DATA_ACCESS_TOKEN", "")
 
 
+def _live_token_from_environment() -> str:
+    # The LIVE trading credential is a SEPARATE configuration surface. It is
+    # never silently taken from the read-only market-data token chain.
+    return os.getenv("UPSTOX_LIVE_ACCESS_TOKEN", "")
+
+
 def _default_public_ip() -> str:
     # This is deliberately an activation-only, non-market-data request.  It is
     # never used as a quote or execution provider.  Failure blocks LIVE.
@@ -150,6 +159,8 @@ class AutonomyService:
                  recovery_factory: Callable | None = None,
                  feed_factory: Callable | None = None,
                  token_provider: Callable[[], str] | None = None,
+                 live_token_provider: Callable[[], str] | None = None,
+                 instance_lease: Any | None = None,
                  public_ip_provider: Callable[[], str] | None = None,
                  kronos: KronosService | None = None,
                  evidence: EvidenceRegistry | None = None,
@@ -160,6 +171,8 @@ class AutonomyService:
         self.data_dir = data_dir
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.token_provider = token_provider or _token_from_environment
+        self.live_token_provider = live_token_provider or _live_token_from_environment
+        self.instance_lease = instance_lease
         self.public_ip_provider = public_ip_provider or _default_public_ip
         self.reader_factory = reader_factory or (
             lambda provider: UpstoxReadOnly(provider, clock=self.clock)
@@ -508,11 +521,26 @@ class AutonomyService:
             token = self.token_provider().strip()
             if not token:
                 raise UpstoxAuthError("Configure a fresh daily Upstox token locally, then retry")
-            profile = runtime.reader.profile(include_static_ips=runtime.mode == "UPSTOX_LIVE")
+            if runtime.mode == "UPSTOX_LIVE":
+                # LIVE execution requires its own explicit credential. The
+                # read-only market-data token is never silently reused for the
+                # trading account.
+                live_token = self.live_token_provider().strip()
+                if not live_token:
+                    raise UpstoxAuthError(
+                        "A separate LIVE trading credential (UPSTOX_LIVE_ACCESS_TOKEN "
+                        "protected slot) is required; the read-only market-data token "
+                        "is never used for live execution"
+                    )
+                # Account identity/permission checks run on the LIVE credential.
+                profile = self.reader_factory(lambda: live_token).profile(include_static_ips=True)
+                if runtime.executor is None:
+                    runtime.executor = self.recovery_factory(lambda: live_token)
+                runtime.live_auth_fingerprint = hashlib.sha256(live_token.encode()).hexdigest()
+            else:
+                profile = runtime.reader.profile(include_static_ips=False)
             if not profile.active:
                 raise UpstoxAuthError("Upstox profile is not active")
-            if runtime.mode == "UPSTOX_LIVE" and runtime.executor is None:
-                runtime.executor = self.recovery_factory(self.token_provider)
             runtime.authorized_day = self.day()
             runtime.auth_fingerprint = hashlib.sha256(token.encode()).hexdigest()
             runtime.profile = profile
@@ -560,6 +588,13 @@ class AutonomyService:
             risk = DailyRisk(self.day(), float(max_daily_loss), float(per_trade_risk_fraction),
                              float(equity), self.now())
             risk.validate()
+            if risk.max_daily_loss > self.settings.max_daily_loss_ceiling:
+                raise SessionError(
+                    "Entered daily maximum loss exceeds the configured hard ceiling; "
+                    "hard limits are never auto-relaxed"
+                )
+            if risk.per_trade_risk_fraction <= 0:
+                raise SessionError("Per-trade risk fraction must be positive")
             runtime.risk = risk
             runtime.entries_blocked = runtime.stop_requested.is_set()
             runtime.daily_loss_noticed = False
@@ -576,9 +611,15 @@ class AutonomyService:
             raise NotReady("LIVE master switch is disabled")
         if not self.settings.upstox_algo_name:
             raise NotReady("AUTONOMY_UPSTOX_ALGO_NAME is required for LIVE")
+        if not self.live_token_provider().strip():
+            raise NotReady(
+                "A separate LIVE trading credential is required; the read-only "
+                "market-data token is never used for live execution"
+            )
         if runtime.executor is None or not getattr(
                 runtime.executor, "broker_mutations_reachable", False):
-            runtime.executor = self.live_factory(self.token_provider)
+            # Live order writes are bound to the LIVE credential only.
+            runtime.executor = self.live_factory(self.live_token_provider)
         return runtime.executor
 
     @staticmethod
@@ -607,7 +648,7 @@ class AutonomyService:
                     )
         return list(dict.fromkeys(blockers))
 
-    def readiness(self, session_id: str) -> dict:
+    def readiness(self, session_id: str, *, deep: bool = False) -> dict:
         runtime = self._runtime(session_id)
         blockers: list[str] = []
         if runtime.recovery_error:
@@ -640,6 +681,11 @@ class AutonomyService:
                 blockers.append("LIVE master switch disabled")
             if not self.settings.upstox_algo_name:
                 blockers.append("Configured Upstox Algo Name required")
+            if not self.live_token_provider().strip():
+                blockers.append(
+                    "A separate LIVE trading credential is required; the read-only "
+                    "market-data token is never used for live execution"
+                )
             if not self.settings.expected_public_ip:
                 blockers.append("Expected registered static public IP required")
             if runtime.profile and self.settings.expected_public_ip:
@@ -652,8 +698,71 @@ class AutonomyService:
             blockers.extend(self._permission_blockers(runtime, runtime.profile))
         if self.store.unresolved():
             blockers.append("Unresolved broker outcomes require reconciliation before activation")
+        if deep:
+            blockers.extend(self._deep_readiness_blockers(runtime))
         return {"ready": not blockers, "blockers": list(dict.fromkeys(blockers)),
                 "checked_at": self.now().isoformat()}
+
+    def _deep_readiness_blockers(self, runtime: Runtime) -> list[str]:
+        """Network/lease/limits checks required BEFORE Arm is enabled.
+
+        Every gate here is fail-closed: a missing, zero, invalid, stale or
+        exceeded value blocks Arm. Limits are never auto-relaxed.
+        """
+        blockers: list[str] = []
+        if self.instance_lease is not None and not self.instance_lease.held:
+            blockers.append("Single-instance lease is not held by this process")
+        if runtime.risk is None:
+            return blockers
+        if runtime.risk.max_daily_loss <= 0 or runtime.risk.per_trade_risk_fraction <= 0:
+            blockers.append("Explicit nonzero bounded risk limits are required")
+        if runtime.risk.max_daily_loss > self.settings.max_daily_loss_ceiling:
+            blockers.append("Entered daily maximum loss exceeds the configured hard ceiling")
+        try:
+            server_time = runtime.reader.server_time()
+            skew = abs((server_time - self.now()).total_seconds())
+            if skew > self.settings.max_clock_skew_seconds:
+                blockers.append(
+                    f"Local clock is {int(skew)}s from server time "
+                    f"(limit {int(self.settings.max_clock_skew_seconds)}s); synchronize the clock"
+                )
+        except Exception:  # noqa: BLE001 - unverifiable clock fails closed
+            blockers.append("Clock synchronization could not be verified against Upstox")
+        try:
+            account = runtime.executor.account() if runtime.executor else None
+        except Exception:  # noqa: BLE001 - unavailable account fails closed
+            account = None
+        if account is None:
+            blockers.append("Fresh account snapshot unavailable for funds/margin checks")
+        else:
+            try:
+                account.validate()
+            except ValueError as exc:
+                blockers.append(str(exc))
+            if account.equity <= 0 or account.available_margin <= 0:
+                blockers.append("Account funds/margin must be positive before Arm")
+            elif account.equity < runtime.risk.max_daily_loss:
+                blockers.append(
+                    "Account equity does not cover the configured daily loss cap "
+                    "(funds/margin sufficiency)"
+                )
+        for item in runtime.instruments.values():
+            try:
+                runtime.calendar.window(item, self.now())
+                if not runtime.calendar.is_open(item, self.now()):
+                    blockers.append(f"Exchange session is closed for {item.exchange}")
+            except Exception:  # noqa: BLE001 - unknown session state fails closed
+                blockers.append(f"Market/session availability is unknown for {item.instrument_key}")
+            try:
+                quote = runtime.reader.quote(item.instrument_key)
+                self._validate_quote(quote, item)
+                age = (self.now() - quote.timestamp.astimezone(timezone.utc)).total_seconds()
+                if age < -self.settings.max_bar_future_skew_seconds \
+                        or age > self.settings.stale_after_seconds:
+                    blockers.append(f"Quote is stale/future for {item.instrument_key}")
+            except Exception:  # noqa: BLE001 - missing quotes fail closed
+                blockers.append(f"Fresh valid quote is required for {item.instrument_key}")
+        return blockers
 
     @_persistence_boundary
     def arm(self, session_id: str) -> dict:
@@ -662,7 +771,13 @@ class AutonomyService:
             with runtime.control_lock:
                 if runtime.state == Lifecycle.ACTIVE.value:
                     raise SessionError("Session is already ACTIVE")
-                readiness = self.readiness(session_id)
+                # Arm requires the full gate list: fresh daily authorization,
+                # verified identity/permissions, exact instruments, fresh
+                # quotes, market availability, funds/margin, synchronized
+                # clock, static-IP checks, reconciliation, no unresolved
+                # intents, clear emergency stop, single-instance lease and
+                # explicit nonzero bounded risk limits.
+                readiness = self.readiness(session_id, deep=True)
                 if not readiness["ready"]:
                     raise NotReady("; ".join(readiness["blockers"]))
                 # Only this explicit operator action clears a prior emergency
@@ -759,12 +874,106 @@ class AutonomyService:
                 or quote.ask < quote.bid or quote.volume < 0:
             raise ReconciliationFailure("Quote failed executable-price validation")
 
+    def _hard_limit_blockers(self, runtime: Runtime, account: AccountSnapshot,
+                             order: ProtectedOrder, quote: Quote,
+                             required_margin: float) -> list[str]:
+        """Server-side hard limits, checked before EVERY entry submission.
+
+        Missing, zero, invalid or exceeded limits block the order. Limits are
+        never auto-relaxed at runtime (settings validation refuses invalid
+        configuration outright).
+        """
+        limits = self.settings
+        instrument = runtime.instruments[order.instrument_key]
+        multiplier = float(instrument.contract_multiplier or 1.0)
+        notional = float(order.quantity) * float(order.limit_price) * multiplier
+        blockers: list[str] = []
+        if not math.isfinite(notional) or notional <= 0:
+            blockers.append("hard limit: order notional is invalid")
+        if order.quantity > limits.max_order_quantity:
+            blockers.append(
+                f"hard limit: order quantity {order.quantity:g} exceeds "
+                f"max_order_quantity {limits.max_order_quantity:g}"
+            )
+        if notional > limits.max_order_notional:
+            blockers.append(
+                f"hard limit: order notional {notional:.0f} exceeds "
+                f"max_order_notional {limits.max_order_notional:.0f}"
+            )
+        held = {p.instrument_key: p for p in account.positions if p.quantity}
+        position = held.get(order.instrument_key)
+        symbol_exposure = notional
+        if position is not None:
+            symbol_exposure += abs(position.quantity) * float(position.last_price
+                                                              or position.average_price) \
+                * float(position.multiplier or 1.0)
+        if symbol_exposure > limits.max_per_symbol_exposure:
+            blockers.append(
+                f"hard limit: per-symbol exposure {symbol_exposure:.0f} exceeds "
+                f"max_per_symbol_exposure {limits.max_per_symbol_exposure:.0f}"
+            )
+        aggregate = sum(
+            abs(p.quantity) * float(p.last_price or p.average_price) * float(p.multiplier or 1.0)
+            for p in account.positions if p.quantity
+        ) + notional
+        if aggregate > limits.max_aggregate_exposure:
+            blockers.append(
+                f"hard limit: aggregate exposure {aggregate:.0f} exceeds "
+                f"max_aggregate_exposure {limits.max_aggregate_exposure:.0f}"
+            )
+        open_positions = len(held)
+        if open_positions + (0 if position is not None else 1) > limits.max_open_positions:
+            blockers.append(
+                f"hard limit: open positions would exceed max_open_positions "
+                f"{limits.max_open_positions}"
+            )
+        if runtime.risk is not None:
+            if daily_loss_breached(runtime.risk, account.day_pnl):
+                blockers.append("hard limit: daily loss cap reached")
+            drawdown = runtime.risk.equity_at_entry - account.equity
+            if drawdown > limits.max_daily_drawdown:
+                blockers.append(
+                    f"hard limit: intraday drawdown {drawdown:.0f} exceeds "
+                    f"max_daily_drawdown {limits.max_daily_drawdown:.0f}"
+                )
+        if required_margin > account.available_margin:
+            blockers.append("hard limit: required margin exceeds available margin")
+        if runtime.daily_submit_day != self.day():
+            runtime.daily_submit_day = self.day()
+            runtime.daily_submit_count = 0
+        if runtime.daily_submit_count + 1 > limits.max_daily_order_submits:
+            blockers.append(
+                f"hard limit: daily order submits would exceed "
+                f"max_daily_order_submits {limits.max_daily_order_submits}"
+            )
+        quote_age = (self.now() - quote.timestamp.astimezone(timezone.utc)).total_seconds()
+        if quote_age < -self.settings.max_bar_future_skew_seconds \
+                or quote_age > self.settings.stale_after_seconds:
+            blockers.append("hard limit: quote age exceeds max_quote_age_seconds")
+        return blockers
+
     @_persistence_boundary
-    def activate(self, session_id: str) -> dict:
+    def activate(self, session_id: str, *, confirm_live_trading: str = "",
+                 strategy_acknowledged: bool = False) -> dict:
         with self._lock:
             runtime = self._runtime(session_id)
             if runtime.state != Lifecycle.ARMED.value:
                 raise SessionError("Explicit Arm is required before Activate")
+            if runtime.mode == "UPSTOX_LIVE":
+                # A fresh, explicit operator confirmation is required: it must
+                # say real-money LIVE trading and permit the already-reviewed
+                # strategy to run. Nothing else (restart, recovery, background
+                # job, retry, data refresh) may supply this.
+                if confirm_live_trading != "ACTIVATE LIVE REAL-MONEY TRADING":
+                    raise SessionError(
+                        "LIVE activation requires the explicit confirmation "
+                        "'ACTIVATE LIVE REAL-MONEY TRADING'"
+                    )
+                if strategy_acknowledged is not True:
+                    raise SessionError(
+                        "LIVE activation requires acknowledging that the "
+                        "already-reviewed strategy will run unattended"
+                    )
             readiness = self.readiness(session_id)
             if not readiness["ready"]:
                 raise NotReady("; ".join(readiness["blockers"]))
@@ -779,6 +988,10 @@ class AutonomyService:
                     "automatic": False, "mode": runtime.mode,
                     "paper_only": runtime.mode == "PAPER", "equity": account.equity,
                     "entries_blocked_at_activation": runtime.entries_blocked,
+                    "live_confirmation": (
+                        "ACTIVATE LIVE REAL-MONEY TRADING" if runtime.mode == "UPSTOX_LIVE"
+                        else ""
+                    ),
                 }, session_id)
                 self._persist(runtime)
                 return self.public(session_id)
@@ -1430,6 +1643,12 @@ class AutonomyService:
                 self.store.audit("CANDIDATE_BLOCKED", {"signal_id": candidate.signal_id,
                                                        "reasons": decision.reasons}, runtime.session_id)
                 return
+            hard_blockers = self._hard_limit_blockers(
+                runtime, account, order, quote, required_margin)
+            if hard_blockers:
+                self.store.audit("CANDIDATE_BLOCKED", {"signal_id": candidate.signal_id,
+                                                       "reasons": hard_blockers}, runtime.session_id)
+                return
             payload = {"candidate": candidate.public(), "order": order.__dict__,
                        "size": size.__dict__, "quote": {"bid": quote.bid, "ask": quote.ask,
                        "timestamp": quote.timestamp.isoformat()}, "required_margin": required_margin}
@@ -1441,6 +1660,7 @@ class AutonomyService:
                     return
                 self.store.transition_intent(order.intent_id, "RISK_APPROVED")
                 self.store.transition_intent(order.intent_id, "SUBMISSION_ATTEMPTED")
+                runtime.daily_submit_count += 1
                 try:
                     submission = runtime.executor.place_protected_entry(
                         order, self._permit(runtime, "ENTRY"), session_id=runtime.session_id,

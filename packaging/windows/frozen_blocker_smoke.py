@@ -79,6 +79,9 @@ class Reader:
     def market_timings(self, day):
         return {"NSE": (self.clock() - timedelta(hours=2), self.clock() + timedelta(hours=2))}
 
+    def server_time(self):
+        return self.clock()
+
 
 class FixedCalendar:
     def __init__(self, start, end):
@@ -97,7 +100,18 @@ def make_service(root: Path):
     feed = Feed(bars())
     reader = Reader(feed, lambda: clock[0])
     item = instrument()
-    settings = AutonomySettings(live_enabled=False, worker_enabled=False)
+    settings = AutonomySettings(
+        live_enabled=False, worker_enabled=False,
+        # Explicit nonzero bounded hard limits sized for this smoke fixture.
+        max_order_quantity=100_000.0,
+        max_order_notional=50_000_000.0,
+        max_per_symbol_exposure=50_000_000.0,
+        max_aggregate_exposure=100_000_000.0,
+        max_open_positions=50,
+        max_daily_loss_ceiling=1_000_000.0,
+        max_daily_drawdown=500_000.0,
+        max_daily_order_submits=1_000,
+    )
     catalog = InstrumentCatalog(settings, root / "catalog.json", clock=lambda: clock[0])
     catalog.instruments = {KEY: item}
     catalog.refreshed_at = clock[0]

@@ -41,6 +41,11 @@
 <div class="row"><input id="tokenTestKey" placeholder="Exact BOD key, e.g. NSE_EQ|INE002A01018" aria-label="Exact instrument key for the read-only quote test"><button id="testToken">Test read-only quote</button></div>
 <div id="tokenTestResult" class="notice" role="status" aria-live="polite"></div>
 </section>
+<section class="panel"><h2>Upstox LIVE trading credential · real money · separate slot</h2>
+<p class="check">This credential is stored in its OWN encrypted slot and is used ONLY for live order writes and trading-account checks. It is never silently reused from the read-only market-data token above, and that token is never used for orders. Saving it changes nothing else: no session, no mode, no Arm/Activate.</p>
+<div class="row"><input id="liveTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Upstox LIVE access token" aria-label="Upstox LIVE trading access token"><button id="saveLiveToken" class="warn">Save LIVE credential</button><button id="replaceLiveToken">Replace</button><button id="deleteLiveToken" class="danger">Delete</button></div>
+<div id="liveTokenStatus" class="muted"></div>
+</section>
 <section class="panel"><h2>2 · Fresh daily authorization & risk</h2>
 <p class="muted">Generate the daily Upstox token with the existing local OAuth command. Do not paste broker credentials into this page or API.</p>
 <div class="row"><button id="authorize">Authorize read-only today</button><span id="authState" class="pill">Not authorized</span></div>

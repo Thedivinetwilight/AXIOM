@@ -30,11 +30,13 @@ from app.market_data.mt5 import MarketDataError, MT5MarketDataService
 from app.performance import LatencyTracker
 from app.listed_assets import ListedAssetService, ListedProviderUnavailable
 from app.autonomy.config import AutonomySettings
+from app.autonomy.lease import LeaseUnavailable, SingleInstanceLease
 from app.autonomy.service import AutonomyService
 from app.autonomy.store import AutonomyStore
 from app.autonomy.upstox import InstrumentCatalog
+from app.autonomy.upstox_token import default_live_store as upstox_live_default_store
 from app.autonomy.upstox_token import default_store as upstox_token_default_store
-from app.autonomy.upstox_token import resolve_token_provider
+from app.autonomy.upstox_token import resolve_live_token_provider, resolve_token_provider
 from app.autonomy.runner import AutonomyRunner
 from app.api.routes import autonomy
 
@@ -129,8 +131,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             # account checks; the OAuth/CLI environment token stays available.
             try:
                 app.state.upstox_token = upstox_token_default_store(secret_dir)
+                app.state.upstox_live_token = upstox_live_default_store(secret_dir)
             except Exception:
                 app.state.upstox_token = None
+                app.state.upstox_live_token = None
                 logging.getLogger("bot.autonomy").error(
                     "upstox_token_store_unavailable", extra={"error": "store_init"}
                 )
@@ -155,10 +159,24 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 )
                 autonomy_catalog.load_cache(require_current_day=False)
                 autonomy_store = AutonomyStore(autonomy_dir / "journal.sqlite3")
+                # Single-instance lease: Arm/Activate require this process to
+                # hold it. A second instance keeps running read-only and fails
+                # closed at Arm with a named blocker.
+                autonomy_lease = SingleInstanceLease(autonomy_dir)
+                try:
+                    autonomy_lease.acquire()
+                except LeaseUnavailable:
+                    logging.getLogger("bot.autonomy").warning(
+                        "autonomy_lease_held_by_other_instance",
+                        extra={"effect": "arm_activate_blocked"},
+                    )
+                app.state.autonomy_lease = autonomy_lease
                 app.state.autonomy = AutonomyService(
                     autonomy_settings, autonomy_store, autonomy_catalog,
                     data_dir=autonomy_dir,
                     token_provider=resolve_token_provider(app.state.upstox_token),
+                    live_token_provider=resolve_live_token_provider(app.state.upstox_live_token),
+                    instance_lease=autonomy_lease,
                 )
                 if autonomy_settings.worker_enabled:
                     app.state.autonomy_runner = AutonomyRunner(

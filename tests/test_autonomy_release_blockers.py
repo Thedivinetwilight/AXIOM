@@ -369,10 +369,12 @@ def test_375_bar_session_closes_reconciles_and_restarts_disarmed(tmp_path):
         close = NOW + timedelta(minutes=374)
         service._runtime(session_id).calendar = FixedCalendar(start, close)
         clock[0] = start - timedelta(minutes=1)
-        service.arm(session_id)
+        # Arm itself now requires market/session availability (the readiness
+        # gate runs before Arm is enabled), so the pre-open attempt fails here.
         with pytest.raises(NotReady, match="closed"):
-            service.activate(session_id)
+            service.arm(session_id)
         clock[0] = start
+        service.arm(session_id)
         service.activate(session_id)
 
         processed_count = 0

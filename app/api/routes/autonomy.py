@@ -25,7 +25,7 @@ from app.autonomy.upstox import (
     InvalidQuote, NoTradedQuote, Quote, ReconciliationFailure, UpstoxAuthError,
     UpstoxError,
 )
-from app.autonomy.upstox_token import resolve_token
+from app.autonomy.upstox_token import resolve_live_token, resolve_token
 
 api = APIRouter(prefix="/api/autonomy", dependencies=[Depends(authenticate)])
 page = APIRouter()
@@ -63,6 +63,14 @@ class UpstoxTokenBody(BaseModel):
 class UpstoxTokenTestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     instrument_key: str = Field(min_length=3, max_length=160)
+
+
+class ActivateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # LIVE activation requires this exact confirmation plus the strategy
+    # acknowledgement. PAPER activation carries neither.
+    confirm_live_trading: str = Field(default="", max_length=64)
+    strategy_acknowledged: bool = False
 
 
 def service(request: Request):
@@ -212,6 +220,53 @@ def upstox_token_delete(request: Request):
             "token_returned": False, "execution_effect": "NONE_TOKEN_STORAGE_ONLY"}
 
 
+# --------------------------------------------------------------------------
+# Separate LIVE trading credential (real money). Distinct protected slot;
+# never silently reused from the read-only market-data token. Save/Delete
+# only — authentication and account identity are verified at Authorize/Arm.
+
+
+def live_token_store(request: Request):
+    store = getattr(request.app.state, "upstox_live_token", None)
+    if store is None:
+        raise HTTPException(503, "The protected credential store is unavailable on this host")
+    return store
+
+
+@api.get("/upstox-live-token/status")
+def upstox_live_token_status(request: Request):
+    store = live_token_store(request)
+    status = dict(store.status())
+    _, source = resolve_live_token(store)
+    status["source"] = source
+    status["label"] = "LIVE TRADING CREDENTIAL · real money · order writes"
+    status["execution_effect"] = "NONE_TOKEN_STORAGE_ONLY"
+    return status
+
+
+@api.post("/upstox-live-token")
+def upstox_live_token_save(body: UpstoxTokenBody, request: Request):
+    store = live_token_store(request)
+    replaced = bool(store.status()["present"])
+    try:
+        status = store.save(body.access_token)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "The protected credential store is unavailable; nothing was stored") from None
+    return {"saved": True, "replaced": replaced,
+            "label": "LIVE TRADING CREDENTIAL · real money · order writes",
+            "execution_effect": "NONE_TOKEN_STORAGE_ONLY", **status}
+
+
+@api.delete("/upstox-live-token")
+def upstox_live_token_delete(request: Request):
+    store = live_token_store(request)
+    deleted = store.delete()
+    return {"deleted": deleted, "present": False, "saved_at": None,
+            "token_returned": False, "execution_effect": "NONE_TOKEN_STORAGE_ONLY"}
+
+
 def _token_test_failure(verdict: str, detail: str, base: dict) -> dict:
     return {"ok": False, "verdict": verdict, "detail": detail, **base}
 
@@ -353,8 +408,13 @@ def arm(session_id: str, request: Request):
 
 
 @api.post("/sessions/{session_id}/activate")
-def activate(session_id: str, request: Request):
-    return call(request, lambda value: value.activate(session_id))
+def activate(session_id: str, request: Request, body: ActivateBody | None = None):
+    payload = body or ActivateBody()
+    return call(request, lambda value: value.activate(
+        session_id,
+        confirm_live_trading=payload.confirm_live_trading,
+        strategy_acknowledged=payload.strategy_acknowledged,
+    ))
 
 
 @api.post("/sessions/{session_id}/pause")

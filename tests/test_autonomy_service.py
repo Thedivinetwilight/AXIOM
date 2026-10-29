@@ -68,6 +68,9 @@ class Reader:
     def market_timings(self, day):
         return {"NSE": (self.clock() - timedelta(hours=2), self.clock() + timedelta(hours=2))}
 
+    def server_time(self):
+        return self.clock()
+
 
 class FakeLive(PaperExecution):
     authoritative = True
@@ -141,6 +144,16 @@ def make_service(tmp_path, live=False):
         live_enabled=live, worker_enabled=False,
         expected_public_ip="1.2.3.4" if live else "",
         upstox_algo_name="AXIOM-TEST" if live else "",
+        # Test-world hard limits: explicit, nonzero and bounded — the same
+        # validation applies, only the magnitudes are sized for the fixture.
+        max_order_quantity=100_000.0,
+        max_order_notional=50_000_000.0,
+        max_per_symbol_exposure=50_000_000.0,
+        max_aggregate_exposure=100_000_000.0,
+        max_open_positions=50,
+        max_daily_loss_ceiling=1_000_000.0,
+        max_daily_drawdown=500_000.0,
+        max_daily_order_submits=1_000,
     )
     catalog = InstrumentCatalog(settings, tmp_path / "catalog.json", clock=lambda: clock[0])
     catalog.instruments = {KEY: item}
@@ -156,6 +169,7 @@ def make_service(tmp_path, live=False):
         recovery_factory=lambda provider: FakeRecovery(executor),
         feed_factory=lambda reader: feed,
         token_provider=lambda: "test-only-not-a-credential",
+        live_token_provider=lambda: "separate-live-test-credential",
         public_ip_provider=lambda: "1.2.3.4",
         evidence=EvidenceRegistry([
             replace(evidence(), synthetic=False, provenance_verified=live)
@@ -172,7 +186,16 @@ def make_service(tmp_path, live=False):
 
 def activate(service, session_id):
     service.arm(session_id)
+    runtime = service._runtime(session_id)
+    if runtime.mode == "UPSTOX_LIVE":
+        return service.activate(session_id, **LIVE_CONFIRM)
     return service.activate(session_id)
+
+
+LIVE_CONFIRM = {
+    "confirm_live_trading": "ACTIVATE LIVE REAL-MONEY TRADING",
+    "strategy_acknowledged": True,
+}
 
 
 def test_daily_gates_are_separate_and_paper_order_lifecycle_is_reconciled(tmp_path):
@@ -323,7 +346,7 @@ def test_order_type_revocation_is_rechecked_by_activation_preflight(tmp_path):
     service.arm(session_id)
     service._runtime(session_id).reader.profile = _missing_sl_profile
     with pytest.raises(NotReady, match="order-type"):
-        service.activate(session_id)
+        service.activate(session_id, **LIVE_CONFIRM)
     assert service.public(session_id)["state"] == "ARMED"
     assert service._runtime(session_id).executor.gtt == {}
     service.close()
@@ -854,7 +877,7 @@ def test_route_permissions_rechecked_at_every_order_boundary(tmp_path, stage, ca
         revoke_permissions()
         activation_expected = "profile became inactive" if case == "inactive" else expected
         with pytest.raises(NotReady, match=activation_expected):
-            service.activate(session_id)
+            service.activate(session_id, **LIVE_CONFIRM)
         assert service.public(session_id)["state"] == "ARMED"
     else:
         activate(service, session_id)
@@ -922,7 +945,7 @@ def test_browser_recovery_paper_is_read_only_until_fresh_full_approval(tmp_path)
         service.arm(session_id)
     service.reconcile(session_id)
     service.arm(session_id)
-    activated = service.activate(session_id)
+    activated = service.activate(session_id, **LIVE_CONFIRM)
     assert activated["state"] == "ACTIVE"
     assert activated["account"]["positions"] == before["account"]["positions"]
     assert executor.gtt == gtt and len(store.intents(session_id)) == 1
@@ -962,7 +985,7 @@ def test_browser_recovery_live_reader_then_activate_writer_without_duplicate(tmp
     service.reconcile(session_id)
     service.arm(session_id)
     assert isinstance(runtime.executor, FakeRecovery)
-    activated = service.activate(session_id)
+    activated = service.activate(session_id, **LIVE_CONFIRM)
     assert activated["state"] == "ACTIVE"
     assert runtime.executor is writer and factory_calls
     assert len(store.intents(session_id)) == 1

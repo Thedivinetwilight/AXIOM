@@ -202,6 +202,27 @@ class UpstoxReadOnly:
             raise ReconciliationFailure("Upstox response did not report success")
         return payload
 
+    def server_time(self) -> datetime:
+        """Read the provider's Date header for clock synchronization.
+
+        A lightweight GET on the read-only profile route; only response
+        headers are inspected and the token is never logged or returned.
+        """
+        try:
+            with httpx.Client(base_url=API_BASE, transport=self._transport,
+                              timeout=self._timeout) as client:
+                response = client.get("/v2/user/profile", headers=self._headers())
+        except httpx.HTTPError:
+            raise ReconciliationFailure("Upstox is unreachable; clock sync unverified") from None
+        from email.utils import parsedate_to_datetime
+
+        raw_date = response.headers.get("Date") or ""
+        try:
+            parsed = parsedate_to_datetime(raw_date)
+        except (TypeError, ValueError):
+            raise ReconciliationFailure("Upstox response carried no usable Date header") from None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
     def profile(self, *, include_static_ips: bool = False) -> AccountProfile:
         data = self._request("GET", "/v2/user/profile")["data"]
         if not isinstance(data, dict):
@@ -445,7 +466,7 @@ class UpstoxLiveBroker(UpstoxReadOnly):
     _shared_last_write = 0.0
 
     def __init__(self, token_provider: Callable[[], str], *, algo_name: str,
-                 write_rate_per_second: float = 5.0,
+                 write_rate_per_second: float = 5.0, max_write_attempts: int = 3,
                  transport: httpx.BaseTransport | None = None,
                  timeout: float = 20.0, clock: Callable[[], datetime] | None = None):
         super().__init__(token_provider, transport=transport, timeout=timeout, clock=clock)
@@ -453,10 +474,22 @@ class UpstoxLiveBroker(UpstoxReadOnly):
             raise ValueError("A configured Upstox Algo Name is required for live order writes")
         self.algo_name = algo_name.strip()
         self._minimum_write_interval = 1.0 / write_rate_per_second
+        if not 1 <= max_write_attempts <= 5:
+            raise ValueError("max_write_attempts must be between 1 and 5")
+        self._max_write_attempts = max_write_attempts
+        self._write_attempts: dict[str, int] = {}
 
     def _write(self, method: str, path: str, body: dict, permit: ExecutionPermit,
-               session_id: str) -> dict:
+               session_id: str, *, attempt_key: str = "") -> dict:
         permit.validate(session_id, self._clock())
+        if attempt_key:
+            used = self._write_attempts.get(attempt_key, 0) + 1
+            if used > self._max_write_attempts:
+                raise UpstoxRejected(
+                    "hard limit: write attempts exceeded for this order; "
+                    "reconcile before any further action"
+                )
+            self._write_attempts[attempt_key] = used
         with UpstoxLiveBroker._shared_write_lock:
             elapsed = time.monotonic() - UpstoxLiveBroker._shared_last_write
             if elapsed < self._minimum_write_interval:
@@ -496,7 +529,7 @@ class UpstoxLiveBroker(UpstoxReadOnly):
                               instrument: Instrument) -> Submission:
         validate_order_route(order, instrument)
         payload = self._write("POST", "/v3/order/gtt/place", self._order_payload(order),
-                              permit, session_id)
+                              permit, session_id, attempt_key=f"entry:{order.intent_id}")
         ids = self._ids(payload, "gtt_order_ids")
         return Submission(ids, "ACKNOWLEDGED_UNRECONCILED")
 
@@ -578,7 +611,8 @@ class UpstoxLiveBroker(UpstoxReadOnly):
             raise ReconciliationFailure("GTT protection legs are not IMMEDIATE as required")
         body = {"type": "MULTIPLE", "quantity": record["quantity"],
                 "gtt_order_id": identifier, "rules": rules}
-        payload = self._write("PUT", "/v3/order/gtt/modify", body, permit, session_id)
+        payload = self._write("PUT", "/v3/order/gtt/modify", body, permit, session_id,
+                              attempt_key=f"modify:{identifier}")
         return Submission(self._ids(payload, "gtt_order_ids"), "MODIFIED_UNRECONCILED")
 
     def cancel_gtt(self, identifier: str, permit: ExecutionPermit, *,
@@ -595,7 +629,8 @@ class UpstoxLiveBroker(UpstoxReadOnly):
                for p in positions):
             raise UpstoxRejected("Refusing to remove protection from an open position")
         payload = self._write("DELETE", "/v3/order/gtt/cancel",
-                              {"gtt_order_id": identifier}, permit, session_id)
+                              {"gtt_order_id": identifier}, permit, session_id,
+                              attempt_key=f"cancel:{identifier}")
         return Submission(self._ids(payload, "gtt_order_ids"), "CANCELLED_UNRECONCILED")
 
     def margin_for(self, order: ProtectedOrder) -> float:

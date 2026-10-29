@@ -55,6 +55,70 @@ The autonomy-specific environment settings include:
 
 Runtime journals, catalog cache, research output, and optional artifacts belong in the per-user writable autonomy data directory. The manifest and vendored source belong to the application resource bundle. Do not edit the journal to make an unresolved order disappear.
 
+## 3.1 Credential separation, hard limits and the PAPER/LIVE boundary
+
+**PAPER is the startup default.** A data token, a quote, a chart, a catalog
+refresh, or a mode selection in the UI never implicitly enables live
+execution; nothing except the explicit operator Arm + Activate sequence does.
+
+**Two separate credential slots.** The manual market-data token on the Daily
+Autonomy page is used ONLY for Upstox market data and required read-only
+account checks; paper fills remain local. LIVE execution requires a SECOND,
+explicitly saved **LIVE trading credential** in its own encrypted slot
+(`UPSTOX_LIVE_ACCESS_TOKEN`, DPAPI per Windows user). The two are never mixed:
+the read-only token is never used for order writes, and the LIVE credential is
+never silently reused from (or for) the read-only slot. Both slots are
+save/replace/delete only — the saved value is never returned, displayed,
+logged, or placed in a URL. Saving or testing a credential changes nothing
+else: no session, no mode, no Arm/Activate.
+
+**Server-side hard limits** (environment-configured, validated at startup;
+missing, zero or invalid values fail closed and are never auto-relaxed):
+
+| Limit | Setting |
+| --- | --- |
+| Order quantity per order | `AUTONOMY_MAX_ORDER_QUANTITY` |
+| Order notional per order | `AUTONOMY_MAX_ORDER_NOTIONAL` |
+| Per-symbol exposure | `AUTONOMY_MAX_PER_SYMBOL_EXPOSURE` |
+| Aggregate exposure | `AUTONOMY_MAX_AGGREGATE_EXPOSURE` |
+| Open positions | `AUTONOMY_MAX_OPEN_POSITIONS` |
+| Daily loss (operator entry ≤ ceiling) | `AUTONOMY_MAX_DAILY_LOSS_CEILING` |
+| Intraday drawdown | `AUTONOMY_MAX_DAILY_DRAWDOWN` |
+| Order write rate / write attempts per order | `AUTONOMY_WRITE_RATE_PER_SECOND` / `AUTONOMY_MAX_WRITE_ATTEMPTS` |
+| Order submissions per day | `AUTONOMY_MAX_DAILY_ORDER_SUBMITS` |
+| Quote age | `AUTONOMY_STALE_AFTER_SECONDS` |
+| Clock skew vs Upstox server time | `AUTONOMY_MAX_CLOCK_SKEW_SECONDS` |
+
+Every entry submission re-checks these limits server-side and is blocked with
+an audited `CANDIDATE_BLOCKED` reason when any is exceeded.
+
+**Before Arm is enabled** the server requires ALL of: fresh daily read-only
+authorization; verified account identity and trading permission (the three-leg
+route needs LIMIT and SL order-type permission); the exact selected BOD
+instrument keys still valid; fresh valid quotes for every selected instrument;
+market/session availability; sufficient funds/margin (account equity must back
+the configured daily loss cap); a synchronized clock (within the skew limit);
+registered static-IP verification (LIVE); a successful reconciliation; zero
+unresolved intents/orders; a clear emergency stop; the **single-instance
+lease** (one process per data directory — a second instance runs read-only and
+fails closed at Arm); and explicit nonzero bounded risk limits. Any failed,
+unknown or unavailable check blocks Arm.
+
+**Arm and Activate are separate.** Arm creates no orders. Activate for
+UPSTOX_LIVE requires a fresh, explicit operator confirmation whose exact text
+is `ACTIVATE LIVE REAL-MONEY TRADING` together with an acknowledgement that
+the already-reviewed strategy will run unattended with real money. No restart,
+recovery, background job, retry, or data refresh may Arm or Activate — those
+require the operator API actions.
+
+**Pause and Emergency stop.** Pause stops new entries immediately while
+confirmed protective exits (stops/targets) remain managed and active. Emergency
+stop preempts entries first, then attempts managed cancellation of unfilled
+entry orders only; open-position protection is preserved and any unresolved
+order remains prominently listed until reconciled. An uncertain submission is
+never blindly retried: the intent is marked UNRESOLVED and reconciliation with
+Upstox is required before any further action.
+
 ## 4. Daily startup sequence
 
 1. Start AXIOM. Startup loads public metadata plus durable session, account, intent, order, and PAPER snapshots into a read-only `HALTED` view. It clears prior approval, never restores ARMED/ACTIVE, and never constructs a LIVE executor during recovery. Recovered sessions require fresh daily authorization, new risk values, successful reconciliation, Arm, and Activate.
