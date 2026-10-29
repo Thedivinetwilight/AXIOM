@@ -77,9 +77,15 @@ def with_catalog(web):
 
 
 def quote_payload(key: str, when: datetime) -> dict:
-    return {"status": "success", "data": {key: {
+    # Official Full Market Quotes shape: data keyed by "EXCHANGE:SYMBOL" with
+    # the exact key in instrument_token (upstox.com/developer/
+    # api-documentation/get-full-market-quote/).
+    symbol = key.split("|", 1)[1]
+    exchange = key.split("|", 1)[0]
+    return {"status": "success", "data": {f"{exchange}:{symbol}": {
+        "instrument_token": key,
         "last_price": 100.0, "volume": 5,
-        "timestamp": int(when.timestamp() * 1000),
+        "timestamp": when.isoformat(),
         "depth": {"buy": [{"price": 99.0, "quantity": 1}],
                   "sell": [{"price": 101.0, "quantity": 1}]},
     }}}
@@ -111,7 +117,7 @@ def assert_read_only_and_secret_free(calls, secret: str):
     assert calls, "the read-only client must have been called"
     for request in calls:
         assert request.method == "GET", f"only GET is allowed, saw {request.method} {request.url.path}"
-        assert request.url.path in {"/v2/user/profile", "/v2/market-quote/full"}, request.url.path
+        assert request.url.path in {"/v2/user/profile", "/v2/market-quote/quotes"}, request.url.path
         assert secret not in str(request.url), "the token must never appear in a URL"
         assert request.headers.get("Authorization") == f"Bearer {secret}"
 
@@ -339,6 +345,74 @@ def test_redaction_covers_token_fields_and_values():
     assert redact({"access_token": SECRET}) == {"access_token": "[REDACTED]"}
     assert redact({"nested": {"Authorization": SECRET}}) == {"nested": {"Authorization": "[REDACTED]"}}
     assert SECRET not in json.dumps(redact({"note": f"token {SECRET} used"}, secrets=(SECRET,)))
+
+
+# ---------------------------------------------------------------------------
+# Regression: the official Full Market Quotes endpoint and exact BOD key
+# encoding. The packaged client used GET /v2/market-quote/full, which is not a
+# documented Upstox endpoint and returned HTTP 400 live for BCD_FO|2135614.
+
+
+def test_full_market_quote_uses_documented_quotes_endpoint_with_exact_bcd_key():
+    """Pin GET /v2/market-quote/quotes + instrument_key=BCD_FO%7C2135614
+    (the user-selected exact BOD key) and the official EXCHANGE:SYMBOL
+    response shape matched via instrument_token."""
+    from app.autonomy.upstox import UpstoxReadOnly as Reader
+
+    requests: list = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "success", "data": {
+            "BCD_FO:668GS2040 99.25 CE 24 JUN 27": {
+                "instrument_token": "BCD_FO|2135614",
+                "last_price": 10.5, "volume": 0,
+                "timestamp": NOW.isoformat(),
+                # Illiquid/closed book: zeroed top-of-book is legitimate and
+                # must not fail the connectivity snapshot.
+                "depth": {"buy": [{"price": 0, "quantity": 0}],
+                          "sell": [{"price": 0, "quantity": 0}]},
+            }}})
+
+    client = Reader(lambda: SECRET, transport=httpx.MockTransport(handler), clock=lambda: NOW)
+    snapshot = client.quote_snapshot("BCD_FO|2135614")
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.url.path == "/v2/market-quote/quotes"
+    assert request.url.query == b"instrument_key=BCD_FO%7C2135614"
+    assert "market-quote/full" not in str(request.url)
+    assert SECRET not in str(request.url)
+    assert snapshot.instrument_key == "BCD_FO|2135614"
+    assert snapshot.timestamp == NOW
+
+    # Execution-path quote() keeps its strict executable-depth requirement
+    # (a zeroed/closed book must fail closed, never trade).
+    import pytest
+    from app.autonomy.upstox import ReconciliationFailure
+    with pytest.raises(ReconciliationFailure, match="depth|validation"):
+        client.quote("BCD_FO|2135614")
+
+
+def test_http_400_failure_surfaces_sanitized_body_and_request_line(tmp_path):
+    """A failing quote call must name the exact request (path + encoded
+    query) and Upstox's whitelisted error code/message — and never the token."""
+    from app.autonomy.upstox import ReconciliationFailure, UpstoxReadOnly as Reader
+
+    def handler(request):
+        return httpx.Response(400, json={"status": "error", "errors": [
+            {"errorCode": "UDAPI1087", "message": "One of either symbol or instrument_key is invalid"}]})
+
+    client = Reader(lambda: SECRET, transport=httpx.MockTransport(handler), clock=lambda: NOW)
+    try:
+        client.quote_snapshot("BCD_FO|2135614")
+    except ReconciliationFailure as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("HTTP 400 must fail closed")
+    assert "HTTP 400" in message
+    assert "GET /v2/market-quote/quotes?instrument_key=BCD_FO%7C2135614" in message
+    assert "UDAPI1087" in message and "instrument_key is invalid" in message
+    assert SECRET not in message
 
 
 def test_file_store_is_owner_only_and_status_never_returns_the_token(tmp_path):

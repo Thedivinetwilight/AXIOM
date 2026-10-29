@@ -219,11 +219,11 @@ def _token_test_failure(verdict: str, detail: str, base: dict) -> dict:
 def upstox_token_test(body: UpstoxTokenTestBody, request: Request):
     """Read-only connection test: authenticate, then fetch ONE exact quote.
 
-    Only GET /v2/user/profile and GET /v2/market-quote/full are ever called.
-    No session is created; execution mode, Arm/Activate and automation state
-    are untouched. The response carries only the instrument key, quote
-    timestamp, freshness and sanitized success/failure details — never prices,
-    never the token.
+    Only GET /v2/user/profile and GET /v2/market-quote/quotes (the documented
+    Full Market Quotes endpoint) are ever called. No session is created;
+    execution mode, Arm/Activate and automation state are untouched. The
+    response carries only the instrument key, quote timestamp, freshness and
+    sanitized success/failure details — never prices, never the token.
     """
     value = service(request)
     key = body.instrument_key.strip()
@@ -271,7 +271,7 @@ def upstox_token_test(body: UpstoxTokenTestBody, request: Request):
         return _token_test_failure(verdict, str(exc), base)
     base["authenticated"] = True
     try:
-        quote = client.quote(key)
+        quote = client.quote_snapshot(key)
     except UpstoxAuthError:
         return _token_test_failure(
             "rejected_credential",

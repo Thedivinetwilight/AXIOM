@@ -172,8 +172,11 @@ def test_mock_upstox_readonly_quote_and_live_gtt_payload():
 
     def handler(request):
         requests.append(request)
-        if request.url.path == "/v2/market-quote/full":
-            return httpx.Response(200, json={"status": "success", "data": {KEY: {
+        if request.url.path == "/v2/market-quote/quotes":
+            # Official Full Market Quotes shape: data keyed by EXCHANGE:SYMBOL,
+            # exact key carried in instrument_token.
+            return httpx.Response(200, json={"status": "success", "data": {"NSE_EQ:MOCK": {
+                "instrument_token": KEY,
                 "last_price": 100.0, "volume": 1000, "timestamp": "2026-10-25T10:00:00+00:00",
                 "depth": {"buy": [{"price": 99.95}], "sell": [{"price": 100.05}]},
             }}})

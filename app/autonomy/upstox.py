@@ -27,7 +27,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Callable
-from urllib.parse import quote as url_quote, urlsplit
+from urllib.parse import quote as url_quote, urlencode, urlsplit
 
 import httpx
 
@@ -40,6 +40,38 @@ from app.autonomy.risk import floor_tick, ceil_tick
 OFFICIAL_API_BASE = "https://api.upstox.com"
 API_BASE = OFFICIAL_API_BASE
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _query_suffix(params: dict | None) -> str:
+    """Token-free, percent-encoded query display (params never hold secrets)."""
+    if not params:
+        return ""
+    return "?" + urlencode(sorted(params.items()))
+
+
+def _sanitized_error_body(response) -> str:
+    """Whitelisted digest of an Upstox error body: error codes and messages
+    only. Constructed from named fields, so credentials can never appear."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return "non-JSON error body"
+    if not isinstance(payload, dict):
+        return "unreadable error body"
+    parts = []
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        parts.append(f"message={message[:160]}")
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        for item in errors[:3]:
+            if isinstance(item, dict):
+                code = str(item.get("errorCode") or item.get("error_code") or "").strip()
+                text = str(item.get("message") or "")[:160]
+                parts.append(f"{code} {text}".strip())
+            elif isinstance(item, str):
+                parts.append(item[:160])
+    return "; ".join(part for part in parts if part)[:400] or "error body without details"
 
 
 def validate_official_upstox_request(path: str) -> None:
@@ -132,7 +164,11 @@ class UpstoxReadOnly:
         if response.status_code >= 400:
             if write:
                 raise UpstoxRejected(f"Upstox rejected the write with HTTP {response.status_code}")
-            raise ReconciliationFailure(f"Upstox read failed with HTTP {response.status_code}")
+            raise ReconciliationFailure(
+                f"Upstox read failed with HTTP {response.status_code} "
+                f"({method} {path}{_query_suffix(params)}): "
+                f"{_sanitized_error_body(response)}"
+            )
         try:
             payload = response.json()
         except ValueError:
@@ -181,23 +217,47 @@ class UpstoxReadOnly:
                 seconds /= 1000
             return datetime.fromtimestamp(seconds, timezone.utc)
         if isinstance(value, str) and value:
+            if value.isdigit():
+                # Documented last_trade_time: epoch milliseconds as a string.
+                return UpstoxReadOnly._timestamp(int(value))
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=IST)
             return parsed.astimezone(timezone.utc)
         raise ReconciliationFailure("Fresh execution quote timestamp is missing")
 
-    def quote(self, instrument_key: str) -> Quote:
-        payload = self._request("GET", "/v2/market-quote/full",
-                                params={"instrument_key": instrument_key})
+    @staticmethod
+    def _quote_entry(payload: dict, instrument_key: str) -> dict:
+        """Locate the exact key's quote in a Full Market Quotes response.
+
+        The official GET /v2/market-quote/quotes response keys ``data`` by
+        "EXCHANGE:SYMBOL" and carries the exact key in ``instrument_token``;
+        older/test shapes key by the instrument key itself.
+        """
         data = payload.get("data")
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or not data:
             raise ReconciliationFailure("Upstox full-quote shape is invalid")
+        for value in data.values():
+            if isinstance(value, dict) and value.get("instrument_token") == instrument_key:
+                return value
         raw = data.get(instrument_key)
-        if raw is None and len(data) == 1:
-            raw = next(iter(data.values()))
-        if not isinstance(raw, dict):
-            raise ReconciliationFailure("Exact instrument quote was not returned")
+        if isinstance(raw, dict):
+            return raw
+        if len(data) == 1:
+            only = next(iter(data.values()))
+            if isinstance(only, dict):
+                return only
+        raise ReconciliationFailure("Exact instrument quote was not returned")
+
+    def quote(self, instrument_key: str) -> Quote:
+        # Official Full Market Quotes endpoint (upstox.com/developer/
+        # api-documentation/get-full-market-quote/): GET /v2/market-quote/quotes
+        # with an instrument_key query parameter. The previously used
+        # /v2/market-quote/full path is not a documented endpoint and returns
+        # HTTP 400 against the live API.
+        payload = self._request("GET", "/v2/market-quote/quotes",
+                                params={"instrument_key": instrument_key})
+        raw = self._quote_entry(payload, instrument_key)
         depth = raw.get("depth") or {}
         buy, sell = depth.get("buy") or [], depth.get("sell") or []
         if not buy or not sell:
@@ -214,6 +274,34 @@ class UpstoxReadOnly:
                 or volume < 0:
             raise ReconciliationFailure("Full quote failed validation")
         return Quote(instrument_key, bid, ask, last, volume, stamp)
+
+    def quote_snapshot(self, instrument_key: str) -> Quote:
+        """Read-only connectivity snapshot: last price + quote timestamp.
+
+        Executable bid/ask depth is NOT required here — an illiquid or
+        closed-market book is legitimate — so the connection test judges
+        freshness from the quote timestamp instead. Execution flows keep the
+        strict :meth:`quote` (depth and full validation required).
+        """
+        payload = self._request("GET", "/v2/market-quote/quotes",
+                                params={"instrument_key": instrument_key})
+        raw = self._quote_entry(payload, instrument_key)
+        try:
+            last = float(raw["last_price"])
+            stamp = self._timestamp(raw.get("timestamp") or raw.get("last_trade_time"))
+        except (KeyError, TypeError, ValueError):
+            raise ReconciliationFailure("Quote snapshot has invalid price/timestamp fields") from None
+        if not (math.isfinite(last) and last > 0):
+            raise ReconciliationFailure("Quote snapshot failed validation")
+        depth = raw.get("depth") or {}
+        buy, sell = depth.get("buy") or [], depth.get("sell") or []
+        bid = ask = 0.0
+        try:
+            if buy and sell and float(buy[0]["price"]) > 0 and float(sell[0]["price"]) > 0:
+                bid, ask = float(buy[0]["price"]), float(sell[0]["price"])
+        except (KeyError, TypeError, ValueError):
+            bid = ask = 0.0
+        return Quote(instrument_key, bid, ask, last, float(raw.get("volume") or 0), stamp)
 
     def market_timings(self, trading_day: str) -> dict[str, tuple[datetime, datetime]]:
         payload = self._request("GET", f"/v2/market/timings/{trading_day}")
