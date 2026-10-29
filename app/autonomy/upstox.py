@@ -563,6 +563,7 @@ class InstrumentCatalog:
         self.refreshed_at: datetime | None = None
         self.source_sha256 = ""
         self.warnings: list[str] = []
+        self.stats: dict[str, Any] = {}
 
     def _download(self, url: str) -> tuple[list[dict], str]:
         try:
@@ -606,17 +607,34 @@ class InstrumentCatalog:
         mis_keys = {str(raw.get("instrument_key")) for raw in mis_nse + mis_bse}
         parsed: dict[str, Instrument] = {}
         warnings: list[str] = []
+        stats: dict[str, Any] = {
+            "source_rows": len(complete),
+            "suspended_keys": len(suspended_keys),
+            "kept_by_segment": {},
+            "dropped_suspended": 0,
+            "dropped_unsupported": 0,
+            "dropped_invalid": 0,
+            "dropped_invalid_samples": [],
+        }
         for raw in complete:
             try:
                 key = str(raw["instrument_key"])
                 segment = str(raw["segment"])
-                kind = str(raw["instrument_type"])
+                kind = str(raw.get("instrument_type") or "").strip()
                 if key in suspended_keys:
+                    stats["dropped_suspended"] += 1
                     continue
+                # The live cash rows occasionally carry a blank series column
+                # (production loaders match NSE_EQ rows as "EQ" or ""); a blank
+                # series on an equity segment is a cash equity. Derivatives must
+                # still name their exact contract type (FUT/CE/PE).
+                if segment in {"NSE_EQ", "BSE_EQ"} and kind == "":
+                    kind = "EQ"
                 supported = (segment in {"NSE_EQ", "BSE_EQ"} and kind == "EQ") or (
                     segment in {"NCD_FO", "BCD_FO"} and kind in {"FUT", "CE", "PE"}
                 )
                 if not supported:
+                    stats["dropped_unsupported"] += 1
                     continue
                 # Upstox BOD tick values are paise (5.0 => ₹0.05).
                 tick = float(raw["tick_size"]) / 100.0
@@ -663,8 +681,15 @@ class InstrumentCatalog:
                 else:
                     raise ValueError("Equity multiplier missing")
                 parsed[key] = instrument
-            except (KeyError, TypeError, ValueError, OverflowError):
+                stats["kept_by_segment"][segment] = stats["kept_by_segment"].get(segment, 0) + 1
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
                 # Bad/unsupported rows are not executable; keep valid exact rows.
+                # Each drop is accounted so format drift is visible in the UI
+                # instead of silently shrinking the catalog.
+                stats["dropped_invalid"] += 1
+                if len(stats["dropped_invalid_samples"]) < 5:
+                    sample = raw.get("instrument_key") if isinstance(raw, dict) else "?"
+                    stats["dropped_invalid_samples"].append(f"{sample}: {type(error).__name__}: {error}")
                 continue
         if not parsed:
             raise UpstoxError("No valid supported instruments in the daily catalog")
@@ -672,13 +697,14 @@ class InstrumentCatalog:
         self.refreshed_at = self.clock()
         self.source_sha256 = digest
         self.warnings = warnings
+        self.stats = stats
         self._write_cache()
         return self.public()
 
     def _write_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         body = {"refreshed_at": self.refreshed_at.isoformat(), "source_sha256": self.source_sha256,
-                "warnings": self.warnings,
+                "warnings": self.warnings, "stats": self.stats,
                 "instruments": [item.public() for item in self.instruments.values()]}
         temporary = self.cache_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
@@ -715,6 +741,7 @@ class InstrumentCatalog:
         self.refreshed_at = refreshed
         self.source_sha256 = str(body.get("source_sha256") or "")
         self.warnings = list(body.get("warnings") or [])
+        self.stats = dict(body.get("stats") or {})
         if require_current_day and not self.fresh_for_day(self.clock().astimezone(IST).date().isoformat()):
             self.instruments = {}
             self.refreshed_at = None
@@ -730,6 +757,7 @@ class InstrumentCatalog:
             "source_sha256": self.source_sha256,
             "count": len(self.instruments),
             "warnings": list(self.warnings),
+            "stats": dict(self.stats),
             "instruments": [item.public() for item in self.instruments.values()],
             "scope": "NSE/BSE equities and NCD/BCD exchange-listed currency futures/options; no spot forex",
         }

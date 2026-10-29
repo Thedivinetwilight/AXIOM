@@ -84,6 +84,7 @@ def status(request: Request):
             "source_sha256": value.catalog.source_sha256,
             "count": len(value.catalog.instruments),
             "warnings": value.catalog.warnings,
+            "stats": value.catalog.stats,
         },
         "credential_api": "none; use local OAuth then POST authorize without a token body",
         "automatic_arm_or_activate": False,

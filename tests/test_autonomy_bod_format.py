@@ -93,6 +93,76 @@ def test_derivative_expiry_rules_remain_strict(tmp_path):
     assert "NCD_FO|2" in catalog.instruments
 
 
+def test_blank_or_missing_series_column_on_cash_segments_is_a_cash_equity(tmp_path):
+    # Production loaders match live NSE_EQ rows as "EQ" or "" — the series
+    # column is sometimes blank in complete.json.gz. A blank series on an
+    # equity segment is a cash equity; derivatives must still name FUT/CE/PE.
+    blank = dict(RELIANCE_RAW, instrument_type="")
+    missing = {k: v for k, v in RELIANCE_RAW.items() if k != "instrument_type"}
+    missing["instrument_key"] = "NSE_EQ|INE002A01019"
+    blank_fo = {"instrument_key": "NCD_FO|9", "segment": "NCD_FO", "exchange": "CDS",
+                "instrument_type": "", "tick_size": 0.25, "lot_size": 1,
+                "freeze_quantity": 1000, "qty_multiplier": 1,
+                "trading_symbol": "USDINR FUT", "underlying_symbol": "USDINR",
+                "underlying_key": "NSE_INDEX|USDINR", "expiry": 1735689000000}
+    catalog = refresh_with([blank, missing, blank_fo], tmp_path)
+    assert RELIANCE_KEY in catalog.instruments
+    assert catalog.instruments[RELIANCE_KEY].instrument_type == "EQ"
+    assert "NSE_EQ|INE002A01019" in catalog.instruments
+    assert "NCD_FO|9" not in catalog.instruments  # blank contract type still fails closed
+
+
+def test_parse_stats_account_for_kept_and_dropped_rows(tmp_path):
+    suspended_row = {"instrument_key": "NSE_EQ|INESUSP01010", "segment": "NSE_EQ",
+                     "exchange": "NSE", "instrument_type": "EQ",
+                     "tick_size": 5.0, "lot_size": 1, "freeze_quantity": 100000,
+                     "qty_multiplier": 1, "trading_symbol": "SUSP"}
+    index_row = {"instrument_key": "NSE_INDEX|Nifty 50", "segment": "NSE_INDEX",
+                 "exchange": "NSE", "instrument_type": "INDEX"}
+    expired_fo = {"instrument_key": "NCD_FO|1", "segment": "NCD_FO", "exchange": "CDS",
+                  "instrument_type": "FUT", "tick_size": 0.25, "lot_size": 1,
+                  "freeze_quantity": 1000, "qty_multiplier": 1,
+                  "trading_symbol": "USDINR FUT", "underlying_symbol": "USDINR",
+                  "underlying_key": "NSE_INDEX|USDINR",
+                  "expiry": int((NOW - timedelta(days=30)).timestamp() * 1000)}
+    broken = {"instrument_key": "BSE_EQ|BROKEN1", "segment": "BSE_EQ",
+              "exchange": "BSE", "instrument_type": "EQ"}  # missing tick/lot/freeze
+
+    def handler(request):
+        if "complete" in request.url.path:
+            body = [RELIANCE_RAW, suspended_row, index_row, expired_fo, broken]
+        elif "suspended" in request.url.path:
+            body = [suspended_row]
+        else:
+            body = []
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    catalog = InstrumentCatalog(
+        AutonomySettings(), tmp_path / "catalog.json",
+        transport=httpx.MockTransport(handler), clock=lambda: NOW,
+    )
+    catalog.refresh()
+    stats = catalog.stats
+    assert stats["source_rows"] == 5
+    assert stats["suspended_keys"] == 1
+    assert stats["kept_by_segment"] == {"NSE_EQ": 1}
+    assert stats["dropped_suspended"] == 1
+    assert stats["dropped_unsupported"] == 1
+    assert stats["dropped_invalid"] == 2  # expired F&O + broken equity row
+    assert any("BSE_EQ|BROKEN1" in sample for sample in stats["dropped_invalid_samples"])
+    assert any("NCD_FO|1" in sample for sample in stats["dropped_invalid_samples"])
+
+
+def test_stats_survive_the_cache_round_trip(tmp_path):
+    catalog = refresh_with([RELIANCE_RAW], tmp_path)
+    assert catalog.stats["kept_by_segment"] == {"NSE_EQ": 1}
+    reloaded = InstrumentCatalog(AutonomySettings(), tmp_path / "catalog.json",
+                                 transport=None, clock=lambda: NOW)
+    assert reloaded.load_cache(require_current_day=False)
+    assert reloaded.stats["kept_by_segment"] == {"NSE_EQ": 1}
+    assert reloaded.public()["stats"]["source_rows"] == 1
+
+
 def test_equity_cannot_carry_a_contract_expiry():
     item = Instrument(
         instrument_key=RELIANCE_KEY, display_symbol="NSE_EQ-INE002A01018",
