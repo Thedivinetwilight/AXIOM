@@ -395,7 +395,7 @@ class TestNoOrderSurfaceWasPorted:
         # /v1/assets/ metadata host in app/data/alpaca.py (tested above).
         for path in (REPO / "app").rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
-            relative = str(path.relative_to(REPO))
+            relative = path.relative_to(REPO).as_posix()
             if relative.startswith(broker_package):
                 continue
             if "alpaca.markets/v2/orders" in text or "alpaca.markets/v1/orders" in text:
@@ -413,5 +413,5 @@ class TestNoOrderSurfaceWasPorted:
         for path in (REPO / "app").rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
             if "/v2/orders" in text:
-                holders.append(str(path.relative_to(REPO)))
+                holders.append(path.relative_to(REPO).as_posix())
         assert holders == ["app/alpaca_broker/client.py"]
