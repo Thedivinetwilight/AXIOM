@@ -21,6 +21,10 @@ class Order:
     average_price: float = 0.0
     fees: float = 0.0
     reason: str | None = None
+    quote_source: str | None = None
+    quote_timestamp: str | None = None
+    quote_received_at: str | None = None
+    quote_id: str | None = None
 
     def __post_init__(self):
         validate_symbol(self.symbol)
@@ -57,3 +61,7 @@ class Fill:
     reason: str = "signal"
     spread_slippage_cost: float = 0.0
     id: str = field(default_factory=lambda: uuid4().hex)
+    quote_source: str | None = None
+    quote_timestamp: str | None = None
+    quote_received_at: str | None = None
+    quote_id: str | None = None

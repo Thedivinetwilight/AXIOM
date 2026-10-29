@@ -704,60 +704,97 @@ def cmd_universe_screen(args) -> int:
         database.close()
 
 
+def _research_series(store, repository, key: str, args) -> list:
+    """Load one symbol only; never combine instruments in one backtest."""
+    from app.data.models import validate_symbol
+
+    rows = store.read_range(
+        key, args.unit, args.interval, args.from_date, args.to_date
+    )
+    try:
+        instruments = repository.list_instruments(state=None, limit=10000)
+    except Exception:
+        instruments = []
+    match = next((row for row in instruments if row["instrument_key"] == key), None)
+    candidate = (match or {}).get("trading_symbol") or key.split("|")[-1]
+    try:
+        symbol = validate_symbol(candidate)
+    except ValueError:
+        symbol = "RESEARCH"
+    return store.to_candles(rows, symbol)
+
+
+def _research_keys(raw: str) -> list[str]:
+    keys = list(dict.fromkeys(k.strip() for k in raw.split(",") if k.strip()))
+    if not keys:
+        raise ValueError("at least one instrument key is required")
+    return keys
+
+
 def cmd_research(args) -> int:
     settings = _load_settings()
     database, repository, store, _manager = _data_stack(settings)
     try:
         if args.action == "run":
+            from app.backtesting.costs import ExecutionConfig
+            from app.backtesting.engine import BacktestEngine
             from app.learning.experiments import ExperimentEngine
 
-            keys = [k.strip() for k in args.instruments.split(",") if k.strip()]
-            rows = []
-            for key in keys:
-                rows.extend(store.read_range(key, args.unit, args.interval,
-                                             args.from_date, args.to_date))
-            if not rows:
-                print(json.dumps({"ok": False,
-                                  "error": "no local candles for that request; run `history sync` first"},
-                                 indent=2))
+            try:
+                keys = _research_keys(args.instruments)
+            except ValueError as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}))
                 return 2
-            from app.backtesting.costs import ExecutionConfig
-
-            from app.data.models import Candle as CandleModel
-            from app.history.store import parse_ts
-
-            def symbol_for(key: str) -> str:
-                from app.data.models import validate_symbol
-
-                try:
-                    found = repository.list_instruments(state=None, limit=10000)
-                except Exception:
-                    found = []
-                match = next((r for r in found if r["instrument_key"] == key), None)
-                candidate = (match or {}).get("trading_symbol") or key.split("|")[-1]
-                try:
-                    return validate_symbol(candidate)
-                except ValueError:
-                    return "RESEARCH"
-
-            candles = []
+            raw_periods = (args.periods if isinstance(args.periods, str)
+                           else ",".join(str(p) for p in args.periods))
+            try:
+                periods = list(dict.fromkeys(
+                    int(part.strip()) for part in raw_periods.split(",") if part.strip()
+                ))
+            except ValueError:
+                print(json.dumps({"ok": False, "error": "--periods must be comma-separated integers"}))
+                return 2
+            if not periods or any(period < 1 for period in periods):
+                print(json.dumps({"ok": False, "error": "--periods must contain positive integers"}))
+                return 2
+            grid = [{"period": period, "threshold": 0.0} for period in periods]
+            engine = ExperimentEngine(
+                repository,
+                engine=BacktestEngine(ExecutionConfig(**settings.execution_kwargs())),
+            )
+            runs, errors = [], []
             for key in keys:
-                rows = store.read_range(key, args.unit, args.interval,
-                                        args.from_date, args.to_date)
-                candles.extend(CandleModel(parse_ts(r["ts"]), r["open"], r["high"],
-                                           r["low"], r["close"], r["volume"],
-                                           symbol_for(key)) for r in rows)
-            grid = [{"period": p, "threshold": 0.0} for p in args.periods]
-            engine = ExperimentEngine(repository,
-                                      engine=BacktestEngine(ExecutionConfig()))
-            result = engine.run(args.name, candles, "momentum", grid, args.timeframe)
+                candles = _research_series(store, repository, key, args)
+                if len(candles) < 60:
+                    errors.append({"instrument": key, "error": f"only {len(candles)} local candles; need at least 60"})
+                    continue
+                name = args.name if len(keys) == 1 else f"{args.name}:{key}"
+                runs.append(engine.run(name, candles, "momentum", grid, args.timeframe))
+            result = {
+                "ok": bool(runs),
+                "runs": runs,
+                "candidates": sum(run["candidates"] for run in runs),
+                "promoted": sum(run["promoted"] for run in runs),
+                "errors": errors,
+                "research_only": True,
+                "execution_authorized": False,
+                "profitability_claim": "none",
+            }
+            if len(runs) == 1:
+                # Preserve the original single-instrument fields while adding
+                # the explicit run list and aggregate report metadata.
+                result = {**runs[0], **result}
+            if not runs:
+                result["error"] = "no instrument had enough local candles; run history sync first"
         elif args.action == "status":
             result = {"experiments": repository.list_experiments(limit=10),
                       "promoted_candidates": repository.list_candidates(
                           promoted=True, limit=10)}
         else:
             result = {"ok": False, "error": f"unknown action {args.action}"}
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps(result, indent=2, default=str, allow_nan=False))
+        if args.action == "run" and not result.get("ok", False):
+            return 2
         return 0
     finally:
         database.close()
@@ -886,39 +923,80 @@ def cmd_scan(args) -> int:
 
 
 def cmd_discover(args) -> int:
+    """Run controlled, per-instrument research; never authorize execution."""
     settings = _load_settings()
     from app.backtesting.costs import ExecutionConfig
     from app.backtesting.engine import BacktestEngine
-    from app.data.models import Candle as CandleModel
-    from app.history.store import CandleStore, parse_ts
+    from app.history.store import CandleStore
     from app.research.discovery import StrategyDiscoveryEngine, generate_specs
 
     database, repository = _stack_or_none(settings)
     try:
         store = CandleStore(Path(settings.data_dir) / "history",
                             parquet_enabled=settings.parquet_enabled)
-        candles = []
-        for key in [k.strip() for k in args.instruments.split(",") if k.strip()]:
-            for row in store.read_range(key, args.unit, args.interval,
-                                        args.from_date, args.to_date):
-                candles.append(CandleModel(parse_ts(row["ts"]), row["open"],
-                                           row["high"], row["low"], row["close"],
-                                           row["volume"], key.split("|")[-1]))
-        if len(candles) < 60:
-            print(json.dumps({"ok": False,
-                              "error": f"only {len(candles)} local candles; run history sync first"}))
+        try:
+            keys = _research_keys(args.instruments)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
             return 2
+        limit = getattr(args, "max_candidates", None)
+        limit = settings.discovery_max_candidates if limit is None else limit
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            print(json.dumps({"ok": False, "error": "--max-candidates must be a positive integer"}))
+            return 2
+        specs = generate_specs(max_candidates=limit)
         discovery = StrategyDiscoveryEngine(
-            repository, engine=BacktestEngine(ExecutionConfig()))
-        specs = generate_specs(max_candidates=settings.discovery_max_candidates)
-        run = discovery.discover(args.name, candles, args.timeframe, specs=specs)
-        print(json.dumps({"experiment_id": run["experiment_id"],
-                          "candidates": len(run["results"]),
-                          "qualified": len(run["qualified"]),
-                          "qualified_detail": [{k: q.get(k) for k in ("strategy", "parameters", "score", "oos")}
-                                               for q in run["qualified"]]},
-                         indent=2, default=str))
-        return 0
+            repository,
+            settings=settings,
+            engine=BacktestEngine(ExecutionConfig(**settings.execution_kwargs())),
+        )
+        runs, errors = [], []
+        for key in keys:
+            candles = _research_series(store, repository, key, args)
+            if len(candles) < 60:
+                errors.append({"instrument": key, "error": f"only {len(candles)} local candles; need at least 60"})
+                continue
+            name = args.name if len(keys) == 1 else f"{args.name}:{key}"
+            run = discovery.discover(name, candles, args.timeframe, specs=specs)
+            run["instrument"] = key
+            runs.append(run)
+        qualified = []
+        for run in runs:
+            for candidate in run["qualified"]:
+                qualified.append({
+                    "instrument": run["instrument"],
+                    "strategy": candidate["strategy"],
+                    "parameters": candidate["parameters"],
+                    "oos": candidate.get("oos", {}),
+                    "robustness_score": candidate.get("robustness_score"),
+                    "wf_expectancy": candidate.get("wf_expectancy"),
+                    "metrics": candidate.get("metrics", {}),
+                    "research_only": True,
+                })
+        report = {
+            "ok": bool(runs),
+            "experiment_id": runs[0]["experiment_id"] if len(runs) == 1 else None,
+            "experiment_ids": [run["experiment_id"] for run in runs],
+            "candidates": sum(run["evaluated"] for run in runs),
+            "qualified": len(qualified),
+            "qualified_detail": qualified,
+            "runs": runs,
+            "errors": errors,
+            "research_only": True,
+            "execution_authorized": False,
+            "profitability_claim": "none",
+            "note": "Historical research candidates only; no profit guarantee, paper deployment or LIVE eligibility.",
+        }
+        if not runs:
+            report["error"] = "no instrument had enough local candles; run history sync first"
+        output = getattr(args, "output", None)
+        if output:
+            report["output"] = str(output)
+            target = Path(output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(report, indent=2, default=str, allow_nan=False) + "\n")
+        print(json.dumps(report, indent=2, default=str, allow_nan=False))
+        return 0 if runs else 2
     finally:
         database.close()
 
@@ -1129,6 +1207,8 @@ def parser() -> argparse.ArgumentParser:
     discover.add_argument("--from-date", default=None)
     discover.add_argument("--to-date", default=None)
     discover.add_argument("--timeframe", default="1D")
+    discover.add_argument("--max-candidates", type=int, default=None)
+    discover.add_argument("--output", default=None, help="optional research JSON report path")
     discover.set_defaults(func=cmd_discover)
 
     life = sub.add_parser("lifecycle", help="strategy pipeline: status/promote/degrade")
@@ -1158,4 +1238,12 @@ def main(argv=None) -> None:
 
 
 if __name__ == "__main__":
+    # Windows runners can default to a legacy charmap code page. Reports and
+    # diagnostics contain Unicode arrows; use UTF-8 instead of crashing after
+    # the work completed. ``replace`` also avoids a secondary print failure for
+    # an unusual unencodable character.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     main()

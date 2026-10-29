@@ -1,1012 +1,712 @@
-# Arena Trading Bot — USER MANUAL
+# AXIOM Operator — User Manual
 
-**Release: Arena 3.0.4 (current build in this repository)**
-Audience: human operator / developer running Arena locally.
+**Current source version: 3.7.0a6**
 
-> **Safety headline.** Arena is a quantitative **research and paper/sandbox**
-> platform. `MODE=PAPER` and `LIVE_TRADING=false` are hard-coded as the only
-> permitted values — any other combination is rejected at startup. `BROKER=LIVE`
-> is rejected by validation. Real-money order routing **does not exist** in the
-> codebase. The only real order APIs Arena can call are the documented
-> **Upstox SANDBOX** endpoints, and only when you explicitly configure
-> `BROKER=UPSTOX_SANDBOX` with your own sandbox token.
+**Audience:** the account owner operating AXIOM on Windows x64.
 
----
+AXIOM now has three mutually exclusive execution modes:
 
-## 1. WHAT ARENA IS
-
-**Purpose.** Arena ingests real Indian market *data* (read-only), runs
-strategies over it, manages a research pipeline (experiments → validation →
-walk-forward → locked-test → lifecycle → router), executes the selected
-strategy through a hard risk gate into a simulated local paper broker or the
-Upstox sandbox broker, reconciles fills, attributes P&L to strategies, and
-records every decision durably for replay and reporting.
-
-**High-level architecture** (all under `app/`, SQLite-backed):
-
-- **Data layer** — `app/data/` (Upstox Market Data Feed V3 WebSocket client
-  with reconnect/re-auth/resubscribe, historical V3 downloader), `app/history/`
-  (candle store: csv.gz, parquet if pyarrow present), `app/universe/`
-  (instrument master sync/screening).
-- **Research layer** — `app/backtesting/` (cost-aware backtest engine),
-  `app/research/` (discovery engine, opportunity scanner, datasets, replay,
-  Command Center), `app/learning/` (experiments, evaluator, strategy router,
-  lifecycle, calibration, portfolio allocator, journal), `app/validation/`
-  (chronological splits, walk-forward, robustness).
-- **Execution layer** — `app/engine/` (`SandboxEngine`: event-driven decision
-  loop, sizing-before-risk, protective exits, daily risk accounting, intent
-  journal, recovery; `events.py`: EventDrivenDecisionEngine + PauseGate;
-  `adaptive.py`: RouterStrategySource), `app/brokers/sandbox.py`
-  (documented Upstox V3 sandbox order APIs), `app/risk/limits.py`
-  (`HardRiskLimits`, `OrderIntent`), `app/paper_trading/` (local paper broker
-  + simulator).
-- **Interface layer** — CLI (`python -m app`), FastAPI dashboard/API
-  (`app/api/`), PySide6 desktop viewer (`desktop/`), reports (`app/reporting/`).
-- **Operations** — `app/database/` (SQLite schema v1–4, migrations, repository,
-  recovery manager), `app/monitoring/`, `app/maintenance/`, `app/logging/`.
-
-**PAPER vs UPSTOX SANDBOX vs LIVE**
-
-| Mode | Broker used | Real network orders | Enabled? |
-|---|---|---|---|
-| `BROKER=LOCAL_PAPER` (default) | local simulated `PaperBroker` | never | **enabled**, default |
-| `BROKER=UPSTOX_SANDBOX` | `UpstoxSandboxBroker` → documented sandbox REST V3 | sandbox-only, no real money | **enabled** with your sandbox token |
-| `BROKER=LIVE` | none | — | **NOT IMPLEMENTED** — rejected by `Settings` validation ("LIVE trading is not enabled") |
-
-Market *data* (read-only Upstox feed, `DATA_SOURCE=upstox`) is a separate
-concern from order routing; even with real data, `LOCAL_PAPER` never sends
-orders anywhere.
-
----
-
-## 2. INSTALLATION
-
-**Required Python:** CPython **3.11+** (tested on 3.13; the lock file pins
-CPython 3.13.14 on Linux). SQLite is the only database.
-
-**Windows / Linux / macOS setup (exact commands)**
-
-```bash
-# 1. get the code (or unzip the release archive) and enter it
-cd trading_bot
-
-# 2. create a virtual environment
-python -m venv .venv
-# Windows:            py -m venv .venv
-
-# 3. activate it
-source .venv/bin/activate        # Linux/macOS
-# Windows:            .venv\Scripts\activate
-
-# 4. install the package + dependencies
-pip install -e .                 # OR: pip install -r requirements.txt
-# reproducible pins (tested set): pip install -r requirements-lock.txt
-
-# 5. (optional desktop viewer, separate install)
-pip install -r requirements-desktop.txt   # PySide6; core never needs this
-```
-
-`pip install -e .` works out of the box: the core declares **no mandatory
-runtime dependencies**; `requirements.txt` adds the optional subsystems
-(fastapi, pydantic, uvicorn, httpx, websockets, protobuf, python-dotenv,
-pytest, starlette, tzdata on Windows). Without the extras, the offline core
-(`paper-test`, research over stored CSV, CLI) still runs; FastAPI-based
-dashboard and Upstox streaming require the extras.
-
-**Verify the installation**
-
-```bash
-python -m app --version     # → Arena 3.0.4
-python -m app --help        # → command list + banner
-python -m app paper-test    # offline self-test; must end with "ok": true
-```
-
----
-
-## 3. PROJECT STRUCTURE
-
-```
-trading_bot/
-├─ app/                    # all application code (modular, small files)
-│  ├─ __main__.py          # CLI entry point (python -m app …)
-│  ├─ main.py              # ASGI factory (uvicorn app.main:create_app --factory)
-│  ├─ api/                 # FastAPI server + routes (health, dashboard, paper,
-│  │                       #  market, strategies, backtests, v2)
-│  ├─ brokers/sandbox.py   # Upstox SANDBOX broker (V3 order APIs, tag lookup)
-│  ├─ backtesting/         # cost-aware backtest engine
-│  ├─ config/settings.py   # Settings dataclass (env + .env), safety validation
-│  ├─ data/                # Upstox market-data feed, auth, models, cache
-│  ├─ database/            # SQLite schema v1–4, migrations, repository, recovery
-│  ├─ engine/              # SandboxEngine, events, adaptive router source, state
-│  ├─ learning/            # experiments, evaluator, router, lifecycle, …
-│  ├─ maintenance/ monitoring/ paper_trading/ reporting/ research/ risk/
-│  ├─ strategies/          # 7 strategies + registry (create_strategy)
-│  ├─ universe/ validation/ history/ logging/ indicators/ tournament/
-│  └─ bootstrap.py         # idempotent `initialize`
-├─ desktop/                # PySide6 desktop viewer (UI only)
-├─ tests/                  # 491 pytest tests (incl. 3.0.1/3.0.2/3.0.3/3.0.4 batteries)
-├─ data/                   # candles, universe cache, datasets, sample CSVs
-│  ├─ history/  universe/  datasets/   # created by `initialize`
-│  └─ sample.csv, sample_1h.csv, …    # shipped offline samples
-├─ logs/bot.jsonl          # JSONL log (created on first run)
-├─ results/ backups/       # research artifacts, DB backups
-├─ trading_bot.db          # SQLite database (created by `initialize`)
-├─ .env                    # YOUR configuration (gitignored; from .env.example)
-├─ .env.example            # documented template of every variable
-├─ run.py                  # portable runner: paper/backtest/api modes
-├─ requirements*.txt       # dependency sets
-└─ ARENA_FINAL_VERIFICATION.md  # current verification report (3.0.4)
-```
-
-**Entry points:** `python -m app <command>` (CLI), `python run.py --mode api`
-or `python -m uvicorn app.main:create_app --factory` (API/dashboard),
-`python -m desktop` (desktop viewer).
-
-**Configuration:** `.env` (loaded by `Settings.from_env()`; env vars always
-win over `.env`). **Data/database:** `DATABASE_URL` (default
-`sqlite:///trading_bot.db` in the project root), `DATA_DIR` (default `data`).
-**Logs:** `logs/bot.jsonl`.
-
----
-
-## 4. CLI COMMAND REFERENCE
-
-Everything below is generated from the actual argparse definition in
-`app/__main__.py` (verified against `--help` for every command).
-
-### `python -m app --version` / `--help`
-Prints `Arena 3.0.4` / the command list. Safe. Offline. No credentials.
-
-### `initialize`
-```bash
-python -m app initialize
-```
-- Idempotent first-run setup: creates `data/{history,universe,datasets}`,
-  `logs/`, `results/`; creates/migrates the SQLite DB (schema v1–4); records
-  the `initialized` engine_state; runs one universe sync (network unless the
-  universe cache already covers it).
-- Orders: **no** · Credentials: **no** · Network: universe master download
-  (official Upstox asset URL; it degrades gracefully offline on re-runs).
-- Example: `python -m app initialize` → JSON `{"ok": true, …}`; safe to re-run.
-
-### `paper-test`
-```bash
-python -m app paper-test [--database sqlite:///path.db]
-```
-- Offline deterministic paper-pipeline self-test (simulated feed → strategy →
-  risk → local paper fills → restart equality). Zero credentials, zero
-  network. Prints a JSON summary ending in `"ok": true`; asserts the exact
-  expected equity invariant (99637.58463385397).
-- Orders: **no** (local simulated) · Credentials: no · Network: **no**.
-
-### `upstox-login`
-```bash
-python -m app upstox-login
-```
-- Official Upstox OAuth authorization-code helper for **market data**; opens
-  the login URL, you paste the redirected URL/code, the access token is stored
-  in your gitignored `.env`. Requires `UPSTOX_CLIENT_ID`, `UPSTOX_CLIENT_SECRET`,
-  `UPSTOX_REDIRECT_URI` in the environment.
-- Orders: no · Credentials: **creates** one (your account) · Network: **yes**.
-
-### `upstox-test`
-```bash
-python -m app upstox-test [--timeout SECONDS]
-```
-- Behavioral credential verification for the **market data feed** (documented
-  authorize probe) and, if verified, one WebSocket connection attempt waiting
-  up to `--timeout` for a first completed candle. Read-only.
-- Orders: **no** · Credentials: **yes** (`MARKET_DATA_ACCESS_TOKEN` /
-  `UPSTOX_ACCESS_TOKEN`) · Network: **yes**.
-- Output JSON: `credential_check`, `authenticated`, `websocket`, `frames`,
-  `market_status`. Exit 0 only when `websocket == "connected"`.
-
-### `market-stream`
-```bash
-python -m app market-stream --duration 30
-```
-- Streams normalized completed candles + market-status transitions to stdout.
-- Orders: no · Credentials: yes (data token) · Network: yes.
-
-### `paper-live`
-```bash
-python -m app paper-live [run.py options…]
-```
-- Runs the V0.6 portable pipeline (`run.py --mode paper --source upstox …`)
-  over the real Upstox data feed with everything executed in the local paper
-  broker. Extra args are passed through to `run.py` (e.g. `--symbol`,
-  `--timeframe`, `--strategy`, `--parameters '{"period":5}'`).
-- Orders: **no** (simulated) · Credentials: yes (data token) · Network: yes.
-
-### `engine`
-```bash
-python -m app engine [--max-candles N]
-```
-- The 24/7 **sandbox execution engine**: refuses to start unless
-  `BROKER=UPSTOX_SANDBOX` **and** `DATA_SOURCE=upstox`. Wires the real feed →
-  event engine → router-selected strategy → sizing → hard risk → durable
-  intents → sandbox orders → reconciliation → attribution, plus the
-  maintenance scheduler. `--max-candles` bounds the run (tests/verification).
-- Orders: **YES (sandbox only)** · Credentials: yes (data + sandbox tokens)
-  · Network: yes.
-
-### `sandbox-test`
-```bash
-python -m app sandbox-test --instrument NSE_EQ|INE002A01018
-python -m app sandbox-test --instrument NSE_EQ|INE002A01018 --place-order --quantity 1
-```
-- Verifies the **sandbox** credential with the documented order-history probe
-  (401/403 → rejected; 400/404 + `UDAPI100010` → accepted; anything else →
-  reported as unexpected, fail-closed). Without `--place-order` it never
-  submits anything. With `--place-order` it explicitly submits ONE sandbox
-  market order at `--quantity` (default 1) and reconciles it.
-- Orders: **no by default; 1 sandbox order with the explicit flag** ·
-  Credentials: yes (`UPSTOX_SANDBOX_ACCESS_TOKEN`) · Network: yes.
-
-### `market-universe`
-```bash
-python -m app market-universe {sync|status|audit}
-```
-- `sync`: download the official instrument master into the local cache/
-  database. `status`: summarize what is stored. `audit`: consistency checks.
-- Orders: no · Credentials: no · Network: only `sync`.
-
-### `history`
-```bash
-python -m app history sync --instrument NSE_EQ|INE002A01018 \
-    --interval minutes:1 --from-date 2026-09-01 --to-date 2026-09-20
-python -m app history status [--instrument KEY]
-python -m app history audit --instrument NSE_EQ|INE002A01018 --interval minutes:1
-```
-- Downloads/summarizes/audits historical candles (V3 endpoints; resumable,
-  chunked, idempotent). `sync` requires `--instrument`.
-- Orders: no · Credentials: no (public historical endpoints) · Network: sync/audit.
-
-### `dataset`
-```bash
-python -m app dataset build --name rel-1m --instruments NSE_EQ|INE002A01018 \
-    --unit minutes --interval 1 --from-date 2026-09-01 --to-date 2026-09-20
-python -m app dataset audit --dataset-id <id>
-```
-- Builds versioned research datasets (with timestamps + hashes) from the
-  local candle store; `audit` reports completeness. Offline (uses stored data).
-
-### `universe`
-```bash
-python -m app universe screen [--exchange NSE_EQ] [--segment ...] [--types EQ]
-    [--min-history 100] [--min-price 10] [--max-price 5000] [--min-volume 100000]
-    [--unit minutes] [--interval 1] [--limit 20]
-```
-- Screens the stored universe for eligible research instruments. Offline.
-
-### `research`
-```bash
-python -m app research run --name exp1 --instruments NSE_EQ|INE002A01018 \
-    --unit minutes --interval 1 --from-date 2026-09-01 --to-date 2026-09-20 \
-    --timeframe 1m --periods 2,3,5
-python -m app research status
-```
-- Runs a momentum parameter grid through the experiment engine
-  (TRAIN → VALIDATION → one-shot locked test) and stores scored candidates;
-  `status` lists recent experiments + promoted candidates. Offline.
-
-### `discover`
-```bash
-python -m app discover --name d1 --instruments NSE_EQ|INE002A01018 \
-    --unit minutes --interval 1 --from-date 2026-09-01 --to-date 2026-09-20 \
-    --timeframe 1m
-```
-- Controlled strategy-discovery run (spec generation → OOS-gated scoring).
-  Requires ≥60 local candles. Offline.
-
-### `scan`
-```bash
-python -m app scan --instruments NSE_EQ|INE002A01018 --unit minutes --interval 1
-```
-- OpportunityScanner over stored candles (research output only; trading still
-  requires the hard risk gate). Offline.
-
-### `lifecycle`
-```bash
-python -m app lifecycle status
-python -m app lifecycle promote --lineage <lineage_id>
-python -m app lifecycle degrade --lineage <lineage_id>
-```
-- Shows every lineage's stage/status/tradability; promotes (next ladder
-  stage) or degrades (PROBATION→SHADOW→RETIRED) a lineage explicitly.
-  **Trading additionally requires the full ladder + ACTIVE status — see §10.**
-
-### `replay`
-```bash
-python -m app replay --signal <signal_id>
-```
-- Reconstructs one recorded decision from durable rows using ONLY
-  at-decision-time information (no lookahead). Offline.
-
-### `report`
-```bash
-python -m app report --format markdown           # prints to stdout
-python -m app report --format pdf --output arena-weekly.pdf
-```
-- Weekly report assembled from recorded data, every number labeled
-  OBSERVED / CALCULATED / MODEL INTERPRETATION. Offline.
-
-### `ask`
-```bash
-python -m app ask "how many orders last week?"
-```
-- Command Center: answers natural-language questions **only from stored
-  rows**; unknown questions are answered honestly, never invented. Offline.
-
-### `monitor`
-```bash
-python -m app monitor
-```
-- Self-monitoring snapshot (load, memory, disk, database quick_check, data
-  staleness). Exit 1 if any alert fires. Offline.
-
-### `maintenance`
-```bash
-python -m app maintenance
-```
-- Runs due maintenance jobs once (universe sync, coverage refresh, dataset
-  refresh, backups). Network: possibly (universe/dataset jobs).
-
-### `backup`
-```bash
-python -m app backup backup [--label pre-sandbox-test] [--backup-dir DIR]
-python -m app backup verify --path backups/<file>.db
-python -m app backup restore --path backups/<file>.db
-```
-- SQLite backup/verify/restore. Offline.
-
-**Command that can place orders:** `engine` (sandbox), `sandbox-test` (only
-with explicit `--place-order`). Nothing else touches order APIs.
-
----
-
-## 5. DASHBOARD / MONITORING
-
-Arena's dashboard is **web-based** (FastAPI + a built-in HTML page). The
-**desktop app is a separate optional viewer** (§16), not a replacement.
-
-**Start the API + dashboard** (requires the FastAPI extras):
-
-```bash
-python run.py --mode api --host 127.0.0.1 --port 8000
-# equivalent: python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
-```
-
-Set `API_TOKEN` in `.env` first. `/health`, `/` and — for **local
-(loopback) browsers only** — the `/dashboard` HTML page load without a
-token (the page contains no secrets; it asks you for the token and sends it
-as an `Authorization: Bearer` header on its API calls). Every other route —
-including `/dashboard/data` and the engine STOP/RESUME controls — returns
-**503** without a configured token and **401** on a wrong
-`Authorization: Bearer <token>` header.
-
-**URLs** (all verified against the routers):
-
-| URL | What it is |
-|---|---|
-| `/health` | public health probe (no auth): `{"status":"ok","version":"3.0.4","mode":"PAPER","live_trading":false,"real_order_routing":"NOT_IMPLEMENTED"}` |
-| `/` | public landing page (HTML; account data stays behind auth) |
-| `/dashboard` | **the HTML dashboard page** |
-| `/dashboard/data` | JSON powering the dashboard panels |
-| `/engine/stop` (POST) | emergency STOP (see §14) |
-| `/engine/resume` (POST) | clear the persisted STOP flag |
-| `/paper/status` `/paper/account` `/paper/positions` `/paper/orders?limit=` `/paper/trades?limit=` | local paper broker views |
-| `/paper/start` `/paper/stop` `/paper/pause` `/paper/resume` (POST) | control the embedded paper simulator |
-| `/market/status` `/market/datasets` | data-platform status |
-| `/strategies` | strategy catalog |
-| `/backtests` `/backtests/{id}` `/backtests/run` (POST) `/tournaments` | research records |
-| `/api/v2/overview` | aggregate overview (mode, live_trading, emergency_stop, equity, P&L, counts) |
-| `/api/v2/trades` `/api/v2/performance` `/api/v2/strategies` `/api/v2/learning` `/api/v2/experiments` `/api/v2/market_data` `/api/v2/risk` `/api/v2/logs` | v2 JSON views |
-| `/api/v2/portfolio` `/api/v2/attribution` `/api/v2/research_lab` `/api/v2/learning_detail` `/api/v2/market_intelligence` | FINAL-era views |
-| `/api/v2/command_center?q=…` | ask questions over stored data |
-| `/api/v2/report/weekly?format=markdown\|pdf` `/api/v2/report?period=weekly` | reports |
-| `/api/v2/charts/equity.svg` `/api/v2/charts/drawdown.svg` `/api/v2/charts/attribution.svg` | generated SVG charts |
-| `/docs` | interactive OpenAPI UI (lists every route with schemas) |
-
-**Dashboard panels** (`/dashboard` page sections): **Account** (capital,
-equity, cash), **Feed / Market** (connection status, authenticated,
-market_status, candles), **Strategy & Signals** (active strategy, last
-signals), **Positions & Sandbox Orders** (open position, recent orders —
-local paper and sandbox), **Learning / Model** (active strategy state,
-promotions), **Recent Events** (durable system events). The v2
-`/api/v2/risk` view exposes hard-limit configuration; drawdown is visible in
-`/api/v2/performance` and the equity/drawdown SVG charts. Emergency
-STOP/RESUME buttons are on the dashboard page and in the desktop app.
-
-**Monitor** — feed: dashboard Feed panel or `/api/v2/market_data`;
-strategies/router: `/api/v2/strategies`, `/api/v2/learning`, Learning panel;
-positions/orders/P&L: Account + Positions panels or `/paper/*`;
-drawdown/risk: `/api/v2/performance`, `/api/v2/risk`, charts; events:
-Recent Events panel; model state: `/api/v2/learning_detail`.
-
-**Shut down safely:** stop the engine with the dashboard STOP (or
-`POST /engine/stop`), then Ctrl-C the server. On KeyboardInterrupt
-the engine runs one final `reconcile()`; uvicorn closes the database in the
-app lifespan. If the engine was run standalone via `python -m app engine`,
-Ctrl-C does the same final reconcile.
-
----
-
-## 6. CONFIGURATION
-
-All variables are read from the environment and/or a gitignored `.env`
-(loaded via python-dotenv; exported env vars override `.env`). Full
-documented template: `.env.example`. Validation lives in
-`app/config/settings.py::Settings.__post_init__`.
-
-**Identity & safety (do not change for sandbox testing):**
-
-| Variable | Default | Notes |
+| Mode | Execution | What it means |
 |---|---|---|
-| `MODE` | `PAPER` | **only** `PAPER` accepted; anything else refuses to boot |
-| `LIVE_TRADING` | `false` | **only** `false` accepted |
-| `BROKER` | `LOCAL_PAPER` | `LOCAL_PAPER` or `UPSTOX_SANDBOX`; `LIVE` raises |
-| `DATABASE_URL` | `sqlite:///trading_bot.db` | SQLite only |
+| **LOCAL PAPER** (`AXIOM_PAPER`) | AXIOM's local simulator | Independent paper state and clearly simulated fills. An optional, separate VANTAGE DEMO read-only feed can supply prices; it never routes a broker order. |
+| **VANTAGE DEMO** | Vantage MT5 demo account | Broker-executed demo orders after explicit review, Arm and Activate. Demo is not AXIOM paper. |
+| **VANTAGE LIVE** | Vantage MT5 live account | Real-money capability, disabled until the account owner completes every in-app gate and confirms each order. |
 
-**Execution / cost model:**
-`INITIAL_CAPITAL=100000`, `CURRENCY=INR`, `COMMISSION=0.0005`,
-`SLIPPAGE=0.0005`, `SPREAD=0.0002`, `POSITION_SIZE=0.25`,
-`STOP_LOSS=0.05`, `TAKE_PROFIT=0.10` (set `NONE` to disable a protective
-exit), `MAX_PARTICIPATION=0.10`, `DEFAULT_SYMBOL=DEMO`,
-`DEFAULT_TIMEFRAME=1D`, `MARKET_CALENDAR=continuous|nse-session`.
+> **No profitability or live-readiness claim.** Tests, a successful connection, and demo fills do not establish profitability or readiness for real money. AXIOM does not promise returns, execution quality, or a particular product offering. Live credentials and live activation are solely the account owner's responsibility.
 
-**Hard risk limits** (learning can never change these; `0` = unlimited —
-consider setting real values before any sandbox run):
-`MAX_POSITION_VALUE=0`, `MAX_OPEN_POSITIONS=0`, `MAX_DAILY_LOSS=0`,
-`MAX_TRAGES_PER_DAY=0` *(typo guard: it is `MAX_TRADES_PER_DAY`)*.
+The Vantage integration uses the official `MetaTrader5` Python package through a local MetaTrader 5 terminal. It does not scrape the Vantage website or automate the terminal with screen coordinates. In a Vantage execution session, quotes, contract metadata, account state and execution come from the same terminal/account connection. In LOCAL PAPER, the optional MT5 feed is a different service with a read-only gateway: it can discover contracts and read ticks/closed bars, but it has no order, position, history, margin-precheck or execution methods. Connecting it never changes the execution mode.
 
-**Market data (read-only feed):**
-`DATA_SOURCE=replay|binance|generic|upstox` (engine requires `upstox`),
-`MARKET_DATA_PROVIDER=upstox`, `MARKET_DATA_SYMBOLS` (comma-separated
-instrument keys, e.g. `NSE_EQ|INE002A01018`; validated by regex),
-`MARKET_DATA_TIMEFRAME` (must equal `DEFAULT_TIMEFRAME`; engine uses
-`1m`), `MARKET_DATA_MODE=ltpc|full`, `MARKET_DATA_ACCESS_TOKEN`
-(alias `UPSTOX_ACCESS_TOKEN`), `MARKET_DATA_AUTHORIZE_URL`,
-`MARKET_DATA_TOKEN`, `DATA_WS_URL` (generic WSS, optional).
+For Windows download, installation and upgrade steps, read `packaging/windows/WINDOWS_INSTALL_MANUAL.md` or the copy installed beside the application. Historical Arena research and paper/sandbox material remains in `README.md`; it does not describe the Vantage order path.
 
-**Upstox sandbox (order APIs):**
-`UPSTOX_SANDBOX_ACCESS_TOKEN` (required iff `BROKER=UPSTOX_SANDBOX`),
-`UPSTOX_SANDBOX_BASE_URL=https://api-hft.upstox.com`,
-`UPSTOX_SANDBOX_ORDER_HISTORY_URL=https://api.upstox.com/v2/order/history`,
-`SANDBOX_PRODUCT=I|D|MTF`, `SANDBOX_ORDER_TAG=arena-v1` (retained setting,
-passed to the broker; since 3.0.2 every ORDER carries the intent-derived
-12-char tag — this setting no longer overrides order tags).
+Version 3.7.0a1 also includes a **separate Daily Upstox Autonomy** boundary at `/autonomy`. Its live-market local PAPER, default-disabled UPSTOX_LIVE real-money path, exact listed-equity/currency-derivative catalog, unattended daily-session rules, three-leg GTT protection, reconciliation, Kronos artifacts and paired-ablation research are documented in `docs/AUTONOMY.md` (also served at `/autonomy/manual`). It does not alter the Vantage rules above. No Upstox account-specific or external DEMO/LIVE verification is implied.
 
-**OAuth login helper:** `UPSTOX_CLIENT_ID`, `UPSTOX_CLIENT_SECRET`,
-`UPSTOX_REDIRECT_URI`.
+Optional Kronos setup is an explicit button on that page. Review the complete pinned sources, revisions, sizes, hashes and CPU runtime lock before confirming. Windows discovery includes `py -3.11-64` / `py -3.12-64` and the `py -0p` registered-interpreter catalog. If needed, use **Validate & use Python** with one full `python.exe` path (no arguments), or **Auto-detect Python** to clear that preference. Only the CPython 3.11/3.12 x64 executable itself with pip is accepted (not a launcher or command line); safe probe diagnostics omit local paths and raw stderr. Selection is stored in per-user Kronos data and does not alter trading state. Weights/runtime install only into per-user autonomy data storage, never the application directory. Cancellation removes partial setup files; failure remains `UNAVAILABLE` with no mock forecast. The separate offline self-test performs real inference on synthetic smoke bars only—it is not market/profitability evidence and does not create, Arm or Activate a trading session.
 
-**Data platform:** `DATA_DIR=data`,
-`UNIVERSE_SYNC_URL` (official complete.json.gz),
-`HISTORY_BASE_URL`, `INTRADAY_BASE_URL` (V3 historical endpoints),
-`PARQUET_ENABLED=true` (auto-fallback to csv.gz without pyarrow),
-`UPSTOX_STREAMING_UNIVERSE` (explicit keys only — subscribing to the whole
-universe is refused by design), `MAINTENANCE_HOUR=17` (UTC),
-`MAX_DOWNLOAD_RETRIES=3`, `RESEARCH_BATCH_SIZE=30`.
+For that autonomy boundary, **Scan once is read-only in both PAPER and LIVE**; only the background worker executes orders for an explicitly ACTIVE daily session. Emergency stop blocks new entries before cleanup, attempts managed unfilled-entry cancellation without requiring ACTIVE, preserves open-position protection, and remains prominently unresolved when cancellation/reconciliation is uncertain—it never claims the account is clear. Restart/browser recovery exposes durable sessions, positions, intents, and orders as HALTED read-only views, never restores ARMED/ACTIVE, and requires fresh authorization/risk/reconciliation/approval. Synthetic research evidence cannot execute even in PAPER; operator-supplied provenance is not independent verification.
 
-**Research/portfolio/event knobs:** `MAX_STRATEGY_ALLOCATION=0.35` (hard cap,
-not learning-editable), `EVENT_MOVE_THRESHOLD=0.003`,
-`EVENT_VOLUME_SPIKE=2.0`, `MARKET_TIMEZONE=Asia/Kolkata` (trading-day
-boundary for daily risk accounting; present in code, **not yet documented in
-.env.example** — known documentation gap), `SCANNER_TOP_K=5`,
-`DISCOVERY_MAX_CANDIDATES=12`, `LOG_LEVEL=INFO`, `API_TOKEN=` (required for
-all protected API routes).
+---
 
-**Example minimal `.env` for offline use:** none needed — defaults work.
-**Example for sandbox execution:**
+## 1. Safety model — read before connecting an account
 
-```env
-BROKER=UPSTOX_SANDBOX
-UPSTOX_SANDBOX_ACCESS_TOKEN=<your sandbox token>
-DATA_SOURCE=upstox
-MARKET_DATA_ACCESS_TOKEN=<your data token>
-MARKET_DATA_SYMBOLS=NSE_EQ|INE002A01018
-MARKET_DATA_TIMEFRAME=1m
-DEFAULT_TIMEFRAME=1m
-MAX_POSITION_VALUE=50000
-MAX_OPEN_POSITIONS=1
-MAX_DAILY_LOSS=2000
-MAX_TRADES_PER_DAY=10
-API_TOKEN=<random secret>
+### 1.1 Selection is not authorization
+
+Selecting **VANTAGE DEMO** or **VANTAGE LIVE**, saving credentials, or passing a read-only connection test does **not** Arm or Activate trading. AXIOM starts disconnected and disarmed. Restart, reconnect, credential changes, risk changes, instrument-selection changes, ambiguous outcomes and other relevant changes invalidate prior approval.
+
+`VANTAGE LIVE` on the mode badge means the live environment is selected. It does not, by itself, mean an order can be sent. Check **Connection**, **Lifecycle**, **Emergency stop**, and the current readiness result separately.
+
+### 1.2 Separate gates
+
+1. **Mode:** explicitly choose PAPER, DEMO or LIVE.
+2. **Connection:** run the read-only MT5 test and verify the masked login, exact server and account type.
+3. **Configuration:** select account-discovered instruments and save bounded risk limits.
+4. **Readiness:** every server-side check must pass. Unknown or unavailable checks fail closed.
+5. **Arm:** enter the exact environment-specific Arm phrase using a fresh readiness challenge.
+6. **Activate:** enter a second, distinct phrase using a fresh activation challenge.
+7. **Order review:** inspect the current contract, quote, margin/risk result and read-only MT5 precheck.
+8. **Final confirmation:** enter the exact order phrase before the 30-second review expires. Submission repeats the checks.
+
+Arming or activating never submits an order. Vantage strategy automation is unavailable and off in this version; activation enables reviewed manual order flow only.
+
+### 1.3 Pause, Stop and Emergency stop
+
+- **Pause** blocks new entries. It does not claim that working orders were cancelled or positions closed. Reactivation requires the displayed challenge and phrase.
+- **Stop** stops the session and makes one cancel attempt per AXIOM-managed working order when connected, then reconciles. External orders are left untouched. Read the returned broker state.
+- **Emergency stop** first sets a durable local halt, stops the session, and attempts managed-order cancellation when connected. The halt survives restart. Clearing it requires `CLEAR EMERGENCY STOP`; clearing still leaves the session disarmed.
+- Neither Stop nor Emergency stop proves that the account is flat, cancelled, or safe. Verify orders, positions and deals from the broker. If MT5 is disconnected, AXIOM cannot cancel anything at the broker.
+
+### 1.4 Ambiguous outcomes
+
+A timeout, exception, unrecognized retcode, or failed post-action reconciliation can leave an outcome unknown. AXIOM records the intent before submission, makes only one submission attempt, and does not blindly retry. An unresolved intent blocks readiness.
+
+Do not submit a replacement merely because the first result is unclear. Open the MT5 terminal, compare AXIOM's intent/comment and broker order/deal history, then use **Reconcile**. AXIOM adopts only a strict unique managed match. Multiple possible matches or missing evidence remain unresolved. Never delete the database or change an idempotency key to bypass this protection.
+
+---
+
+## 2. Requirements and installation
+
+### 2.1 Windows and MT5
+
+- Windows 10/11 **x64** for the packaged application.
+- A modern browser. Keep the AXIOM console window open while using the app.
+- A Vantage MetaTrader 5 desktop terminal obtained through Vantage's official instructions.
+- The official MT5 terminal must be able to connect to the intended account/server. AXIOM's official Python package is bundled in the Windows build; the MT5 desktop terminal is a separate prerequisite.
+- Terminal and account permissions must allow the intended operation. If the terminal requires an algorithmic-trading permission, configure it deliberately in MT5 and follow Vantage's rules.
+
+The operator's **MT5 package available** capability only proves that the official Python module is present. It does not prove that the terminal exists, is running, can log in, is connected, or is permitted to trade.
+
+### 2.2 Install or run portable
+
+1. Download the Windows x64 `*-no-temp-install.zip` or `*-portable.zip` and the published `SHA256SUMS.txt` from the same release.
+2. Verify the exact ZIP hash before extracting it. Release binaries are **unsigned unless the release metadata explicitly says otherwise**; SmartScreen/Smart App Control can warn or block them.
+3. For installation, extract the entire installer ZIP, keep the setup EXE and matching `-0.bin`/`-1.bin` together, then run the EXE. The per-user installer does not require administrator rights and installs under `%LOCALAPPDATA%\Programs\AXIOM-Chart` for upgrade compatibility, while the product name is **AXIOM Operator**.
+4. Alternatively, extract the entire portable ZIP and run `AXIOM-Chart.exe` inside `AXIOM-Operator` with `_internal` beside it. The onedir folder avoids onefile TEMP extraction and stores operator data in the per-user data directory, not beside the executable.
+5. AXIOM opens `http://127.0.0.1:<port>/terminal`. The displayed local address is not a public hosted service.
+
+For the reported Error 4551, these loaderless/onedir packages avoid the identified Inno setup-loader and onefile runtime TEMP paths. They do not make unsigned code trusted or bypass Windows policy. Keep Application Control enabled; if the device still blocks the package, trusted signing or administrator approval is required. Read `WINDOWS_APP_CONTROL.md`.
+
+The release's `BUILD_METADATA.json` is the authoritative record of source commit, runner, commands, test results, skipped checks and signing status. A source archive is not a verified Windows binary.
+
+### 2.3 Local API token
+
+The local `API_TOKEN` protects AXIOM's loopback API. It is **not** a Vantage password, MT5 login, or market-data credential. The launcher does not print it.
+
+When the browser asks for it:
+
+1. Open `%LOCALAPPDATA%\AXIOM\axiom.env` in Notepad.
+2. Copy only the value after `API_TOKEN=` into the browser's token field.
+3. Keep the file private. The page remembers the token only for that browser tab.
+
+Do not paste the token, `axiom.env`, broker passwords, or full account credentials into chat, screenshots, issues, logs, or CI.
+
+---
+
+## 3. Operator pages
+
+The top mode badge and environment labels remain visible across the eight pages. A three-part boundary banner separately identifies the **execution session**, **market-data source**, and **order authorization** at all times. DEMO data connected while execution is LOCAL PAPER never changes that execution label. The layout adapts to narrow screens, keeps safety controls visible, supports keyboard focus/modal trapping, and honors reduced-motion and increased-contrast preferences.
+
+| Page | Purpose |
+|---|---|
+| **Overview** | Current mode, connection/lifecycle, broker or paper account state, positions, exposure and explicit limitations. |
+| **Instruments** | Account-specific discovery, product/contract details, search, editable tab-local watchlists, execution selection and tradability. Watch and execution-selection controls are separate. |
+| **Charts** | Account-discovered MT5 bars/contracts for Vantage execution or the independent DEMO feed; replay remains explicitly labeled. Includes timeframe shortcuts, zoom/pan, crosshair/OHLC readout, EMA/SMA overlays, horizontal/trend drawings, manual-only MT5 paper control and a docked reviewed ticket. |
+| **Orders / Positions** | Broker-truthful orders, deals, positions, P&L where available, durable intents, reviewed cancel/close/protection modification. |
+| **Risk** | Required bounded limits, current readiness checks, Arm/Activate/Pause/Stop and durable emergency controls. |
+| **Connections** | Separate demo/live credential metadata, execution read-only test, disconnect, replace/delete and non-secret capabilities. In LOCAL PAPER, only the VANTAGE DEMO profile can be edited for the independent quote feed. |
+| **Activity / Audit** | Redacted local operational events and unresolved outcomes. No external alert delivery is claimed. |
+| **Settings / Help** | Local token handling, refresh/redacted diagnostics, separate latency/render measurements, listed-share/ETF provider scope, links to the legacy chart/manual, mode explanations and recovery guidance. |
+
+Controls that cannot run in the current state are disabled or return an explanatory blocker. An empty disconnected broker view is **not** a statement that the account has no positions or orders; look for `broker state unavailable` / no reconciliation timestamp.
+
+---
+
+## 4. Connections and credentials
+
+### 4.1 Add a demo credential first
+
+Use a demo account explicitly supplied by Vantage if you want to rehearse the workflow. Do not use a live login to test demo mode.
+
+For **fresh prices with local paper fills**, do not follow the execution-mode switch below: keep **LOCAL PAPER**, save the DEMO-only profile, and use **Connect demo market data — read-only** as described in section 4.5. The execution **Test connection** button remains unavailable in paper mode.
+
+For a **Vantage demo execution** session:
+
+1. Choose **VANTAGE DEMO**.
+2. Open **Connections**.
+3. Enter the numeric MT5 login, trading password, exact demo server shown by Vantage, an optional local label, and the MT5 terminal path if auto-discovery is insufficient.
+4. Choose **Save credentials**. If a profile already exists, use the explicit **Replace** flow instead.
+5. Choose **Test connection (read only)**.
+
+The read-only test initializes/logs into MT5, verifies identity, discovers account instruments, and reads/reconciles account state. It does not place, modify or cancel an order.
+
+### 4.2 Live server selection
+
+For the requested environment, the exact server choice is:
+
+```text
+VantageMarkets-Live 13
 ```
 
-**MUST NOT change for sandbox testing:** `MODE`, `LIVE_TRADING`, `BROKER`
-(never `LIVE`; it would be rejected anyway), `DATABASE_URL` scheme.
+Enter/select that exact text only if it is the server Vantage assigned to **your** live account. Select **VANTAGE LIVE** separately. The server string alone never selects or activates live trading. A real-account identity mismatch fails readiness.
+
+### 4.3 Protected storage and metadata
+
+On Windows, broker secrets are encrypted with **Windows DPAPI for the current Windows user**. AXIOM stores separate demo and live profiles. Public views contain only masked login metadata, server, terminal path and label; password and full login are not returned by the API.
+
+DPAPI protection is tied to the Windows user/machine context. After moving to another user or machine, re-enter credentials through the app. There is no plaintext credential export. Deleting a profile removes its protected secret and metadata; replacing or deleting the current environment disconnects and disarms it.
+
+Keep these credentials separate from:
+
+- `API_TOKEN` in `axiom.env` — local AXIOM API only;
+- Alpaca/Upstox or other market-data credentials — legacy paper/data features only;
+- Vantage demo and live profiles — never interchangeable.
+
+### 4.4 Read-only test results
+
+A passing test confirms only the observed connection, identity, discovery and read/reconcile operations at that time. It does not confirm future connectivity, order acceptance, margin availability at a later time, profitability, or live readiness. Disconnecting invalidates Arm/Activate.
+
+### 4.5 Independent DEMO market data in LOCAL PAPER
+
+The optional `VANTAGE DEMO MT5` feed is for market data only. It uses the saved **VANTAGE_DEMO** DPAPI profile and refuses a non-DEMO MT5 account. It never reads the VANTAGE LIVE profile and never selects or activates that execution mode. Saving credentials, connecting, disconnecting and loading a chart create zero orders.
+
+Its isolated gateway exposes only terminal initialization/login, terminal/account identity, account-symbol discovery/metadata/selection, current ticks, closed rates, constants needed to interpret them, and shutdown. It does not expose order placement/check/modify/cancel/close, positions, orders, history or margin calculation. The UI/API cannot reach the execution gateway through this service.
+
+Deleting the DEMO credential, selecting a Vantage execution environment, or explicitly disconnecting the feed closes that independent MT5 connection. LOCAL PAPER account state is preserved. A status of `CONNECTED` alone is not enough to start MT5 paper: a supported exact symbol must have a fresh, valid, advancing tick.
 
 ---
 
-## 7. UPSTOX SANDBOX
+## 5. Instruments and product metadata
 
-**Workflow:** get a sandbox token from your own Upstox developer account
-(Developer Apps → Sandbox) → put it in `.env` as
-`UPSTOX_SANDBOX_ACCESS_TOKEN` → set `BROKER=UPSTOX_SANDBOX` → probe with
-`sandbox-test` → run the engine with `engine` (or one explicit order via
-`sandbox-test --place-order --quantity 1`).
+AXIOM calls MT5 `symbols_get` for the connected account. It does not hard-code a Vantage universe and does not infer availability from Vantage marketing pages. Entity, jurisdiction, account type and server can change the offering.
 
-**Credential validation (implemented as documented; not externally verified —
-needs a real sandbox token):** `sandbox-test` sends the documented
-`GET /order/history?order_id=0` probe. 401/403 → rejected, fail closed.
-HTTP 400/404 with error code **UDAPI100010** (order not found) → credential
-accepted, nothing placed. Any other status/body (429, 5xx, malformed,
-unrelated error codes) → reported `unexpected`, **not** classified as
-verified.
+1. After a successful read-only test, open **Instruments**.
+2. Search/filter the returned symbols and inspect each contract.
+3. Select only the instruments you intend to use (up to 50 distinct symbols).
+4. Save the **execution selection**. Changing it disarms the session and requires readiness/Arm/Activate again.
 
-**How orders are placed:** every order is an `OrderIntent` with an explicit
-`instrument_key`; the broker POSTs to the documented V3 endpoint
-(`https://api-hft.upstox.com/v3/order/place`) with body fields including
-`quantity` (integer), `product` (`I`/`D`/`MTF`), `validity=DAY`,
-`order_type`, `transaction_type`, `instrument_token`, and a ≤20-char `tag`
-(the intent-derived durable reference; `slice=true` so large orders are
-auto-split by exchange freeze limits). The response's `data.order_ids`
-become the tracked remote ids. 429/5xx/network failure → intent marked
-**UNKNOWN**, never re-POSTed blindly (§13).
+The star column is a separate editable watchlist. **Watch visible**, **Clear watchlist**, and **Watchlist only** affect only this browser tab's watchlist, capped at 200 exact discovered symbols and scoped by execution mode plus the existing opaque account fingerprint. Watching, unwatching or filtering sends no selection, connection, feed, Arm/Activate or order request and does not change the execution checkboxes. Only **Save execution selection** calls the selection API.
 
-**Reconciliation:** `reconcile()` pulls the documented order history per
-remote id, maps statuses (complete→FILLED, reject→REJECTED, cancel→
-CANCELLED, open→OPEN/PARTIALLY_FILLED) and applies fill deltas exactly once
-(idempotent transitions, restart-safe).
+The detail view exposes available fields such as broker path/description, product classification, CFD flag, currencies, volume min/max/step/limit, contract size, tick size/value, digits/point, trade mode, sessions and filling/execution flags where MT5 supplies them.
 
-**Partial fills:** deltas are credited incrementally; a partial-then-
-cancelled order still credits exactly the executed quantity once.
+AXIOM distinguishes forex, indices, commodities, share CFDs, ETFs/ETF CFDs and other products. **A share CFD or ETF CFD does not represent owned underlying shares or ETF units.** Classification assists display; the broker's actual contract metadata governs the order checks.
 
-**Cancellation:** DELETE per child order; only broker-confirmed cancellations
-make the logical order CANCELLED (§13/§11).
-
-**Restart recovery:** on startup Arena loads durable ledger state from
-recorded transitions (cash, position, avg entry, realized, fees), replays
-order records, resolves unresolved intents via the tag lookup, and only then
-trades.
-
-**Verify an order was actually accepted:** the durable journal
-(`INTENT_PERSISTED` → `ACKNOWLEDGED` events; `/dashboard/data` events
-panel), the sandbox transition rows (`list_sandbox_orders`), and
-`reconcile()` fills. There is **no** "assume accepted" path.
-
-**Requires real sandbox access:** everything in this section beyond the code
-(contract verified by the 404-test battery) — the sandbox flows are
-**implemented, not externally verified** with a real Upstox sandbox token.
+An instrument is rejected for order flow when it is unavailable, not selected, disabled/close-only for the requested action, stale, or has incomplete/inconsistent metadata needed for safe sizing and validation. A displayed symbol is not a promise that an order will be accepted.
 
 ---
 
-## 8. MARKET DATA
+## 6. Quotes and charts
 
-**Instruments:** `market-universe sync` downloads the official instrument
-master (complete.json.gz) into `data/universe/` + DB; `universe screen`
-filters eligible instruments by exchange/segment/type/price/volume/history.
+Vantage execution quotes use the same MT5 connection as that execution session. Independent paper quotes use only the separate DEMO read-only service. Quote validation includes positive ordered prices, finite values, tick time, receive time, maximum age and spread. A chart's historical bars do not prove that the current quote is fresh.
 
-**Historical:** `history sync --instrument KEY --interval minutes:1 …`
-(chunked, resumable, idempotent; stored under `data/history/` as csv.gz or
-parquet). `history status` / `history audit` report coverage and integrity.
+To view a Vantage execution chart, select the instrument first, then choose a supported MT5 timeframe on **Charts**. Its label identifies DEMO or LIVE and states that it is the same MT5 account source as execution. DEMO market data can be real broker data while execution fills remain demo; do not confuse that with LOCAL PAPER simulation.
 
-**Live feed:** `DATA_SOURCE=upstox` + `MARKET_DATA_*` config. The provider
-is the documented Upstox **Market Data Feed V3** WebSocket
-(`upstox-test` verifies the credential behaviorally first; the feed protocol
-is decoded with the official protobuf bindings bundled in
-`app/data/upstox_proto`). `market-stream --duration 30` prints normalized
-completed candles; `paper-live` runs the paper pipeline on the live feed;
-`engine` runs sandbox execution on it.
+For independent paper charts, connect the DEMO feed and choose an exact account-discovered symbol on **Charts**. The label says **FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS** only when a current tick is fresh and advancing. Bars are validated, newly closed MT5 bars; chart history is not replayed into the paper strategy. Broker tick volume is labeled as such. The contract panel preserves the exact symbol, product/CFD classification, currencies, contract size, tick/point metadata and MT5 lot metadata for inspection, while the paper ticket explicitly uses **units, not MT5 lots**.
 
-**WebSocket behavior:** connects only after the authorize probe passes;
-emits **completed candles only** (in-progress bars are never traded);
-deboundounced decisions (event cadence) — no per-tick trading.
+The chart displays bid, ask, price spread, source timestamp, local receive timestamp and freshness/age where the provider supplies a tick. Use the timeframe selector or shortcuts; mouse/touch drag pans, the wheel and +/− controls zoom, and **Reset view** returns to the latest bounded window. With the canvas focused, Left/Right pan, +/− zoom and Home resets. The crosshair shows time and OHLC values. EMA 20, SMA 50 or both are calculated from loaded closes. Horizontal and two-click trend drawings are kept per chart identity in memory, capped at 50; **Clear drawings** affects only the current chart. Escape cancels a pending trend point. These analysis gestures never change the server series, select an execution instrument, connect a feed, or create an order.
 
-**Reconnect:** bounded exponential backoff (cap 60 s) with fresh
-authorization and **resubscription**; reconnect counters exposed in
-`/market/status` metrics (`connection_status`, `reconnects`, `stale_feed`,
-`data_gap_detected`). Tested against fakes; **real-socket behavior
-implemented, not externally verified**.
+A disconnected, stale, non-advancing, invalid, incomplete or refused feed is labeled with its reason. MT5 chart failures return an error and clear the chart; AXIOM never silently substitutes replay, cache, fixture or synthetic bars. Feed loss blocks new BUY entries but preserves paper cash, positions, orders and fills; a reviewed SELL exit of an existing long position remains available. Reconnect and verify the exact symbol/fresh quote before new entries.
 
-**Market-status gating:** the engine checks `provider.metrics()` before
-every candle: market closed → `MARKET_CLOSED_SKIP` (plus one reconcile pass),
-stale feed → `STALE_FEED_SIGNALS_PAUSED` (reconcile continues, no signals).
+The legacy `/chart` page supports replay/US-paper workflows. Its sample CSVs are labeled sample data, and Alpaca/US-paper fills remain locally simulated. It is not a Vantage order ticket.
 
-**If data is unavailable:** research commands over stored candles keep
-working; the live engine skips/pauses as above and exits the stream loop
-gracefully when the feed ends.
+TradingView integration and relayed webhooks are deferred. No TradingView alert is treated as an order in this version.
 
 ---
 
-## 9. TRADING MODES
+## 7. Risk limits
 
-**LOCAL PAPER (default).** Enable: nothing to do (default `BROKER`).
-Verify: `/health` → `"mode":"PAPER","live_trading":false`;
-`python -m app paper-test`. Broker: in-process `PaperBroker` — nothing leaves
-the machine; real money **cannot** move. This is also the mode behind
-`paper-live` (real data, simulated execution).
+Open **Risk**, enter every limit, and save. Values are per selected environment. Saving risk changes disarms the session.
 
-**UPSTOX SANDBOX.** Enable: `.env` with `BROKER=UPSTOX_SANDBOX` +
-`UPSTOX_SANDBOX_ACCESS_TOKEN` (validation refuses the broker without a
-token). Verify: `python -m app sandbox-test --instrument …` →
-`"credential_accepted": true`; `/health` still reports PAPER mode (mode and
-broker are independent). Broker: `UpstoxSandboxBroker` → documented sandbox
-order APIs. Real money: **no** — sandbox tokens only reach sandbox endpoints.
-Safety: every order passes the same hard risk gate, intent journal, and
-identity checks; orders are real HTTP calls to the sandbox only.
+| Limit | Enforcement purpose |
+|---|---|
+| Maximum order volume | Absolute cap before contract min/max/step normalization checks. |
+| Maximum symbol volume | Caps aggregated exposure for the symbol, including relevant open/working exposure. |
+| Maximum order margin | Caps estimated margin for one entry using MT5 margin calculation. |
+| Maximum total margin | Caps current plus estimated account exposure. |
+| Maximum open positions | Bounds the broker-reported open-position count. |
+| Maximum daily loss | Uses a persisted day-start equity baseline and broker P&L/cost data. |
+| Maximum drawdown % | Uses the observed persisted peak-equity baseline. |
+| Maximum trades per day | Bounds AXIOM-recorded submissions for the environment/day. |
+| Maximum margin usage % | Bounds margin relative to account equity. |
+| Maximum spread bps | Rejects an excessively wide current quote. |
+| Maximum slippage points | Sets the MT5 request deviation bound; it is not a guaranteed fill bound. |
+| Maximum quote age seconds | Rejects stale or invalid quote timestamps. |
 
-**LIVE.** **Not implemented.** `BROKER=LIVE` raises "LIVE trading is not
-enabled"; `MODE≠PAPER` / `LIVE_TRADING=true` raise at boot. There is no live
-broker adapter, no live order routing, and no configuration that can enable
-either.
-
----
-
-## 10. STRATEGIES AND LEARNING
-
-**Available strategies** (`app/strategies/`, via `create_strategy(name,
-parameters)`): `moving_average`, `momentum`, `mean_reversion`, `breakout`,
-`rsi`, `macd`, `bollinger`. `GET /strategies` lists them with default
-parameters.
-
-**Discovery & experiments:** `discover` (spec generation → OOS-gated
-qualification) and `research run` (momentum grid) run the documented
-protocol: **TRAIN → VALIDATION → SELECTION/PROMOTION → LOCKED TEST (once,
-report-only) → REPORT**. Selection metrics use the **validation** leg only;
-robustness (parameter/cost stability) and walk-forward are separate gates;
-every experiment/candidate/dataset row is versioned with timestamps/hashes.
-
-**Regime detection:** `RegimeEngine` + `classify_regime` derive the market
-regime (e.g. `trend_up_low_vol`) from past-only features; regime labels carry
-no guarantee (documented disclaimer).
-
-**Router:** `StrategyRouter` scores candidates by out-of-sample expectancy,
-robustness and calibrated confidence; hard filters reject negative/insufficient
-OOS and excessive drawdown; in-sample return is never scored. Selection is
-persisted as `ROUTER_DECISION` learning events; accepted selections swap the
-engine's active strategy and are recorded as versioned `STRATEGY_SWAPPED`
-events. Degraded strategies are penalized (PROBATION) or hard-excluded
-(SHADOW/RETIRED).
-
-**Candidate lifecycle:** lineages move through
-`RESEARCH → VALIDATION → WALK_FORWARD → SHADOW → CANARY → APPROVED` stages
-with health `ACTIVE/PROBATION/SHADOW/RETIRED`. `lifecycle status` shows
-stage/status/tradable; `lifecycle promote/degrade --lineage …` move a
-lineage explicitly (children can never trade on a parent's success;
-RETIRED history is kept, never resurrected silently).
-
-**Final execution boundary (3.0.2):** a candidate is tradable only with the
-**complete ladder recorded AND current status ACTIVE**. `promoted=True`
-alone is never enough.
-
-**Shadow strategies:** `ShadowStrategyEngine` tracks non-traded strategies
-for evidence; `CAPITAL ALLOCATION`: `CapitalAllocator` weights by OOS
-evidence × robustness × calibration under the `MAX_STRATEGY_ALLOCATION`
-hard cap; the resulting plan bounds entry sizing (verified end-to-end).
-
-**Learning may change:** strategy selection, candidate parameters, model
-versions (always through the evidence gates). **Learning may NEVER change:**
-risk limits, position sizing rules, drawdown protection, STOP, auth,
-execution mode, LIVE flags, exposure caps, kill switches (enforced by
-separation + tests).
+Limits are necessary guards, not a complete risk-management guarantee. Gaps, rejected protective orders, disconnections, broker changes, contract events and execution differences can produce larger losses. Balance operations can make a day baseline untrustworthy; AXIOM then fails readiness rather than inventing one.
 
 ---
 
-## 11. RISK CONTROLS
+## 8. Readiness, Arm and Activate
 
-All of these sit **outside** any learning system and fail closed:
+On **Risk**, run **Readiness** after connection, selection and risk configuration. Checks include:
 
-1. **Hard limits** (`HardRiskLimits.from_settings`): `MAX_POSITION_VALUE`
-   (per-order notional cap), `MAX_OPEN_POSITIONS`, `MAX_DAILY_LOSS`,
-   `MAX_TRADES_PER_DAY` (tz-aware daily accounting, `MARKET_TIMEZONE`
-   boundary; resets each trading day, preserved across same-day restarts).
-2. **Sizing before the gate:** intended quantity from
-   `min(cash, equity×POSITION_SIZE, allocator allowance)` divided by the
-   all-in price (costs included) — the **exact** gated quantity is what is
-   submitted; oversize/exposure violations are rejected with `RISK_REJECT`.
-3. **Portfolio exposure:** the allocator plan caps per-strategy capital
-   before the risk gate; no bypass path exists.
-4. **Duplicate-order prevention:** deterministic intent ids
-   (`uuid5(strategy|symbol|timestamp|side)`), durable `processed_signals`,
-   the submission journal (no resubmission from
-   SUBMISSION_ATTEMPTED/UNKNOWN/… states — ever), entry-stacking guard, and
-   no pyramiding while a position is open.
-5. **Emergency STOP:** persisted flag checked before every submission;
-   blocks entries AND exits; cancels working sandbox orders (§14).
-6. **Pause gate:** operator/engine pause blocks BUY entries only
-   (risk-reducing exits still pass); STOP blocks everything.
-7. **Lifecycle restrictions:** entries require an eligible router selection
-   (full ladder + ACTIVE); no qualified candidate ⇒ no entry.
-8. **Instrument identity:** explicit `instrument_key` per order; missing
-   mapping, mismatch, ambiguity → `RISK_REJECT:INSTRUMENT_IDENTITY_MISSING`
-   or broker `ValueError`; no defaults, ever.
-9. **Broker/authentication failures:** 401/403 → `SandboxAuthError`,
-   fail closed; 429/5xx on submit → UNKNOWN + no blind retry; status GETs
-   retried GET-only.
-10. **Protective exits:** stop-loss (`STOP_LOSS`) / take-profit
-    (`TAKE_PROFIT`) per candle against the recovered average entry,
-    duplicate-exit guard, independent of strategy signals.
-11. **Market gating:** closed market / stale feed → no new signals.
-12. **Fail-closed philosophy:** every uncertain remote outcome resolves to a
-    blocked or reconciled state, never to an optimistic default.
+- explicit Vantage environment and verified terminal connection;
+- exact server, masked account identity and DEMO/REAL account type;
+- account and terminal trading permissions;
+- selected instruments, fresh valid quotes, clock sanity, market/symbol availability and complete contracts;
+- valid bounded risk limits, funds/margin, daily baseline and recent reconciliation;
+- no unresolved intents and no unexplained external positions/orders;
+- emergency stop clear, valid single-instance writer lock, writable audit store and local alerting availability;
+- automation off/unavailable.
 
----
+Any failed, unknown or unavailable check blocks Arm. A challenge expires after 60 seconds. Use the exact phrases displayed for the selected environment:
 
-## 12. ORDER LIFECYCLE (actual implementation)
+```text
+ARM VANTAGE DEMO
+ACTIVATE VANTAGE DEMO
 
-```
-Market data (completed candle; market-open + fresh checks)
-  → event engine (move/volume/volatility/regime/cadence triggers; debounce)
-  → protective exits first (SL/TP vs recovered avg entry; dup guard)
-  → regime classification → router selection (_maybe_swap_strategy)
-  → lifecycle eligibility (full ladder + ACTIVE at the boundary)
-  → sizing (_size_entry: min(cash, equity×fraction, allocator) ÷ all-in price)
-  → HARD risk gate (HardRiskLimits.check on the exact OrderIntent → RISK_DECISION)
-  → intent id (uuid5 V1 format) + durable journal INTENT_PERSISTED (+ tag)
-      ↳ duplicates blocked here (journal + processed_signals + working-order guard)
-  → DECISION event (full observability record)
-  → broker.submit: identity resolution (fail-closed) → POST V3 (tag, slice)
-      ↳ 200 → ACKNOWLEDGED (+ remote order ids)
-      ↳ 4xx → REJECTED (final)
-      ↳ 429/5xx/network → UNKNOWN (no blind re-POST)
-  → reconciliation (GET history per remote id; or tag lookup for UNKNOWN)
-  → fills applied as deltas exactly once (ledger: cash/position/realized)
-  → daily risk accounting (trades/realized for the trading day)
-  → TRADE_OUTCOME attribution (strategy/symbol/qty/pnl) on round trips
-  → learning/reporting (rolling batches, weekly report, dashboard views)
+ARM VANTAGE LIVE
+ACTIVATE VANTAGE LIVE
 ```
 
-Every step persists durable events (`INTENT_STATE`, `INTENT_PERSISTED`,
-`DECISION`, `RISK_DECISION`, `RISK_REJECT`, `SANDBOX_FILL_RECONCILED`,
-`TRADE_OUTCOME`, …) — a full decision is reconstructible with
-`replay --signal <id>`.
+Arm and Activate are separate. Activation submits zero orders and does not start a strategy. Relevant changes or failures disarm the session; never treat an old screenshot or previous readiness result as current approval.
 
 ---
 
-## 13. RECOVERY
+## 9. Reviewed order flow
 
-- **Restart recovery:** engine init = load durable ledger from recorded
-  transitions → reregister open orders from DB records **without
-  resubmitting** → resolve unresolved intents (tag lookup) → rebuild
-  in-memory state → trade. Verified: identical cash/position/realized after
-  restart; round-trip P&L matches the original.
-- **Unknown remote orders:** submission accepted remotely but the response
-  was lost → journal UNKNOWN → reconcile performs the documented tag lookup →
-  exactly one strict attribute match is ADOPTED (fills applied once); zero
-  matches → VERIFIED_ABSENCE (this intent never auto-resubmits); multiple →
-  UNRESOLVED (fail closed). Unknown/Unresolved persist across restarts.
-- **Duplicate prevention:** see §11.4 — the same intent can never POST twice.
-- **Crash recovery:** any crash point (before POST, during POST, after remote
-  accept, after response before persist, during reconcile, during restart) is
-  covered by the durable journal state machine (regression-tested).
-- **Reconnect recovery:** WebSocket reconnects with fresh auth + resubscribe
-  (bounded backoff); reconnects counter exposed.
-- **Disagreement broker vs local:** reconciliation and the remote are always
-  authoritative for fills/status; unverifiable differences surface as
-  UNRESOLVED/UNKNOWN and block further resubmission instead of guessing.
-- **Database recovery:** `backup backup|verify|restore` (RecoveryManager),
-  `monitor` runs an SQLite `quick_check`; schema migrations are versioned
-  (v1–4) and idempotent.
+### 9.1 New entry
 
----
+1. Complete activation for the intended environment.
+2. On **Charts**, use the docked ticket to choose a selected symbol, BUY/SELL, MARKET/LIMIT, volume and optional SL/TP. Use the displayed contract units—MT5 volume is lots, not a share count; MT5-priced LOCAL PAPER explicitly uses units and does not perform lot/contract/FX conversion.
+3. Generate a new idempotency key for a genuinely new intention. Reusing a key returns/blocks the existing intent rather than sending another order.
+4. Choose **Review**. AXIOM refreshes/reconciles broker state, contract and quote; normalizes volume/price; checks session, emergency stop, identity, exposure, margin, risk and MT5's read-only `order_check` precheck.
+5. Inspect the 30-second review: environment, masked account/server, contract, quote age/spread, estimated price/margin, all blockers and the exact confirmation phrase.
+6. Only if every check passes, type:
 
-## 14. EMERGENCY STOP
+   ```text
+   SUBMIT DEMO ORDER
+   ```
 
-- **Dashboard/API:** `POST /engine/stop` (or the STOP button on
-  `/dashboard` / in the desktop app) — records `EMERGENCY_STOP_REQUESTED`,
-  sets the persisted `emergency_stop` engine_state, and if a sandbox engine
-  is embedded in the same process also calls `engine.emergency_stop()` which
-  cancels every working sandbox order (cancel failures are recorded, never
-  hidden).
-- **Standalone engine:** the flag lives in the database; the engine checks it
-  **before every submission**, so a STOP from the dashboard on the same
-  database halts order flow in a separately-running engine on its next
-  decision. (Cancelling already-working remote orders from the dashboard
-  requires the engine to be reachable; otherwise cancel them via the broker
-  API or let the DAY validity lapse — documented honestly.)
-- **What it stops:** ALL submissions — entries AND protective exits
-  (`EXECUTION_STOPPED_SKIP`).
-- **Existing positions:** NOT auto-closed (orders are cancelled; positions
-  remain; close them deliberately after resuming).
-- **Resume:** `POST /engine/resume`, the dashboard Resume button,
-  or `engine.resume()` → clears the persisted flag; the engine returns to
-  STOPPED→RUNNING on next run.
-- **Persistence:** the flag survives restarts (verified by tests).
+   or, for an explicitly authorized live session:
+
+   ```text
+   SUBMIT LIVE ORDER
+   ```
+
+7. Final submission repeats all checks, persists the intent, and makes one `order_send` attempt. Read the resulting intent and broker reconciliation—not just the button animation.
+
+The docked ticket shows product/CFD context, quantity units, indicative value/currency, bid/ask/spread, cost limitations, margin context and risk state. Indicative value is units × price for paper and lots × broker contract size × price for Vantage; it is not a guaranteed account-currency value or fill. AXIOM does not invent commission/fee values. MT5 margin and server risk appear from the actual read-only review, and editing the ticket clears that review context. Broker deals remain authoritative for filled price, commission, swap, fee and P&L.
+
+A read-only precheck passing does not guarantee a fill. AXIOM does not report `FILLED`, `CANCELLED` or `MODIFIED` without supporting broker evidence. Demo fills are broker demo outcomes, not evidence of live execution or profitability.
+
+### 9.2 Close a position
+
+A close must reference a currently broker-reported position ticket, use the opposite MARKET side, and not exceed its confirmed volume. Review and type `CLOSE DEMO POSITION` or `CLOSE LIVE POSITION`. Actual filled volume, costs and P&L come from broker deals. If the position disappears or changes, reconcile and review again.
+
+### 9.3 Cancel a working order
+
+Only a reconciled AXIOM-managed working order can be cancelled through its intent. Type `CANCEL DEMO ORDER` or `CANCEL LIVE ORDER`. One cancel attempt is followed by reconciliation. If the outcome is not broker-confirmed, it remains unresolved and the session disarms.
+
+### 9.4 Modify position SL/TP
+
+Protection modification is a separate reviewed, position-ticket-bound action with its own idempotency key and `MODIFY DEMO POSITION` / `MODIFY LIVE POSITION` confirmation. AXIOM confirms `MODIFIED` only when the resulting broker position matches the requested SL/TP values. Pending-order modification is not exposed in this version.
+
+### 9.5 What AXIOM does not manage
+
+Externally created/manual MT5 orders and positions are reported where possible but are not assumed owned by AXIOM. They block Arm as unexplained exposure. Stop/Emergency stop leave external orders untouched. Manage them deliberately in MT5, then reconcile; AXIOM never claims to have flattened them.
 
 ---
 
-## 15. REPORTS
+## 10. Broker state, P&L and audit
 
-- `python -m app report --format markdown` — weekly report to stdout:
-  mode banner, Account (OBSERVED/CALCULATED labels), Activity (sandbox
-  orders, fills, trades, risk events), Strategy & regimes (regime changes,
-  promotions), Data status (coverage, instruments).
-- `python -m app report --format pdf --output arena-weekly.pdf` — same
-  content as a PDF file (default name `arena-weekly-<date>.pdf`).
-- `/api/v2/report/weekly?format=markdown|pdf` — the same report over HTTP.
-- `/api/v2/performance`, `/api/v2/attribution`, equity/drawdown/attribution
-  SVG charts — computed from recorded trades/snapshots.
-- `research status`, `lifecycle status`, `dataset audit`, `monitor` —
-  research/model/ops snapshots.
-- Interpretation rule: every number is labeled **OBSERVED** (recorded),
-  **CALCULATED** (derived), or **MODEL INTERPRETATION** — never a
-  fabricated/guaranteed figure.
+Vantage account snapshots, working orders, order history, positions and deals are read from MT5. P&L includes available broker-reported components; the UI distinguishes realized history, unrealized position P&L and data availability. A disconnected view cannot provide current broker P&L.
+
+**Activity / Audit** records redacted events such as mode selection, credential metadata changes, connection tests, readiness/lifecycle transitions, reviews, intents, broker results, reconciliation and emergency actions. Local replay additionally records run-scoped start/running, actionable strategy signals, simulated orders/fills and explicit stop reasons as described in section 13. Secrets and full logins are excluded. Local event persistence is not an external notification service.
+
+Keep the console and local logs available for diagnosis, but inspect any file before sharing it. Never share `axiom.env`, DPAPI credential files, screenshots containing account details, or unreviewed support bundles.
 
 ---
 
-## 16. DESKTOP APPLICATION
+## 11. Restart and recovery
 
-- **Launch:** `python -m desktop` (from the repo root; needs
-  `pip install -r requirements-desktop.txt` i.e. PySide6, plus a running
-  backend: set `ARENA_BACKEND_URL` (default `http://127.0.0.1:8000`) and
-  `ARENA_API_TOKEN`). Windows helper: `desktop/run_windows.bat`.
-- **Screens:** overview/monitoring page (equity/drawdown charts, tables),
-  Ask (Command Center query box), report loader; header **EMERGENCY STOP**
-  and **Resume** buttons; an explicit notice that the app is a
-  viewer + emergency stop only.
-- **Status indicators:** mode, live-trading-disabled badge, emergency-stop
-  state, equity/P&L, feed status — all fetched from the backend API; the
-  desktop app cannot place orders or change risk.
-- **Known limitations:** Qt could not be booted in the build sandbox — the
-  desktop UI is **implemented, not externally verified**; Windows launcher
-  provided as source. The backend it talks to is fully verified.
-- There is no tray/daemon mode; closing the window detaches the viewer only
-  (the backend keeps running).
+1. **Ordinary restart:** expect disconnected/disarmed and automation off. Re-run the read-only test, reconcile, readiness, Arm and Activate. Saved credentials/selection/risk do not authorize trading.
+2. **Reconnect:** prior activation is invalid. Confirm exact account/server and fresh broker state before proceeding.
+3. **Unknown order result:** do not retry. Compare intent/comment, working orders, history and deals in MT5; run Reconcile. Multiple/no safe matches remain blockers.
+4. **Unrecognized external exposure:** inspect it in MT5. AXIOM will not adopt or cancel it merely to make readiness pass.
+5. **Emergency stop after restart:** the durable flag remains set. Verify broker state independently, then explicitly clear it if appropriate; full readiness and activation are still required.
+6. **Stale review/challenge:** generate a fresh one. Never reuse an expired review after prices or positions change.
+7. **Database/audit failure or lost writer lock:** readiness fails closed. Close duplicate AXIOM instances and restore exclusive access; do not bypass the check.
+8. **Backup:** close AXIOM before copying the SQLite database and configuration. Treat DPAPI files as sensitive; they are not portable plaintext backups and may not decrypt for another user.
+
+Do not “fix” a blocker by deleting journals, editing intents, disabling risk limits, or launching a second writer. Those actions destroy the evidence needed for safe reconciliation.
 
 ---
 
-## 17. TROUBLESHOOTING
+## 12. Troubleshooting
 
-| Symptom | Likely cause | Diagnostic | Safe fix |
+| Symptom | What to check |
+|---|---|
+| MT5 package unavailable | Use the current Windows x64 build; inspect `BUILD_METADATA.json`. Package presence is separate from terminal connectivity. |
+| Terminal unavailable / initialize failed | Install/open Vantage MT5, verify the executable path, terminal architecture and Vantage instructions. No website fallback exists. |
+| Authentication failed | Recheck numeric login, trading password and exact server. Use Replace deliberately; never send the password for support. |
+| Server/account mismatch | The selected DEMO/LIVE mode or exact server does not match MT5. Disconnect and correct it; do not Arm. |
+| Credential storage unavailable | Packaged Vantage credentials require Windows DPAPI. Source/fake tests using memory stores are not production secret storage. |
+| No instruments | Complete the read-only test on the intended account. Availability is account-specific; an empty result is not filled from a preset universe. |
+| Instrument untradable | Inspect trade mode and metadata issues. Incomplete products, disabled symbols, unselected symbols and invalid quotes are rejected. |
+| Readiness blocked by external items | Review all MT5 positions/orders. AXIOM requires explained exposure before Arm. |
+| Readiness blocked by unresolved intent | Reconcile against broker evidence. Do not submit a duplicate or delete the journal. |
+| Readiness blocked by equity baseline | Balance operations or missing state can prevent a trustworthy daily baseline. Resolve with broker records; do not invent a value. |
+| Review expired / changed | Generate a new review. Quote, identity, risk and contract checks are intentionally repeated. |
+| Stop clicked but positions remain | Stop is not flatten-all. Inspect broker-reported positions/orders and use separately reviewed risk-reducing actions where supported. |
+| Browser asks for token | Read `API_TOKEN` from private `axiom.env`; it is tab-scoped and intentionally not printed by the launcher. |
+| Port unavailable | Set `AXIOM_PORT` before launch or close the old instance. The launcher searches its documented local port range. |
+| Console closes | Start the executable from PowerShell to read the sanitized error; inspect local logs without sharing secrets. |
+
+---
+
+## 13. LOCAL PAPER and legacy chart
+
+LOCAL PAPER execution remains independent of MT5: its account, orders, positions and P&L are local simulation outputs. The optional DEMO market-data connection changes only the source of prices, never the execution mode or broker state. It uses VANTAGE DEMO credentials only when the operator explicitly saves/connects that read-only feed.
+
+**Default replay is automated.** **Start automated replay (moving_average)** and the legacy **START AUTOMATED REPLAY** control run the configured local `moving_average` strategy with automation ON. Actionable strategy signals can create simulated orders and later simulated fills without reviewing each ticket. The banner, sidebar, run panel and start result identify this behavior; it is not the `manual_only` workflow and not Daily Upstox live-market PAPER. All orders/fills remain local simulation and no broker order is routed.
+
+**Replay audit and stop reasons are durable.** Activity / Audit records allowlisted `PAPER_SESSION_STARTED`, `PAPER_SESSION_RUNNING`, actionable `PAPER_STRATEGY_SIGNAL`, `PAPER_ORDER_SIMULATED`, `PAPER_FILL_SIMULATED`, pause/resume and `PAPER_SESSION_STOPPED` events with a run ID and per-run sequence. Normal finite replay completion reports `END_OF_DATA`; operator stop, execution-mode change, emergency stop, application shutdown and errors have distinct reasons. Immediate stop is also journaled. Provider objects, URLs, credentials, tokens, exception text and arbitrary settings are not exported. Market timestamps are data fields inside redacted payloads; event timestamps remain local audit times.
+
+**P&L scopes are separate.** Overview's realized card is all persisted local history, while unrealized is all current local open positions. The run panel reports the current/last run's bars, actionable signals, simulated orders/fills, stop reason, realized delta, unrealized delta and ending open-position unrealized P&L. Run deltas are account-level changes from that run's start, not per-trade attribution. After process restart there is no active current run; the last completed run summary can remain visible, but persisted account P&L is not reset or presented as a new run result. These are simulated accounting values, not money earned or profitability evidence.
+
+On **Charts**, **Start manual-only MT5 paper** requires the selected exact symbol, configured timeframe, authenticated DEMO feed, complete contract metadata, and fresh advancing quotes. It stages only newly closed bars for the always-HOLD `manual_only` strategy. Automation remains off; startup itself creates no order. A manual order still requires Review, an idempotency key, and Confirm. The saved order/fill includes quote source, source timestamp, receive timestamp and stable closed-bar provenance.
+
+MT5 paper quantities are explicit units in the existing long-only, one-currency simulator. AXIOM does not convert MT5 lots with contract size, perform FX conversion, model short selling, or claim CFD margin/execution parity. Configured paper currency must match the DEMO account's profit currency. Fresh ticks gate entry; simulated fills use the existing last-completed-bar price/cost model, not a tick-accurate broker fill. A local paper fill based on a demo quote is **not** a Vantage demo execution fill.
+
+- Open `/chart` for the legacy chart/replay/US-paper workflow.
+- `/dashboard` is explicitly a **legacy paper/sandbox** page, not a Vantage live dashboard.
+- Selecting a Vantage execution mode disconnects the independent feed and stops the legacy paper simulator so two execution sessions cannot continue as one active session.
+- Paper emergency stop persists and blocks start/resume/new entries; confirmed risk-reducing exits remain supported.
+- Alpaca keys in `axiom.env`, if used, are market-data credentials only. They do not enable Alpaca order routing or Vantage connectivity.
+
+Historical Upstox sandbox/research commands in the repository are not the Vantage operator path. Do not infer live capability from those legacy components.
+
+---
+
+## 14. Verification and limitations
+
+Read the exact release's `BUILD_METADATA.json` and release notes. They distinguish:
+
+- source/unit/fake-MT5/API/UI tests;
+- real-Windows DPAPI, frozen executable and installer/upgrade/uninstall checks;
+- real-demo read-only market-data/local-paper evidence, if any;
+- explicitly authorized demo execution connection/order evidence, if any;
+- live connection/order evidence, which is not implied by any of the above.
+
+No real-money action is part of automated development or CI. A demo account must be explicitly available for demo E2E; otherwise it is skipped and reported. Fake and demo results establish neither profitability nor live readiness.
+
+Current functional limits include:
+
+- Windows production credential storage and official MT5 integration; Linux fake tests are not terminal evidence.
+- Manual reviewed Vantage order flow only; no Vantage strategy automation. MT5 fresh-price paper is always `manual_only` with automation off.
+- MT5 paper supports the configured timeframe, one exact symbol, long-only explicit units and one account currency; no lot/contract-size or FX conversion, short selling, tick-accurate fill or multi-symbol portfolio claim.
+- Market/limit entries, position close, managed-order cancel and position SL/TP modification; no claim of support for every MT5 order type.
+- No TradingView relay/webhook execution.
+- Local audit alerts only; no guaranteed external notification.
+- Unsigned binaries unless release metadata explicitly provides signing evidence.
+- Broker/session schedules, corporate actions, rejection behavior and execution quality remain external realities; software guards cannot remove market risk.
+
+The legacy historical documentation in `README.md` preserves earlier research releases. Where it says real-money routing did not exist, that statement belongs to those historical releases, not to this Vantage-capable operator version.
+
+---
+
+## 15. Local real-demo market-data verification procedure
+
+This procedure verifies a **real Vantage DEMO terminal/feed with local AXIOM simulated fills**. It does not place a Vantage demo order and does not verify live trading. Perform it yourself on Windows; never send the login, password, DPAPI files, local token or unredacted account screenshots to a developer, issue, chat or CI.
+
+### 15.1 Prepare an isolated paper test profile
+
+1. Hash-verify the exact unsigned Windows release and read its `BUILD_METADATA.json`. Install/open the Vantage MT5 desktop terminal using Vantage's official instructions. Manually log that terminal into the **DEMO** account you intend to test; do not select or log into a live account for this procedure.
+2. Close other AXIOM instances. From PowerShell inside the extracted portable `AXIOM-Operator` folder containing the verified `AXIOM-Chart.exe` and `_internal`, choose a new empty data directory so an old paper configuration cannot conflict with the demo account:
+
+   ```powershell
+   $env:AXIOM_DATA_DIR = Join-Path $env:LOCALAPPDATA 'AXIOM-DemoFeedTest'
+   .\AXIOM-Chart.exe
+   ```
+
+3. On first launch, close AXIOM with Ctrl+C in its console. Open the newly created `%LOCALAPPDATA%\AXIOM-DemoFeedTest\axiom.env` locally. Set `DEFAULT_TIMEFRAME=1m` and set `CURRENCY` to the demo account's actual profit/account currency (for example `USD` only if the account is USD). Keep `MODE=PAPER`, `LIVE_TRADING=false`, and `BROKER=LOCAL_PAPER`. `DATA_SOURCE=replay` may remain for the legacy/default chart; it is never an MT5 fallback. Restart from the same PowerShell environment.
+
+   A saved paper database refuses a later currency/timeframe change. Do not delete or edit an existing database to bypass that guard; use a new data directory as above.
+
+### 15.2 Connect and inspect the real feed
+
+4. In `/terminal`, verify the global execution badge is **LOCAL PAPER**. Open **Connections**. The credential editor in this mode is explicitly DEMO-only. Enter the numeric demo login, demo password, exact demo server and terminal path locally; save/replace the protected profile. Do not use **VANTAGE LIVE**, the execution mode selector, **Test connection**, Arm or Activate.
+5. Choose **Connect demo market data — read-only**. Verify provider `VANTAGE_DEMO_MT5`, masked login, exact server, account type `DEMO`, and currency. Execution must still say LOCAL PAPER, no strategy may be started by the connection, and no order may appear. A module-installed indicator or saved credential alone is not a successful feed test.
+6. Open **Charts** and choose an exact symbol returned by this account. Check the broker description/path, product classification, currencies, contract size, tick/point metadata and volume limits. A share/ETF CFD must be labeled as a CFD, not owned shares. If a desired symbol is absent or unsupported, record that limitation; do not substitute a hard-coded ticker.
+7. Load the chart. Required evidence is the **FRESH READ-ONLY MARKET DATA · LOCAL PAPER FILLS** label, a fresh advancing quote, separate source/receive timestamps, validated closed bars, and broker tick-volume labeling. Compare a few prices/times with the MT5 terminal. If the label says disconnected, degraded, stale, not advancing, replay or unavailable, stop and resolve that reason; do not record a pass.
+
+### 15.3 Verify manual-only local fills and degradation
+
+8. Choose **Start manual-only MT5 paper**. Confirm `manual_only`, the configured timeframe, automation OFF and zero automatically created orders. Enter a small **paper quantity in units, not MT5 lots**, then Review. Verify the modal says local simulated execution and shows `VANTAGE_DEMO_MT5`, source/receive timestamps and market-data ID. Confirm once; inspect the local order/fill and its provenance. The review carries an idempotency key: an API retry of that identical request must return its saved result, not create a second order. A new review is a new intention/key; never reuse a key for changed order content.
+9. Create a small long paper position, then use **Disconnect demo data** (or close only the MT5 terminal for a terminal-loss check). Verify an actionable degraded/disconnected reason, no replay bars, preserved paper position/cash/order/fill state, and rejection of a new BUY. A reviewed SELL that only exits the existing long paper position remains permitted and must retain its last closed-bar provenance. Reconnect and re-verify fresh advancing quotes before another BUY.
+10. Record the release commit/hash, Windows version, masked demo server/account identity, exact symbols/products tested, timeframes, timestamps, each pass/fail/skip and any terminal errors. Redact secrets and full account numbers from evidence. Keep fake-provider CI results distinct from this real-terminal check.
+
+A pass demonstrates only the observed demo-market-data and local-simulation behavior at that time. It does not demonstrate a Vantage demo execution fill, profitability, execution quality, complete instrument coverage or real-money readiness.
+
+---
+
+## 16. Owner-run Vantage DEMO execution rehearsal
+
+This separate optional procedure places **demo orders only**. It is not the market-data/paper procedure above and must never be performed with a real/live login. The account owner must run it locally on Windows. Agent and CI tests must not log into an external account or substitute fake results for this rehearsal.
+
+1. Use a dedicated Vantage DEMO account, preferably with no external positions/orders. Verify `DEMO` in the MT5 terminal and account details before every connection. Hash-verify the exact AXIOM release and use a new empty `AXIOM_DATA_DIR` such as `%LOCALAPPDATA%\AXIOM-DemoExecutionTest`; do not overwrite an existing database.
+2. Start AXIOM in its default local paper state. Save the numeric DEMO login/password and exact DEMO server in the protected profile. Explicitly select **VANTAGE_DEMO** and Apply. Confirm the three-part banner changes execution to VANTAGE DEMO, not LIVE. Choose **Test connection — read-only** and verify masked identity, server, DEMO account type and zero orders.
+3. Discover and inspect the exact contracts you intend to test. Select only those symbols and save the execution selection. Set conservative, nonzero server risk limits appropriate to the demo account. Check contract size, lot min/step, currency, sessions, filling support, spread and product/CFD ownership labels.
+4. Run readiness and resolve every blocker. Perform **Arm**, then separately **Activate**, with the exact DEMO phrases. Confirm both actions create zero orders and automation remains OFF.
+5. On Charts, use the smallest suitable broker-lot quantity. Review every field, including indicative value versus actual MT5 margin, spread, costs limitation, quote timestamp and precheck. Type `SUBMIT DEMO ORDER` only after confirming the session is DEMO. Inspect the persisted intent and broker orders/deals after reconciliation; a click or retcode alone is not a fill.
+6. If supported and appropriate for the demo test, separately review position SL/TP modification, a managed pending-order cancellation and a position-ticket-bound close. Confirm each from resulting broker position/history/deals. For an ambiguous/timeout result, do not retry: reconcile and compare the MT5 terminal.
+7. Test Pause, Stop and Emergency stop. Confirm new entries block, restart returns DISARMED, and no startup/reconnect/chart/feed action creates an order. Do not expect AXIOM to cancel or flatten external/manual MT5 exposure.
+8. Record release commit and binary SHA-256, Windows/MT5 builds, masked account/server, exact symbols/contracts, timestamps, risk limits (without secrets), each review/retcode/reconciled result, skips/failures and redacted performance samples. An external DEMO execution claim requires this actual evidence; otherwise record **not verified**.
+
+A successful rehearsal verifies only the observed demo operations at that time. It does not establish live execution quality, complete broker coverage, profitability or live readiness.
+
+---
+
+## 17. Performance diagnostics
+
+Open **Settings → Latency & render diagnostics** after using the relevant workflow. Empty means not measured, not zero. Server and browser p50/p95/p99 values remain separate for feed receipt, quote source age, chart backend/load/render, review, full submission, broker acknowledgement and reconciliation. Samples are bounded (512 per server metric, at most 64 server metric names, 128 per browser metric) and contain no order payloads or secrets.
+
+For definitions, the reproducible fake-DEMO load procedure and measured development results, read `docs/TERMINAL_PERFORMANCE.md`, `docs/TERMINAL_BENCHMARK.json`, and `docs/TERMINAL_UI_BENCHMARK.json`. For a real local DEMO record, note Windows/browser/terminal builds, account environment, symbol, market/session conditions, network conditions, sample counts and timestamp. Do not compare a fake in-process acknowledgement with a real broker round trip or promise universal latency.
+
+---
+
+## 18. Listed shares and ETFs
+
+Vantage share/ETF CFDs remain CFDs and do not confer underlying ownership. True listed instruments require a separate suitable provider and exact symbol + exchange/MIC + currency + asset-class identity. The current `listed-assets-v1` interface is fail-closed: no listed execution adapter or entitled listed reference/quote provider is configured, and no MT5/CFD fallback is allowed. Existing Alpaca support is read-only market data for local paper fills, not owned-share execution.
+
+Read `docs/LISTED_ASSETS.md` for the authenticated status/policy checks, existing read-only Alpaca setup, and acceptance gates for any future provider. Do not route a listed ticker to a similarly named Vantage symbol.
+
+---
+
+## 19. LIVE-readiness checklist — owner only
+
+No agent or CI process may log into LIVE, Arm/Activate LIVE, or place a real-money order. The account owner alone must decide whether to perform any real-account operation locally. If any item below is unverified, leave LIVE disconnected/disarmed and record **not ready**.
+
+- [ ] Exact tested release commit and both Windows SHA-256 hashes verified; unsigned-binary implications understood.
+- [ ] Official Vantage MT5 terminal, Windows clock, network and terminal/account permissions checked by the owner.
+- [ ] Separate DPAPI LIVE profile entered locally; exact assigned server confirmed. `VantageMarkets-Live 13` is used only if Vantage assigned that server to this account.
+- [ ] Read-only connection verifies masked identity, server and REAL account type. Credential presence or quote connectivity is not treated as trading permission.
+- [ ] Account-discovered products/contracts/sessions/currencies/lot rules inspected; CFDs are not mistaken for owned shares/ETFs.
+- [ ] Current broker positions, working orders, history and external exposure reconciled; no unresolved or ambiguous intent remains.
+- [ ] Conservative nonzero risk, daily-loss/drawdown, margin, spread, slippage and freshness bounds understood and saved. Emergency stop/recovery and ambiguous-outcome procedures rehearsed on DEMO.
+- [ ] Fresh readiness passes with no blockers; the owner separately Arms and Activates the intended account. Restart/reconnect/mode/chart/feed actions remain non-order actions.
+- [ ] Every order receives a fresh review and exact final confirmation. Margin, spread, costs and quantity units are checked; no blind retry follows an uncertain result.
+- [ ] Automation remains OFF. Monitoring, persistent emergency stop, audit retention and manual MT5 reconciliation are available.
+- [ ] The owner accepts that losses, gaps, slippage, rejection, disconnection and broker/contract changes can exceed estimates.
+
+Software tests, benchmarks, paper fills and DEMO executions do not establish profitability or LIVE readiness. Activation is an explicit owner decision, not a certification by AXIOM.
+
+---
+
+## 20. Research candidate generation — source CLI
+
+The repaired source CLI can generate historical research candidates from local history. Read `docs/RESEARCH_CANDIDATES.md` (also staged as `docs/RESEARCH_CANDIDATES.md` in Windows artifacts) for commands and full limitations.
+
+```bash
+python -m app discover --instruments 'NSE_EQ|INE002A01018' --unit days --interval 1 --timeframe 1D --max-candidates 12 --output results/discovery.json
+python -m app research run --instruments 'NSE_EQ|INE002A01018' --unit days --interval 1 --timeframe 1D --periods 2,3,5
+python run.py --mode validate --csv data/sample.csv --symbol DEMO --timeframe 1D --output results/validation-sample
+```
+
+Instruments are evaluated separately; at least 60 candles are required per key. Validation/locked-test warmup uses only earlier candles. A baseline is never promoted merely because it is the baseline, and validation promotion requires positive expectancy and strict baseline improvement in addition to the other gates. Discovery also requires present, positive walk-forward-proxy expectancy; missing evidence cannot pass. Zero profit factor is penalized, robustness is measured against each baseline return, and invalid/non-finite router evidence fails closed.
+
+The bundled sample CSV is synthetic. Qualified candidates, positive backtests and paper results are not guarantees of profit or LIVE readiness. Generic OHLCV research does not verify Vantage lot/tick/margin/session/CFD financing rules and never becomes an order instruction automatically. These commands do not change execution mode, Arm/Activate, automation or emergency stop. All reviewed-order and reconciliation controls remain separate.
+
+## 21. Connecting live market data — Upstox (India) and Alpaca (U.S.)
+
+This section connects **real market data** to the local PAPER engine for Indian
+equities (Upstox) and U.S.-listed stocks/ETFs (Alpaca). Every fill stays
+simulated inside AXIOM: the app contains no Upstox or Alpaca order client, and
+the read-only probes below never touch an order endpoint. No profitability or
+LIVE-readiness claim is made.
+
+India and the U.S. are kept separate: different currencies (INR/USD),
+calendars, credentials, instrument formats and local PAPER portfolios. A
+combined view appears only when both markets are explicitly selected. When a
+provider connection fails, AXIOM fails closed — it never silently substitutes
+the bundled `DEMO` sample data (which is synthetic and labelled as such).
+
+### 21.1 Upstox (India, NSE/BSE)
+
+1. Create an Upstox developer app and obtain its API key and redirect URI.
+2. Run the built-in OAuth helper to obtain a daily access token; it stores the
+   token in the local `.env` (`MARKET_DATA_ACCESS_TOKEN`) with owner-only file
+   permissions and never prints it:
+
+   ```bash
+   python -c "from app.data.upstox_auth import run_login_flow; run_login_flow()"
+   ```
+
+3. Configure `.env` (exact instrument keys only, `SEGMENT|ISIN` format):
+
+   ```dotenv
+   DATA_SOURCE=upstox
+   MARKET_DATA_PROVIDER=upstox
+   MARKET=india
+   CURRENCY=INR
+   MARKET_CALENDAR=nse-session
+   MARKET_DATA_SYMBOLS=NSE_EQ|INE002A01018
+   MARKET_DATA_TIMEFRAME=1m
+   MARKET_DATA_MODE=ltpc
+   MARKET_DATA_ACCESS_TOKEN=...
+   ```
+
+4. Test the connection (read-only; market-data authorize probe only):
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $AXIOM_API_TOKEN" \
+     http://127.0.0.1:8000/api/connections/upstox/test
+   ```
+
+   `verdict: feed_ok` means the token is authorized for Market Data Feed V3.
+   Upstox access tokens expire daily: after expiry the probe reports
+   `rejected` with re-authorization guidance — rerun step 2. A `403` means the
+   account is not entitled to the feed; an `unreachable` verdict means network
+   connectivity failed first and nothing has been verified.
+5. Start the local PAPER session from the terminal or `POST /paper/start` with
+   `source=upstox`. Stop it with `POST /paper/stop`. Session state, simulated
+   fills and audit events are visible in the terminal and `/paper/status`.
+
+### 21.2 Alpaca (U.S. stocks and ETFs)
+
+1. Create an Alpaca account and generate **market-data** API keys on the
+   dashboard. AXIOM uses only read-only market-data endpoints; the keys can
+   never place, modify or cancel an order through this app.
+2. Configure `.env` for the U.S. market:
+
+   ```dotenv
+   DATA_SOURCE=alpaca
+   MARKET=us
+   CURRENCY=USD
+   MARKET_CALENDAR=us-equities
+   DEFAULT_TIMEFRAME=1m
+   ALPACA_API_KEY=...
+   ALPACA_API_SECRET=...
+   ALPACA_DATA_FEED=iex
+   ALPACA_SYMBOLS=AAPL,MSFT,SPY
+   ```
+
+3. **Feed entitlements are labelled exactly, never upgraded.** `iex` is the
+   IEX single-venue feed (roughly 2–3% of U.S. volume) and is never described
+   as the consolidated tape; `sip` is the all-exchange consolidated feed (paid
+   plan); `delayed_sip` is SIP delayed 15 minutes. Set `ALPACA_DATA_FEED` to
+   what your account is actually entitled to — the free Basic plan includes
+   IEX only. Plan rate limits apply (Basic: 200 data calls/minute); AXIOM
+   fails closed on HTTP 429 and never retries silently.
+4. Test the connection (read-only latest-bar probe plus listing metadata):
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $AXIOM_API_TOKEN" \
+     "http://127.0.0.1:8000/api/connections/alpaca/test?symbol=AAPL"
+   ```
+
+   The response reports the entitlement verdict, the feed label for your
+   configured feed, and listing metadata (venue, class, status) for the
+   ticker. `forbidden` means the credential lacks the requested feed
+   entitlement; switch `ALPACA_DATA_FEED` to your entitled feed. U.S. session
+   rules (09:30–16:00 America/New_York, standard holidays, 13:00 early closes,
+   daylight-saving changes) are applied by the local `us-equities` calendar.
+5. Start/stop the local PAPER session as in step 5 above with `source=alpaca`.
+
+### 21.3 What "connected" means here
+
+`POST /api/connections` lists both markets with credential-presence booleans
+(secrets are never returned). Automated tests exercise these flows with mocked
+provider responses and are **not** proof of real provider connectivity — the
+owner must run the two connection tests above on a networked machine with real
+credentials. Real-connection verification is the owner's step; without it the
+connections remain BLOCKED / NOT VERIFIED regardless of how many mock tests
+pass. Historical data caching, when enabled, is stored per-user locally from
+the licensed provider APIs and is never committed to the repository.
+
+## 22. U.S. brokerage path (Alpaca) — separately gated order execution
+
+This section covers AXIOM's **broker** integration for U.S.-listed stocks and
+ETFs through Alpaca's official Trading API. It is separate from market data
+(section 21) and from local PAPER. Three execution destinations are strictly
+distinct and always displayed before any action:
+
+| Destination | Endpoint | Money | What fills |
 |---|---|---|---|
-| `No module named app` / wrong results | wrong directory / venv not active | `pwd` (repo root?); `which python` | `cd trading_bot && source .venv/bin/activate` |
-| `ModuleNotFoundError: fastapi` (etc.) | optional extras missing | `pip show fastapi` | `pip install -r requirements.txt` |
-| `Only MODE=PAPER and LIVE_TRADING=false are permitted` | env overrides | `env | grep -E "MODE|LIVE"` | remove the override |
-| `BROKER must be LOCAL_PAPER or UPSTOX_SANDBOX` | invalid broker value | `grep BROKER .env` | set `LOCAL_PAPER` or `UPSTOX_SANDBOX` |
-| `BROKER=UPSTOX_SANDBOX requires UPSTOX_SANDBOX_ACCESS_TOKEN` | token missing | `python -m app sandbox-test …` (exit 3) | add token to `.env` |
-| sandbox probe `credential rejected (401/403)` | invalid/expired sandbox token | `python -m app sandbox-test --instrument …` | regenerate the sandbox token |
-| `upstox-test` → `credential NOT verified for feed V3` | wrong/expired data token | same command; read `credential_check` | `python -m app upstox-login` |
-| WebSocket `connected_no_completed_candle_in_window` | market closed / long candle timeframe | `/market/status` metrics | retry during market hours or increase `--timeout` |
-| `STALE_FEED_SIGNALS_PAUSED` in logs | feed gone quiet | `python -m app monitor`; feed metrics | waits for fresh data; check connectivity |
-| `RISK_REJECT:NO_QUALIFIED_CANDIDATE` | no lifecycle-eligible candidate | `python -m app lifecycle status` | approve a candidate through research/lifecycle (do NOT bypass) |
-| `RISK_REJECT` with a limit reason | hard limit hit | the event payload in `/dashboard/data` | raise the limit deliberately or reduce size |
-| `DUPLICATE_INTENT_BLOCKED` / `ENTRY_ORDER_STILL_WORKING` | same signal retried / entry already working | events panel | expected protection; wait for reconciliation |
-| `REMOTE_LOOKUP_*` / `UNRESOLVED` warnings | submission outcome uncertain | `INTENT_STATE` events; journal state | let reconcile retry; never resubmit manually |
-| `database is locked` | two processes on one SQLite file | `ps \| grep "python -m app"` | stop one process; SQLite is single-writer |
-| `PRAGMA quick_check` not ok / corruption | disk/db damage | `python -m app backup verify --path …`; `monitor` | restore latest backup (`backup restore`) |
-| `503 Set API_TOKEN…` from API | `API_TOKEN` empty | `curl -i http://127.0.0.1:8000/health` | set `API_TOKEN` in `.env`, restart server |
-| `401 Invalid or missing bearer token` | wrong header | same | send `Authorization: Bearer $API_TOKEN` |
-| `Address already in use` (port 8000) | server already running | `curl -s http://127.0.0.1:8000/health` | use `--port 8001` or stop the old process |
-| `engine` exits with code 2 + "requires BROKER=UPSTOX_SANDBOX" | engine misconfig | `grep -E "BROKER|DATA_SOURCE" .env` | configure both `BROKER=UPSTOX_SANDBOX` and `DATA_SOURCE=upstox` |
+| Local PAPER | none (in-app) | none | AXIOM's local simulator |
+| **Alpaca PAPER** | `paper-api.alpaca.markets` | none | Alpaca's paper-trading environment |
+| **Alpaca LIVE** | `api.alpaca.markets` | **REAL** | Alpaca brokerage |
 
----
+LIVE is **disabled by default**. Configuration alone can never enable it: the
+LIVE path additionally requires every readiness check to pass and two distinct
+operator actions — **Arm**, then **Activate**. Disarm, any material change
+(credentials, risk limits, account identity, failed reconciliation, stale or
+uncertain state) or the emergency stop immediately invalidate activation. No
+environment switch is ever implicit, paper credentials are never accepted for
+LIVE (separate protected credential slots), and no sample/DEMO data is ever
+substituted while reporting a broker connection.
 
-## 18. SAFE FIRST-RUN PROCEDURE
+### 22.1 Owner-side prerequisites (before anything works)
 
-Offline steps 1–5 need **nothing** but Python. Steps 6–13 need your **own**
-Upstox *sandbox* token and are marked accordingly. **There is no
-live-trading procedure: LIVE is not implemented and cannot be enabled.**
+1. **Account eligibility — broker approval required.** Alpaca live-account
+   availability depends on your country of residence and on Alpaca's approval
+   of your account application (identity verification/KYC, tax forms such as
+   W-8BEN, account review, funding; MFA is mandatory). See Alpaca's official
+   guidance: https://alpaca.markets/learn/live-trading-account-non-us — "we
+   support services to 195+ countries; if you don't see your country in the
+   list, reach out to support". **Do not assume your account is eligible or
+   approved until Alpaca confirms it.** AXIOM does not and cannot grant
+   eligibility. A paper account does NOT imply a live account.
+2. Create **separate broker API keys** in the Alpaca dashboard (paper keys for
+   the paper environment; live keys only after approval). These are distinct
+   from the market-data keys of section 21 and are stored separately.
+3. Store the broker credentials in the protected local store (DPAPI on
+   Windows; owner-only files elsewhere):
 
-1. **Verify installation** — `python -m app --version` → `Arena 3.0.4`;
-   `python -m app --help` lists 22 commands.
-2. **Initialize** — `python -m app initialize` (idempotent; re-run shows
-   what already existed). Expect `{"ok": true, …}`.
-3. **Paper test** — `python -m app paper-test` → JSON ending `"ok": true`,
-   equity exactly `99637.58463385397`.
-4. **Launch dashboard** — set `API_TOKEN=<random>` in `.env`;
-   `python run.py --mode api --host 127.0.0.1 --port 8000`.
-5. **Inspect status** — browser: `http://127.0.0.1:8000/health`, then
-   `/dashboard` (set a REST-client header `Authorization: Bearer $API_TOKEN`
-   for the JSON routes). Confirm `"mode":"PAPER"`, `"live_trading":false`,
-   `"real_order_routing":"NOT_IMPLEMENTED"`.
-6. **Configure Upstox Sandbox** *(requires your sandbox account)* — in
-   `.env`: `BROKER=UPSTOX_SANDBOX`, `UPSTOX_SANDBOX_ACCESS_TOKEN=<token>`,
-   plus data config (`DATA_SOURCE=upstox`, `MARKET_DATA_ACCESS_TOKEN`,
-   `MARKET_DATA_SYMBOLS=NSE_EQ|INE002A01018`, `MARKET_DATA_TIMEFRAME=1m`,
-   `DEFAULT_TIMEFRAME=1m`) and sensible hard limits (e.g.
-   `MAX_POSITION_VALUE=20000`, `MAX_OPEN_POSITIONS=1`,
-   `MAX_TRADES_PER_DAY=10`, `MAX_DAILY_LOSS=1000`). Restart the server.
-7. **Credential test** — `python -m app sandbox-test --instrument
-   NSE_EQ|INE002A01018` → `"credential_accepted": true`, `order_placed` false.
-8. **Market/data test** — `python -m app upstox-test --timeout 30` (feed
-   probe) and/or `python -m app market-stream --duration 30`.
-9. **ONE sandbox BUY** — either `python -m app sandbox-test --instrument
-   NSE_EQ|INE002A01018 --place-order --quantity 1` (single explicit order) or
-   start the engine (`python -m app engine --max-candles 200`) with an
-   eligible candidate so it enters by itself. Quantity: 1 share.
-10. **Verify acknowledgement** — events show
-    `INTENT_PERSISTED → DECISION → RISK_DECISION → ACKNOWLEDGED`; sandbox-test
-    prints `submitted_intent` + `fills_after_reconcile`.
-11. **Reconcile** — `reconcile()` runs inside the engine loop / after
-    sandbox-test automatically; confirm `SANDBOX_FILL_RECONCILED` and the
-    ledger row (position = 1).
-12. **Sandbox SELL** — flatten with a strategy exit/protective exit in the
-    engine, or stop the engine and submit one explicit sandbox SELL through
-    your own script against the same documented API (the CLI exposes the BUY
-    probe only; there is no separate `sell` subcommand — this is the honest
-    limitation).
-13. **Verify flat** — ledger `position_quantity == 0`, realized P&L recorded
-    in the report/dashboard.
-14. **Inspect reports** — `python -m app report --format markdown`;
-    dashboard panels; `python -m app monitor`.
-15. **Restart Arena** — Ctrl-C, then start again (`engine` or `run.py`).
-16. **Verify recovery** — startup logs show `LEDGER_RECOVERED` when a
-    position/fill was replayed; equity/cash identical to pre-restart;
-    `/dashboard/data` consistent. Run `python -m app backup backup --label
-    first-run` when satisfied.
+   ```bash
+   python -m app.alpaca_broker.credentials paper --directory <data>/secrets
+   python -m app.alpaca_broker.credentials live  --directory <data>/secrets   # only after broker approval
+   ```
 
----
+   Environment variables `ALPACA_BROKER_API_KEY`/`ALPACA_BROKER_API_SECRET`
+   work for headless setups and are reported as `environment` (not
+   `protected-store`) in status output.
+4. Configure `.env` (broker fields are separate from market-data fields):
 
-## 19. QUICK REFERENCE
+   ```dotenv
+   ALPACA_BROKER_ENABLED=true
+   ALPACA_BROKER_ENVIRONMENT=paper        # paper | live; live needs runtime Arm+Activate
+   ALPACA_BROKER_MAX_ORDER_VALUE=1000     # all three limits are mandatory (> 0)
+   ALPACA_BROKER_MAX_OPEN_POSITIONS=2
+   ALPACA_BROKER_MAX_DAILY_ORDERS=10
+   ```
 
-| Task | Command | Safe/Unsafe | Network? | Credentials? | Orders? |
-|---|---|---|---|---|---|
-| Version check | `python -m app --version` | Safe | No | No | No |
-| First-run setup | `python -m app initialize` | Safe | Universe sync | No | No |
-| Offline self-test | `python -m app paper-test` | Safe | No | No | No (sim) |
-| Weekly report | `python -m app report --format markdown` | Safe | No | No | No |
-| Ask stored data | `python -m app ask "…"` | Safe | No | No | No |
-| Health snapshot | `python -m app monitor` | Safe | No | No | No |
-| DB backup | `python -m app backup backup` | Safe | No | No | No |
-| Research run | `python -m app research run …` | Safe | No | No | No |
-| Discovery | `python -m app discover …` | Safe | No | No | No |
-| Opportunity scan | `python -m app scan …` | Safe | No | No | No |
-| Lifecycle view | `python -m app lifecycle status` | Safe | No | No | No |
-| Lifecycle mutate | `lifecycle promote/degrade --lineage …` | Mutating (research) | No | No | No |
-| Replay decision | `python -m app replay --signal ID` | Safe | No | No | No |
-| Universe sync | `python -m app market-universe sync` | Safe | Yes | No | No |
-| History sync | `python -m app history sync …` | Safe | Yes | No | No |
-| Data login | `python -m app upstox-login` | Safe | Yes | Creates token | No |
-| Feed test | `python -m app upstox-test` | Safe (read-only) | Yes | Yes | No |
-| Stream print | `python -m app market-stream --duration 30` | Safe (read-only) | Yes | Yes | No |
-| Paper pipeline | `python -m app paper-live …` | Safe (sim orders) | Yes | Yes | No (sim) |
-| Sandbox probe | `python -m app sandbox-test --instrument KEY` | Safe (read-only) | Yes | Yes | No |
-| Sandbox order probe | `… sandbox-test … --place-order --quantity 1` | **ORDER (sandbox)** | Yes | Yes | **Yes** |
-| 24/7 execution | `python -m app engine` | **ORDER (sandbox)** | Yes | Yes | **Yes** |
-| Dashboard | `python run.py --mode api` | Safe (read-only UI) | Local | API_TOKEN | Via STOP/RESUME only |
-| Desktop viewer | `python -m desktop` | Safe (viewer) | Local | API_TOKEN | No |
+   Missing or zero risk limits fail closed: orders are refused.
 
----
+### 22.2 Operating the broker path
 
-## 20. CURRENT VERIFICATION STATUS
+- `GET /api/alpaca-broker/status` — account mode, endpoint host, gate state,
+  masked account, risk limits, reconciliation state. The console header shows
+  the broker destination at all times (`ALPACA_PAPER · paper-api.alpaca.markets
+  · gate …`, and for LIVE an unmistakable real-money badge).
+- `POST /api/alpaca-broker/preview` — order preview with every check listed
+  (instrument, size, risk caps, buying power, account state, gate). Nothing is
+  submitted.
+- `POST /api/alpaca-broker/orders` — submit. Every order carries a mandatory
+  `client_order_id`; duplicates (including after a restart) are adopted or
+  refused, never re-posted. Intents, submissions, fills, rejects, cancels and
+  replaces are journaled in the local audit history.
+- `GET /api/alpaca-broker/orders`, `DELETE|PATCH /api/alpaca-broker/orders/{id}`
+  — status updates, cancellation, cancel/replace.
+- `POST /api/alpaca-broker/sync-fills`, `/reconcile`, `/recover` — fill
+  polling, reconciliation (any mismatch fails closed and blocks orders), and
+  restart recovery (broker state is re-adopted; uncertainty blocks orders).
+- `POST /api/alpaca-broker/emergency-stop` — kill switch: cancels all open
+  orders at the broker and blocks every action until an explicit reset
+  (which returns the gate to DISABLED; LIVE must be armed+activated again).
+- LIVE only: `POST /api/alpaca-broker/gate/arm` → `/gate/activate` (and
+  `/gate/disarm`). Activation issues the LIVE permit; without it a LIVE client
+  cannot even be constructed.
 
-Full detail: `ARENA_FINAL_VERIFICATION.md` (3.0.4) in the repo root.
+### 22.3 What is verified and what is not
 
-- **Test suite:** 404 collected, **404 passed, 0 failed, 0 skipped**
-  (Python 3.13 venv; ×2 consecutive runs + once from the extracted release
-  zip). — VERIFIED.
-- **External Upstox REST (order APIs):** NOT ATTEMPTED (no credentials).
-  Sandbox flows implemented per current published docs and tested against
-  fakes only — **implemented, not externally verified**.
-- **External Upstox WebSocket (market data feed):** NOT ATTEMPTED —
-  implemented, not externally verified (credential probe, reconnect,
-  resubscribe tested against fakes).
-- **Sandbox order placement end-to-end with a real token:** NOT ATTEMPTED.
-- **Live trading:** NOT IMPLEMENTED (rejected by validation; no adapter).
-- **GUI verification:** desktop (PySide6) — NOT VERIFIED (sandbox has no
-  display); web dashboard routes/panels — VERIFIED via the API test suite.
-- **Termux:** NOT ATTEMPTED. **Python 3.11/3.12 specifically:** NOT ATTEMPTED
-  (3.13 verified; `requires-python >= 3.11`).
-- **Windows:** packaging includes a `.bat` launcher and tzdata pin; a real
-  Windows run — NOT ATTEMPTED.
-- **Known limitations:** optional runtime extras; single-writer SQLite; no
-  guaranteed profits (regime similarity disclaimed); rolling evaluator cannot
-  auto-promote without research evidence; desktop boot unverified.
-
----
-
-## 21. FINAL SAFETY CHECKLIST (before ANY order-capable run)
-
-Tick every line before `engine` or `sandbox-test --place-order`:
-
-- [ ] `MODE=PAPER`, `LIVE_TRADING=false` in `.env` (and no shell overrides)
-- [ ] `BROKER=UPSTOX_SANDBOX` exactly (never `LIVE` — it would be rejected)
-- [ ] Sandbox token is from **your** developer sandbox account; data token
-      verified by `upstox-test`; sandbox token verified by `sandbox-test`
-- [ ] `MARKET_DATA_SYMBOLS` contains exactly the instrument(s) you intend;
-      you know each `instrument_key` by heart
-- [ ] Quantity intended is deliberate (`--quantity 1` for probes); sizing
-      knob (`POSITION_SIZE`) and allocator plan understood
-- [ ] Hard limits set to real values, not `0`/unlimited:
-      `MAX_POSITION_VALUE`, `MAX_OPEN_POSITIONS`, `MAX_DAILY_LOSS`,
-      `MAX_TRADES_PER_DAY`
-- [ ] Emergency STOP path tested: you know `POST /engine/stop`
-      and that the flag persists across restart
-- [ ] Dashboard healthy: `/health` ok, feed panel connected, no active
-      alerts (`python -m app monitor` exits 0)
-- [ ] Reconciliation healthy: recent `SANDBOX_FILL_RECONCILED` events, no
-      standing `UNRESOLVED`/`UNKNOWN` intents, positions match the broker
-
-*If any box is unticked: do not start an order-capable run.*
+- The automated tests exercise the full order lifecycle (preview, submit,
+  partial fills, completion, duplicate prevention, rejections, cancel/replace,
+  reconciliation, restart recovery, kill switch) against a **mocked** paper
+  broker, plus proof that tests cannot reach the LIVE endpoint. Mock tests are
+  **not** proof of real broker connectivity or real fills.
+- Real **Alpaca PAPER** order-flow verification requires the owner's paper
+  account and network access and remains **BLOCKED / NOT VERIFIED** until run
+  owner-side.
+- **LIVE code paths** are tested at the gate/client level only. No real-money
+  order has been placed or may be placed without broker-approved eligibility,
+  funding, readiness checks passing, and explicit Arm + Activate.
+- No profitability or readiness claim is made by any test, mock or CI run.

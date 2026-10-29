@@ -590,7 +590,7 @@ def test_real_broker_remains_non_operational():
         FutureRealBroker()
 
 
-def test_health_and_status_are_paper_only(tmp_path):
+def test_health_keeps_legacy_paper_process_and_names_guarded_vantage_capability(tmp_path):
     settings = replace(
         Settings(),
         api_token="local-test-token",
@@ -601,7 +601,8 @@ def test_health_and_status_are_paper_only(tmp_path):
         health = client.get("/health").json()
         assert health["version"] == __version__
         assert health["mode"] == "PAPER" and health["live_trading"] is False
-        assert health["real_order_routing"] == "NOT_IMPLEMENTED"
+        assert health["real_order_routing"] == "VANTAGE_MT5_GUARDED"
+        assert health["vantage_startup"] == "DISCONNECTED_DISARMED"
         headers = {"Authorization": "Bearer local-test-token"}
         status = client.get("/market/status", headers=headers).json()
         assert status["paper_mode"] is True and status["mode"] == "PAPER"

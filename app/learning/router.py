@@ -5,20 +5,24 @@ Scoring (documented, deterministic):
 - oos_expectancy: out-of-sample ONLY (in-sample return is never scored).
 - robustness: from the robustness harness (parameter/cost stability), [0,1].
 - confidence: min(1, oos_trades / min_trades).
-Risk constraints are hard filters (max drawdown, min trades). If nothing
-qualifies, the router returns the fallback (no trading) rather than the
-least-bad candidate.
+Risk constraints are hard filters (max drawdown, min trades, min robustness).
+If nothing qualifies, the router returns the fallback (no trading) rather than
+the least-bad candidate.
 """
 
 from __future__ import annotations
 
+from math import isfinite
+
 
 class StrategyRouter:
     def __init__(self, *, fallback=("momentum", {"period": 2, "threshold": 0.0}),
-                 min_oos_trades: int = 3, max_oos_drawdown: float = 0.5):
+                 min_oos_trades: int = 3, max_oos_drawdown: float = 0.5,
+                 min_robustness: float = 0.25):
         self.fallback = fallback
         self.min_oos_trades = int(min_oos_trades)
         self.max_oos_drawdown = float(max_oos_drawdown)
+        self.min_robustness = float(min_robustness)
 
     def score(self, candidate: dict) -> float | None:
         oos = candidate.get("oos") or {}
@@ -26,12 +30,17 @@ class StrategyRouter:
         expectancy = float(oos.get("oos_expectancy") or 0.0)
         if trades < self.min_oos_trades:
             return None
-        if expectancy <= 0:
-            return None  # negative out-of-sample expectancy is never tradable
+        if not isfinite(expectancy) or expectancy <= 0:
+            return None  # invalid/negative OOS expectancy is never tradable
         metrics = candidate.get("metrics") or {}
-        if float(metrics.get("max_drawdown") or 0.0) > self.max_oos_drawdown:
+        drawdown = float(metrics.get("max_drawdown") or 0.0)
+        if (not isfinite(drawdown) or drawdown < 0
+                or drawdown > self.max_oos_drawdown):
             return None
         robustness = float(candidate.get("robustness_score", 0.0))
+        if (not isfinite(robustness) or not 0.0 <= robustness <= 1.0
+                or robustness < self.min_robustness):
+            return None
         confidence = min(1.0, trades / max(self.min_oos_trades, 1))
         # Expectancy normalized by a modest per-trade anchor; sign dominates.
         norm_expectancy = max(-1.0, min(1.0, expectancy / 0.01))

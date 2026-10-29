@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
+from math import isfinite
 import logging
 from app.backtesting.costs import ExecutionConfig
 from app.backtesting.orders import ACTIVE_STATUSES, Fill, Order
@@ -15,8 +16,47 @@ from app.paper_trading.execution import ContinuousCalendar, execution_price, cal
 logger = logging.getLogger("bot.broker")
 
 
+class PaperRiskLimits:
+    """Separate entry-only limits, kept outside execution-cost account schema."""
+
+    def __init__(self, values=None):
+        values = values or {}
+        self.max_position_value = float(values.get("max_position_value", 0.0))
+        self.max_open_positions = int(values.get("max_open_positions", 0))
+        self.max_daily_loss = float(values.get("max_daily_loss", 0.0))
+        self.max_drawdown = float(values.get("max_drawdown", 0.0))
+        self.max_trades_per_day = int(values.get("max_trades_per_day", 0))
+        if any(not isfinite(v) or v < 0 for v in
+               (self.max_position_value, self.max_daily_loss)):
+            raise ValueError("Paper monetary risk limits must be finite and non-negative")
+        if any(v < 0 for v in (self.max_open_positions, self.max_trades_per_day)):
+            raise ValueError("Paper count risk limits must be non-negative")
+        if not isfinite(self.max_drawdown) or not 0 <= self.max_drawdown < 1:
+            raise ValueError("Paper max_drawdown must be in [0, 1)")
+
+    def to_dict(self):
+        return {name: getattr(self, name) for name in (
+            "max_position_value", "max_open_positions", "max_daily_loss",
+            "max_drawdown", "max_trades_per_day")}
+
+
 class BrokerInterface(ABC):
     @abstractmethod
+    def _update_paper_entry_halts(self, timestamp: str):
+        """Latch the daily-loss and drawdown halts for the current session day."""
+        from zoneinfo import ZoneInfo
+
+        zone = getattr(self.calendar, "timezone", "UTC")
+        day = parse_timestamp(timestamp).astimezone(ZoneInfo(zone)).date().isoformat()
+        halts = self.context.setdefault("paper_risk_halts", {})
+        equity, limits = self.portfolio.equity, self.risk_limits
+        if limits.max_daily_loss > 0 and self.portfolio.day_start_equity - equity >= limits.max_daily_loss:
+            halts["daily_loss_date"] = day
+        if (limits.max_drawdown > 0 and self.portfolio.peak > 0
+                and 1 - equity / self.portfolio.peak >= limits.max_drawdown):
+            halts["drawdown"] = True
+        return day, halts.get("daily_loss_date") == day, bool(halts.get("drawdown"))
+
     def place_order(self, order: Order) -> dict: ...
     @abstractmethod
     def cancel_order(self, order_id: str) -> dict: ...
@@ -45,6 +85,7 @@ class PaperBroker(BrokerInterface):
         currency: str = "INR",
         timeframe: str = "1D",
         calendar=None,
+        risk_limits: dict | None = None,
         repository=None,
         restore=True,
     ):
@@ -53,6 +94,7 @@ class PaperBroker(BrokerInterface):
         if timeframe not in TIMEFRAMES:
             raise ValueError("Unsupported timeframe")
         self.config = config or ExecutionConfig()
+        self.risk_limits = PaperRiskLimits(risk_limits)
         self.currency, self.timeframe = currency, timeframe
         self.calendar = calendar or ContinuousCalendar()
         self.portfolio = Portfolio(self.config.initial_capital)
@@ -60,6 +102,7 @@ class PaperBroker(BrokerInterface):
         self.fills: list[Fill] = []
         self.last_bars: dict[str, str] = {}
         self.last_candles: dict[str, dict] = {}
+        self.market_provenance: dict[str, dict] = {}
         self.context: dict = {}  # Persist strategy warmup/controller metadata with account.
         self.repository = repository
         if repository:
@@ -77,10 +120,17 @@ class PaperBroker(BrokerInterface):
                         or state["timeframe"] != timeframe
                     ):
                         raise ValueError("Saved paper account config differs; use a new database")
+                    if (
+                        state.get("risk_limits") or {}
+                    ) != self.risk_limits.to_dict():
+                        raise ValueError(
+                            "Saved paper risk limits differ; use a new database"
+                        )
                     self.portfolio = Portfolio.restore(state["portfolio"])
                     self.orders = {o["id"]: Order(**o) for o in state["orders"]}
                     self.fills = [Fill(**f) for f in state["fills"]]
                     self.last_candles = state.get("last_candles", {})
+                    self.market_provenance = state.get("market_provenance", {})
                     self.last_bars, self.context = state["last_bars"], state.get("context", {})
             except Exception:
                 repository.release_writer()
@@ -90,9 +140,88 @@ class PaperBroker(BrokerInterface):
         if self.repository:
             self.repository.save_broker(self, snapshot)
 
+    def _record_provenance(self, symbol: str, provenance: dict | None):
+        if provenance is None:
+            return
+        if not isinstance(provenance, dict):
+            raise ValueError("Market-data provenance must be a mapping")
+        required = ("source", "timestamp", "received_at", "id", "kind")
+        if any(not str(provenance.get(key) or "").strip() for key in required):
+            raise ValueError("Market-data provenance is incomplete")
+        parse_timestamp(provenance["timestamp"])
+        parse_timestamp(provenance["received_at"])
+        record = {
+            "source": str(provenance["source"])[:80],
+            "timestamp": parse_timestamp(provenance["timestamp"]).isoformat(),
+            "received_at": parse_timestamp(provenance["received_at"]).isoformat(),
+            "id": str(provenance["id"])[:128],
+            "kind": str(provenance["kind"])[:40],
+            "timeframe": str(provenance.get("timeframe") or self.timeframe)[:8],
+        }
+        self.market_provenance[symbol] = record
+
+    def _apply_provenance(self, order):
+        provenance = self.market_provenance.get(order.symbol)
+        if not provenance:
+            return order
+        order.quote_source = order.quote_source or provenance["source"]
+        order.quote_timestamp = order.quote_timestamp or provenance["timestamp"]
+        order.quote_received_at = order.quote_received_at or provenance["received_at"]
+        order.quote_id = order.quote_id or provenance["id"]
+        return order
+
+    def paper_entry_block_reason(self, symbol: str, timestamp: str,
+                                 *, order_value: float | None = None) -> str | None:
+        """Why a NEW entry is not allowed now, or None when it is.
+
+        Shared by strategy entries and hand-entered paper orders so a cap
+        cannot be sidestepped by trading from the chart instead of the engine.
+        ``order_value`` is the cash a manual entry would commit; passing it
+        makes the position-value cap bite before the order is recorded, which
+        an immediate market fill would otherwise skip.
+        """
+        from zoneinfo import ZoneInfo
+
+        limits = self.risk_limits
+        trade_day, daily_halt, drawdown_halt = self._update_paper_entry_halts(timestamp)
+        zone = getattr(self.calendar, "timezone", "UTC")
+        entry_count = sum(
+            1 for order in self.orders.values()
+            if order.side == "BUY"
+            and parse_timestamp(order.timestamp).astimezone(ZoneInfo(zone)).date().isoformat()
+            == trade_day
+        )
+        open_or_pending = len(self.portfolio.positions) + sum(
+            1 for order in self.orders.values()
+            if order.side == "BUY" and order.status in ACTIVE_STATUSES
+            and order.symbol not in self.portfolio.positions
+        )
+        if daily_halt:
+            return "paper_max_daily_loss"
+        if drawdown_halt:
+            return "paper_max_drawdown"
+        if limits.max_open_positions and open_or_pending >= limits.max_open_positions:
+            return "paper_max_open_positions"
+        if limits.max_trades_per_day and entry_count >= limits.max_trades_per_day:
+            return "paper_max_trades_per_day"
+        if limits.max_position_value and order_value is not None:
+            mark = float(self.portfolio.marks.get(symbol) or 0.0)
+            position = self.portfolio.positions.get(symbol)
+            held = position.quantity * mark if position else 0.0
+            pending = sum(
+                order.remaining * (order.limit_price or mark)
+                for order in self.orders.values()
+                if order.symbol == symbol and order.side == "BUY"
+                and order.status in ACTIVE_STATUSES
+            )
+            if held + pending + float(order_value) > limits.max_position_value + 1e-6:
+                return "paper_max_position_value"
+        return None
+
     def dump(self):
         return {
             "config": asdict(self.config),
+            "risk_limits": self.risk_limits.to_dict(),
             "calendar": calendar_signature(self.calendar),
             "currency": self.currency,
             "timeframe": self.timeframe,
@@ -101,8 +230,24 @@ class PaperBroker(BrokerInterface):
             "fills": [asdict(f) for f in self.fills],
             "last_bars": self.last_bars,
             "last_candles": self.last_candles,
+            "market_provenance": self.market_provenance,
             "context": self.context,
         }
+
+    def _update_paper_entry_halts(self, timestamp: str):
+        """Latch the daily-loss and drawdown halts for the current session day."""
+        from zoneinfo import ZoneInfo
+
+        zone = getattr(self.calendar, "timezone", "UTC")
+        day = parse_timestamp(timestamp).astimezone(ZoneInfo(zone)).date().isoformat()
+        halts = self.context.setdefault("paper_risk_halts", {})
+        equity, limits = self.portfolio.equity, self.risk_limits
+        if limits.max_daily_loss > 0 and self.portfolio.day_start_equity - equity >= limits.max_daily_loss:
+            halts["daily_loss_date"] = day
+        if (limits.max_drawdown > 0 and self.portfolio.peak > 0
+                and 1 - equity / self.portfolio.peak >= limits.max_drawdown):
+            halts["drawdown"] = True
+        return day, halts.get("daily_loss_date") == day, bool(halts.get("drawdown"))
 
     def place_order(self, order: Order) -> dict:
         # Never trust mutable caller-owned order objects or pre-filled statuses.
@@ -129,6 +274,7 @@ class PaperBroker(BrokerInterface):
             position is None or order.quantity > position.quantity - reserved + 1e-8
         ):
             order.status, order.reason = "REJECTED", "insufficient_position"
+        self._apply_provenance(order)
         self.orders[order.id] = order
         self._persist()
         logger.info(
@@ -173,6 +319,7 @@ class PaperBroker(BrokerInterface):
         return self.portfolio.snapshot(timestamp, self.currency)
 
     def _fill(self, order, quantity, price, timestamp, reason="signal", reference=None):
+        self._apply_provenance(order)
         fee = self.config.fee(quantity, price)
         impact = quantity * abs(price - reference) if reference is not None else 0.0
         fill = Fill(
@@ -186,6 +333,10 @@ class PaperBroker(BrokerInterface):
             order.strategy,
             reason,
             impact,
+            quote_source=order.quote_source,
+            quote_timestamp=order.quote_timestamp,
+            quote_received_at=order.quote_received_at,
+            quote_id=order.quote_id,
         )
         self.portfolio.apply_fill(fill)
         total = order.filled_quantity + quantity
@@ -206,8 +357,9 @@ class PaperBroker(BrokerInterface):
             },
         )
 
-    def on_bar(self, candle, *, persist=True) -> dict | None:
+    def on_bar(self, candle, *, persist=True, provenance=None) -> dict | None:
         validate([candle], self.timeframe).require_valid()
+        self._record_provenance(candle.symbol, provenance)
         timestamp = candle.timestamp.isoformat()
         if candle.symbol in self.last_bars and candle.timestamp < parse_timestamp(
             self.last_bars[candle.symbol]
@@ -222,6 +374,16 @@ class PaperBroker(BrokerInterface):
             return None  # Reconnect/replay idempotency.
         if not self.calendar.is_open(candle.timestamp):
             return None
+        # Roll the session-day boundary on last-known equity, then mark this
+        # symbol at the new bar's open before deciding whether resting entries
+        # remain allowed after a price gap.
+        self.portfolio.snapshot(timestamp, self.currency)
+        self.portfolio.marks[candle.symbol] = candle.open
+        _, daily_halt, drawdown_halt = self._update_paper_entry_halts(timestamp)
+        if daily_halt or drawdown_halt:
+            for pending in self.orders.values():
+                if pending.side == "BUY" and pending.status in ACTIVE_STATUSES:
+                    pending.status, pending.reason = "CANCELLED", "paper_risk_limit_breach"
         exposed_at_open = bool(self.portfolio.positions)
         budget = candle.volume * self.config.max_participation
         bought = False
@@ -237,6 +399,14 @@ class PaperBroker(BrokerInterface):
             if order.side == "BUY":
                 affordable = self.portfolio.cash / (price * (1 + self.config.commission))
                 quantity = min(quantity, affordable)
+                cap = self.risk_limits.max_position_value
+                if cap > 0:
+                    position = self.portfolio.positions.get(candle.symbol)
+                    current_value = position.quantity * price if position else 0.0
+                    quantity = min(quantity, max(0.0, cap - current_value) / price)
+                    if quantity <= 1e-8:
+                        order.status, order.reason = "CANCELLED", "paper_max_position_value"
+                        continue
                 if quantity <= 1e-8:
                     order.status, order.reason = "REJECTED", "insufficient_cash"
                     continue
@@ -317,6 +487,8 @@ class PaperBroker(BrokerInterface):
             candle.available_at(self.timeframe).isoformat(), self.currency
         )
         snapshot["exposed"] = snapshot["exposed"] or exposed_at_open or bought
+        if candle.symbol in self.market_provenance:
+            snapshot["quote_provenance"] = dict(self.market_provenance[candle.symbol])
         if persist:
             self._persist(snapshot)
         return snapshot
@@ -337,15 +509,25 @@ class PaperBroker(BrokerInterface):
             position = self.portfolio.positions.get(symbol)
             if position:
                 order = Order(symbol, "SELL", position.quantity, timestamp, strategy)
+                self._apply_provenance(order)
                 self.orders[order.id] = order
         elif signal == Signal.BUY and symbol not in self.portfolio.positions and not active:
             mark = self.portfolio.marks.get(symbol)
             if mark is None:
                 raise ValueError("No market price for sizing")
+            reason = self.paper_entry_block_reason(symbol, timestamp)
+            if reason:
+                logger.warning("paper_entry_blocked", extra={"symbol": symbol, "reason": reason})
+                if persist:
+                    self._persist()
+                return
             budget = min(self.portfolio.cash, self.portfolio.equity * self.config.position_size)
+            if self.risk_limits.max_position_value > 0:
+                budget = min(budget, self.risk_limits.max_position_value)
             quantity = budget / (self.config.fill_price(mark, "BUY") * (1 + self.config.commission))
             if quantity > 1e-8:
                 order = Order(symbol, "BUY", quantity, timestamp, strategy)
+                self._apply_provenance(order)
                 self.orders[order.id] = order
         if persist:
             self._persist()

@@ -1,5 +1,6 @@
 .env
 .venv/
+node_modules/
 __pycache__/
 .pytest_cache/
 *.db
@@ -10,3 +11,19 @@ data/cache/
 results/*
 !results/.gitkeep
 *.paper.lock
+
+# Autonomy operator state, downloaded weights and generated research are local
+# data, never source/release fixtures. Reviewed evidence can be exported explicitly.
+data/autonomy/
+
+# Windows build outputs are generated from the exact source commit. Keep them
+# out of Git so post-build benchmark clean-tree checks do not see themselves.
+packaging/windows/build/
+packaging/windows/dist/
+packaging/windows/*.log
+packaging/windows/build-error.txt
+packaging/windows/TERMINAL_BENCHMARK.json
+packaging/windows/TERMINAL_UI_BENCHMARK.json
+packaging/windows/dist-onedir/
+packaging/windows/build-onedir/
+packaging/windows/package-staging/

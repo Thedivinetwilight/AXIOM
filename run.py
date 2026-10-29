@@ -13,6 +13,7 @@ from app.backtesting.engine import BacktestEngine
 from app.data.cache import DataCache
 from app.data.historical import CSVProvider
 from app.data.factory import stream_provider
+from app.data.realtime import replay_provenance
 from app.database.database import Database
 from app.database.repository import Repository
 from app.logging.logger import configure
@@ -109,6 +110,14 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
         bars=bars,
         delay=args.delay,
         symbol=settings.default_symbol,
+        source_label=(
+            replay_provenance(args.csv.name)[0]
+            if (args.source or settings.data_source) == "replay" else None
+        ),
+        data_kind=(
+            replay_provenance(args.csv.name)[1]
+            if (args.source or settings.data_source) == "replay" else None
+        ),
     )
     # Live data adapters report the symbols they actually subscribe to.
     symbols = list(getattr(provider, "symbols", None) or [settings.default_symbol])
