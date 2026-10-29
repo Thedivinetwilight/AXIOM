@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - arena/19f4cba3-axiom
+      - arena/ffd46191-axiom
   pull_request:
     branches:
       - main
@@ -57,6 +58,7 @@ jobs:
           node --check app/static/autonomy/autonomy.js
           node tests/js/chart_smoke.mjs
           node tests/js/terminal_smoke.mjs
+          node tests/js/multimarket_terminal_smoke.mjs
           node tests/js/autonomy_smoke.mjs
 
   full:
@@ -80,8 +82,5 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
       - name: full Python test suite
         run: python -m pytest -q
-      - name: all three JavaScript harnesses
-        run: |
-          node tests/js/chart_smoke.mjs
-          node tests/js/terminal_smoke.mjs
-          node tests/js/autonomy_smoke.mjs
+      - name: all JavaScript harnesses
+        run: npm test

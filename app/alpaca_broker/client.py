@@ -247,6 +247,120 @@ class AlpacaTradingClient:
         self._fail(response, "order replace")
         return response.json()
 
+    def close_position(self, symbol: str) -> dict:
+        """DELETE /v2/positions/{symbol} — explicit operator-requested position close."""
+        clean_symbol = (symbol or "").strip().upper()
+        if not clean_symbol:
+            raise ValueError("symbol is required to close a position")
+        response = self._request("DELETE", f"/v2/positions/{clean_symbol}")
+        if response.status_code == 404:
+            raise BrokerRejected(f"Alpaca has no open position for {clean_symbol}")
+        self._fail(response, "position close")
+        return response.json()
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+
+class AlpacaReadOnlyClient:
+    """Strictly GET-only Alpaca account/clock/order/position inspection client.
+
+    Used for preflight readiness checks, connection verification, and recovery
+    reconciliation before ``LivePermit`` activation. Has zero order-write,
+    cancel, or replace methods and hard-refuses any HTTP verb other than GET.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        secret: str,
+        *,
+        environment: str = "paper",
+        timeout: float = 15.0,
+        client: httpx.Client | None = None,
+    ) -> None:
+        if not isinstance(key, str) or not key.strip() or not isinstance(secret, str) or not secret.strip():
+            raise ValueError("Alpaca broker credentials are required for read-only inspection")
+        if environment not in {"paper", "live"}:
+            raise ValueError("Alpaca broker environment must be 'paper' or 'live'")
+        self.environment = environment
+        self._base = _PAPER_BASE if environment == "paper" else _LIVE_BASE
+        headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+        self._client = client or httpx.Client(timeout=timeout, headers=headers)
+        if client is not None:
+            self._client.headers.update(headers)
+        self._owns_client = client is None
+
+    @property
+    def endpoint_host(self) -> str:
+        return PAPER_HOST if self.environment == "paper" else LIVE_HOST
+
+    def __repr__(self) -> str:
+        return f"AlpacaReadOnlyClient(environment={self.environment!r})"
+
+    def _get(self, path: str, *, params=None) -> httpx.Response:
+        if not path.startswith("/v2/") or not any(
+            path == allowed or path.startswith(allowed) for allowed in _ALLOWED_PATHS
+        ):
+            raise BrokerError("refusing non-Trading-API request path")
+        try:
+            response = self._client.request("GET", f"{self._base}{path}", params=params)
+        except httpx.HTTPError as exc:
+            raise BrokerError(f"Alpaca read endpoint unreachable ({type(exc).__name__})") from None
+        if response.status_code == 429:
+            raise BrokerError("Alpaca broker rate limit reached (HTTP 429); failing closed")
+        return response
+
+    def get_account(self) -> dict:
+        response = self._get("/v2/account")
+        AlpacaTradingClient._fail(response, "account read")
+        raw = response.json()
+        return {
+            "id_masked": _mask_account(raw.get("id")),
+            "account_number_masked": _mask_account(raw.get("account_number")),
+            "status": raw.get("status"),
+            "currency": raw.get("currency"),
+            "cash": raw.get("cash"),
+            "buying_power": raw.get("buying_power"),
+            "equity": raw.get("equity"),
+            "last_equity": raw.get("last_equity"),
+            "portfolio_value": raw.get("portfolio_value"),
+            "trading_blocked": bool(raw.get("trading_blocked")),
+            "trade_suspended_by_user": bool(raw.get("trade_suspended_by_user")),
+            "account_blocked": bool(raw.get("account_blocked")),
+        }
+
+    def get_clock(self) -> dict:
+        response = self._get("/v2/clock")
+        AlpacaTradingClient._fail(response, "clock read")
+        return response.json()
+
+    def get_order(self, order_id: str) -> dict:
+        response = self._get(f"/v2/orders/{order_id}")
+        AlpacaTradingClient._fail(response, "order read")
+        return response.json()
+
+    def get_order_by_client_id(self, client_order_id: str) -> dict | None:
+        response = self._get(
+            "/v2/orders:by_client_order_id",
+            params={"client_order_id": client_order_id},
+        )
+        if response.status_code == 404:
+            return None
+        AlpacaTradingClient._fail(response, "order lookup")
+        return response.json()
+
+    def get_orders(self, *, status: str = "open", limit: int = 100) -> list[dict]:
+        response = self._get("/v2/orders", params={"status": status, "limit": limit})
+        AlpacaTradingClient._fail(response, "orders read")
+        return list(response.json())
+
+    def get_positions(self) -> list[dict]:
+        response = self._get("/v2/positions")
+        AlpacaTradingClient._fail(response, "positions read")
+        return list(response.json())
+
     def close(self) -> None:
         if self._owns_client:
             self._client.close()

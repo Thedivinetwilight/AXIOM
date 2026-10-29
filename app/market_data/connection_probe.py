@@ -76,7 +76,12 @@ def probe_upstox_connection_sync(
 
 
 async def probe_upstox_connection(
-    settings, *, transport: httpx.AsyncBaseTransport | None = None, timeout: float = 20.0,
+    settings,
+    *,
+    token_override: str | None = None,
+    credential_source: str = "environment",
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout: float = 20.0,
 ) -> dict:
     """Read-only Upstox credential/entitlement probe (awaitable).
 
@@ -84,7 +89,11 @@ async def probe_upstox_connection(
     verdict dict. The token itself is never part of the result;
     ``credential_present`` is a boolean only.
     """
-    token = str(getattr(settings, "market_data_access_token", "") or "")
+    token = (
+        str(token_override)
+        if token_override is not None
+        else str(getattr(settings, "market_data_access_token", "") or "")
+    )
     authorize_url = str(
         getattr(settings, "market_data_authorize_url", "")
         or "https://api.upstox.com/v3/feed/market-data-feed/authorize"
@@ -93,11 +102,22 @@ async def probe_upstox_connection(
         token, authorize_url=authorize_url, transport=transport, timeout=timeout,
     )
     view = check.public_view()
+    verdict = view["verdict"]
+    if not token.strip():
+        conn_state = "DISCONNECTED"
+    elif verdict == "feed_ok":
+        conn_state = "CONNECTED_READ_ONLY"
+    elif verdict in {"rejected", "forbidden"}:
+        conn_state = "REJECTED"
+    else:
+        conn_state = "UNAVAILABLE"
     return {
         "provider": "upstox",
         "market": "india",
         "currency": "INR",
         "credential_present": bool(token.strip()),
+        "credential_source": credential_source if token.strip() else "none",
+        "connection_state": conn_state,
         "feed": "market-data-feed-v3",
         "feed_label": "UPSTOX MARKET DATA FEED V3 · READ-ONLY · LOCAL PAPER FILLS",
         "instruments_configured": list(
@@ -107,7 +127,7 @@ async def probe_upstox_connection(
         "read_only": True,
         "real_order_api_used": False,
         **view,
-        "ok": view["verdict"] == "feed_ok",
+        "ok": verdict == "feed_ok",
     }
 
 
@@ -115,6 +135,8 @@ def probe_alpaca_connection(
     settings,
     *,
     symbol: str | None = None,
+    credentials_override: dict[str, str] | None = None,
+    credential_source: str = "environment",
     transport: httpx.BaseTransport | None = None,
     timeout: float = 20.0,
 ) -> dict:
@@ -126,9 +148,14 @@ def probe_alpaca_connection(
     """
     from app.data.alpaca import AlpacaAssetLookup, validate_us_symbol
 
-    key = str(getattr(settings, "alpaca_api_key", "") or "")
-    secret = str(getattr(settings, "alpaca_api_secret", "") or "")
-    feed = str(getattr(settings, "alpaca_data_feed", "") or "iex")
+    if credentials_override is not None:
+        key = str(credentials_override.get("api_key") or "")
+        secret = str(credentials_override.get("api_secret") or "")
+        feed = str(credentials_override.get("feed") or getattr(settings, "alpaca_data_feed", "") or "iex")
+    else:
+        key = str(getattr(settings, "alpaca_api_key", "") or "")
+        secret = str(getattr(settings, "alpaca_api_secret", "") or "")
+        feed = str(getattr(settings, "alpaca_data_feed", "") or "iex")
     configured = list(getattr(settings, "alpaca_symbol_list", lambda: [])())
     requested = (symbol or (configured[0] if configured else "")).strip().upper()
     base = {

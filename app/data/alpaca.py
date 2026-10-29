@@ -327,10 +327,114 @@ class AlpacaAssetLookup:
             "currency": "USD",
             "status": status,
             "tradable": bool(asset.get("tradable")),
+            "fractionable": bool(asset.get("fractionable", False)),
+            "marginable": bool(asset.get("marginable", False)),
+            "shortable": bool(asset.get("shortable", False)),
+            "easy_to_borrow": bool(asset.get("easy_to_borrow", False)),
             "source": "alpaca-assets",
             "read_only": True,
         }
 
+    def list_assets(
+        self,
+        *,
+        status: str = "active",
+        asset_class: str = "us_equity",
+        exchange: str | None = "NASDAQ",
+    ) -> list[dict]:
+        """Read-only asset universe sync via `GET {_ASSET_HOST}/v2/assets`."""
+        params: dict[str, str] = {"status": status, "asset_class": asset_class}
+        if exchange:
+            params["exchange"] = exchange.upper()
+        response = self._client.get(f"{_ASSET_HOST}/v2/assets", params=params)
+        if response.status_code == 429:
+            raise _rate_limit_error("metadata")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError("Alpaca assets response must be a JSON list")
+        return [row for row in payload if isinstance(row, dict)]
+
     def close(self):
         if self._owns_client:
             self._client.close()
+
+
+class AlpacaQuoteReader:
+    """Read-only US equity quote & snapshot reader on `data.alpaca.markets`.
+
+    Strictly GET-only against market-data endpoints; zero trading capability.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        secret: str,
+        *,
+        feed: str = "iex",
+        timeout: float = 15.0,
+        client: httpx.Client | None = None,
+    ) -> None:
+        if not key.strip() or not secret.strip():
+            raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required")
+        feed_label(feed)
+        self.feed = feed
+        headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+        self._client = client or httpx.Client(timeout=timeout, headers=headers)
+        if client is not None:
+            self._client.headers.update(headers)
+        self._owns_client = client is None
+
+    def latest_quote(self, symbol: str) -> dict:
+        symbol = validate_us_symbol(symbol)
+        response = self._client.get(
+            f"{_DATA_HOST}/v2/stocks/{symbol}/snapshot",
+            params={"feed": self.feed},
+        )
+        if response.status_code == 429:
+            raise _rate_limit_error("REST")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Alpaca snapshot response is invalid")
+        quote = payload.get("latestQuote") or {}
+        trade = payload.get("latestTrade") or {}
+        daily = payload.get("dailyBar") or {}
+        prev_daily = payload.get("prevDailyBar") or {}
+        bid = float(quote.get("bp") or 0.0)
+        ask = float(quote.get("ap") or 0.0)
+        last = float(trade.get("p") or daily.get("c") or 0.0)
+        if last <= 0 and bid > 0 and ask >= bid:
+            last = round((bid + ask) / 2.0, 4)
+        stamp_raw = trade.get("t") or quote.get("t") or daily.get("t")
+        if not stamp_raw or last <= 0:
+            raise ValueError(f"Alpaca returned no usable quote/trade price for {symbol}")
+        stamp = parse_timestamp(stamp_raw)
+        prev_close = float(prev_daily.get("c") or 0.0) or None
+        change_pct = (
+            round(((last - prev_close) / prev_close) * 100.0, 3)
+            if prev_close and prev_close > 0
+            else None
+        )
+        return {
+            "symbol": symbol,
+            "market": "NASDAQ",
+            "currency": "USD",
+            "bid": bid if bid > 0 else last,
+            "ask": ask if ask >= max(bid, 0.0) and ask > 0 else last,
+            "last": last,
+            "volume": float(daily.get("v") or trade.get("s") or 0.0),
+            "previous_close": prev_close,
+            "change_pct": change_pct,
+            "timestamp": stamp.isoformat(),
+            "feed": self.feed,
+            "feed_label": feed_label(self.feed),
+            "is_delayed": self.feed == "delayed_sip",
+            "source": f"alpaca-market-data:{self.feed}",
+            "read_only": True,
+        }
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+

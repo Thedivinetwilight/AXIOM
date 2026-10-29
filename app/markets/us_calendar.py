@@ -44,13 +44,20 @@ def _easter(year: int) -> date:
 
 @lru_cache(maxsize=32)
 def holidays(year: int) -> frozenset[date]:
-    fixed = {date(year, 1, 1), date(year, 7, 4), date(year, 12, 25)}
+    # Per NYSE Rule 7.2 / Nasdaq Equity 4 Rule 4120: when New Year's Day (Jan 1)
+    # falls on Saturday, exchanges do NOT close on Friday Dec 31 because Dec 31
+    # is the end of a monthly and yearly accounting period.
+    closed: set[date] = set()
+    jan1 = date(year, 1, 1)
+    if jan1.weekday() < 5:
+        closed.add(jan1)
+    elif jan1.weekday() == 6:
+        closed.add(date(year, 1, 2))
+
+    fixed = {date(year, 7, 4), date(year, 12, 25)}
     if year >= 2022:
         fixed.add(date(year, 6, 19))
-    closed = {_observed(day) for day in fixed}
-    # New Year's Day observed on Dec 31 belongs to the previous calendar year.
-    if date(year + 1, 1, 1).weekday() == 5:
-        closed.add(date(year, 12, 31))
+    closed.update(_observed(day) for day in fixed)
     closed.update({
         _nth_weekday(year, 1, 0, 3),       # Martin Luther King Jr. Day
         _nth_weekday(year, 2, 0, 3),       # Washington's Birthday
@@ -85,21 +92,40 @@ class USEquitiesCalendar:
     timezone = "America/New_York"
     open_time = time(9, 30)
 
+    def __init__(
+        self,
+        *,
+        closed_dates: set[date] | frozenset[date] | list[date] | tuple[date, ...] = (),
+        early_close_dates: set[date] | frozenset[date] | list[date] | tuple[date, ...] = (),
+    ) -> None:
+        self._closed_overrides = frozenset(closed_dates)
+        self._early_close_overrides = frozenset(early_close_dates)
+
+    def is_holiday(self, day: date) -> bool:
+        return day in self._closed_overrides or day in holidays(day.year)
+
+    def is_trading_day(self, day: date) -> bool:
+        return day.weekday() < 5 and not self.is_holiday(day)
+
+    def is_early_close(self, day: date) -> bool:
+        if not self.is_trading_day(day):
+            return False
+        return day in self._early_close_overrides or early_close(day)
+
     def close_time(self, day: date) -> time:
-        return time(13, 0) if early_close(day) else time(16, 0)
+        return time(13, 0) if self.is_early_close(day) else time(16, 0)
 
     def is_open(self, timestamp: datetime) -> bool:
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("US session calendar requires a timezone-aware timestamp")
         local = timestamp.astimezone(ZoneInfo(self.timezone))
         return (
-            local.weekday() < 5
-            and local.date() not in holidays(local.year)
+            self.is_trading_day(local.date())
             and self.open_time <= local.time().replace(tzinfo=None) < self.close_time(local.date())
         )
 
     def session_bounds(self, day: date) -> tuple[datetime, datetime] | None:
-        if day.weekday() >= 5 or day in holidays(day.year):
+        if not self.is_trading_day(day):
             return None
         zone = ZoneInfo(self.timezone)
         return (

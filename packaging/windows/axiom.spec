@@ -47,6 +47,8 @@ datas = [
     (str(ROOT / "app" / "static"), "app/static"),
 ] + demo_datas + identity_datas + [
     (str(ROOT / "app" / "data" / "upstox_proto"), "app/data/upstox_proto"),
+    (str(ROOT / "app" / "markets" / "nse_seed_catalog.json"), "app/markets"),
+    (str(ROOT / "app" / "markets" / "nasdaq_seed_catalog.json"), "app/markets"),
     (str(ROOT / "app" / "autonomy" / "vendor" / "kronos"), "app/autonomy/vendor/kronos"),
     # The optional system-Python worker reads these small modules as files.
     # Torch/Pandas and all weights remain outside the frozen package.
@@ -68,6 +70,8 @@ datas = [
     (str(ROOT / "docs" / "WINDOWS_APP_CONTROL.md"), "docs"),
     (str(ROOT / "docs" / "AUTONOMY.md"), "docs"),
     (str(ROOT / "docs" / "ARCHITECTURE_AUDIT.md"), "docs"),
+    (str(ROOT / "docs" / "BASELINE_AUDIT_AND_ISSUES.md"), "docs"),
+    (str(ROOT / "docs" / "OWNER_SETUP_GUIDE.md"), "docs"),
     (str(ROOT / "docs" / "autonomy-shakedown.template.json"), "docs"),
 ]
 

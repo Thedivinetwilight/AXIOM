@@ -9,10 +9,11 @@ const MODE_LABELS = {
   VANTAGE_LIVE: "VANTAGE LIVE",
 };
 const PAGE_TITLES = {
-  overview: ["WORKSPACE", "Overview"], instruments: ["ACCOUNT UNIVERSE", "Instruments"],
-  charts: ["MARKET & EXECUTION", "Charts & order"], orders: ["BROKER STATE", "Orders & positions"],
-  risk: ["FAIL-CLOSED CONTROLS", "Risk & lifecycle"], connections: ["MT5 CONNECTION", "Connections"],
-  activity: ["LOCAL AUDIT", "Activity & audit"], settings: ["PREFERENCES & HELP", "Settings & help"],
+  overview: ["WORKSPACE", "Overview"], instruments: ["MULTI-MARKET UNIVERSE", "Watchlists & search"],
+  charts: ["SUPERCHARTS & TICKET", "Supercharts & ticket"], orders: ["LEDGER & BROKER STATE", "Orders & positions"],
+  strategies: ["MODES & STRATEGIES", "Strategies & modes"],
+  risk: ["FAIL-CLOSED CONTROLS", "Risk & live gates"], connections: ["PROVIDER CONNECTIONS", "Connections"],
+  activity: ["SHA-256 & LOCAL AUDIT", "Activity & audit"], settings: ["PREFERENCES & HELP", "Settings & manuals"],
 };
 const UNRESOLVED = new Set([
   "INTENT_RECORDED", "SUBMISSION_ATTEMPTED", "MODIFICATION_ATTEMPTED", "UNKNOWN",
@@ -27,6 +28,7 @@ const state = {
   chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
   chartSymbolsLoaded: false, chartRequest: 0, riskDirty: false, credentialMode: null,
   performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
+  mm: { available: false, activeVenue: "NSE", overview: null, catalogItems: [], side: "BUY", chartFeed: "SESSION", lastPreview: null },
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -304,9 +306,13 @@ async function loadBrokerDestination() {
 }
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets(), loadBrokerDestination()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets(), loadBrokerDestination(), loadMultiMarketOverview()]);
   if (state.page === "instruments" && currentStatus().connected) await loadInstruments();
-  if (state.page === "charts") await loadChartSymbols();
+  if (state.page === "instruments" && state.mm.available) await searchMultiMarketCatalog();
+  if (state.page === "charts") {
+    if (state.mm.chartFeed !== "SESSION" && state.mm.available) await loadMultiMarketChart();
+    else await loadChartSymbols();
+  }
 }
 function resetModeLocalState() {
   state.readiness = null; state.activation = null; state.riskDirty = false; state.ticketReview = null;
@@ -1122,7 +1128,7 @@ function drawChart() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
   const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#080f17"; ctx.fillRect(0, 0, width, height);
+  ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#131722"; ctx.fillRect(0, 0, width, height);
   const bars = state.chart.bars || [];
   $("chart-empty").hidden = bars.length > 0;
   canvas.dataset.tool = $("drawing-tool")?.value || "NONE";
@@ -1136,32 +1142,38 @@ function drawChart() {
     observeBrowser("browser.chart.render", performance.now() - startedAt); return;
   }
   const view = chartWindow(); const visible = view.bars;
-  const left = 12, right = 76, top = 20, bottom = 31;
+  const left = 12, right = 78, top = 20, bottom = 31;
   const plotW = Math.max(1, width - left - right), plotH = Math.max(1, height - top - bottom);
   const high = Math.max(...visible.map((bar) => Number(bar.high))); const low = Math.min(...visible.map((bar) => Number(bar.low)));
+  const maxVol = Math.max(1, ...visible.map((bar) => Number(bar.volume || 0)));
   const padding = Math.max((high - low) * .08, high * .0001); const max = high + padding, min = low - padding;
-  const step = plotW / visible.length; const bodyW = Math.max(1, Math.min(12, step * .68));
+  const step = plotW / visible.length; const bodyW = Math.max(1, Math.min(13, step * .7));
   const y = (price) => top + (max - Number(price)) / (max - min || 1) * plotH;
   const xForIndex = (index) => left + (index - view.start + .5) * step;
   const geometry = { left, right, top, bottom, plotW, plotH, max, min, start: view.start, end: view.end, step, width, height };
   state.chartView.geometry = geometry;
-  ctx.font = "10px ui-sans-serif, system-ui"; ctx.textBaseline = "middle";
+  ctx.font = "10px -apple-system, BlinkMacSystemFont, monospace"; ctx.textBaseline = "middle";
   for (let index = 0; index <= 5; index += 1) {
     const gy = top + plotH * index / 5; const price = max - (max - min) * index / 5;
-    ctx.strokeStyle = "#1b2a39"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(left, gy); ctx.lineTo(left + plotW, gy); ctx.stroke();
-    ctx.fillStyle = "#8298ac"; ctx.fillText(fmt(price, 6), left + plotW + 8, gy);
+    ctx.strokeStyle = "#2a2e39"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(left, gy); ctx.lineTo(left + plotW, gy); ctx.stroke();
+    ctx.fillStyle = "#868993"; ctx.fillText(fmt(price, 6), left + plotW + 8, gy);
   }
   visible.forEach((bar, localIndex) => {
     const x = left + step * localIndex + step / 2; const up = Number(bar.close) >= Number(bar.open);
-    ctx.strokeStyle = up ? "#70dfad" : "#ff8999"; ctx.fillStyle = up ? "#70dfad" : "#ff8999";
+    const volH = Math.max(0, (Number(bar.volume || 0) / maxVol) * (plotH * 0.16));
+    if (volH > 0.5) {
+      ctx.fillStyle = up ? "rgba(8, 153, 129, 0.2)" : "rgba(242, 54, 69, 0.2)";
+      ctx.fillRect(x - bodyW / 2, top + plotH - volH, bodyW, volH);
+    }
+    ctx.strokeStyle = up ? "#089981" : "#f23645"; ctx.fillStyle = up ? "#089981" : "#f23645";
     ctx.beginPath(); ctx.moveTo(x, y(bar.high)); ctx.lineTo(x, y(bar.low)); ctx.stroke();
     const bodyTop = y(Math.max(Number(bar.open), Number(bar.close)));
     const bodyBottom = y(Math.min(Number(bar.open), Number(bar.close)));
     ctx.fillRect(x - bodyW / 2, bodyTop, bodyW, Math.max(1, bodyBottom - bodyTop));
   });
   const indicator = $("chart-indicator")?.value || "NONE";
-  if (["EMA20", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("EMA", 20), view, geometry, "#85b5ff");
-  if (["SMA50", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("SMA", 50), view, geometry, "#f4c676");
+  if (["EMA20", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("EMA", 20), view, geometry, "#2962ff");
+  if (["SMA50", "BOTH"].includes(indicator) && bars.length) drawIndicator(ctx, indicatorSeries("SMA", 50), view, geometry, "#f59e0b");
   const drawings = currentDrawings();
   drawings.forEach((drawing) => {
     ctx.strokeStyle = "#c49aff"; ctx.fillStyle = "#c49aff"; ctx.lineWidth = 1.25; ctx.beginPath();
@@ -1584,22 +1596,27 @@ function emergencyStop() {
   const mode = currentStatus().mode;
   openDialog({
     title: "Set durable emergency stop",
-    body: `<p><strong>This affects the selected execution session (${escapeHtml(MODE_LABELS[mode])}) and persists across restart.</strong></p><p>${mode === "AXIOM_PAPER" ? "The local paper strategy stops and working simulated orders are cancelled. New entries/resume stay blocked until explicit clear." : "AXIOM first sets the durable halt, then attempts to cancel managed working orders once and reconciles. It does not assume positions are closed or the account is flat."}</p>`,
+    body: `<p><strong>This halts the selected execution session (${escapeHtml(MODE_LABELS[mode])})${state.mm.available ? " plus NSE & NASDAQ Live-Market Paper, Upstox Autonomy, and Alpaca Broker" : ""}, and persists across restart.</strong></p><p>${mode === "AXIOM_PAPER" ? "The local paper strategy stops and working simulated orders are cancelled. Protective SL/TP on open positions are preserved. New entries stay blocked until explicit clear." : "AXIOM sets the durable halt, cancels unfilled entry orders while preserving protective stops, and reconciles."}</p>`,
     confirmLabel: "Set emergency stop", onConfirm: async () => {
       const result = await api("/api/trading/emergency", { body: {} });
+      if (state.mm.available) await api("/api/markets/emergency-stop", { body: { reason: "operator emergency stop" } }).catch(() => {});
       state.activation = null; state.readiness = null; closeDialog(); await loadWorkspace(); await loadActivity();
-      toast("Durable emergency stop SET", result.note || "New entries blocked. Inspect broker/local remainder.", "err", 12000);
+      if (state.mm.available) await loadMultiMarketOverview();
+      toast("Durable emergency stop SET", result.note || "New entries blocked across sessions. Protective exits preserved.", "err", 12000);
     },
   });
 }
 function clearEmergency() {
   openDialog({
     title: "Clear durable emergency stop",
-    body: "<p>Clearing does not connect, Arm, Activate, resume a strategy, or submit an order. Vantage remains DISARMED and requires fresh readiness.</p>",
+    body: "<p>Clearing does not connect, Arm, Activate, resume a strategy, or submit an order. Live execution remains OFF and disarmed.</p>",
     confirmLabel: "Clear stop — remain disarmed", confirmClass: "warning", phrase: "CLEAR EMERGENCY STOP",
     onConfirm: async () => {
       await api("/api/trading/emergency/clear", { body: { phrase: "CLEAR EMERGENCY STOP" } });
-      closeDialog(); await loadWorkspace(); toast("Emergency stop cleared", "Still disarmed. No session or strategy was automatically resumed.", "ok");
+      if (state.mm.available) await api("/api/markets/emergency-stop/reset", { body: { confirm_phrase: "CLEAR EMERGENCY STOP" } }).catch(() => {});
+      closeDialog(); await loadWorkspace();
+      if (state.mm.available) await loadMultiMarketOverview();
+      toast("Emergency stop cleared", "Still disarmed and LIVE OFF. No session or strategy was automatically resumed.", "ok");
     },
   });
 }
@@ -1858,6 +1875,844 @@ function bindEvents() {
     connection: state.connectionInfo ? { secret_store: state.connectionInfo.secret_store, profiles: state.connectionInfo.profiles, test_is_read_only: state.connectionInfo.test_is_read_only, mt5_package_available: state.connectionInfo.mt5_package_available, mt5_integration: state.connectionInfo.mt5_integration } : null,
   }));
   if (globalThis.ResizeObserver) new ResizeObserver(() => drawChart()).observe($("terminal-chart"));
+  bindMultiMarketEvents();
+}
+
+/* ============================================================================
+ * Multi-Market NSE (INR) + NASDAQ (USD) Desktop Controller
+ * ============================================================================ */
+
+function connStatePillClass(st) {
+  if (st === "CONNECTED_READ_ONLY") return "ok";
+  if (st === "STALE" || st === "AUTHENTICATING") return "warn";
+  if (st === "REJECTED" || st === "UNAVAILABLE") return "err";
+  return "";
+}
+
+async function loadMultiMarketOverview() {
+  try {
+    const ov = await api("/api/markets/overview", { keepAuth: true });
+    state.mm.available = true;
+    state.mm.overview = ov;
+    renderMultiMarketDesk();
+  } catch (_) {
+    // Graceful no-op when running against legacy/minimal test harnesses without /api/markets/*
+    state.mm.available = false;
+  }
+}
+
+function renderMultiMarketDesk() {
+  const ov = state.mm.overview;
+  if (!ov) return;
+
+  const nse = ov.paper?.NSE || {};
+  const nasdaq = ov.paper?.NASDAQ || {};
+  const providers = ov.providers?.providers || [];
+  const live = ov.live || {};
+  const watchlists = ov.watchlists || { NSE: [], NASDAQ: [] };
+
+  // Session clocks & header pills
+  if ($("mm-clock-nse") && nse.exchange_session) {
+    const s = nse.exchange_session;
+    $("mm-clock-nse").textContent = `NSE IST · ${s.state || "CLOSED"}`;
+    $("mm-clock-nse").className = `status-pill ${s.is_open ? "ok" : "warn"}`;
+  }
+  if ($("mm-clock-nasdaq") && nasdaq.exchange_session) {
+    const s = nasdaq.exchange_session;
+    $("mm-clock-nasdaq").textContent = `NASDAQ ET · ${s.state || "CLOSED"}`;
+    $("mm-clock-nasdaq").className = `status-pill ${s.is_open ? "ok" : "warn"}`;
+  }
+
+  const upData = providers.find((p) => p.id === "upstox_market_data");
+  const alData = providers.find((p) => p.id === "alpaca_market_data");
+  if ($("mm-pill-upstox-data") && upData) {
+    $("mm-pill-upstox-data").textContent = `UPSTOX NSE · ${upData.connection_state}`;
+    $("mm-pill-upstox-data").className = `status-pill ${connStatePillClass(upData.connection_state)}`;
+  }
+  if ($("mm-pill-alpaca-data") && alData) {
+    $("mm-pill-alpaca-data").textContent = `ALPACA US (${(alData.feed || "iex").toUpperCase()}) · ${alData.connection_state}`;
+    $("mm-pill-alpaca-data").className = `status-pill ${connStatePillClass(alData.connection_state)}`;
+  }
+  if ($("mm-upstox-data-pill") && upData) {
+    $("mm-upstox-data-pill").textContent = upData.connection_state;
+    $("mm-upstox-data-pill").className = `status-pill ${connStatePillClass(upData.connection_state)}`;
+  }
+  if ($("mm-alpaca-data-pill") && alData) {
+    $("mm-alpaca-data-pill").textContent = alData.connection_state;
+    $("mm-alpaca-data-pill").className = `status-pill ${connStatePillClass(alData.connection_state)}`;
+  }
+
+  if ($("mm-boundary-live")) {
+    const nseGate = live.nse?.availability === "AVAILABLE_BEHIND_GATE" ? "GATED READY" : "NOT AVAILABLE";
+    const usGate = live.nasdaq?.broker_status?.gate?.state === "LIVE_ACTIVE" ? "LIVE ACTIVE" : (live.nasdaq?.availability === "AVAILABLE_BEHIND_GATE" ? "GATED READY" : "OFF / LOCKED");
+    $("mm-boundary-live").textContent = `NSE ${nseGate} · NASDAQ ${usGate}`;
+  }
+
+  // Overview NSE & NASDAQ Paper Ledger cards
+  const renderLedgerList = (elId, badgeId, snap, symPrefix) => {
+    const acct = snap.account || {};
+    if ($(badgeId)) {
+      $(badgeId).textContent = snap.session_state || "STOPPED";
+      $(badgeId).className = `status-pill ${snap.session_state === "RUNNING" ? "ok" : snap.session_state === "EMERGENCY_STOPPED" ? "err" : "info"}`;
+    }
+    if ($(elId)) {
+      const rows = [
+        ["Execution mode", "LIVE-MARKET PAPER · Simulated · 0 Broker Orders"],
+        ["Exchange session", `${snap.exchange_session?.state || "—"} (${snap.exchange_session?.timezone || ""})`],
+        ["Equity", `${symPrefix}${fmt(acct.equity, 2)}`],
+        ["Available cash", `${symPrefix}${fmt(acct.cash, 2)}`],
+        ["Open market value", `${symPrefix}${fmt(acct.market_value, 2)} (${(snap.positions || []).length} pos)`],
+        ["Day / Realized P&L", `${symPrefix}${fmt(acct.day_pnl, 2)} / ${symPrefix}${fmt(acct.realized_pnl, 2)}`],
+        ["Regulatory fees simulated", `${symPrefix}${fmt(acct.total_fees_paid, 2)}`],
+        ["Strategy", `${snap.strategy || "manual_only"} · ${snap.timeframe || "5m"}`],
+      ];
+      $(elId).innerHTML = rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("");
+    }
+  };
+  renderLedgerList("mm-nse-overview-list", "mm-nse-paper-state", nse, "₹");
+  renderLedgerList("mm-nasdaq-overview-list", "mm-nasdaq-paper-state", nasdaq, "$");
+
+  // Overview 5-Role Provider Matrix
+  if ($("mm-overview-providers")) {
+    $("mm-overview-providers").innerHTML = providers.map((p) => `
+      <div class="provider-card">
+        <div class="panel-head" style="margin-bottom:4px">
+          <strong>${escapeHtml(p.name)}</strong>
+          ${statusPill(p.connection_state, connStatePillClass(p.connection_state))}
+        </div>
+        <div class="muted small">Role: <code>${escapeHtml(p.role)}</code> · Creds: <strong>${p.credential_present ? escapeHtml(p.credential_source) : "missing"}</strong></div>
+        <div class="muted small">${escapeHtml((p.used_for || []).join(" · "))}</div>
+        ${p.token_expiry?.jwt_exp_present ? `<div class="small ${p.token_expiry.expired_by_claim ? "pnl-neg" : "pnl-pos"}">JWT expires: ${escapeHtml(timeText(p.token_expiry.expires_at))}</div>` : ""}
+      </div>
+    `).join("");
+  }
+
+  // Reconciliation Note & Watchlists
+  const nseRec = ov.reconciliation?.NSE || {};
+  const usRec = ov.reconciliation?.NASDAQ || {};
+  if ($("mm-reconcile-badge")) {
+    $("mm-reconcile-badge").textContent = `NSE: ${nseRec.tradable_count ?? (nseRec.counts?.tradable ?? 0)} · NASDAQ: ${usRec.counts?.total ?? 0}`;
+  }
+  if ($("mm-catalog-reconciliation-note")) {
+    $("mm-catalog-reconciliation-note").textContent =
+      `NSE source: ${nseRec.source_kind || "seed"} (${nseRec.authoritative_complete ? "Authoritative BOD" : "Seed reference — click Refresh NSE BOD master for full exchange universe"}) · ` +
+      `NASDAQ source: ${usRec.source_kind || "seed"} (${usRec.authoritative_reconciled ? "Synced from Alpaca /v2/assets" : "Seed reference — save Alpaca keys & click Sync NASDAQ universe"}).`;
+  }
+
+  const allWatch = [
+    ...(watchlists.NSE || []).map((w) => ({ ...w, market: "NSE" })),
+    ...(watchlists.NASDAQ || []).map((w) => ({ ...w, market: "NASDAQ" })),
+  ];
+  if ($("mm-watchlist-grid")) {
+    $("mm-watchlist-grid").innerHTML = allWatch.length ? allWatch.map((w) => `
+      <div class="provider-card">
+        <div class="panel-head" style="margin-bottom:2px">
+          <strong>${escapeHtml(w.symbol)}</strong>
+          ${statusPill(w.market, w.market === "NSE" ? "info" : "ok")}
+        </div>
+        <div class="muted small">${escapeHtml(w.name || w.instrument_key)}</div>
+        <div class="button-row">
+          <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}">Chart</button>
+          <button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${w.market}:${w.symbol}`)}">Paper Ticket</button>
+          <button type="button" class="button danger-outline xs" data-mm-unwatch="${escapeHtml(`${w.market}:${w.symbol}`)}">Remove</button>
+        </div>
+      </div>
+    `).join("") : `<p class="empty-state">No pinned watchlist symbols.</p>`;
+  }
+
+  if ($("mm-chart-watchlist-bar")) {
+    $("mm-chart-watchlist-bar").innerHTML = allWatch.map((w) =>
+      `<button type="button" class="wl-pill" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}"><span>${escapeHtml(w.market)}</span><strong>${escapeHtml(w.symbol)}</strong></button>`
+    ).join("");
+  }
+
+  // Orders, Fills & Positions Page
+  const allPos = [
+    ...(nse.positions || []).map((p) => ({ ...p, market: "NSE", curSym: "₹" })),
+    ...(nasdaq.positions || []).map((p) => ({ ...p, market: "NASDAQ", curSym: "$" })),
+  ];
+  if ($("mm-paper-pos-count")) $("mm-paper-pos-count").textContent = `${allPos.length} OPEN`;
+  if ($("mm-paper-position-rows")) {
+    $("mm-paper-position-rows").innerHTML = allPos.length ? allPos.map((p) => `
+      <tr>
+        <td>${statusPill(`${p.market} · PAPER`, p.market === "NSE" ? "info" : "ok")}</td>
+        <td><strong>${escapeHtml(p.symbol)}</strong></td>
+        <td>${fmt(p.qty, 4)}</td>
+        <td>${p.curSym}${fmt(p.avg_entry_price, 2)}</td>
+        <td>${p.curSym}${fmt(p.last_price, 2)}</td>
+        <td>${p.curSym}${fmt(p.market_value, 2)}</td>
+        <td class="${Number(p.unrealized_pnl) >= 0 ? "pnl-pos" : "pnl-neg"}">${p.curSym}${fmt(p.unrealized_pnl, 2)} (${fmt(p.unrealized_pnl_pct, 2)}%)</td>
+        <td>SL ${p.stop_loss ?? "—"} / TP ${p.take_profit ?? "—"}</td>
+        <td>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" data-mm-pos-prot="${escapeHtml(`${p.market}:${p.symbol}:${p.stop_loss ?? ""}:${p.take_profit ?? ""}`)}">SL/TP</button>
+            <button type="button" class="button danger xs" data-mm-pos-close="${escapeHtml(`${p.market}:${p.symbol}`)}">Close</button>
+          </div>
+        </td>
+      </tr>
+    `).join("") : `<tr><td colspan="9" class="empty-state">No open NSE or NASDAQ Live-Market Paper positions.</td></tr>`;
+  }
+
+  const allOrders = [...(nse.orders || []), ...(nasdaq.orders || [])].slice(0, 60);
+  if ($("mm-paper-order-rows")) {
+    $("mm-paper-order-rows").innerHTML = allOrders.length ? allOrders.map((o) => {
+      const open = ["WORKING", "PARTIALLY_FILLED"].includes(o.status);
+      return `<tr>
+        <td>${escapeHtml(o.market)}</td>
+        <td><strong>${escapeHtml(o.symbol)}</strong></td>
+        <td>${escapeHtml(o.side)} · ${escapeHtml(o.order_type)}</td>
+        <td>${fmt(o.filled_qty, 4)} / ${fmt(o.qty, 4)}</td>
+        <td>${fmt(o.avg_fill_price || o.limit_price || o.stop_price, 2)}</td>
+        <td>${statusPill(o.status, o.status === "FILLED" ? "ok" : open ? "warn" : "")}</td>
+        <td>${open ? `<button type="button" class="button danger-outline xs" data-mm-cancel-order="${escapeHtml(o.client_order_id)}">Cancel</button>` : "—"}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7" class="empty-state">No NSE/NASDAQ paper orders yet.</td></tr>`;
+  }
+
+  const allFills = [...(nse.fills || []), ...(nasdaq.fills || [])].slice(0, 60);
+  if ($("mm-paper-fill-rows")) {
+    $("mm-paper-fill-rows").innerHTML = allFills.length ? allFills.map((f) => {
+      const c = f.currency === "INR" ? "₹" : "$";
+      return `<tr>
+        <td><small>${escapeHtml(timeText(f.created_at))}</small></td>
+        <td><strong>${escapeHtml(f.market)}:${escapeHtml(f.symbol)}</strong></td>
+        <td>${escapeHtml(f.side)}</td>
+        <td>${fmt(f.qty, 4)} @ ${c}${fmt(f.fill_price, 2)}</td>
+        <td>${c}${fmt(f.fees_total, 2)}</td>
+        <td class="${Number(f.realized_pnl) >= 0 ? "pnl-pos" : "pnl-neg"}">${c}${fmt(f.realized_pnl, 2)}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="6" class="empty-state">No NSE/NASDAQ paper fills yet.</td></tr>`;
+  }
+
+  // Strategies & Modes Page
+  if ($("mm-strat-nse-state")) $("mm-strat-nse-state").textContent = nse.session_state || "STOPPED";
+  if ($("mm-strat-nasdaq-state")) $("mm-strat-nasdaq-state").textContent = nasdaq.session_state || "STOPPED";
+  if ($("mm-live-mode-cards")) {
+    const nseL = live.nse || {};
+    const usL = live.nasdaq || {};
+    $("mm-live-mode-cards").innerHTML = `
+      <div class="provider-card">
+        <div class="panel-head" style="margin-bottom:4px">
+          <strong>NSE · UPSTOX_LIVE (INR)</strong>
+          ${statusPill(nseL.availability || "NOT_AVAILABLE", nseL.availability === "AVAILABLE_BEHIND_GATE" ? "warn" : "err")}
+        </div>
+        <div class="muted small">Broker: ${escapeHtml(nseL.broker || "Upstox GTT v3")}</div>
+        <div class="muted small">${(nseL.missing_dependencies || []).length ? `Missing: ${escapeHtml(nseL.missing_dependencies.join(" · "))}` : "All static prerequisites present; Arm & Activate required."}</div>
+      </div>
+      <div class="provider-card">
+        <div class="panel-head" style="margin-bottom:4px">
+          <strong>NASDAQ · ALPACA_LIVE (USD)</strong>
+          ${statusPill(usL.availability || "NOT_AVAILABLE", usL.availability === "AVAILABLE_BEHIND_GATE" ? "warn" : "err")}
+        </div>
+        <div class="muted small">Broker: ${escapeHtml(usL.broker || "Alpaca Trading API v2")} · Gate: <code>${escapeHtml(usL.broker_status?.gate?.state || "DISABLED")}</code></div>
+        <div class="muted small">${(usL.missing_dependencies || []).length ? `Missing: ${escapeHtml(usL.missing_dependencies.join(" · "))}` : "Distinct LIVE keys present; run Readiness → Arm → Phrase Activate."}</div>
+      </div>
+    `;
+  }
+
+  const allDecisions = [...(nse.decisions || []), ...(nasdaq.decisions || [])].slice(0, 40);
+  if ($("mm-strategy-decision-rows")) {
+    $("mm-strategy-decision-rows").innerHTML = allDecisions.length ? allDecisions.map((d) => `
+      <tr>
+        <td><small>${escapeHtml(timeText(d.created_at))}</small></td>
+        <td>${escapeHtml(d.market)}</td>
+        <td><strong>${escapeHtml(d.symbol)}</strong></td>
+        <td>${escapeHtml(d.strategy)} · ${escapeHtml(d.timeframe)}</td>
+        <td>${statusPill(d.action, d.action === "BUY" ? "ok" : d.action === "SELL" ? "err" : "")}</td>
+        <td>${escapeHtml(d.reason)}</td>
+        <td><code>${escapeHtml(d.order_client_id || "—")}</code></td>
+      </tr>
+    `).join("") : `<tr><td colspan="7" class="empty-state">No automated paper strategy decisions recorded yet.</td></tr>`;
+  }
+
+  // SHA-256 Audit Table
+  const audits = ov.recent_audit || [];
+  if ($("mm-paper-audit-rows")) {
+    $("mm-paper-audit-rows").innerHTML = audits.length ? audits.map((a) => `
+      <tr>
+        <td>${a.seq}</td>
+        <td><small>${escapeHtml(timeText(a.created_at))}</small></td>
+        <td>${escapeHtml(a.market)}</td>
+        <td><strong>${escapeHtml(a.event_kind)}</strong></td>
+        <td><small>${escapeHtml(JSON.stringify(a.payload || {}))}</small></td>
+        <td><code>${escapeHtml(String(a.entry_hash || "").slice(0, 14))}…</code></td>
+      </tr>
+    `).join("") : `<tr><td colspan="6" class="empty-state">No multi-market paper audit rows yet.</td></tr>`;
+  }
+}
+
+async function searchMultiMarketCatalog() {
+  if (!state.mm.available || !$("mm-catalog-rows")) return;
+  const q = new URLSearchParams({
+    query: $("mm-catalog-query")?.value || "",
+    market: $("mm-catalog-market")?.value || "ALL",
+    subclass: $("mm-catalog-subclass")?.value || "",
+    limit: "80",
+  });
+  try {
+    const res = await api(`/api/markets/search?${q}`);
+    state.mm.catalogItems = res.items || [];
+    if (!state.mm.catalogItems.length) {
+      $("mm-catalog-rows").innerHTML = `<tr><td colspan="8" class="empty-state">No matching NSE or NASDAQ instruments found.</td></tr>`;
+      return;
+    }
+    $("mm-catalog-rows").innerHTML = state.mm.catalogItems.map((it) => {
+      const sym = it.trading_symbol || it.symbol;
+      const mkt = it.market || "NSE";
+      return `<tr>
+        <td><button type="button" class="button secondary xs" data-mm-watch="${escapeHtml(`${mkt}:${sym}`)}">+ Watch</button></td>
+        <td>${statusPill(mkt, mkt === "NSE" ? "info" : "ok")}</td>
+        <td><strong>${escapeHtml(sym)}</strong><br><small class="muted">${escapeHtml(it.instrument_key || sym)}</small></td>
+        <td>${escapeHtml(it.name || sym)}</td>
+        <td><code>${escapeHtml(it.asset_subclass || it.instrument_type || "EQ")}</code></td>
+        <td>Lot ${fmt(it.quantity_step || it.lot_size || 1, 0)} · Tick ${fmt(it.tick_size, 4)}</td>
+        <td>${it.tradable === false ? statusPill("WATCH ONLY", "warn") : escapeHtml(it.product_label || (it.fractionable ? "USD Cash · Fractionable" : "Cash / Delivery"))}</td>
+        <td>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${mkt}:${sym}`)}">Chart</button>
+            ${it.tradable === false ? "" : `<button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${mkt}:${sym}`)}">Trade Paper</button>`}
+          </div>
+        </td>
+      </tr>`;
+    }).join("");
+  } catch (err) {
+    toast("Catalog search failed", err.message, "err");
+  }
+}
+
+async function loadMultiMarketChart() {
+  const feedMode = $("mm-chart-source-mode")?.value || "SESSION";
+  state.mm.chartFeed = feedMode;
+  if (feedMode === "SESSION") {
+    $("session-chart-symbol-wrap").hidden = false;
+    $("mm-chart-symbol-wrap").hidden = true;
+    $("mm-load-live-chart-btn").hidden = true;
+    if ($("mm-chart-feed-badge")) $("mm-chart-feed-badge").textContent = "SESSION / DATASET";
+    await loadChartSymbols();
+    return;
+  }
+  $("session-chart-symbol-wrap").hidden = true;
+  $("mm-chart-symbol-wrap").hidden = false;
+  $("mm-load-live-chart-btn").hidden = false;
+  const symbol = ($("mm-chart-symbol-input")?.value || (feedMode === "NSE" ? "RELIANCE" : "AAPL")).trim();
+  const timeframe = $("chart-timeframe")?.value || "5m";
+  if ($("mm-chart-feed-badge")) $("mm-chart-feed-badge").textContent = `${feedMode} LIVE READ-ONLY`;
+  try {
+    const q = new URLSearchParams({ market: feedMode, symbol, timeframe });
+    const payload = await api(`/api/markets/chart?${q}`);
+    const bars = normalizeBars(payload.bars || []);
+    state.chart = {
+      mode: currentStatus().mode,
+      feed: `mm_${feedMode.toLowerCase()}`,
+      symbol: payload.symbol || symbol,
+      timeframe,
+      bars,
+      quote: payload.quote || null,
+      payload,
+    };
+    state.chartView.endOffset = 0;
+    state.chartView.visible = Math.min(160, Math.max(20, bars.length || 20));
+    $("chart-source").textContent = payload.data_feed_label || `${feedMode} READ-ONLY`;
+    $("chart-source").className = `status-pill ${connStatePillClass(payload.connection_state)}`;
+    $("chart-feed-context").className = `inline-status ${bars.length ? "ok" : "warn"}`;
+    $("chart-feed-context").textContent = bars.length
+      ? `${payload.data_feed_label} · Source: ${payload.data_source} · ${bars.length} real OHLCV bars loaded.`
+      : `${payload.data_feed_label} (${payload.connection_state}). AXIOM never substitutes sample or replay bars for live ${feedMode} market data.`;
+    if (!bars.length && $("chart-empty")) {
+      $("chart-empty").hidden = false;
+      $("chart-empty").textContent = `${feedMode} live bars unavailable (${payload.connection_state}). Save ${feedMode === "NSE" ? "Upstox daily access_token" : "Alpaca Market Data API Key & Secret"} on Connections.`;
+    }
+    $("chart-legend").textContent = `${bars.length} real bars · ${payload.data_source} · checked ${timeText(payload.generated_at)}`;
+    if ($("mm-order-market")) $("mm-order-market").value = feedMode;
+    if ($("mm-order-symbol")) $("mm-order-symbol").value = payload.symbol || symbol;
+    if ($("mm-ticket-currency-badge")) $("mm-ticket-currency-badge").textContent = feedMode === "NSE" ? "INR ₹" : "USD $";
+    renderChartQuote();
+    drawChart();
+  } catch (err) {
+    toast(`${feedMode} chart request failed`, err.message, "err");
+  }
+}
+
+function getMultiMarketTicketBody() {
+  const numOrNull = (id) => ($(id)?.value ? Number($(id).value) : null);
+  return {
+    market: $("mm-order-market").value,
+    symbol: $("mm-order-symbol").value.trim(),
+    side: state.mm.side,
+    qty: Number($("mm-order-qty").value),
+    order_type: $("mm-order-type").value,
+    product: $("mm-order-product").value,
+    time_in_force: $("mm-order-tif").value,
+    limit_price: numOrNull("mm-order-limit"),
+    stop_price: numOrNull("mm-order-stop"),
+    stop_loss: numOrNull("mm-order-sl"),
+    take_profit: numOrNull("mm-order-tp"),
+    allow_off_hours_working: Boolean($("mm-order-offhours")?.checked),
+  };
+}
+
+function renderMultiMarketPreview(prev) {
+  const box = $("mm-ticket-preview-box");
+  if (!box || !prev) return;
+  const c = prev.currency === "INR" ? "₹" : "$";
+  const fees = prev.estimated_fees || {};
+  box.innerHTML = `
+    <div class="inline-status ${prev.ok ? "ok" : "err"}" style="margin-bottom:6px">
+      <strong>${prev.ok ? "SIMULATED PREVIEW PASSED" : "BLOCKED BY GUARDRAILS"}</strong> · 0 Broker Calls
+    </div>
+    <div>Ref / Est Fill: <strong>${c}${fmt(prev.reference_price, 2)} → ${c}${fmt(prev.estimated_fill_price, 2)}</strong></div>
+    <div>Est Notional: <strong>${c}${fmt(prev.estimated_notional, 2)}</strong> · Total Fees: <strong>${c}${fmt(fees.total, 2)}</strong></div>
+    <div class="muted small">Quote: ${escapeHtml(prev.quote_source || "unavailable")} (${prev.quote_age_seconds !== null && prev.quote_age_seconds !== undefined ? `${prev.quote_age_seconds}s old` : "no fresh quote"})</div>
+    ${(prev.rejection_reasons || []).length ? `<div class="pnl-neg small" style="margin-top:5px">${escapeHtml(prev.rejection_reasons.join(" · "))}</div>` : ""}
+  `;
+}
+
+function switchTicketTab(tab) {
+  const isMM = tab === "MULTIMARKET";
+  if ($("ticket-tab-session")) $("ticket-tab-session").classList.toggle("active", !isMM);
+  if ($("ticket-tab-mm")) $("ticket-tab-mm").classList.toggle("active", isMM);
+  if ($("session-ticket-pane")) $("session-ticket-pane").hidden = isMM;
+  if ($("mm-ticket-pane")) $("mm-ticket-pane").hidden = !isMM;
+}
+
+function bindMultiMarketEvents() {
+  if (!$("mm-venue-nse")) return;
+
+  // Venue Switcher
+  for (const id of ["mm-venue-nse", "mm-venue-nasdaq"]) {
+    $(id)?.addEventListener("click", () => {
+      const v = $(id).dataset.mmVenue;
+      state.mm.activeVenue = v;
+      $("mm-venue-nse").classList.toggle("active", v === "NSE");
+      $("mm-venue-nse").setAttribute("aria-pressed", String(v === "NSE"));
+      $("mm-venue-nasdaq").classList.toggle("active", v === "NASDAQ");
+      $("mm-venue-nasdaq").setAttribute("aria-pressed", String(v === "NASDAQ"));
+      if ($("mm-order-market")) $("mm-order-market").value = v;
+      if ($("mm-ticket-currency-badge")) $("mm-ticket-currency-badge").textContent = v === "NSE" ? "INR ₹" : "USD $";
+    });
+  }
+
+  // Quick Symbol Jump
+  $("mm-quick-search-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const raw = ($("mm-quick-search-input")?.value || "").trim().toUpperCase();
+    if (!raw) return;
+    let mkt = state.mm.activeVenue;
+    let sym = raw;
+    if (raw.includes(":")) {
+      const [m, s] = raw.split(":", 2);
+      if (m === "NSE" || m === "NASDAQ") { mkt = m; sym = s; }
+    } else if (["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "QQQ", "TQQQ", "AMD", "NFLX"].includes(raw)) {
+      mkt = "NASDAQ";
+    } else if (["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "NIFTYBEES"].includes(raw) || raw.startsWith("NSE_")) {
+      mkt = "NSE";
+    }
+    await goPage("charts");
+    if ($("mm-chart-source-mode")) $("mm-chart-source-mode").value = mkt;
+    if ($("mm-chart-symbol-input")) $("mm-chart-symbol-input").value = sym;
+    switchTicketTab("MULTIMARKET");
+    if ($("mm-order-market")) $("mm-order-market").value = mkt;
+    if ($("mm-order-symbol")) $("mm-order-symbol").value = sym;
+    await loadMultiMarketChart();
+  });
+
+  // Delegated clicks for jump-chart, jump-ticket, watch, unwatch, cancel, close, modify
+  document.addEventListener("click", async (e) => {
+    const target = e.target.closest("button");
+    if (!target) return;
+    if (target.dataset.mmJumpChart) {
+      const [mkt, sym] = target.dataset.mmJumpChart.split(":");
+      await goPage("charts");
+      $("mm-chart-source-mode").value = mkt;
+      $("mm-chart-symbol-input").value = sym;
+      await loadMultiMarketChart();
+    } else if (target.dataset.mmJumpTicket) {
+      const [mkt, sym] = target.dataset.mmJumpTicket.split(":");
+      await goPage("charts");
+      switchTicketTab("MULTIMARKET");
+      $("mm-order-market").value = mkt;
+      $("mm-order-symbol").value = sym;
+      $("mm-ticket-currency-badge").textContent = mkt === "NSE" ? "INR ₹" : "USD $";
+    } else if (target.dataset.mmWatch) {
+      const [market, symbol] = target.dataset.mmWatch.split(":");
+      try {
+        await api("/api/markets/watchlists", { body: { market, symbol } });
+        await loadMultiMarketOverview();
+        toast("Added to watchlist", `${market}:${symbol} pinned.`, "ok");
+      } catch (err) { toast("Watchlist failed", err.message, "err"); }
+    } else if (target.dataset.mmUnwatch) {
+      const [market, symbol] = target.dataset.mmUnwatch.split(":");
+      try {
+        await api(`/api/markets/watchlists/${encodeURIComponent(market)}/${encodeURIComponent(symbol)}`, { method: "DELETE" });
+        await loadMultiMarketOverview();
+        toast("Removed from watchlist", `${market}:${symbol} removed.`, "ok");
+      } catch (err) { toast("Watchlist failed", err.message, "err"); }
+    } else if (target.dataset.mmCancelOrder) {
+      try {
+        await api(`/api/markets/paper/orders/${encodeURIComponent(target.dataset.mmCancelOrder)}`, { method: "DELETE" });
+        await loadMultiMarketOverview();
+        toast("Simulated paper order canceled", target.dataset.mmCancelOrder, "ok");
+      } catch (err) { toast("Cancel failed", err.message, "err"); }
+    } else if (target.dataset.mmPosClose) {
+      const [mkt, sym] = target.dataset.mmPosClose.split(":");
+      try {
+        await api(`/api/markets/paper/positions/${encodeURIComponent(mkt)}/${encodeURIComponent(sym)}/close`, { body: {} });
+        await loadMultiMarketOverview();
+        toast("Paper position closed", `${mkt}:${sym} closed against live quote.`, "ok");
+      } catch (err) { toast("Position close blocked", err.message, "err"); }
+    } else if (target.dataset.mmPosProt) {
+      const [mkt, sym, slCur, tpCur] = target.dataset.mmPosProt.split(":");
+      openDialog({
+        title: `Update ${mkt}:${sym} Paper Protection (SL / TP)`,
+        body: `<div class="form-grid"><div class="field"><label for="mm-mod-sl">Stop-loss</label><input id="mm-mod-sl" type="number" step="any" value="${escapeHtml(slCur)}"></div><div class="field"><label for="mm-mod-tp">Take-profit</label><input id="mm-mod-tp" type="number" step="any" value="${escapeHtml(tpCur)}"></div></div>`,
+        confirmLabel: "Save SL / TP",
+        confirmClass: "primary",
+        onConfirm: async () => {
+          const stop_loss = $("mm-mod-sl").value ? Number($("mm-mod-sl").value) : null;
+          const take_profit = $("mm-mod-tp").value ? Number($("mm-mod-tp").value) : null;
+          await api("/api/markets/paper/positions/protection", { body: { market: mkt, symbol: sym, stop_loss, take_profit } });
+          await loadMultiMarketOverview();
+          toast("Protection updated", `${mkt}:${sym} SL/TP updated.`, "ok");
+        },
+      });
+    }
+  });
+
+  // Sync quotes & Reconcile
+  $("mm-nse-sync-btn")?.addEventListener("click", async () => {
+    try { await api("/api/markets/paper/NSE/sync", { body: {} }); await loadMultiMarketOverview(); toast("NSE paper synced", "Quotes & triggers evaluated.", "ok"); }
+    catch (err) { toast("NSE sync notice", err.message, "warn"); }
+  });
+  $("mm-nasdaq-sync-btn")?.addEventListener("click", async () => {
+    try { await api("/api/markets/paper/NASDAQ/sync", { body: {} }); await loadMultiMarketOverview(); toast("NASDAQ paper synced", "Quotes & triggers evaluated.", "ok"); }
+    catch (err) { toast("NASDAQ sync notice", err.message, "warn"); }
+  });
+  $("mm-reconcile-paper-btn")?.addEventListener("click", async () => {
+    try {
+      const r1 = await api("/api/markets/paper/NSE/reconcile", { body: {} });
+      const r2 = await api("/api/markets/paper/NASDAQ/reconcile", { body: {} });
+      toast("SQLite & Hash Chain Reconciled", `NSE valid=${r1.audit_chain_valid} · NASDAQ valid=${r2.audit_chain_valid} (${r1.audit_events_verified} events)`, "ok");
+    } catch (err) { toast("Reconciliation failed", err.message, "err"); }
+  });
+
+  // Catalog Search & Master Sync
+  $("mm-catalog-search-btn")?.addEventListener("click", searchMultiMarketCatalog);
+  $("mm-catalog-query")?.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); searchMultiMarketCatalog(); } });
+  $("mm-catalog-market")?.addEventListener("change", searchMultiMarketCatalog);
+  $("mm-catalog-subclass")?.addEventListener("change", searchMultiMarketCatalog);
+  $("mm-refresh-nse-bod")?.addEventListener("click", async () => {
+    setDisabled("mm-refresh-nse-bod", true, "Downloading Upstox BOD master…");
+    try {
+      const rep = await api("/api/markets/nse/refresh", { body: {} });
+      await loadMultiMarketOverview(); await searchMultiMarketCatalog();
+      toast("NSE BOD Master Reconciled", `${rep.tradable_count || rep.counts?.tradable || 0} tradable instruments reconciled.`, "ok");
+    } catch (err) { toast("NSE BOD refresh failed", err.message, "err"); }
+    finally { setDisabled("mm-refresh-nse-bod", false); }
+  });
+  $("mm-sync-nasdaq-assets")?.addEventListener("click", async () => {
+    setDisabled("mm-sync-nasdaq-assets", true, "Syncing Alpaca NASDAQ universe…");
+    try {
+      const rep = await api("/api/markets/nasdaq/sync", { body: {} });
+      await loadMultiMarketOverview(); await searchMultiMarketCatalog();
+      toast("NASDAQ Universe Synced", `${rep.counts?.total || 0} active NASDAQ stocks & ETFs synced.`, "ok");
+    } catch (err) { toast("NASDAQ sync blocked", err.message, "err"); }
+    finally { setDisabled("mm-sync-nasdaq-assets", false); }
+  });
+
+  // Superchart Feed Mode & Multi-Market Ticket
+  $("mm-chart-source-mode")?.addEventListener("change", loadMultiMarketChart);
+  $("mm-load-live-chart-btn")?.addEventListener("click", loadMultiMarketChart);
+  $("ticket-tab-session")?.addEventListener("click", () => switchTicketTab("SESSION"));
+  $("ticket-tab-mm")?.addEventListener("click", () => switchTicketTab("MULTIMARKET"));
+
+  $("mm-order-market")?.addEventListener("change", () => {
+    const m = $("mm-order-market").value;
+    $("mm-ticket-currency-badge").textContent = m === "NSE" ? "INR ₹" : "USD $";
+    if (m === "NASDAQ" && $("mm-order-symbol").value === "RELIANCE") $("mm-order-symbol").value = "AAPL";
+    if (m === "NSE" && $("mm-order-symbol").value === "AAPL") $("mm-order-symbol").value = "RELIANCE";
+  });
+  $("mm-side-buy")?.addEventListener("click", () => { state.mm.side = "BUY"; $("mm-side-buy").classList.add("active"); $("mm-side-sell").classList.remove("active"); });
+  $("mm-side-sell")?.addEventListener("click", () => { state.mm.side = "SELL"; $("mm-side-sell").classList.add("active"); $("mm-side-buy").classList.remove("active"); });
+
+  $("mm-preview-order-btn")?.addEventListener("click", async () => {
+    try {
+      const prev = await api("/api/markets/paper/preview", { body: getMultiMarketTicketBody() });
+      state.mm.lastPreview = prev;
+      renderMultiMarketPreview(prev);
+    } catch (err) { toast("Preview failed", err.message, "err"); }
+  });
+  $("mm-order-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const body = { ...getMultiMarketTicketBody(), client_order_id: newKey("mm-paper") };
+      const res = await api("/api/markets/paper/orders", { body });
+      if (res.preview) renderMultiMarketPreview(res.preview);
+      if (!res.ok) {
+        toast("Simulated paper order blocked", (res.preview?.rejection_reasons || ["Guardrail failed"]).join("; "), "err");
+        return;
+      }
+      await loadMultiMarketOverview();
+      toast("Simulated paper order recorded", `${res.order.market}:${res.order.symbol} ${res.order.status} · 0 broker orders`, "ok");
+    } catch (err) { toast("Paper order error", err.message, "err"); }
+  });
+
+  // Strategy Session Controls (NSE & NASDAQ)
+  const bindPaperLifecycle = (mkt, prefix) => {
+    $(`${prefix}-start-btn`)?.addEventListener("click", async () => {
+      try {
+        const strategy = $(`mm-strat-${mkt.toLowerCase()}-select`).value;
+        const timeframe = $(`mm-strat-${mkt.toLowerCase()}-tf`).value;
+        const wl = (state.mm.overview?.watchlists?.[mkt] || []).map((w) => w.symbol);
+        await api("/api/markets/paper/session/start", { body: { market: mkt, strategy, timeframe, symbols: wl } });
+        await loadMultiMarketOverview();
+        toast(`${mkt} Paper Session Started`, `Strategy=${strategy} (${timeframe}) · 0 broker orders.`, "ok");
+      } catch (err) { toast(`${mkt} start blocked`, err.message, "err"); }
+    });
+    for (const act of ["pause", "resume", "stop"]) {
+      $(`${prefix}-${act}-btn`)?.addEventListener("click", async () => {
+        try {
+          await api("/api/markets/paper/session/transition", { body: { market: mkt, action: act, reason: `operator ${act}` } });
+          await loadMultiMarketOverview();
+          toast(`${mkt} Paper ${act.toUpperCase()}`, "Session state updated.", "ok");
+        } catch (err) { toast(`${mkt} ${act} failed`, err.message, "err"); }
+      });
+    }
+    $(`${prefix}-reset-btn`)?.addEventListener("click", () => {
+      openDialog({
+        title: `Reset ${mkt} Simulated Paper Ledger`,
+        body: `<p>This resets ${mkt} local paper cash, positions, and orders back to starting capital while preserving the tamper-evident SHA-256 audit log.</p>`,
+        confirmLabel: `Reset ${mkt} Paper Account`,
+        onConfirm: async () => {
+          await api("/api/markets/paper/reset", { body: { market: mkt, confirm: true } });
+          await loadMultiMarketOverview();
+          toast(`${mkt} Paper Ledger Reset`, "Starting capital restored.", "ok");
+        },
+      });
+    });
+  };
+  bindPaperLifecycle("NSE", "mm-nse");
+  bindPaperLifecycle("NASDAQ", "mm-nasdaq");
+
+  // Alpaca Broker Mode & Gate Controls
+  $("mm-alpaca-enable-paper-btn")?.addEventListener("click", async () => {
+    try {
+      const st = await api("/api/alpaca-broker/mode", { body: { enabled: true, environment: "paper" } });
+      $("mm-alpaca-gate-output").textContent = `Alpaca Broker configured in PAPER mode (${st.endpoint_host}). Real money=false.`;
+      await loadBrokerDestination(); await loadMultiMarketOverview();
+    } catch (err) { toast("Alpaca mode blocked", err.message, "err"); }
+  });
+  $("mm-alpaca-readiness-btn")?.addEventListener("click", async () => {
+    try {
+      const r = await api("/api/alpaca-broker/readiness?symbol=AAPL");
+      $("mm-alpaca-gate-output").className = `inline-status top-space ${r.all_passed ? "ok" : "warn"}`;
+      $("mm-alpaca-gate-output").textContent = r.all_passed
+        ? `All readiness checks passed (${Object.keys(r.checks).join(", ")}). Ready to Arm.`
+        : `Readiness blockers: ${r.failed_checks.join(", ")}.`;
+    } catch (err) { $("mm-alpaca-gate-output").className = "inline-status top-space err"; $("mm-alpaca-gate-output").textContent = err.message; }
+  });
+  $("mm-alpaca-arm-btn")?.addEventListener("click", async () => {
+    try {
+      const res = await api("/api/alpaca-broker/gate/arm?symbol=AAPL", { body: {} });
+      $("mm-alpaca-gate-output").className = "inline-status top-space warn";
+      $("mm-alpaca-gate-output").textContent = `Alpaca Gate ARMED (${res.gate.state}). Separate phrase confirmation required for LIVE Activate.`;
+      await loadBrokerDestination(); await loadMultiMarketOverview();
+    } catch (err) { toast("Alpaca Arm refused", err.message, "err"); }
+  });
+  $("mm-alpaca-activate-btn")?.addEventListener("click", () => {
+    openDialog({
+      title: "Activate ALPACA_LIVE Real-Money Execution",
+      body: "<p><strong>REAL-MONEY WARNING:</strong> Activating ALPACA_LIVE binds the authenticated write client to <code>api.alpaca.markets</code> under your bounded risk limits.</p>",
+      phrase: "I UNDERSTAND THIS WILL PLACE REAL-MONEY LIVE ORDERS",
+      confirmLabel: "Activate LIVE Execution",
+      onConfirm: async () => {
+        const res = await api("/api/alpaca-broker/gate/activate", {
+          body: { confirm_live_trading: "I UNDERSTAND THIS WILL PLACE REAL-MONEY LIVE ORDERS", acknowledge_risk: true, symbol: "AAPL" },
+        });
+        $("mm-alpaca-gate-output").className = "inline-status top-space err";
+        $("mm-alpaca-gate-output").textContent = `ALPACA_LIVE ACTIVE (${res.gate.state}). Prominent Emergency Stop remains armed.`;
+        await loadBrokerDestination(); await loadMultiMarketOverview();
+      },
+    });
+  });
+  $("mm-alpaca-disarm-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/alpaca-broker/gate/disarm", { body: { reason: "operator disarm" } });
+      $("mm-alpaca-gate-output").className = "inline-status top-space";
+      $("mm-alpaca-gate-output").textContent = "Alpaca Gate DISARMED. Write client unbound.";
+      await loadBrokerDestination(); await loadMultiMarketOverview();
+    } catch (err) { toast("Disarm notice", err.message, "warn"); }
+  });
+  $("mm-alpaca-recover-btn")?.addEventListener("click", async () => {
+    try {
+      const rec = await api("/api/alpaca-broker/recover", { body: {} });
+      toast("Alpaca journal recovered", `Resolved intents: ${rec.resolved_intents || 0}`, "ok");
+    } catch (err) { toast("Recover blocked", err.message, "err"); }
+  });
+
+  // Risk Forms
+  $("mm-nse-risk-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/markets/paper/config", {
+        body: {
+          market: "NSE",
+          max_order_value: Number($("mm-nse-max-order").value),
+          max_daily_loss: Number($("mm-nse-max-loss").value),
+          max_open_positions: Number($("mm-nse-max-pos").value),
+          slippage_bps: Number($("mm-nse-slippage").value),
+        },
+      });
+      await loadMultiMarketOverview();
+      toast("NSE paper risk bounds saved", "INR caps and simulated slippage updated.", "ok");
+    } catch (err) { toast("NSE risk rejected", err.message, "err"); }
+  });
+  $("mm-nasdaq-risk-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/markets/paper/config", {
+        body: {
+          market: "NASDAQ",
+          max_order_value: Number($("mm-us-max-order").value),
+          max_daily_loss: Number($("mm-us-max-loss").value),
+          max_open_positions: Number($("mm-us-max-pos").value),
+          max_daily_orders: Number($("mm-us-max-orders").value),
+        },
+      });
+      await loadMultiMarketOverview();
+      toast("NASDAQ paper risk bounds saved", "USD paper caps updated.", "ok");
+    } catch (err) { toast("NASDAQ risk rejected", err.message, "err"); }
+  });
+  $("mm-save-alpaca-broker-risk")?.addEventListener("click", async () => {
+    try {
+      await api("/api/alpaca-broker/limits", {
+        body: {
+          max_order_value: Number($("mm-us-max-order").value),
+          max_daily_loss: Number($("mm-us-max-loss").value),
+          max_open_positions: Number($("mm-us-max-pos").value),
+          max_daily_orders: Number($("mm-us-max-orders").value),
+        },
+      });
+      await loadBrokerDestination();
+      toast("Alpaca Broker hard limits saved", "Prior Arm/Activate invalidated.", "ok");
+    } catch (err) { toast("Broker limits rejected", err.message, "err"); }
+  });
+
+  // Provider Connections (Upstox Data, Alpaca Data, Alpaca Broker, Upstox Live)
+  $("mm-upstox-data-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const access_token = $("mm-upstox-token-input").value.trim();
+    $("mm-upstox-token-input").value = "";
+    if (!access_token) return;
+    try {
+      await api("/api/autonomy/upstox-token", { body: { access_token } });
+      await loadMultiMarketOverview();
+      $("mm-upstox-verify-result").className = "inline-status top-space ok";
+      $("mm-upstox-verify-result").textContent = "Upstox read-only token encrypted in protected store. Click Verify NSE quote to test.";
+      toast("Upstox token saved", "Encrypted in local protected store; never echoed.", "ok");
+    } catch (err) { toast("Upstox token save failed", err.message, "err"); }
+  });
+  $("mm-upstox-verify-btn")?.addEventListener("click", async () => {
+    $("mm-upstox-data-pill").textContent = "AUTHENTICATING";
+    try {
+      const v = await api("/api/connections/upstox/verify-quote", { body: { instrument_key: "NSE_EQ|INE002A01018" } });
+      $("mm-upstox-data-pill").textContent = v.connection_state;
+      $("mm-upstox-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
+      $("mm-upstox-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
+      $("mm-upstox-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""} ${v.quote?.last ? `(RELIANCE ₹${v.quote.last})` : ""}`;
+    } catch (err) { $("mm-upstox-verify-result").textContent = err.message; }
+  });
+  $("mm-upstox-delete-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/autonomy/upstox-token", { method: "DELETE" });
+      await loadMultiMarketOverview();
+      toast("Upstox token deleted", "Read-only Upstox token removed.", "ok");
+    } catch (err) { toast("Delete failed", err.message, "err"); }
+  });
+
+  $("mm-alpaca-data-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const api_key = $("mm-alpaca-data-key").value.trim();
+    const api_secret = $("mm-alpaca-data-secret").value.trim();
+    const feed = $("mm-alpaca-data-feed").value;
+    $("mm-alpaca-data-key").value = "";
+    $("mm-alpaca-data-secret").value = "";
+    try {
+      await api("/api/connections/alpaca/credentials", { body: { api_key, api_secret, feed } });
+      await loadMultiMarketOverview();
+      $("mm-alpaca-verify-result").className = "inline-status top-space ok";
+      $("mm-alpaca-verify-result").textContent = `Alpaca Market Data keys saved (${feed.toUpperCase()}). Click Verify NASDAQ quote to test.`;
+      toast("Alpaca data keys saved", "Encrypted in ALPACA_MARKET_DATA slot; secrets cleared from DOM.", "ok");
+    } catch (err) { toast("Alpaca save failed", err.message, "err"); }
+  });
+  $("mm-alpaca-data-verify-btn")?.addEventListener("click", async () => {
+    $("mm-alpaca-data-pill").textContent = "AUTHENTICATING";
+    try {
+      const v = await api("/api/connections/alpaca/verify-quote", { body: { symbol: "AAPL", feed: $("mm-alpaca-data-feed").value } });
+      $("mm-alpaca-data-pill").textContent = v.connection_state;
+      $("mm-alpaca-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
+      $("mm-alpaca-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
+      $("mm-alpaca-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""}`;
+    } catch (err) { $("mm-alpaca-verify-result").textContent = err.message; }
+  });
+  $("mm-alpaca-data-delete-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/connections/alpaca/credentials", { method: "DELETE" });
+      await loadMultiMarketOverview();
+      toast("Alpaca data keys deleted", "Removed from protected store.", "ok");
+    } catch (err) { toast("Delete failed", err.message, "err"); }
+  });
+
+  $("mm-alpaca-broker-cred-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const env = $("mm-alpaca-broker-env").value;
+    const api_key = $("mm-alpaca-broker-key").value.trim();
+    const api_secret = $("mm-alpaca-broker-secret").value.trim();
+    $("mm-alpaca-broker-key").value = "";
+    $("mm-alpaca-broker-secret").value = "";
+    try {
+      await api(`/api/alpaca-broker/credentials/${encodeURIComponent(env)}`, { body: { api_key, api_secret } });
+      await loadMultiMarketOverview();
+      $("mm-alpaca-broker-test-result").className = "inline-status ok";
+      $("mm-alpaca-broker-test-result").textContent = `Saved ALPACA_BROKER_${env.toUpperCase()} keys. Gate remains DISARMED.`;
+      toast("Broker slot saved", `ALPACA_BROKER_${env.toUpperCase()} saved; gate remains DISARMED.`, "ok");
+    } catch (err) { toast("Broker credential save failed", err.message, "err"); }
+  });
+  $("mm-alpaca-broker-test-btn")?.addEventListener("click", async () => {
+    const env = $("mm-alpaca-broker-env").value;
+    try {
+      const res = await api(`/api/alpaca-broker/test?environment=${encodeURIComponent(env)}`, { body: {} });
+      $("mm-alpaca-broker-test-result").className = `inline-status ${res.ok ? "ok" : "err"}`;
+      $("mm-alpaca-broker-test-result").textContent = `${res.connection_state}: ${res.guidance || ""}`;
+    } catch (err) { $("mm-alpaca-broker-test-result").textContent = err.message; }
+  });
+  $("mm-alpaca-broker-del-btn")?.addEventListener("click", async () => {
+    const env = $("mm-alpaca-broker-env").value;
+    try {
+      await api(`/api/alpaca-broker/credentials/${encodeURIComponent(env)}`, { method: "DELETE" });
+      await loadMultiMarketOverview();
+      toast("Broker slot deleted", `ALPACA_BROKER_${env.toUpperCase()} removed.`, "ok");
+    } catch (err) { toast("Delete failed", err.message, "err"); }
+  });
+
+  $("mm-upstox-live-cred-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const access_token = $("mm-upstox-live-input").value.trim();
+    $("mm-upstox-live-input").value = "";
+    try {
+      await api("/api/autonomy/upstox-live-token", { body: { access_token } });
+      await loadMultiMarketOverview();
+      $("mm-upstox-live-result").className = "inline-status ok";
+      $("mm-upstox-live-result").textContent = "Saved separate UPSTOX_LIVE_ACCESS_TOKEN. Live trading remains OFF.";
+      toast("Upstox LIVE token saved", "Stored separately; live trading remains OFF.", "ok");
+    } catch (err) { toast("Upstox LIVE save failed", err.message, "err"); }
+  });
+  $("mm-upstox-live-del-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/autonomy/upstox-live-token", { method: "DELETE" });
+      await loadMultiMarketOverview();
+      toast("Upstox LIVE token deleted", "Removed from protected store.", "ok");
+    } catch (err) { toast("Delete failed", err.message, "err"); }
+  });
 }
 
 function init() {

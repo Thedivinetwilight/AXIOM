@@ -65,6 +65,7 @@ class Instrument:
     # `isin`, so search must cover them explicitly.
     isin: str = ""
     name: str = ""
+    security_type: str = ""
 
     @property
     def market_kind(self) -> str:
@@ -80,6 +81,35 @@ class Instrument:
         if self.segment in {"NCD_FO", "BCD_FO"} and self.instrument_type in {"CE", "PE"}:
             return "CURRENCY_OPTION"
         return "UNSUPPORTED"
+
+    @property
+    def asset_subclass(self) -> str:
+        from app.markets.nse_reconciliation import classify_nse_subclass
+
+        return classify_nse_subclass(
+            segment=self.segment,
+            instrument_type=self.instrument_type,
+            isin=self.isin,
+            trading_symbol=self.trading_symbol,
+            name=self.name,
+            security_type=self.security_type,
+        )
+
+    @property
+    def mis_intraday_allowed(self) -> bool:
+        from app.markets.nse_reconciliation import mis_intraday_allowed_for
+
+        return mis_intraday_allowed_for(self.segment, self.instrument_type)
+
+    @property
+    def delivery_allowed(self) -> bool:
+        return self.segment in {"NSE_EQ", "BSE_EQ"}
+
+    @property
+    def precision_decimals(self) -> int:
+        from app.markets.nse_reconciliation import tick_precision_decimals
+
+        return tick_precision_decimals(self.tick_size)
 
     @property
     def currency_derivative(self) -> bool:
@@ -120,6 +150,12 @@ class Instrument:
         result = asdict(self)
         result["expiry"] = self.expiry.isoformat() if self.expiry else None
         result["market_kind"] = self.market_kind
+        result["asset_subclass"] = self.asset_subclass
+        result["currency"] = "INR"
+        result["tradable"] = self.contract_multiplier is not None
+        result["mis_intraday_allowed"] = self.mis_intraday_allowed
+        result["delivery_allowed"] = self.delivery_allowed
+        result["precision_decimals"] = self.precision_decimals
         result["product_label"] = (
             "exchange-listed currency derivative; not spot forex"
             if self.currency_derivative else "Upstox-listed equity"

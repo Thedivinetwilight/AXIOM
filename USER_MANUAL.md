@@ -710,3 +710,24 @@ substituted while reporting a broker connection.
   order has been placed or may be placed without broker-approved eligibility,
   funding, readiness checks passing, and explicit Arm + Activate.
 - No profitability or readiness claim is made by any test, mock or CI run.
+
+---
+
+## 23. Unified Multi-Market Desktop Terminal (NSE INR + NASDAQ USD)
+
+AXIOM's dark TradingView-inspired desktop terminal (`/terminal`, workspaces `01`–`09`) unifies Indian **NSE** (`INR ₹`) and US **NASDAQ** (`USD $`) operations under two strictly separated execution modes:
+
+### 23.1 `LIVE-MARKET PAPER` (Simulated Execution on Live Market Data)
+- **Data feeds**: Upstox API v2/v3 read-only quotes & historical candles for NSE (`Asia/Kolkata` IST); Alpaca Market Data API v2 (`IEX` or entitled `SIP`) for NASDAQ (`America/New_York` ET with DST, holidays, and NYSE Rule 7.2 early closes).
+- **Zero broker order calls**: All orders, partial/complete fills, SL/TP triggers, and regulatory fees (Indian STT, NSE txn, SEBI, Stamp Duty, 18% GST; US SEC Section 31 & FINRA TAF) are simulated locally in isolated SQLite WAL ledgers (`INR` vs `USD`) chained with a tamper-evident SHA-256 audit log.
+- **No disguised demo bars**: Outside market hours or when credentials are disconnected/expired, charts and quotes explicitly report `DISCONNECTED`, `STALE`, or `CLOSED` — sample/replay bars are never substituted as live data.
+
+### 23.2 `LIVE-MARKET LIVE` (Default-Disabled Real-Money Execution)
+- **Always OFF by default**: Startup, process restart, crash recovery (`RECOVERED_PAUSED` / halted), config import, and paper mode never enable live execution.
+- **Distinct credentials & dual gate**:
+  - **NSE (`UPSTOX_LIVE`)**: Requires separate `UPSTOX_LIVE_ACCESS_TOKEN`, Upstox Plus / static IPv4 order whitelist, bounded risk limits, and `/autonomy` Arm → Activate.
+  - **NASDAQ (`ALPACA_LIVE`)**: Requires separate `ALPACA_BROKER_LIVE` slot, funded brokerage approval, bounded USD risk limits, fresh `GET /v2/account` + `GET /v2/clock` readiness, Arm, and exact confirmation phrase `I UNDERSTAND THIS WILL PLACE REAL-MONEY LIVE ORDERS`.
+- **Global Emergency Stop**: Halts NSE & NASDAQ paper sessions, Upstox Autonomy, Alpaca Broker, and Vantage sessions simultaneously while preserving protective SL/TP on open positions. Clearing requires `CLEAR EMERGENCY STOP` and leaves all live gates disarmed.
+
+For step-by-step credential onboarding and verification status, see `docs/OWNER_SETUP_GUIDE.md` and `docs/BASELINE_AUDIT_AND_ISSUES.md`.
+

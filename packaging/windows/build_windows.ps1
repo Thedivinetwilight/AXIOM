@@ -137,6 +137,8 @@ if ($LASTEXITCODE -ne 0) { Fail 'autonomy JavaScript interaction harness failed'
 if ($LASTEXITCODE -ne 0) { Fail 'legacy chart JavaScript harness failed' }
 & node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal.log')
 if ($LASTEXITCODE -ne 0) { Fail 'operator JavaScript interaction harness failed' }
+& node tests/js/multimarket_terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-multimarket.log')
+if ($LASTEXITCODE -ne 0) { Fail 'multi-market desktop JavaScript interaction harness failed' }
 
 Step '3b. Full Python test suite (hard gate)'
 & python -m pytest -q 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-full.log')
@@ -612,7 +614,7 @@ $Meta = [ordered]@{
     commands      = [ordered]@{
         focused_tests = 'python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py tests/test_mt5_market_data.py tests/test_terminal_performance_listed.py tests/test_vantage_dpapi_windows.py tests/test_us_equities_paper.py tests/test_us_chart_integration.py tests/test_chart_terminal.py tests/test_paper_replay_audit.py tests/test_windows_app_control_packaging.py tests/test_research_candidate_cli.py tests/test_kronos_setup.py tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py tests/test_autonomy_release_blockers.py'
         full_tests    = 'python -m pytest -q'
-        javascript_tests = 'node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs'
+        javascript_tests = 'node --check app/static/chart/chart.js; node --check app/static/terminal/terminal.js; node --check app/static/autonomy/autonomy.js; node tests/js/autonomy_smoke.mjs; node tests/js/chart_smoke.mjs; node tests/js/terminal_smoke.mjs; node tests/js/multimarket_terminal_smoke.mjs'
         performance_benchmarks = "python scripts/benchmark_terminal.py --output `"$BenchmarkOutput`"; `$env:AXIOM_UI_BENCHMARK_OUTPUT = `"$UiBenchmarkOutput`"; node tests/js/terminal_smoke.mjs"
         payload_hygiene = "python `"$PayloadGuard`" source `"$RepoRoot`"; python `"$PayloadGuard`" onefile `"$Exe`"; python `"$PayloadGuard`" tree `"$OnedirRoot`"; python `"$PayloadGuard`" zip `"$InstallZip`"; python `"$PayloadGuard`" zip `"$PortableZip`""
         freeze        = 'python -m PyInstaller --noconfirm --clean axiom.spec'

@@ -24,6 +24,7 @@ import ipaddress
 import json
 import math
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -46,10 +47,11 @@ _ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
 
 
 def _clean_identity(value: str) -> str:
-    """Strip stray Unicode format characters (BOM/zero-width) and outer
-    whitespace from identity fields. Instrument-file variants have been seen
-    carrying invisible characters that defeat exact substring search."""
-    return value.translate({ord(ch): None for ch in _ZERO_WIDTH}).strip()
+    """Normalize Unicode NFKC, strip BOM/zero-width/soft-hyphen characters,
+    and collapse internal whitespace from identity fields."""
+    from app.markets.nse_reconciliation import clean_nse_identity
+
+    return clean_nse_identity(value)
 
 
 def _query_suffix(params: dict | None) -> str:
@@ -466,6 +468,72 @@ class UpstoxReadOnly:
             if bar.available_at(timeframe) <= now
         ]
 
+    def historical_candles(self, instrument_key: str, display_symbol: str,
+                           timeframe: str, *, days: int | None = None) -> list:
+        """Read-only historical candles via Upstox V3 (`/v3/historical-candle/...`).
+
+        Supports `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1D` both during and
+        outside regular NSE trading hours without substituting sample data.
+        """
+        from app.data.models import Candle, TIMEFRAMES, parse_timestamp
+
+        if timeframe not in TIMEFRAMES:
+            raise ValueError(f"Unsupported historical timeframe: {timeframe}")
+        now = self._clock().astimezone(timezone.utc)
+        to_day = now.astimezone(IST).date()
+        if timeframe == "1D":
+            unit, interval = "days", 1
+            lookback_days = max(5, min(int(days or 180), 3650))
+        elif timeframe in {"1h", "4h"}:
+            unit, interval = "hours", TIMEFRAMES[timeframe] // 3600
+            lookback_days = max(2, min(int(days or 30), 180))
+        else:
+            unit, interval = "minutes", TIMEFRAMES[timeframe] // 60
+            lookback_days = max(1, min(int(days or 5), 30))
+        from_day = to_day - timedelta(days=lookback_days)
+        encoded_key = url_quote(instrument_key, safe="")
+        path = (
+            f"/v3/historical-candle/{encoded_key}/{unit}/{interval}"
+            f"/{to_day.isoformat()}/{from_day.isoformat()}"
+        )
+        payload = self._request("GET", path)
+        rows = (payload.get("data") or {}).get("candles")
+        if not isinstance(rows, list):
+            raise ReconciliationFailure("Historical candle response is incomplete")
+        parsed_bars = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise ReconciliationFailure("Historical candle row is malformed")
+            try:
+                timestamp = row[0]
+                if timestamp is None or timestamp == "":
+                    raise ValueError("missing candle timestamp")
+                parsed_timestamp = parse_timestamp(timestamp)
+                bar = Candle.from_dict({
+                    "timestamp": parsed_timestamp,
+                    "open": row[1],
+                    "high": row[2],
+                    "low": row[3],
+                    "close": row[4],
+                    "volume": row[5],
+                    "symbol": display_symbol,
+                })
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ReconciliationFailure("Historical candle values are invalid") from exc
+            if bar.timestamp > now + timedelta(days=1 if timeframe == "1D" else 0, seconds=5):
+                raise ReconciliationFailure("Future candle received")
+            parsed_bars.append(bar)
+        parsed_bars.sort(key=lambda item: item.timestamp)
+        for previous, current in zip(parsed_bars, parsed_bars[1:]):
+            if current.timestamp == previous.timestamp:
+                raise ReconciliationFailure("Duplicate candle timestamp received")
+        if timeframe == "1D":
+            return parsed_bars
+        return [bar for bar in parsed_bars if bar.available_at(timeframe) <= now]
+
+    def daily_candles(self, instrument_key: str, display_symbol: str, *, days: int = 180) -> list:
+        return self.historical_candles(instrument_key, display_symbol, "1D", days=days)
+
 
 class UpstoxLiveBroker(UpstoxReadOnly):
     broker_mutations_reachable = True
@@ -754,6 +822,8 @@ class InstrumentCatalog:
         self.transport = transport
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.instruments: dict[str, Instrument] = {}
+        self.indices: dict[str, dict[str, Any]] = {}
+        self.source_kind: str = "empty"
         self.refreshed_at: datetime | None = None
         self.source_sha256 = ""
         self.warnings: list[str] = []
@@ -797,25 +867,59 @@ class InstrumentCatalog:
         suspended, _ = self._download(self.settings.suspended_url)
         mis_nse, _ = self._download(self.settings.mis_nse_url)
         mis_bse, _ = self._download(self.settings.mis_bse_url)
-        suspended_keys = {str(raw.get("instrument_key")) for raw in suspended}
-        mis_keys = {str(raw.get("instrument_key")) for raw in mis_nse + mis_bse}
+        suspended_keys = {_clean_identity(str(raw.get("instrument_key") or "")) for raw in suspended}
+        mis_keys = {_clean_identity(str(raw.get("instrument_key") or "")) for raw in mis_nse + mis_bse}
+        self._ingest_records(
+            complete,
+            digest=digest,
+            suspended_keys=suspended_keys,
+            mis_keys=mis_keys,
+            source_kind="authoritative_upstox_bod",
+        )
+        self._write_cache()
+        return self.public()
+
+    def _ingest_records(
+        self,
+        complete: list[dict],
+        *,
+        digest: str,
+        suspended_keys: set[str],
+        mis_keys: set[str],
+        source_kind: str,
+    ) -> None:
+        from app.markets.nse_reconciliation import (
+            default_product_for_series,
+            is_valid_indian_isin,
+        )
+
         parsed: dict[str, Instrument] = {}
+        indices: dict[str, dict[str, Any]] = {}
         warnings: list[str] = []
         stats: dict[str, Any] = {
             "source_rows": len(complete),
-            "suspended_keys": len(suspended_keys),
+            "suspended_keys": len([k for k in suspended_keys if k]),
             "kept_by_segment": {},
             "kept_by_segment_and_type": {},
+            "kept_by_subclass": {},
             "dropped_suspended": 0,
             "dropped_unsupported": 0,
             "dropped_unsupported_by": {},
             "dropped_invalid": 0,
+            "dropped_invalid_reasons": {},
             "dropped_invalid_samples": [],
+            "duplicate_keys": [],
+            "missing_isin_count": 0,
+            "watch_only_indices": 0,
             "segment_field_mismatch": 0,
         }
         for raw in complete:
             try:
+                if not isinstance(raw, dict):
+                    raise TypeError("record must be a JSON object")
                 key = _clean_identity(str(raw["instrument_key"]))
+                if not key:
+                    raise ValueError("blank instrument_key")
                 segment_field = _clean_identity(str(raw.get("segment") or "")).upper()
                 # The official instrument_key format is SEGMENT|IDENTIFIER
                 # (upstox skills instruments reference), so the key prefix is
@@ -828,6 +932,10 @@ class InstrumentCatalog:
                 if key in suspended_keys:
                     stats["dropped_suspended"] += 1
                     continue
+                is_duplicate_key = key in parsed or key in indices
+                if is_duplicate_key:
+                    stats["duplicate_keys"].append(key)
+                    warnings.append(f"{key}: duplicate instrument_key encountered in BOD source")
                 # The official field description states instrument_type on
                 # equity segments carries the NSE/BSE share-series code (EQ,
                 # BE, BZ, SM, ST, SG, GS, N1, XT, MT, ...) — a real BOD also
@@ -835,7 +943,6 @@ class InstrumentCatalog:
                 # equity-segment cash instrument; only real derivative
                 # contract types (FUT/CE/PE) are handled by the F&O branches.
                 if segment in {"NSE_EQ", "BSE_EQ"}:
-                    # A blank series on an equity segment is a cash equity.
                     if kind == "":
                         kind = "EQ"
                     supported = kind not in {"FUT", "CE", "PE", "INDEX"}
@@ -846,6 +953,27 @@ class InstrumentCatalog:
                     bucket = f"{segment}|{kind or '(blank)'}"
                     by = stats["dropped_unsupported_by"]
                     by[bucket] = by.get(bucket, 0) + 1
+                    if segment in {"NSE_INDEX", "BSE_INDEX"} or kind == "INDEX":
+                        idx_name = _clean_identity(str(raw.get("name") or raw.get("trading_symbol") or key.split("|", 1)[-1]))
+                        idx_sym = _clean_identity(str(raw.get("trading_symbol") or idx_name))
+                        safe_disp = re.sub(r"[^A-Za-z0-9._:-]+", "_", key.replace("|", "-")).strip("_")[:40]
+                        indices[key] = {
+                            "instrument_key": key,
+                            "display_symbol": safe_disp,
+                            "segment": segment,
+                            "exchange": _clean_identity(str(raw.get("exchange") or segment.split("_", 1)[0])),
+                            "trading_symbol": idx_sym,
+                            "name": idx_name,
+                            "instrument_type": "INDEX",
+                            "market_kind": "INDEX",
+                            "asset_subclass": "INDEX",
+                            "currency": "INR",
+                            "tradable": False,
+                            "mis_intraday_allowed": False,
+                            "delivery_allowed": False,
+                            "product_label": "Watch-only exchange benchmark index (not directly tradable)",
+                        }
+                        stats["watch_only_indices"] = len(indices)
                     continue
                 # Upstox BOD tick values are paise (5.0 => ₹0.05).
                 tick = float(raw["tick_size"]) / 100.0
@@ -856,26 +984,22 @@ class InstrumentCatalog:
                     multiplier = float(multiplier_raw or 1.0)
                 else:
                     multiplier = float(multiplier_raw) if multiplier_raw is not None else None
-                # Upstox's complete.json.gz pads equity rows with an `expiry`
-                # epoch value that is NOT a contract expiry — cash equities do
-                # not expire. Only exchange-traded derivatives carry a real
-                # contract expiry; without this, every NSE/BSE equity row is
-                # silently dropped as an "expired contract" and exact keys
-                # like NSE_EQ|INE002A01018 become unknown.
                 if segment in {"NSE_EQ", "BSE_EQ"}:
                     expiry = None
                 else:
                     expiry = self._expiry(raw.get("expiry"))
                 name = _clean_identity(str(raw.get("name") or ""))
                 isin = _clean_identity(str(raw.get("isin") or "")).upper()
+                security_type = _clean_identity(str(raw.get("security_type") or ""))
                 trading_symbol = _clean_identity(
                     str(raw.get("trading_symbol") or raw.get("short_name") or name or "")
                 )
+                product = default_product_for_series(segment, kind)
                 instrument = Instrument(
                     instrument_key=key,
                     display_symbol=key.replace("|", "-"),
                     segment=segment,
-                    exchange=str(raw["exchange"]),
+                    exchange=_clean_identity(str(raw["exchange"])),
                     trading_symbol=trading_symbol,
                     instrument_type=kind,
                     tick_size=tick,
@@ -883,50 +1007,88 @@ class InstrumentCatalog:
                     freeze_quantity=freeze,
                     contract_multiplier=multiplier,
                     expiry=expiry,
-                    underlying_key=str(raw.get("underlying_key") or ""),
+                    underlying_key=_clean_identity(str(raw.get("underlying_key") or "")),
                     underlying_symbol=_clean_identity(str(raw.get("underlying_symbol") or "")),
-                    correlation_group=str(raw.get("underlying_key") or raw.get("underlying_symbol") or ""),
+                    correlation_group=_clean_identity(
+                        str(raw.get("underlying_key") or raw.get("underlying_symbol") or "")
+                    ),
                     short_route_metadata=(key in mis_keys) if segment.endswith("_EQ") else True,
+                    product=product,
                     isin=isin,
                     name=name,
+                    security_type=security_type,
                 )
-                # Structural checks that do not require a multiplier allow the
-                # UI to show the metadata blocker without treating it tradable.
                 if multiplier is not None:
                     instrument.validate(now=self.clock())
                 elif instrument.currency_derivative:
                     warnings.append(f"{key}: exact qty_multiplier/contract multiplier missing")
                 else:
                     raise ValueError("Equity multiplier missing")
-                parsed[key] = instrument
+                if segment in {"NSE_EQ", "BSE_EQ"} and not is_valid_indian_isin(isin):
+                    stats["missing_isin_count"] += 1
+                if key not in parsed or (parsed[key].instrument_type != "EQ" and kind == "EQ"):
+                    parsed[key] = instrument
                 stats["kept_by_segment"][segment] = stats["kept_by_segment"].get(segment, 0) + 1
                 kept_kind = f"{segment}|{kind or '(blank)'}"
                 stats["kept_by_segment_and_type"][kept_kind] = \
                     stats["kept_by_segment_and_type"].get(kept_kind, 0) + 1
+                sub = instrument.asset_subclass
+                stats["kept_by_subclass"][sub] = stats["kept_by_subclass"].get(sub, 0) + 1
             except (KeyError, TypeError, ValueError, OverflowError) as error:
-                # Bad/unsupported rows are not executable; keep valid exact rows.
-                # Each drop is accounted so format drift is visible in the UI
-                # instead of silently shrinking the catalog.
                 stats["dropped_invalid"] += 1
+                reason_key = type(error).__name__
+                reasons = stats["dropped_invalid_reasons"]
+                reasons[reason_key] = reasons.get(reason_key, 0) + 1
                 if len(stats["dropped_invalid_samples"]) < 5:
                     sample = raw.get("instrument_key") if isinstance(raw, dict) else "?"
                     stats["dropped_invalid_samples"].append(f"{sample}: {type(error).__name__}: {error}")
                 continue
         if not parsed:
             raise UpstoxError("No valid supported instruments in the daily catalog")
+        stats["unique_instruments"] = len(parsed)
         self.instruments = parsed
-        self.refreshed_at = self.clock()
+        self.indices = indices
+        self.source_kind = source_kind
+        self.refreshed_at = self.clock() if source_kind == "authoritative_upstox_bod" else None
         self.source_sha256 = digest
         self.warnings = warnings
         self.stats = stats
-        self._write_cache()
-        return self.public()
+
+    def load_seed_fallback(self) -> bool:
+        """Load the non-authoritative bundled NSE reference seed for cold-start/offline search.
+
+        Never marks ``refreshed_at`` or ``authoritative_reconciled`` true, so
+        execution gates that require a fresh daily BOD download stay fail-closed.
+        """
+        from app.markets.nse_reconciliation import load_nse_seed_records
+
+        if self.instruments:
+            return True
+        records = load_nse_seed_records()
+        if not records:
+            return False
+        digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest()
+        mis_keys = {str(r.get("instrument_key") or "") for r in records if r.get("segment") == "NSE_EQ"}
+        self._ingest_records(
+            records,
+            digest=digest,
+            suspended_keys=set(),
+            mis_keys=mis_keys,
+            source_kind="bundled_seed_reference",
+        )
+        return True
 
     def _write_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        body = {"refreshed_at": self.refreshed_at.isoformat(), "source_sha256": self.source_sha256,
-                "warnings": self.warnings, "stats": self.stats,
-                "instruments": [item.public() for item in self.instruments.values()]}
+        body = {
+            "refreshed_at": self.refreshed_at.isoformat() if self.refreshed_at else None,
+            "source_sha256": self.source_sha256,
+            "source_kind": self.source_kind,
+            "warnings": self.warnings,
+            "stats": self.stats,
+            "indices": list(self.indices.values()),
+            "instruments": [item.public() for item in self.instruments.values()],
+        }
         temporary = self.cache_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
         temporary.replace(self.cache_path)
@@ -954,6 +1116,7 @@ class InstrumentCatalog:
                     product=raw.get("product", "I"),
                     isin=str(raw.get("isin") or ""),
                     name=str(raw.get("name") or ""),
+                    security_type=str(raw.get("security_type") or ""),
                 )
                 instruments[item.instrument_key] = item
             if not instruments:
@@ -961,26 +1124,60 @@ class InstrumentCatalog:
         except (OSError, KeyError, TypeError, ValueError):
             return False
         self.instruments = instruments
+        self.indices = {
+            str(idx["instrument_key"]): dict(idx)
+            for idx in (body.get("indices") or [])
+            if isinstance(idx, dict) and idx.get("instrument_key")
+        }
+        self.source_kind = str(body.get("source_kind") or "authoritative_upstox_bod")
         self.refreshed_at = refreshed
         self.source_sha256 = str(body.get("source_sha256") or "")
         self.warnings = list(body.get("warnings") or [])
         self.stats = dict(body.get("stats") or {})
         if require_current_day and not self.fresh_for_day(self.clock().astimezone(IST).date().isoformat()):
             self.instruments = {}
+            self.indices = {}
+            self.source_kind = "stale_cache_evicted"
             self.refreshed_at = None
             return False
         return True
 
     def fresh_for_day(self, trading_day: str) -> bool:
-        return bool(self.refreshed_at and self.refreshed_at.astimezone(IST).date().isoformat() == trading_day)
+        return bool(
+            self.source_kind != "bundled_seed_reference"
+            and self.refreshed_at
+            and self.refreshed_at.astimezone(IST).date().isoformat() == trading_day
+        )
+
+    def search(self, query: str = "", *, segment: str = "", subclass: str = "",
+               include_indices: bool = False, limit: int = 50) -> dict[str, Any]:
+        from app.markets.nse_reconciliation import search_nse_catalog
+
+        return search_nse_catalog(
+            self.instruments.values(),
+            indices=self.indices.values(),
+            query=query,
+            segment=segment,
+            subclass=subclass,
+            include_indices=include_indices,
+            limit=limit,
+        )
+
+    def reconciliation_report(self, *, now: datetime | None = None) -> dict[str, Any]:
+        from app.markets.nse_reconciliation import build_nse_reconciliation_report
+
+        return build_nse_reconciliation_report(self, now=now or self.clock())
 
     def public(self) -> dict:
         return {
             "refreshed_at": self.refreshed_at.isoformat() if self.refreshed_at else None,
             "source_sha256": self.source_sha256,
+            "source_kind": self.source_kind,
             "count": len(self.instruments),
+            "watch_only_indices_count": len(self.indices),
             "warnings": list(self.warnings),
             "stats": dict(self.stats),
             "instruments": [item.public() for item in self.instruments.values()],
+            "indices": list(self.indices.values()),
             "scope": "NSE/BSE equities and NCD/BCD exchange-listed currency futures/options; no spot forex",
         }

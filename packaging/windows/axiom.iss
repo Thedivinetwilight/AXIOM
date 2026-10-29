@@ -67,6 +67,8 @@ Source: "..\..\docs\TERMINAL_PERFORMANCE.md"; DestDir: "{app}\docs"; Flags: igno
 Source: "..\..\docs\LISTED_ASSETS.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\RESEARCH_CANDIDATES.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\WINDOWS_APP_CONTROL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\BASELINE_AUDIT_AND_ISSUES.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\OWNER_SETUP_GUIDE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_UI_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

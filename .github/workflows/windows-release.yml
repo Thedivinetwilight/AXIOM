@@ -35,6 +35,7 @@ on:
     branches:
       - arena/19f4cba3-axiom
       - arena/d832c9d3-axiom
+      - arena/ffd46191-axiom
   workflow_dispatch:
     inputs:
       commit:
@@ -259,6 +260,7 @@ jobs:
             '..\..\docs\TERMINAL_PERFORMANCE.md',
             '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md',
             '..\..\docs\AUTONOMY.md', '..\..\docs\ARCHITECTURE_AUDIT.md',
+            '..\..\docs\BASELINE_AUDIT_AND_ISSUES.md', '..\..\docs\OWNER_SETUP_GUIDE.md',
             '..\..\docs\autonomy-shakedown.template.json'
           )
           $sums = @()
@@ -310,6 +312,7 @@ jobs:
             src/packaging/windows/js-autonomy.log
             src/packaging/windows/js-chart.log
             src/packaging/windows/js-terminal.log
+            src/packaging/windows/js-multimarket.log
             src/packaging/windows/benchmark-python.log
             src/packaging/windows/js-terminal-benchmark.log
             src/packaging/windows/TERMINAL_BENCHMARK.json
@@ -322,6 +325,8 @@ jobs:
             src/docs/WINDOWS_APP_CONTROL.md
             src/docs/AUTONOMY.md
             src/docs/ARCHITECTURE_AUDIT.md
+            src/docs/BASELINE_AUDIT_AND_ISSUES.md
+            src/docs/OWNER_SETUP_GUIDE.md
             src/docs/autonomy-shakedown.template.json
           if-no-files-found: warn
           retention-days: 30

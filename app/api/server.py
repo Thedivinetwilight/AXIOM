@@ -17,7 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
-    market_data, listed_assets, connections, alpaca_broker,
+    market_data, listed_assets, connections, alpaca_broker, markets,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -82,49 +82,70 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 audit=repository.record_system_event,
                 metrics=app.state.performance,
             )
+            is_ephemeral_memory = database_path == ":memory:" and not app.state.explicit_data_dir
+            runtime_base = (
+                None
+                if is_ephemeral_memory
+                else (
+                    Path(app.state.data_dir)
+                    if (app.state.explicit_data_dir or database_path == ":memory:")
+                    else Path(database_path).parent
+                )
+            )
+            if runtime_base is not None and runtime_base.resolve() == (ROOT / "data").resolve():
+                runtime_base = runtime_base / "autonomy"
+            from app.markets.alpaca_credentials import (
+                default_alpaca_data_store,
+                resolve_alpaca_data_credentials,
+            )
+            from app.markets.nasdaq_catalog import NasdaqCatalog
+
+            app.state.alpaca_data_store = default_alpaca_data_store(runtime_base)
+            app.state.nasdaq_catalog = NasdaqCatalog(
+                (runtime_base / "nasdaq-catalog.json") if runtime_base is not None else None
+            )
+
+            def _us_live_quote_lookup(sym: str):
+                creds, _ = resolve_alpaca_data_credentials(app.state.alpaca_data_store, settings)
+                if not creds["api_key"] or not creds["api_secret"]:
+                    return None
+                from app.data.alpaca import AlpacaQuoteReader
+
+                reader = AlpacaQuoteReader(creds["api_key"], creds["api_secret"], feed=creds["feed"])
+                try:
+                    return reader.latest_quote(sym)
+                finally:
+                    reader.close()
+
+            def _us_asset_lookup(sym: str):
+                found = app.state.nasdaq_catalog.get(sym)
+                if found is not None:
+                    return {"listing_venue": found.exchange, "tradable": found.tradable, "fractionable": found.fractionable}
+                creds, _ = resolve_alpaca_data_credentials(app.state.alpaca_data_store, settings)
+                if creds["api_key"] and creds["api_secret"]:
+                    from app.data.alpaca import AlpacaAssetLookup
+
+                    lkp = AlpacaAssetLookup(creds["api_key"], creds["api_secret"])
+                    try:
+                        return lkp.lookup(sym)
+                    finally:
+                        lkp.close()
+                raise ValueError(f"Asset {sym} not found in NASDAQ catalog")
+
             # Alpaca broker path (separately gated; disabled by default). LIVE
             # binds its client only after the gate's explicit Arm + Activate.
-            app.state.alpaca_broker = None
-            app.state.alpaca_broker_credential_source = "none"
-            if settings.alpaca_broker_enabled:
-                from app.alpaca_broker.client import AlpacaTradingClient
-                from app.alpaca_broker.credentials import (
-                    default_store as broker_credential_store,
-                    load_broker_credentials,
-                )
-                from app.alpaca_broker.service import AlpacaBrokerService, BrokerRiskLimits
+            from app.alpaca_broker.runtime import AlpacaBrokerRuntime
 
-                broker_store = broker_credential_store(secret_dir)
-                broker_environment = settings.alpaca_broker_environment
-                broker_creds, credential_source = load_broker_credentials(
-                    broker_store, broker_environment, settings,
-                )
-                app.state.alpaca_broker_credential_source = credential_source
-                broker_limits = BrokerRiskLimits(
-                    settings.alpaca_broker_max_order_value,
-                    settings.alpaca_broker_max_open_positions,
-                    settings.alpaca_broker_max_daily_orders,
-                )
-                broker_client = None
-                broker_factory = None
-                if broker_creds["api_key"] and broker_creds["api_secret"]:
-                    if broker_environment == "paper":
-                        broker_client = AlpacaTradingClient(
-                            broker_creds["api_key"], broker_creds["api_secret"],
-                            environment="paper",
-                        )
-                    else:
-                        broker_factory = lambda permit: AlpacaTradingClient(  # noqa: E731
-                            broker_creds["api_key"], broker_creds["api_secret"],
-                            environment="live", live_permit=permit,
-                        )
-                app.state.alpaca_broker = AlpacaBrokerService(
-                    broker_client,
-                    environment=broker_environment,
-                    limits=broker_limits,
-                    repository=repository,
-                    client_factory=broker_factory,
-                )
+            app.state.alpaca_broker_runtime = AlpacaBrokerRuntime(
+                settings=settings,
+                secret_dir=secret_dir if runtime_base is not None else None,
+                journal_path=":memory:" if runtime_base is None else (runtime_base / "alpaca_broker.sqlite3"),
+                repository=repository,
+                quote_provider=_us_live_quote_lookup,
+                asset_lookup=_us_asset_lookup,
+            )
+            app.state.alpaca_broker = app.state.alpaca_broker_runtime.service
+            app.state.alpaca_broker_credential_source = app.state.alpaca_broker_runtime.credential_source
             # Manual Upstox access-token entry: protected per-user storage only.
             # Never creates a session, changes execution mode, or starts
             # automation. The stored token feeds market data and read-only
@@ -195,7 +216,65 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     autonomy_store.close()
                 if autonomy_lease is not None:
                     autonomy_lease.release()
+
+            from app.markets.live_paper import LiveMarketPaperEngine
+            from app.autonomy.upstox import UpstoxReadOnly
+            from app.autonomy.upstox_token import resolve_token
+
+            app.state.nse_seed_catalog = InstrumentCatalog(
+                AutonomySettings(), Path(app.state.data_dir) / "nse-seed-fallback.json"
+            )
+            app.state.nse_seed_catalog.load_seed_fallback()
+
+            def _resolve_nse_instrument(symbol_or_key: str):
+                cat = (
+                    app.state.autonomy.catalog
+                    if (app.state.autonomy is not None and app.state.autonomy.catalog.instruments)
+                    else app.state.nse_seed_catalog
+                )
+                res = cat.search(symbol_or_key, include_indices=False, limit=1)
+                return res["items"][0] if res["items"] else None
+
+            def _resolve_nasdaq_instrument(symbol_or_key: str):
+                found = app.state.nasdaq_catalog.get(symbol_or_key)
+                return found.public() if found is not None else None
+
+            def _nse_live_quote_lookup(instrument_key: str):
+                tok, _ = resolve_token(app.state.upstox_token)
+                if not tok:
+                    tok = str(getattr(settings, "market_data_access_token", "") or "").strip()
+                if not tok:
+                    raise RuntimeError("Upstox read-only market-data token is not configured")
+                snap = UpstoxReadOnly(lambda: tok).quote_snapshot(instrument_key)
+                return {
+                    "instrument_key": snap.instrument_key,
+                    "bid": snap.bid,
+                    "ask": snap.ask,
+                    "last": snap.last,
+                    "volume": snap.volume,
+                    "timestamp": snap.timestamp.isoformat(),
+                    "source": "upstox-market-quote-v2",
+                }
+
+            def _nasdaq_live_quote_lookup(symbol: str):
+                quote = _us_live_quote_lookup(symbol)
+                if quote is None:
+                    raise RuntimeError("Alpaca read-only market-data credentials are not configured")
+                return quote
+
+            app.state.live_paper_engine = LiveMarketPaperEngine(
+                ":memory:" if runtime_base is None else (runtime_base / "live_market_paper.sqlite3"),
+                nse_quote_provider=_nse_live_quote_lookup,
+                nasdaq_quote_provider=_nasdaq_live_quote_lookup,
+                nse_instrument_resolver=_resolve_nse_instrument,
+                nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
+            )
+
             yield
+            if getattr(app.state, "live_paper_engine", None) is not None:
+                app.state.live_paper_engine.close()
+            if getattr(app.state, "alpaca_broker_runtime", None) is not None and app.state.alpaca_broker_runtime.journal is not None:
+                app.state.alpaca_broker_runtime.journal.close()
             if app.state.autonomy_runner is not None:
                 await app.state.autonomy_runner.stop()
             if app.state.autonomy is not None:
@@ -318,7 +397,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
     # every data route declares its own bearer dependency.
     app.include_router(chart.router)
-    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections, alpaca_broker):
+    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections, alpaca_broker, markets):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
     # remote script, and nothing secret is ever placed here. Assets are served

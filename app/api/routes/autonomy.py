@@ -156,49 +156,44 @@ def kronos_cancel(request: Request):
 
 
 @api.get("/catalog")
-def catalog(request: Request, query: str = "", limit: int = 100):
+def catalog(
+    request: Request,
+    query: str = "",
+    limit: int = 100,
+    segment: str = "",
+    subclass: str = "",
+    include_indices: bool = False,
+):
     value = service(request)
     limit = max(1, min(limit, 500))
-    from app.autonomy.upstox import _clean_identity
-
-    needle = _clean_identity(query).upper()
-    # Exact-key alias: instrument-file variants drift the equity key suffix
-    # away from the ISIN, while the documented identity stays ISIN-based.
-    # A needle of the form SEGMENT|<ISIN> must resolve to the row whose ISIN
-    # matches even when the stored key drifted.
-    alias_isin = ""
-    alias_segment = ""
-    if "|" in needle:
-        alias_segment, alias_tail = needle.split("|", 1)
-        if alias_tail.startswith("IN") and 10 <= len(alias_tail) <= 12:
-            alias_isin = alias_tail
-
-    def matches(item) -> bool:
-        if not needle:
-            return True
-        haystack = " ".join(
-            _clean_identity(str(value)).upper()
-            for value in (item.instrument_key, item.trading_symbol,
-                          item.underlying_symbol, item.name, item.isin,
-                          item.short_name if hasattr(item, "short_name") else "")
-        )
-        if needle in haystack:
-            return True
-        return bool(alias_isin and item.segment.upper() == alias_segment
-                    and _clean_identity(str(item.isin)).upper() == alias_isin)
-
-    items = [item.public() for item in value.catalog.instruments.values() if matches(item)]
-    items.sort(key=lambda row: str(row.get("instrument_key") or ""))
+    searched = value.catalog.search(
+        query,
+        segment=segment,
+        subclass=subclass,
+        include_indices=include_indices,
+        limit=limit,
+    )
+    items = searched["items"]
     return {
         "scope": "NSE/BSE equities and NCD/BCD exchange-listed currency derivatives; no spot forex",
+        "source_kind": value.catalog.source_kind,
         "refreshed_at": value.catalog.refreshed_at.isoformat() if value.catalog.refreshed_at else None,
         "source_sha256": value.catalog.source_sha256,
-        "total": len(value.catalog.instruments), "returned": len(items[:limit]),
-        "warnings": value.catalog.warnings, "instruments": items[:limit],
-        # The UI's diagnostics line renders these; omitting them silently hid
-        # every parse drop from the operator (regression-pinned in tests).
+        "total": len(value.catalog.instruments),
+        "total_matches": searched["total_matches"],
+        "returned": len(items),
+        "ambiguous": searched["ambiguous"],
+        "ambiguity_detail": searched["ambiguity_detail"],
+        "warnings": value.catalog.warnings,
+        "instruments": items,
         "stats": value.catalog.stats,
     }
+
+
+@api.get("/catalog/reconciliation")
+def catalog_reconciliation(request: Request):
+    value = service(request)
+    return value.catalog.reconciliation_report()
 
 
 @api.post("/catalog/refresh")
