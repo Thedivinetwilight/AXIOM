@@ -42,6 +42,16 @@ API_BASE = OFFICIAL_API_BASE
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+_ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
+
+
+def _clean_identity(value: str) -> str:
+    """Strip stray Unicode format characters (BOM/zero-width) and outer
+    whitespace from identity fields. Instrument-file variants have been seen
+    carrying invisible characters that defeat exact substring search."""
+    return value.translate({ord(ch): None for ch in _ZERO_WIDTH}).strip()
+
+
 def _query_suffix(params: dict | None) -> str:
     """Token-free, percent-encoded query display (params never hold secrets)."""
     if not params:
@@ -805,8 +815,8 @@ class InstrumentCatalog:
         }
         for raw in complete:
             try:
-                key = str(raw["instrument_key"]).strip()
-                segment_field = str(raw.get("segment") or "").strip().upper()
+                key = _clean_identity(str(raw["instrument_key"]))
+                segment_field = _clean_identity(str(raw.get("segment") or "")).upper()
                 # The official instrument_key format is SEGMENT|IDENTIFIER
                 # (upstox skills instruments reference), so the key prefix is
                 # authoritative for the segment; a drifted `segment` field is
@@ -814,7 +824,7 @@ class InstrumentCatalog:
                 segment = key.split("|", 1)[0].strip().upper() if "|" in key else segment_field
                 if segment_field and segment_field != segment:
                     stats["segment_field_mismatch"] += 1
-                kind = str(raw.get("instrument_type") or "").strip().upper()
+                kind = _clean_identity(str(raw.get("instrument_type") or "")).upper()
                 if key in suspended_keys:
                     stats["dropped_suspended"] += 1
                     continue
@@ -856,12 +866,17 @@ class InstrumentCatalog:
                     expiry = None
                 else:
                     expiry = self._expiry(raw.get("expiry"))
+                name = _clean_identity(str(raw.get("name") or ""))
+                isin = _clean_identity(str(raw.get("isin") or "")).upper()
+                trading_symbol = _clean_identity(
+                    str(raw.get("trading_symbol") or raw.get("short_name") or name or "")
+                )
                 instrument = Instrument(
                     instrument_key=key,
                     display_symbol=key.replace("|", "-"),
                     segment=segment,
                     exchange=str(raw["exchange"]),
-                    trading_symbol=str(raw.get("trading_symbol") or raw.get("short_name") or ""),
+                    trading_symbol=trading_symbol,
                     instrument_type=kind,
                     tick_size=tick,
                     quantity_step=step,
@@ -869,9 +884,11 @@ class InstrumentCatalog:
                     contract_multiplier=multiplier,
                     expiry=expiry,
                     underlying_key=str(raw.get("underlying_key") or ""),
-                    underlying_symbol=str(raw.get("underlying_symbol") or ""),
+                    underlying_symbol=_clean_identity(str(raw.get("underlying_symbol") or "")),
                     correlation_group=str(raw.get("underlying_key") or raw.get("underlying_symbol") or ""),
                     short_route_metadata=(key in mis_keys) if segment.endswith("_EQ") else True,
+                    isin=isin,
+                    name=name,
                 )
                 # Structural checks that do not require a multiplier allow the
                 # UI to show the metadata blocker without treating it tradable.
@@ -935,6 +952,8 @@ class InstrumentCatalog:
                     correlation_group=raw.get("correlation_group", ""),
                     short_route_metadata=bool(raw.get("short_route_metadata")),
                     product=raw.get("product", "I"),
+                    isin=str(raw.get("isin") or ""),
+                    name=str(raw.get("name") or ""),
                 )
                 instruments[item.instrument_key] = item
             if not instruments:

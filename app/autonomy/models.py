@@ -60,6 +60,11 @@ class Instrument:
     correlation_group: str = ""
     short_route_metadata: bool = False
     product: str = "I"
+    # Documented identity fields used by catalog search. Some instrument-file
+    # variants carry the human symbol only in `name` and the ISIN only in
+    # `isin`, so search must cover them explicitly.
+    isin: str = ""
+    name: str = ""
 
     @property
     def market_kind(self) -> str:

@@ -159,11 +159,36 @@ def kronos_cancel(request: Request):
 def catalog(request: Request, query: str = "", limit: int = 100):
     value = service(request)
     limit = max(1, min(limit, 500))
-    needle = query.strip().upper()
-    items = [item.public() for item in value.catalog.instruments.values()
-             if not needle or needle in item.instrument_key.upper()
-             or needle in item.trading_symbol.upper()
-             or needle in item.underlying_symbol.upper()]
+    from app.autonomy.upstox import _clean_identity
+
+    needle = _clean_identity(query).upper()
+    # Exact-key alias: instrument-file variants drift the equity key suffix
+    # away from the ISIN, while the documented identity stays ISIN-based.
+    # A needle of the form SEGMENT|<ISIN> must resolve to the row whose ISIN
+    # matches even when the stored key drifted.
+    alias_isin = ""
+    alias_segment = ""
+    if "|" in needle:
+        alias_segment, alias_tail = needle.split("|", 1)
+        if alias_tail.startswith("IN") and 10 <= len(alias_tail) <= 12:
+            alias_isin = alias_tail
+
+    def matches(item) -> bool:
+        if not needle:
+            return True
+        haystack = " ".join(
+            _clean_identity(str(value)).upper()
+            for value in (item.instrument_key, item.trading_symbol,
+                          item.underlying_symbol, item.name, item.isin,
+                          item.short_name if hasattr(item, "short_name") else "")
+        )
+        if needle in haystack:
+            return True
+        return bool(alias_isin and item.segment.upper() == alias_segment
+                    and _clean_identity(str(item.isin)).upper() == alias_isin)
+
+    items = [item.public() for item in value.catalog.instruments.values() if matches(item)]
+    items.sort(key=lambda row: str(row.get("instrument_key") or ""))
     return {
         "scope": "NSE/BSE equities and NCD/BCD exchange-listed currency derivatives; no spot forex",
         "refreshed_at": value.catalog.refreshed_at.isoformat() if value.catalog.refreshed_at else None,
