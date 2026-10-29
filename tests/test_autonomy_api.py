@@ -102,14 +102,24 @@ def test_no_generic_order_or_credential_api_is_exposed(tmp_path):
     with client(tmp_path) as web:
         schema = web.get("/openapi.json").json()
         paths = list(schema["paths"])
-        assert "/api/autonomy/sessions/{session_id}/activate" in paths
-        assert "/api/autonomy/sessions/{session_id}/arm" in paths
-        assert "/api/autonomy/sessions/{session_id}/reconcile" in paths
-        assert not any("place-order" in path or "token" in path.rsplit("/", 1)[-1]
-                       for path in paths if path.startswith("/api/autonomy"))
-        health = web.get("/health").json()
-        assert health["mode"] == "PAPER" and health["live_trading"] is False
-        assert health["autonomy"]["live_active"] is False
+    assert "/api/autonomy/sessions/{session_id}/activate" in paths
+    assert "/api/autonomy/sessions/{session_id}/arm" in paths
+    assert "/api/autonomy/sessions/{session_id}/reconcile" in paths
+    assert not any("place-order" in path for path in paths if path.startswith("/api/autonomy"))
+    # The ONLY credential surface is the fixed manual Upstox token entry (this
+    # task's explicit contract): a body-only save/replace, a metadata-only
+    # status, a delete, and one read-only connection test. Nothing generic —
+    # no arbitrary credential names, and no endpoint that reads a token back.
+    assert sorted(path for path in paths if "upstox-token" in path) == [
+        "/api/autonomy/upstox-token",
+        "/api/autonomy/upstox-token/status",
+        "/api/autonomy/upstox-token/test",
+    ]
+    assert set(schema["paths"]["/api/autonomy/upstox-token"]) <= {"post", "delete"}
+    assert "get" not in schema["paths"]["/api/autonomy/upstox-token"]
+    health = web.get("/health").json()
+    assert health["mode"] == "PAPER" and health["live_trading"] is False
+    assert health["autonomy"]["live_active"] is False
 
 
 def test_live_scan_route_cannot_reach_execution_or_broker_mutation(tmp_path, monkeypatch):

@@ -45,6 +45,7 @@ let session = {
   operator_note: "PAPER is local simulation",
 };
 let availableSessions = [];
+let tokenSaved = false;
 const confirmations = [];
 const manifestFile = "379ffadfb56911c7c85048e159286457008fcff684b2647b4ea847dc479785aa";
 const installPlan = {
@@ -123,6 +124,20 @@ window.fetch = (url, options = {}) => {
         || item.trading_symbol.toUpperCase().includes(query));
     return response({ total: matches.length, refreshed_at: "2026-10-25T00:00:00+00:00", scope: "test exact scope", instruments: matches, warnings: [],
       stats: { source_rows: 2, suspended_keys: 0, kept_by_segment: { NSE_EQ: 2 }, dropped_suspended: 0, dropped_unsupported: 0, dropped_unsupported_by: { "NSE_INDEX|INDEX": 3 }, dropped_invalid: 0, dropped_invalid_samples: [] } });
+  }
+  if (path === "/api/autonomy/upstox-token/status") {
+    return response({ present: tokenSaved, saved_at: tokenSaved ? "2026-10-29T05:00:00+00:00" : null, protection: "test-memory", token_returned: false, source: tokenSaved ? "protected-store" : "none", execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
+  }
+  if (path === "/api/autonomy/upstox-token" && options.method === "POST") {
+    const replaced = tokenSaved; tokenSaved = true;
+    return response({ saved: true, replaced, present: true, saved_at: "2026-10-29T05:00:00+00:00", protection: "test-memory", token_returned: false, execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
+  }
+  if (path === "/api/autonomy/upstox-token" && options.method === "DELETE") {
+    tokenSaved = false;
+    return response({ deleted: true, present: false, saved_at: null, token_returned: false, execution_effect: "NONE_TOKEN_STORAGE_ONLY" });
+  }
+  if (path === "/api/autonomy/upstox-token/test" && options.method === "POST") {
+    return response({ ok: true, verdict: "ok", detail: "Authenticated (read-only profile) and a fresh full quote was returned for this exact BOD key. Market data only; paper fills remain local.", instrument_key: "NSE_EQ|INE002A01018", quote_timestamp: "2026-10-29T05:00:05+00:00", freshness: { label: "fresh", age_seconds: 2 }, authenticated: true, token_source: "protected-store", checked_at: "2026-10-29T05:00:06+00:00", read_only: true, real_order_api_used: false, execution_mode: "AXIOM_PAPER", session_effect: "NONE" });
   }
   if (path === "/api/autonomy/status") return response({ sessions: availableSessions });
   if (path === "/api/autonomy/sessions" && options.method === "POST") return response(session, true, 201);
@@ -251,6 +266,33 @@ assert.equal(window.document.getElementById("testKronos").disabled, false);
 const create = calls.find(call => call.path === "/api/autonomy/sessions");
 assert.deepEqual(JSON.parse(create.options.body).instrument_keys, [key]);
 assert.equal(JSON.parse(create.options.body).mode, "PAPER");
+
+// Manual Upstox access-token entry: Save clears the input, the value never
+// appears in a URL or rendered output, Test renders only key/quote timestamp/
+// freshness/sanitized details, and Delete removes the saved token.
+const secret = "test-secret-token-value-1234567890";
+window.document.getElementById("tokenInput").value = secret;
+await click("saveToken");
+assert.equal(window.document.getElementById("tokenInput").value, "");
+assert.match(window.document.getElementById("tokenStatus").textContent, /Saved token present/);
+assert.ok(!window.document.getElementById("notice").textContent.includes(secret));
+assert.ok(!window.document.getElementById("tokenStatus").textContent.includes(secret));
+window.document.getElementById("tokenTestKey").value = "NSE_EQ|INE002A01018";
+await click("testToken");
+const tokenTestResult = window.document.getElementById("tokenTestResult").textContent;
+assert.match(tokenTestResult, /OK/);
+assert.match(tokenTestResult, /NSE_EQ\|INE002A01018/);
+assert.match(tokenTestResult, /quote 2026-10-29T05:00:05\+00:00/);
+assert.match(tokenTestResult, /freshness fresh \(2s\)/);
+assert.ok(!tokenTestResult.includes(secret));
+assert.ok(!tokenTestResult.includes("last_price") && !tokenTestResult.includes("bid"));
+await click("deleteToken");
+assert.match(window.document.getElementById("tokenStatus").textContent, /No saved token/);
+for (const call of calls) {
+  assert.ok(!String(call.path).includes(secret), "the token must never appear in a URL");
+  const inBody = String(call.options.body || "").includes(secret);
+  assert.ok(!inBody || call.path.endsWith("/upstox-token"), "the token may travel only in the save body");
+}
 for (const name of ["authorize", "risk", "arm", "activate"]) {
   assert(calls.some(call => call.path.endsWith(`/${name}`)), `missing ${name}`);
 }
@@ -258,11 +300,13 @@ const authorize = calls.find(call => call.path.endsWith("/authorize"));
 assert.equal(authorize.options.body, undefined);
 for (const call of calls) {
   assert(!call.path.includes("place-order"));
-  assert(!String(call.options.body || "").includes("access_token"));
-  assert(!String(call.options.body || "").includes("password"));
+  const body = String(call.options.body || "");
+  const isTokenSave = call.path.endsWith("/upstox-token") && call.options.method === "POST";
+  assert(!body.includes("access_token") || isTokenSave, "access_token may travel only in the manual token save body");
+  assert(!body.includes("password"));
   assert(!call.path.includes("localhost"));
 }
 assert(html.includes("/static/vendor/lightweight-charts/"));
 assert(!html.includes("https://"));
-console.log(`PASS autonomy UI: ${calls.length} local API interactions, separate Arm/Activate, no credential/order API`);
+console.log(`PASS autonomy UI: ${calls.length} local API interactions, separate Arm/Activate, no order API; token save is body-only and never echoed`);
 window.close();

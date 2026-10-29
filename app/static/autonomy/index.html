@@ -34,6 +34,13 @@
 <p class="check">Live requires the separate environment master switch, fresh account/profile and margin checks, registered static-IP verification, exact strategy evidence, and operator Arm + Activate.</p>
 <button id="createSession" class="primary">Create unconfigured session</button>
 </section>
+<section class="panel"><h2>Upstox access token · manual entry (market data · read-only)</h2>
+<p class="muted">Paste an Upstox access token (daily OAuth login token or Analytics Token) for <b>live market data and read-only account checks only</b>. It is stored encrypted for the current Windows user (DPAPI) and is never shown again, logged, or placed in a URL. Paper fills remain local. Saving, replacing, deleting or testing never creates a session, changes execution mode, Arms or Activates.</p>
+<div class="row"><input id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Upstox access token" aria-label="Upstox access token"><button id="saveToken" class="primary">Save</button><button id="replaceToken">Replace</button><button id="deleteToken" class="warn">Delete</button></div>
+<div id="tokenStatus" class="muted"></div>
+<div class="row"><input id="tokenTestKey" placeholder="Exact BOD key, e.g. NSE_EQ|INE002A01018" aria-label="Exact instrument key for the read-only quote test"><button id="testToken">Test read-only quote</button></div>
+<div id="tokenTestResult" class="notice" role="status" aria-live="polite"></div>
+</section>
 <section class="panel"><h2>2 · Fresh daily authorization & risk</h2>
 <p class="muted">Generate the daily Upstox token with the existing local OAuth command. Do not paste broker credentials into this page or API.</p>
 <div class="row"><button id="authorize">Authorize read-only today</button><span id="authState" class="pill">Not authorized</span></div>

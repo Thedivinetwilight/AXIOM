@@ -133,7 +133,15 @@ $('scan').onclick=()=>action('scan');
 $('reconcile').onclick=()=>action('reconcile');
 $('cancelUnfilled').onclick=()=>{const key=$('chartInstrument').value;if(key&&window.confirm('Cancel only the selected unfilled entry after fresh reconciliation? Open-position protection will not be cancelled.'))action('cancel-unfilled',{instrument_key:key});};
 $('loadAudit').onclick=loadAudit;
+async function loadTokenStatus(){try{const s=await api('/upstox-token/status');$('tokenStatus').textContent=s.present?`Saved token present · ${s.protection} · saved ${s.saved_at||'unknown'} · resolves from ${s.source}`:`No saved token · token source ${s.source}`;$('saveToken').hidden=s.present;$('replaceToken').hidden=!s.present;$('deleteToken').hidden=!s.present;}catch(error){note(error.message,true);}}
+async function saveToken(){try{await ensureToken();const value=$('tokenInput').value;if(!value){note('Paste an Upstox access token first.',true);return;}const result=await api('/upstox-token',{method:'POST',body:JSON.stringify({access_token:value})});$('tokenInput').value='';note(result.replaced?'Access token replaced · stored encrypted for this Windows user. Nothing else changed.':'Access token saved · stored encrypted for this Windows user. Nothing else changed.');loadTokenStatus();}catch(error){note(error.message,true);}}
+async function deleteToken(){try{await ensureToken();await api('/upstox-token',{method:'DELETE'});note('Saved access token deleted. Nothing else changed.');loadTokenStatus();}catch(error){note(error.message,true);}}
+async function testToken(){try{await ensureToken();const key=$('tokenTestKey').value.trim();if(!key){note('Enter the exact BOD instrument key to test.',true);return;}const result=await api('/upstox-token/test',{method:'POST',body:JSON.stringify({instrument_key:key})});const f=result.freshness||{};$('tokenTestResult').textContent=`${String(result.verdict).toUpperCase()} · ${result.instrument_key} · quote ${result.quote_timestamp||'none'} · freshness ${f.label||'unknown'}${f.age_seconds!==null&&f.age_seconds!==undefined?` (${f.age_seconds}s)`:''} · ${result.detail}`;}catch(error){$('tokenTestResult').textContent=error.message;}}
+$('saveToken').onclick=saveToken;
+$('replaceToken').onclick=saveToken;
+$('deleteToken').onclick=deleteToken;
+$('testToken').onclick=testToken;
 $('chartInstrument').onchange=loadBars;
-if(token()){loadSessions();loadKronos();}
+if(token()){loadSessions();loadKronos();loadTokenStatus();}
 setInterval(loadKronos,3000);
 setInterval(async()=>{if(session){await reload();await loadBars();}},7000);

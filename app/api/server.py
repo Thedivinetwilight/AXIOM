@@ -33,6 +33,8 @@ from app.autonomy.config import AutonomySettings
 from app.autonomy.service import AutonomyService
 from app.autonomy.store import AutonomyStore
 from app.autonomy.upstox import InstrumentCatalog
+from app.autonomy.upstox_token import default_store as upstox_token_default_store
+from app.autonomy.upstox_token import resolve_token_provider
 from app.autonomy.runner import AutonomyRunner
 from app.api.routes import autonomy
 
@@ -121,6 +123,17 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     repository=repository,
                     client_factory=broker_factory,
                 )
+            # Manual Upstox access-token entry: protected per-user storage only.
+            # Never creates a session, changes execution mode, or starts
+            # automation. The stored token feeds market data and read-only
+            # account checks; the OAuth/CLI environment token stays available.
+            try:
+                app.state.upstox_token = upstox_token_default_store(secret_dir)
+            except Exception:
+                app.state.upstox_token = None
+                logging.getLogger("bot.autonomy").error(
+                    "upstox_token_store_unavailable", extra={"error": "store_init"}
+                )
             # Autonomy is an isolated boundary.  Startup may load public BOD
             # metadata and a halted journal, but never creates/Arms/Activates
             # a session and never starts with an execution permit.
@@ -145,6 +158,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 app.state.autonomy = AutonomyService(
                     autonomy_settings, autonomy_store, autonomy_catalog,
                     data_dir=autonomy_dir,
+                    token_provider=resolve_token_provider(app.state.upstox_token),
                 )
                 if autonomy_settings.worker_enabled:
                     app.state.autonomy_runner = AutonomyRunner(

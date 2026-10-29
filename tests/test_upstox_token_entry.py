@@ -1,0 +1,356 @@
+"""Manual Upstox access-token entry: secrets stay protected, errors fail closed,
+only read-only endpoints are called, and save/test can never Arm or Activate.
+
+Contract under test:
+- the saved token is never returned, displayed, logged, placed in a URL, or
+  included in error messages (every response body is scanned for it);
+- the read-only connection test calls only GET /v2/user/profile and
+  GET /v2/market-quote/full, reports instrument key / quote timestamp /
+  freshness / sanitized details only, and never falls back to sample data;
+- missing, rejected (expired/invalid/revoked) and unreachable states fail
+  closed with explicit verdicts; stale quotes are never treated as current;
+- saving, replacing, deleting or testing a token never creates a session,
+  changes execution mode, Arms/Activates, or starts automation.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+from fastapi.testclient import TestClient
+
+from app.api.server import create_app
+from app.autonomy.upstox import UpstoxReadOnly
+from app.autonomy.upstox_token import (
+    FileUpstoxTokenStore, MemoryUpstoxTokenStore, resolve_token_provider,
+)
+from app.config.settings import Settings
+from app.vantage.secrets import redact
+
+SECRET = "test-secret-token-value-1234567890"
+RELIANCE_KEY = "NSE_EQ|INE002A01018"
+NOW = datetime(2026, 10, 29, 5, 0, tzinfo=timezone.utc)
+
+RELIANCE_ROW = {
+    "segment": "NSE_EQ", "name": "RELIANCE INDUSTRIES LTD",
+    "exchange": "NSE", "isin": "INE002A01018",
+    "instrument_type": "EQ", "instrument_key": RELIANCE_KEY,
+    "lot_size": 1, "freeze_quantity": 100000.0, "exchange_token": "2885",
+    "tick_size": 5.0, "trading_symbol": "RELIANCE",
+}
+
+ALLOWED_TEST_KEYS = {
+    "ok", "verdict", "detail", "instrument_key", "quote_timestamp",
+    "freshness", "authenticated", "token_source", "checked_at",
+    "read_only", "real_order_api_used", "execution_mode", "session_effect",
+}
+
+
+def client(tmp_path):
+    settings = replace(Settings(), api_token="local-api-test",
+                       database_url=f"sqlite:///{tmp_path}/app.db")
+    return TestClient(create_app(settings, data_dir=tmp_path))
+
+
+def with_store(web) -> MemoryUpstoxTokenStore:
+    store = MemoryUpstoxTokenStore()
+    web.app.state.upstox_token = store
+    web.app.state.autonomy.token_provider = resolve_token_provider(store)
+    return store
+
+
+def with_catalog(web):
+    catalog = web.app.state.autonomy.catalog
+
+    def fake_download(url):
+        return ([RELIANCE_ROW] if "complete" in str(url) else []), "bod-digest"
+
+    catalog._download = fake_download
+    catalog.clock = lambda: NOW
+    web.app.state.autonomy.clock = lambda: NOW
+    headers = {"Authorization": "Bearer local-api-test"}
+    assert web.post("/api/autonomy/catalog/refresh", headers=headers).status_code == 200
+
+
+def quote_payload(key: str, when: datetime) -> dict:
+    return {"status": "success", "data": {key: {
+        "last_price": 100.0, "volume": 5,
+        "timestamp": int(when.timestamp() * 1000),
+        "depth": {"buy": [{"price": 99.0, "quantity": 1}],
+                  "sell": [{"price": 101.0, "quantity": 1}]},
+    }}}
+
+
+PROFILE_PAYLOAD = {"status": "success", "data": {
+    "user_id": "UTEST1", "is_active": True,
+    "exchanges": ["NSE"], "products": ["I"], "order_types": ["MARKET"],
+}}
+
+
+class RecordingTransport(httpx.MockTransport):
+    def __init__(self, handler):
+        self.calls: list[httpx.Request] = []
+        super().__init__(lambda request: (self.calls.append(request), handler(request))[1])
+
+
+def install_reader(web, handler):
+    transport = RecordingTransport(handler)
+
+    def factory(provider):
+        return UpstoxReadOnly(provider, transport=transport, clock=lambda: NOW)
+
+    web.app.state.autonomy.reader_factory = factory
+    return transport
+
+
+def assert_read_only_and_secret_free(calls, secret: str):
+    assert calls, "the read-only client must have been called"
+    for request in calls:
+        assert request.method == "GET", f"only GET is allowed, saw {request.method} {request.url.path}"
+        assert request.url.path in {"/v2/user/profile", "/v2/market-quote/full"}, request.url.path
+        assert secret not in str(request.url), "the token must never appear in a URL"
+        assert request.headers.get("Authorization") == f"Bearer {secret}"
+
+
+def test_save_replace_delete_lifecycle_never_returns_the_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("MARKET_DATA_ACCESS_TOKEN", raising=False)
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        store = with_store(web)
+        saved = web.post("/api/autonomy/upstox-token", headers=headers,
+                         json={"access_token": SECRET})
+        assert saved.status_code == 200
+        assert saved.json()["saved"] is True and saved.json()["replaced"] is False
+        assert saved.json()["token_returned"] is False
+        assert SECRET not in saved.text
+
+        status = web.get("/api/autonomy/upstox-token/status", headers=headers)
+        assert status.status_code == 200
+        body = status.json()
+        assert body["present"] is True and body["saved_at"]
+        assert body["source"] == "protected-store"
+        assert body["token_returned"] is False
+        assert "access_token" not in json.dumps(body).lower().replace("token_returned", "")
+        assert SECRET not in status.text
+
+        replaced = web.post("/api/autonomy/upstox-token", headers=headers,
+                            json={"access_token": SECRET + "v2"})
+        assert replaced.json()["replaced"] is True
+        assert SECRET + "v2" not in replaced.text
+        assert store.token() == SECRET + "v2"  # only one value stored
+
+        deleted = web.delete("/api/autonomy/upstox-token", headers=headers)
+        assert deleted.status_code == 200 and deleted.json()["deleted"] is True
+        assert store.token() == ""
+        assert web.get("/api/autonomy/upstox-token/status", headers=headers).json()["present"] is False
+
+
+def test_token_endpoints_require_authentication(tmp_path):
+    with client(tmp_path) as web:
+        with_store(web)
+        assert web.get("/api/autonomy/upstox-token/status").status_code == 401
+        assert web.post("/api/autonomy/upstox-token", json={"access_token": SECRET}).status_code == 401
+        assert web.delete("/api/autonomy/upstox-token").status_code == 401
+        assert web.post("/api/autonomy/upstox-token/test",
+                        json={"instrument_key": RELIANCE_KEY}).status_code == 401
+
+
+def test_read_only_test_calls_only_profile_and_quote_and_returns_no_prices(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            return httpx.Response(200, json=quote_payload(RELIANCE_KEY, NOW))
+
+        transport = install_reader(web, handler)
+        response = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                            json={"instrument_key": RELIANCE_KEY})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert set(result.keys()) == ALLOWED_TEST_KEYS  # no prices, no token
+        assert result["ok"] is True and result["verdict"] == "ok"
+        assert result["authenticated"] is True
+        assert result["instrument_key"] == RELIANCE_KEY
+        assert result["quote_timestamp"] == NOW.isoformat()
+        assert result["freshness"] == {"label": "fresh", "age_seconds": 0}
+        assert result["session_effect"] == "NONE"
+        assert SECRET not in response.text
+        for banned in ("last_price", "bid", "ask", "volume", "100.0"):
+            assert banned not in response.text
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_stale_quote_is_never_treated_as_current(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            return httpx.Response(200, json=quote_payload(RELIANCE_KEY, NOW - timedelta(hours=1)))
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False and result["verdict"] == "stale_quote"
+        assert result["freshness"]["label"] == "stale"
+        assert result["freshness"]["age_seconds"] == 3600
+        assert "NOT treated as current" in result["detail"]
+        assert result["authenticated"] is True
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_rejected_expired_or_revoked_token_fails_closed(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def handler(request):
+            return httpx.Response(401, json={"status": "error"})
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False and result["verdict"] == "rejected_credential"
+        assert result["authenticated"] is False
+        assert "expired" in result["detail"] and "revoked" in result["detail"]
+        assert SECRET not in json.dumps(result)
+        assert len(transport.calls) == 1  # fail closed before any quote call
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_missing_token_fails_closed_without_any_upstox_call(tmp_path, monkeypatch):
+    monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("MARKET_DATA_ACCESS_TOKEN", raising=False)
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web)
+        with_catalog(web)
+        transport = install_reader(web, lambda request: httpx.Response(500))
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False and result["verdict"] == "missing_token"
+        assert "nothing was sent to Upstox" in result["detail"]
+        assert transport.calls == []  # no silent fallback, no network call
+
+
+def test_unreachable_upstox_fails_closed_and_shows_no_fallback_data(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+
+        def handler(request):
+            raise httpx.ConnectTimeout("offline", request=request)
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["ok"] is False
+        assert result["verdict"] in {"unreachable", "read_failed"}
+        assert "unreachable" in result["detail"]
+        for banned in ("DEMO", "sample", "replay"):
+            assert banned.lower() not in result["detail"].lower()
+        assert_read_only_and_secret_free(transport.calls, SECRET)
+
+
+def test_unknown_instrument_key_rejected_before_any_upstox_call(tmp_path):
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web).save(SECRET)
+        with_catalog(web)
+        transport = install_reader(web, lambda request: httpx.Response(500))
+        response = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                            json={"instrument_key": "NSE_EQ|INE000000000"})
+        assert response.status_code == 400
+        assert "BOD catalog" in response.text
+        assert transport.calls == []
+
+
+def test_save_and_test_never_create_sessions_arm_or_activate(tmp_path, monkeypatch):
+    monkeypatch.delenv("UPSTOX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("MARKET_DATA_ACCESS_TOKEN", raising=False)
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        store = with_store(web)
+        with_catalog(web)
+        service = web.app.state.autonomy
+
+        created = web.post("/api/autonomy/sessions", headers=headers,
+                           json={"mode": "PAPER", "instrument_keys": [RELIANCE_KEY]})
+        assert created.status_code in {200, 201}
+        session_id = created.json()["session_id"]
+        assert service.runtimes[session_id].state == "UNCONFIGURED"
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            return httpx.Response(200, json=quote_payload(RELIANCE_KEY, NOW))
+
+        transport = install_reader(web, handler)
+        web.post("/api/autonomy/upstox-token", headers=headers, json={"access_token": SECRET})
+        web.post("/api/autonomy/upstox-token/test", headers=headers,
+                 json={"instrument_key": RELIANCE_KEY})
+        web.get("/api/autonomy/upstox-token/status", headers=headers)
+        web.delete("/api/autonomy/upstox-token", headers=headers)
+
+        assert set(service.runtimes) == {session_id}
+        assert service.runtimes[session_id].state == "UNCONFIGURED"
+        assert store.token() == "" or store.token() == SECRET  # storage only
+        status = web.get("/api/autonomy/status", headers=headers).json()
+        assert status["automatic_arm_or_activate"] is False
+        assert "arm" not in [str(getattr(r, "path", "")) for r in transport.calls]
+
+
+def test_environment_token_still_works_and_is_labelled(tmp_path, monkeypatch):
+    monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "environment-token-abc")
+    monkeypatch.delenv("MARKET_DATA_ACCESS_TOKEN", raising=False)
+    with client(tmp_path) as web:
+        headers = {"Authorization": "Bearer local-api-test"}
+        with_store(web)  # empty store; environment must win the fallback
+        with_catalog(web)
+
+        def handler(request):
+            if request.url.path.endswith("/profile"):
+                return httpx.Response(200, json=PROFILE_PAYLOAD)
+            return httpx.Response(200, json=quote_payload(RELIANCE_KEY, NOW))
+
+        transport = install_reader(web, handler)
+        result = web.post("/api/autonomy/upstox-token/test", headers=headers,
+                          json={"instrument_key": RELIANCE_KEY}).json()
+        assert result["token_source"] == "environment"
+        assert result["ok"] is True
+        assert_read_only_and_secret_free(transport.calls, "environment-token-abc")
+
+
+def test_redaction_covers_token_fields_and_values():
+    assert redact({"access_token": SECRET}) == {"access_token": "[REDACTED]"}
+    assert redact({"nested": {"Authorization": SECRET}}) == {"nested": {"Authorization": "[REDACTED]"}}
+    assert SECRET not in json.dumps(redact({"note": f"token {SECRET} used"}, secrets=(SECRET,)))
+
+
+def test_file_store_is_owner_only_and_status_never_returns_the_token(tmp_path):
+    store = FileUpstoxTokenStore(tmp_path)
+    status = store.save(SECRET)
+    assert status["present"] is True and status["token_returned"] is False
+    path = tmp_path / "upstox_access_token.token.json"
+    assert path.is_file()
+    import stat as stat_module
+    assert stat_module.S_IMODE(path.stat().st_mode) == 0o600
+    dumped = json.dumps(store.status())
+    assert SECRET not in dumped and "access_token" not in dumped
+    assert store.token() == SECRET
+    assert store.delete() is True
+    assert store.status()["present"] is False

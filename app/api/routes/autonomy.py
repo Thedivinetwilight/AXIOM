@@ -1,8 +1,12 @@
 """Authenticated autonomy API and local operator page.
 
-There is deliberately no token/credential request model and no order-confirm
-endpoint.  Daily OAuth remains a local operator action; this API only asks the
-service to re-read the locally configured token for read-only verification.
+There is deliberately no order-confirm endpoint.  The only credential request
+model is the manual Upstox access-token entry: the token value travels in a
+POST body (never a URL), is stored encrypted for the current Windows user, is
+never returned/displayed/logged, and is used only for Upstox market data and
+read-only account checks.  Daily OAuth remains available as the environment
+token source.  Saving or testing a token never creates a session, changes
+execution mode, Arms/Activates, or starts automation.
 """
 
 from __future__ import annotations
@@ -17,7 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.auth import authenticate, loopback_or_bearer
 from app.autonomy.kronos_artifacts import ArtifactError
 from app.autonomy.service import NotReady, SessionError
-from app.autonomy.upstox import ReconciliationFailure, UpstoxAuthError, UpstoxError
+from app.autonomy.upstox import (
+    Quote, ReconciliationFailure, UpstoxAuthError, UpstoxError,
+)
+from app.autonomy.upstox_token import resolve_token
 
 api = APIRouter(prefix="/api/autonomy", dependencies=[Depends(authenticate)])
 page = APIRouter()
@@ -46,12 +53,30 @@ class KronosPythonBody(BaseModel):
     executable: str = Field(default="", max_length=1024)
 
 
+class UpstoxTokenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # The token travels only in this POST body: never a URL, never a query.
+    access_token: str = Field(min_length=1, max_length=4096)
+
+
+class UpstoxTokenTestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instrument_key: str = Field(min_length=3, max_length=160)
+
+
 def service(request: Request):
     value = getattr(request.app.state, "autonomy", None)
     if value is None:
         detail = getattr(request.app.state, "autonomy_error", "Autonomy service unavailable")
         raise HTTPException(503, detail)
     return value
+
+
+def token_store(request: Request):
+    store = getattr(request.app.state, "upstox_token", None)
+    if store is None:
+        raise HTTPException(503, "The protected credential store is unavailable on this host")
+    return store
 
 
 def call(request: Request, operation):
@@ -147,6 +172,136 @@ def refresh_catalog(request: Request):
     # Data-only operation: does not create a session, change mode, Arm,
     # Activate, or issue an execution permit.
     return call(request, lambda value: value.refresh_catalog())
+
+
+# --------------------------------------------------------------------------
+# Manual Upstox access-token entry (market data + read-only account checks).
+# The token value never appears in a response, a URL, a log line or an error.
+
+
+@api.get("/upstox-token/status")
+def upstox_token_status(request: Request):
+    store = token_store(request)
+    status = dict(store.status())
+    _, source = resolve_token(store)
+    status["source"] = source
+    status["execution_effect"] = "NONE_TOKEN_STORAGE_ONLY"
+    return status
+
+
+@api.post("/upstox-token")
+def upstox_token_save(body: UpstoxTokenBody, request: Request):
+    store = token_store(request)
+    replaced = bool(store.status()["present"])
+    try:
+        status = store.save(body.access_token)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "The protected credential store is unavailable; nothing was stored") from None
+    return {"saved": True, "replaced": replaced,
+            "execution_effect": "NONE_TOKEN_STORAGE_ONLY", **status}
+
+
+@api.delete("/upstox-token")
+def upstox_token_delete(request: Request):
+    store = token_store(request)
+    deleted = store.delete()
+    return {"deleted": deleted, "present": False, "saved_at": None,
+            "token_returned": False, "execution_effect": "NONE_TOKEN_STORAGE_ONLY"}
+
+
+def _token_test_failure(verdict: str, detail: str, base: dict) -> dict:
+    return {"ok": False, "verdict": verdict, "detail": detail, **base}
+
+
+@api.post("/upstox-token/test")
+def upstox_token_test(body: UpstoxTokenTestBody, request: Request):
+    """Read-only connection test: authenticate, then fetch ONE exact quote.
+
+    Only GET /v2/user/profile and GET /v2/market-quote/full are ever called.
+    No session is created; execution mode, Arm/Activate and automation state
+    are untouched. The response carries only the instrument key, quote
+    timestamp, freshness and sanitized success/failure details — never prices,
+    never the token.
+    """
+    value = service(request)
+    key = body.instrument_key.strip()
+    item = value.catalog.instruments.get(key)
+    if item is None:
+        raise HTTPException(
+            400,
+            "Instrument key is not present in the refreshed BOD catalog; "
+            "select an exact key from the search results",
+        )
+    store = token_store(request)
+    token, source = resolve_token(store)
+    base = {
+        "instrument_key": key,
+        "quote_timestamp": None,
+        "freshness": {"label": "no-quote", "age_seconds": None},
+        "authenticated": False,
+        "token_source": source,
+        "checked_at": value.clock().isoformat(),
+        "read_only": True,
+        "real_order_api_used": False,
+        "execution_mode": "AXIOM_PAPER",
+        "session_effect": "NONE",
+    }
+    if not token:
+        return _token_test_failure(
+            "missing_token",
+            "No Upstox access token is configured. Save a manual token on this "
+            "page or run the daily OAuth login; nothing was sent to Upstox.",
+            base,
+        )
+    client = value.reader_factory(value.token_provider)
+    try:
+        client.profile()
+    except UpstoxAuthError:
+        return _token_test_failure(
+            "rejected_credential",
+            "Upstox rejected the credential (HTTP 401/403): it is expired, "
+            "invalid or was revoked. Generate a new token and Save it again.",
+            base,
+        )
+    except ReconciliationFailure as exc:
+        base["authenticated"] = False
+        verdict = "unreachable" if "unreachable" in str(exc) else "read_failed"
+        return _token_test_failure(verdict, str(exc), base)
+    base["authenticated"] = True
+    try:
+        quote = client.quote(key)
+    except UpstoxAuthError:
+        return _token_test_failure(
+            "rejected_credential",
+            "Upstox rejected the credential mid-test (expired, invalid or "
+            "revoked). Generate a new token and Save it again.",
+            base,
+        )
+    except ReconciliationFailure as exc:
+        verdict = "unreachable" if "unreachable" in str(exc) else "read_failed"
+        return _token_test_failure(verdict, str(exc), base)
+    age = (value.clock() - quote.timestamp).total_seconds()
+    fresh = 0 <= age <= 90
+    base["quote_timestamp"] = quote.timestamp.isoformat()
+    base["freshness"] = {"label": "fresh" if fresh else "stale",
+                         "age_seconds": int(age)}
+    if fresh:
+        return {
+            "ok": True, "verdict": "ok",
+            "detail": "Authenticated (read-only profile) and a fresh full quote "
+                      "was returned for this exact BOD key. Market data only; "
+                      "paper fills remain local.",
+            **base,
+        }
+    return _token_test_failure(
+        "stale_quote",
+        f"Authenticated, but the quote timestamp is {int(age)} seconds old and "
+        "is NOT treated as current. The market may be closed or the feed "
+        "delayed; retry when the market is live.",
+        base,
+    )
 
 
 @api.post("/sessions", status_code=201)
