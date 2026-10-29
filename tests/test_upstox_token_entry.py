@@ -347,8 +347,12 @@ def test_file_store_is_owner_only_and_status_never_returns_the_token(tmp_path):
     assert status["present"] is True and status["token_returned"] is False
     path = tmp_path / "upstox_access_token.token.json"
     assert path.is_file()
+    import os as os_module
     import stat as stat_module
-    assert stat_module.S_IMODE(path.stat().st_mode) == 0o600
+    if os_module.name != "nt":
+        # POSIX fallback is required to be owner-only; on Windows the
+        # production store is DPAPI and the file fallback is dev-only.
+        assert stat_module.S_IMODE(path.stat().st_mode) == 0o600
     dumped = json.dumps(store.status())
     assert SECRET not in dumped and "access_token" not in dumped
     assert store.token() == SECRET
