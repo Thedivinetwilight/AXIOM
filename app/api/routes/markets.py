@@ -217,6 +217,261 @@ def _live_status_summary(request: Request) -> dict[str, Any]:
     }
 
 
+def _build_readiness_matrix(request: Request) -> dict[str, Any]:
+    """Structured per-market / per-mode readiness checklists with honest owner-verification state."""
+    eng = _paper_engine(request)
+    nse_snap = eng.market_snapshot("NSE")
+    us_snap = eng.market_snapshot("NASDAQ")
+    live_sum = _live_status_summary(request)
+    nse_cat = _nse_search_catalog(request)
+    us_cat = _nasdaq_catalog(request)
+    receipts = getattr(request.app.state, "owner_verification_receipts", None) or {}
+
+    upstox_tok, upstox_src = _upstox_readonly_token(request)
+    upstox_rec = receipts.get("UPSTOX_MARKET_DATA") if upstox_tok else None
+    nse_estop = nse_snap["session_state"] == "EMERGENCY_STOPPED"
+    nse_ex_sess = nse_snap["exchange_session"]
+    nse_sess_open = bool(nse_ex_sess["is_open"])
+
+    nse_paper_items = [
+        {
+            "id": "upstox_token",
+            "label": "Upstox read-only access token stored",
+            "state": "PASS" if bool(upstox_tok) else "BLOCKED",
+            "detail": f"Configured via {upstox_src}" if upstox_tok else "Missing UPSTOX_ACCESS_TOKEN (save in 02 Connections)",
+        },
+        {
+            "id": "upstox_owner_probe",
+            "label": "Read-only NSE quote connection verified",
+            "state": "PASS" if upstox_rec else "NOT_VERIFIED",
+            "detail": (
+                f"Verified ({upstox_rec.get('connection_state')}) at {upstox_rec.get('verified_at')}"
+                if upstox_rec
+                else "NOT VERIFIED with owner credentials in this session (click 'Verify NSE Quote' in 02 Connections)"
+            ),
+        },
+        {
+            "id": "nse_catalog",
+            "label": "NSE instrument catalog & ISIN resolution",
+            "state": "PASS" if nse_cat.source_kind == "authoritative_upstox_bod" else "INFO",
+            "detail": f"source={nse_cat.source_kind} ({len(nse_cat.instruments)} instruments)",
+        },
+        {
+            "id": "nse_session",
+            "label": "NSE regular trading hours (09:15–15:30 IST)",
+            "state": "PASS" if nse_sess_open else "INFO",
+            "detail": f"Session={nse_ex_sess['state']} (MARKET fills require open session; off-hours LIMIT orders queue)",
+        },
+        {
+            "id": "nse_risk_estop",
+            "label": "Bounded INR paper risk limits & Emergency Stop clear",
+            "state": "BLOCKED" if nse_estop else "PASS",
+            "detail": "EMERGENCY_STOPPED — click Clear Halt first" if nse_estop else "INR paper limits active; 0 broker order calls",
+        },
+    ]
+    nse_paper_blockers = [i["detail"] for i in nse_paper_items if i["state"] == "BLOCKED"]
+    nse_paper_status = (
+        "BLOCKED"
+        if nse_paper_blockers
+        else ("NOT_VERIFIED" if not upstox_rec else ("READY" if nse_sess_open else "MARKET_CLOSED_READY"))
+    )
+
+    alpaca_creds, alpaca_src = _alpaca_readonly_creds(request)
+    has_alpaca_data = bool(alpaca_creds["api_key"] and alpaca_creds["api_secret"])
+    alpaca_rec = receipts.get("ALPACA_MARKET_DATA") if has_alpaca_data else None
+    us_estop = us_snap["session_state"] == "EMERGENCY_STOPPED"
+    us_ex_sess = us_snap["exchange_session"]
+    us_sess_open = bool(us_ex_sess["is_open"])
+
+    us_paper_items = [
+        {
+            "id": "alpaca_data_keys",
+            "label": "Alpaca Market Data API Key & Secret stored",
+            "state": "PASS" if has_alpaca_data else "BLOCKED",
+            "detail": f"Configured via {alpaca_src} (feed={alpaca_creds['feed'].upper()})" if has_alpaca_data else "Missing ALPACA_MARKET_DATA keys (save in 02 Connections)",
+        },
+        {
+            "id": "alpaca_owner_probe",
+            "label": "Read-only NASDAQ quote connection verified",
+            "state": "PASS" if alpaca_rec else "NOT_VERIFIED",
+            "detail": (
+                f"Verified ({alpaca_rec.get('connection_state')}, feed={str(alpaca_rec.get('feed') or '').upper()}) at {alpaca_rec.get('verified_at')}"
+                if alpaca_rec
+                else "NOT VERIFIED with owner credentials in this session (click 'Verify AAPL Quote' in 02 Connections)"
+            ),
+        },
+        {
+            "id": "nasdaq_catalog",
+            "label": "NASDAQ symbol catalog",
+            "state": "PASS" if us_cat.source_kind == "authoritative_alpaca_assets" else "INFO",
+            "detail": f"source={us_cat.source_kind} ({len(us_cat.instruments)} symbols)",
+        },
+        {
+            "id": "nasdaq_session",
+            "label": "NASDAQ regular session (09:30–16:00 ET)",
+            "state": "PASS" if us_sess_open else "INFO",
+            "detail": f"Session={us_ex_sess['state']} (MARKET fills require regular ET session)",
+        },
+        {
+            "id": "nasdaq_risk_estop",
+            "label": "Bounded USD paper risk limits & Emergency Stop clear",
+            "state": "BLOCKED" if us_estop else "PASS",
+            "detail": "EMERGENCY_STOPPED — click Clear Halt first" if us_estop else "USD paper limits active; 0 broker order calls",
+        },
+    ]
+    us_paper_blockers = [i["detail"] for i in us_paper_items if i["state"] == "BLOCKED"]
+    us_paper_status = (
+        "BLOCKED"
+        if us_paper_blockers
+        else ("NOT_VERIFIED" if not alpaca_rec else ("READY" if us_sess_open else "MARKET_CLOSED_READY"))
+    )
+
+    nse_l = live_sum["nse"]
+    nse_live_items = [
+        {
+            "id": "nse_live_flag",
+            "label": "Host master gate AUTONOMY_LIVE_ENABLED=true",
+            "state": "PASS" if nse_l["live_master_flag"] else "BLOCKED",
+            "detail": "Enabled" if nse_l["live_master_flag"] else "Default OFF — requires AUTONOMY_LIVE_ENABLED=true",
+        },
+        {
+            "id": "nse_live_token",
+            "label": "Separate UPSTOX_LIVE_ACCESS_TOKEN slot",
+            "state": "PASS" if nse_l["live_credential_present"] else "BLOCKED",
+            "detail": f"Source={nse_l['live_credential_source']}" if nse_l["live_credential_present"] else "Separate live token not saved",
+        },
+        {
+            "id": "nse_sebi_algo",
+            "label": "SEBI static IPv4 & UPSTOX_ALGO_NAME registration",
+            "state": "PASS" if nse_l["algo_name_configured"] else "BLOCKED",
+            "detail": "UPSTOX_ALGO_NAME configured" if nse_l["algo_name_configured"] else "External owner/broker prerequisite: UPSTOX_ALGO_NAME + static IP whitelist",
+        },
+        {
+            "id": "nse_live_bod",
+            "label": "Same-day authoritative Upstox BOD catalog",
+            "state": "PASS" if nse_cat.source_kind == "authoritative_upstox_bod" else "BLOCKED",
+            "detail": f"source={nse_cat.source_kind}",
+        },
+    ]
+
+    us_l = live_sum["nasdaq"]
+    alpaca_b_status = us_l.get("broker_status") or {}
+    alpaca_live_readiness = ((alpaca_b_status.get("live") or {}).get("last_readiness")) or {}
+    us_live_acct_ok = bool(alpaca_live_readiness.get("ready"))
+    us_live_items = [
+        {
+            "id": "us_live_flag",
+            "label": "Host master gate ALPACA_BROKER_ENABLED=true",
+            "state": "PASS" if us_l["live_master_flag"] else "BLOCKED",
+            "detail": "Enabled" if us_l["live_master_flag"] else "Default OFF — requires ALPACA_BROKER_ENABLED=true",
+        },
+        {
+            "id": "us_live_creds",
+            "label": "Separate ALPACA_BROKER_LIVE API Key & Secret",
+            "state": "PASS" if us_l["live_credential_present"] else "BLOCKED",
+            "detail": f"Source={us_l['live_credential_source']}" if us_l["live_credential_present"] else "Separate live broker credentials not saved",
+        },
+        {
+            "id": "us_live_preflight",
+            "label": "Read-only live Alpaca account, clock & risk preflight",
+            "state": "PASS" if us_live_acct_ok else "NOT_VERIFIED",
+            "detail": "Live preflight passed" if us_live_acct_ok else "NOT VERIFIED on owner live Alpaca account (run Test Live Connection in 06 Risk & live gates)",
+        },
+    ]
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "verification_note": "CI and mocked unit tests never count as owner connectivity. Items remain NOT_VERIFIED until tested with credentials entered in AXIOM's local UI.",
+        "modes": {
+            "NSE_PAPER": {
+                "mode_key": "NSE_PAPER",
+                "market": "NSE",
+                "currency": "INR",
+                "mode": "LIVE-MARKET PAPER",
+                "overall_status": nse_paper_status,
+                "owner_connection_verified": bool(upstox_rec),
+                "items": nse_paper_items,
+                "blockers": nse_paper_blockers,
+                "next_action": (
+                    "Open 02 Connections and save your daily Upstox read-only access token."
+                    if not upstox_tok
+                    else (
+                        "Open 02 Connections and click 'Verify NSE Quote' to confirm live read-only NSE connectivity."
+                        if not upstox_rec
+                        else (
+                            "Clear Emergency Stop in 06 Risk & live gates before placing paper orders."
+                            if nse_estop
+                            else "Ready for NSE LIVE-MARKET PAPER (simulated INR ledger, 0 broker order calls)."
+                        )
+                    )
+                ),
+            },
+            "NASDAQ_PAPER": {
+                "mode_key": "NASDAQ_PAPER",
+                "market": "NASDAQ",
+                "currency": "USD",
+                "mode": "LIVE-MARKET PAPER",
+                "overall_status": us_paper_status,
+                "owner_connection_verified": bool(alpaca_rec),
+                "items": us_paper_items,
+                "blockers": us_paper_blockers,
+                "next_action": (
+                    "Open 02 Connections and save your Alpaca Market Data API Key & Secret (IEX or SIP)."
+                    if not has_alpaca_data
+                    else (
+                        "Open 02 Connections and click 'Verify AAPL Quote' to confirm live read-only NASDAQ connectivity."
+                        if not alpaca_rec
+                        else (
+                            "Clear Emergency Stop in 06 Risk & live gates before placing paper orders."
+                            if us_estop
+                            else "Ready for NASDAQ LIVE-MARKET PAPER (simulated USD ledger, 0 broker order calls)."
+                        )
+                    )
+                ),
+            },
+            "NSE_LIVE": {
+                "mode_key": "NSE_LIVE",
+                "market": "NSE",
+                "currency": "INR",
+                "mode": "LIVE-MARKET LIVE",
+                "overall_status": "AVAILABLE_BEHIND_GATE" if nse_l["availability"] == "AVAILABLE_BEHIND_GATE" else "DISABLED",
+                "owner_connection_verified": False,
+                "items": nse_live_items,
+                "blockers": list(nse_l["missing_dependencies"]),
+                "next_action": (
+                    nse_l["missing_dependencies"][0]
+                    if nse_l["missing_dependencies"]
+                    else "Complete read-only preflight, Arm, and Activate on /autonomy when ready."
+                ),
+            },
+            "NASDAQ_LIVE": {
+                "mode_key": "NASDAQ_LIVE",
+                "market": "NASDAQ",
+                "currency": "USD",
+                "mode": "LIVE-MARKET LIVE",
+                "overall_status": (
+                    "READY_TO_ARM"
+                    if (us_l["availability"] == "AVAILABLE_BEHIND_GATE" and us_live_acct_ok)
+                    else ("NOT_VERIFIED" if us_l["availability"] == "AVAILABLE_BEHIND_GATE" else "DISABLED")
+                ),
+                "owner_connection_verified": us_live_acct_ok,
+                "items": us_live_items,
+                "blockers": list(us_l["missing_dependencies"]),
+                "next_action": (
+                    us_l["missing_dependencies"][0]
+                    if us_l["missing_dependencies"]
+                    else "Configure bounded USD risk limits, run read-only live preflight, Arm (15-min), and type confirmation phrase in 06 Risk & live gates."
+                ),
+            },
+        },
+    }
+
+
+@router.get("/readiness")
+def markets_readiness(request: Request):
+    return _build_readiness_matrix(request)
+
+
 @router.get("/overview")
 def markets_overview(request: Request):
     eng = _paper_engine(request)
@@ -247,6 +502,7 @@ def markets_overview(request: Request):
             "NASDAQ": eng.market_snapshot("NASDAQ"),
         },
         "live": _live_status_summary(request),
+        "readiness": _build_readiness_matrix(request),
         "providers": build_provider_matrix(request.app.state),
         "watchlists": eng.list_watchlists(),
         "reconciliation": {

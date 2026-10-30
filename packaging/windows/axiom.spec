@@ -72,6 +72,9 @@ datas = [
     (str(ROOT / "docs" / "ARCHITECTURE_AUDIT.md"), "docs"),
     (str(ROOT / "docs" / "BASELINE_AUDIT_AND_ISSUES.md"), "docs"),
     (str(ROOT / "docs" / "OWNER_SETUP_GUIDE.md"), "docs"),
+    (str(ROOT / "docs" / "MODEL_LAB_AND_KRONOS_AUDIT.md"), "docs"),
+    (str(ROOT / "docs" / "AI_MODEL_LAB_MANUAL.md"), "docs"),
+    (str(ROOT / "docs" / "RESEARCH_COMPARISON_REPORT.md"), "docs"),
     (str(ROOT / "docs" / "autonomy-shakedown.template.json"), "docs"),
 ]
 

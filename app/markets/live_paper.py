@@ -202,7 +202,12 @@ def estimate_market_fees(
     }
 
 
-def evaluate_bar_strategy_signal(strategy: str, candles: list[Candle]) -> dict[str, Any]:
+def evaluate_bar_strategy_signal(
+    strategy: str,
+    candles: list[Candle],
+    *,
+    kronos_forecast: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Deterministic completed-bar signal evaluator for Live-Market Paper strategies."""
     name = (strategy or "manual_only").strip().lower()
     if name == "manual_only":
@@ -269,6 +274,40 @@ def evaluate_bar_strategy_signal(strategy: str, candles: list[Candle]) -> dict[s
             return {"action": "SELL", "reason": f"10-bar momentum turned negative ({roc:.2f}%)", "bar_ts": last_bar.timestamp.isoformat()}
         return {"action": "HOLD", "reason": f"10-bar ROC={roc:.2f}%"}
 
+    if name in {"kronos_ensemble", "kronos_informed"}:
+        if (
+            not isinstance(kronos_forecast, dict)
+            or bool(kronos_forecast.get("mock_outputs_used"))
+            or kronos_forecast.get("freshness_state") == "STALE"
+        ):
+            return {
+                "action": "HOLD",
+                "reason": "Kronos forecast unavailable or stale; fail-closed no trade",
+                "bar_ts": last_bar.timestamp.isoformat(),
+            }
+        fast_now = sum(closes[-5:]) / 5.0
+        slow_now = sum(closes[-20:]) / 20.0
+        up_p = float(kronos_forecast.get("up_probability") or 0.0)
+        exp_r = float(kronos_forecast.get("expected_return_pct") or 0.0)
+        sha_tag = str(((kronos_forecast.get("model_identity") or {}).get("manifest_sha256") or ""))[:10]
+        if fast_now > slow_now and up_p >= 0.55 and exp_r > 0.0:
+            return {
+                "action": "BUY",
+                "reason": f"Kronos ensemble BUY: SMA5>{slow_now:.2f}, P(up)={up_p:.2f}, E[ret]={exp_r:+.2f}% [sha:{sha_tag}]",
+                "bar_ts": last_bar.timestamp.isoformat(),
+            }
+        if fast_now < slow_now and up_p <= 0.45 and exp_r < 0.0:
+            return {
+                "action": "SELL",
+                "reason": f"Kronos ensemble SELL: SMA5<{slow_now:.2f}, P(up)={up_p:.2f}, E[ret]={exp_r:+.2f}% [sha:{sha_tag}]",
+                "bar_ts": last_bar.timestamp.isoformat(),
+            }
+        return {
+            "action": "HOLD",
+            "reason": f"Kronos advisory neutral: P(up)={up_p:.2f}, E[ret]={exp_r:+.2f}% [sha:{sha_tag}]",
+            "bar_ts": last_bar.timestamp.isoformat(),
+        }
+
     return {"action": "HOLD", "reason": f"unrecognized strategy {name!r}; holding"}
 
 
@@ -283,6 +322,9 @@ class LiveMarketPaperEngine:
         *,
         nse_quote_provider: Callable[[str], dict[str, Any]] | None = None,
         nasdaq_quote_provider: Callable[[str], dict[str, Any]] | None = None,
+        nse_bars_provider: Callable[[str, str], list[Candle]] | None = None,
+        nasdaq_bars_provider: Callable[[str, str], list[Candle]] | None = None,
+        kronos_provider: Any | None = None,
         nse_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         nasdaq_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -299,6 +341,9 @@ class LiveMarketPaperEngine:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.nse_quote_provider = nse_quote_provider
         self.nasdaq_quote_provider = nasdaq_quote_provider
+        self.nse_bars_provider = nse_bars_provider
+        self.nasdaq_bars_provider = nasdaq_bars_provider
+        self.kronos_provider = kronos_provider
         self.nse_instrument_resolver = nse_instrument_resolver
         self.nasdaq_instrument_resolver = nasdaq_instrument_resolver
         self.us_calendar = USEquitiesCalendar()
@@ -1650,11 +1695,52 @@ class LiveMarketPaperEngine:
                     triggered_orders.append(str(res_close["order"]["client_order_id"]))
 
         # Evaluate completed-bar strategy decisions if session is RUNNING and strategy != manual_only
-        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and bars_by_symbol:
-            for sym, bars in bars_by_symbol.items():
+        resolved_bars_map = bars_by_symbol
+        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map is None:
+            bar_fetcher = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
+            if bar_fetcher is not None:
+                auto_bars: dict[str, list[Candle]] = {}
+                for sym in watched_syms or sorted(fetched_quotes.keys()):
+                    try:
+                        fetched_bars = bar_fetcher(sym, timeframe)
+                        if fetched_bars:
+                            auto_bars[sym] = fetched_bars
+                    except Exception as exc:
+                        _ = exc
+                resolved_bars_map = auto_bars
+
+        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map:
+            for sym, bars in resolved_bars_map.items():
                 if not bars:
                     continue
-                decision = evaluate_bar_strategy_signal(strategy, bars)
+                latest_bar_iso = bars[-1].timestamp.isoformat()
+                with self._lock, self._connect() as conn:
+                    already_evaluated = conn.execute(
+                        """
+                        SELECT decision_id FROM live_paper_decisions
+                        WHERE market = ? AND symbol = ? AND strategy = ? AND timeframe = ? AND bar_timestamp = ?
+                        LIMIT 1
+                        """,
+                        (mkt, sym, strategy, timeframe, latest_bar_iso),
+                    ).fetchone()
+                if already_evaluated is not None:
+                    continue
+
+                k_fc: dict[str, Any] | None = None
+                if strategy.strip().lower() in {"kronos_ensemble", "kronos_informed"} and self.kronos_provider is not None:
+                    try:
+                        k_fc = self.kronos_provider.predict(
+                            market=mkt,
+                            symbol=sym,
+                            timeframe=timeframe,
+                            bars=bars,
+                            require_fresh=False,
+                        )
+                    except Exception as exc:
+                        k_fc = None
+                        _ = exc
+
+                decision = evaluate_bar_strategy_signal(strategy, bars, kronos_forecast=k_fc)
                 order_cid: str | None = None
                 q = fetched_quotes.get(sym)
                 if decision["action"] == "BUY" and q:
@@ -1696,7 +1782,7 @@ class LiveMarketPaperEngine:
                             timeframe,
                             decision["action"],
                             decision["reason"],
-                            decision.get("bar_ts"),
+                            decision.get("bar_ts") or latest_bar_iso,
                             order_cid,
                             now.isoformat(),
                         ),

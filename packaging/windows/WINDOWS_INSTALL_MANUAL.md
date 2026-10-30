@@ -1,6 +1,6 @@
 # AXIOM Operator — Windows x64 Install Guide
 
-**Version:** 3.7.0a6
+**Version:** 3.7.0a7
 
 **Applies to:** the AXIOM Operator loaderless installer and portable onedir folder built from the exact commit named in `BUILD_METADATA.json`.
 
@@ -47,8 +47,8 @@ The release also includes test logs/manuals. Read `BUILD_METADATA.json` for the 
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AXIOM-Operator-3.7.0a6-windows-x64-no-temp-install.zip -Algorithm SHA256
-Get-FileHash .\AXIOM-Operator-3.7.0a6-windows-x64-portable.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-no-temp-install.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-portable.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -58,7 +58,7 @@ The file name and full 64-character hash must match the same release. Do not use
 
 ### 2.1 Error 4551 / Application Control
 
-The 3.5.0a1 single installer was blocked on the reporting device while Inno Setup tried to execute its unsigned temporary `setup.tmp`. The workaround introduced in 3.5.0a2 is retained in 3.7.0a6: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids the identified setup-loader and onefile runtime TEMP paths.
+The 3.5.0a1 single installer was blocked on the reporting device while Inno Setup tried to execute its unsigned temporary `setup.tmp`. The workaround introduced in 3.5.0a2 is retained in 3.7.0a7: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids the identified setup-loader and onefile runtime TEMP paths.
 
 It is a packaging workaround, **not a policy bypass**. The packages are still unsigned. If an enforced Smart App Control or organization policy still blocks them, keep Windows security enabled and obtain trusted signing or administrator approval. Do not disable Application Control to install AXIOM. See `WINDOWS_APP_CONTROL.md`.
 
@@ -211,7 +211,7 @@ Maintainers can reproduce the build on a real Windows x64 machine with the pinne
 ```powershell
 cd packaging\windows
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
-  -ExpectedCommit <full-source-commit> -Version 3.7.0a6
+  -ExpectedCommit <full-source-commit> -Version 3.7.0a7
 ```
 
 The script requires a clean source tree, runs focused and full Python tests, all three pinned JavaScript harnesses, real Windows DPAPI tests with dummy secrets, PyInstaller onefile/onedir frozen-app checks, loaderless Inno packaging and ZIP structure checks. The release workflow separately extracts and tests both release ZIPs, including install/upgrade/uninstall and the portable no-`_MEI` runtime check. It refuses to produce a success result when a hard gate fails.

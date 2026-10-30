@@ -42,6 +42,7 @@
       <button type="button" class="nav-item" data-page="connections"><span>07</span>Connections</button>
       <button type="button" class="nav-item" data-page="activity"><span>08</span>Activity &amp; audit</button>
       <button type="button" class="nav-item" data-page="settings"><span>09</span>Settings &amp; manuals</button>
+      <button type="button" class="nav-item" data-page="modellab"><span>10</span>AI &amp; Model Lab</button>
     </nav>
     <div class="sidebar-foot">
       <span class="status-pill" id="global-lifecycle">DISARMED</span>
@@ -88,13 +89,25 @@
         </select>
         <button type="button" class="button secondary" id="apply-mode">Apply mode</button>
       </div>
-      <div class="provider-pill-strip" id="mm-provider-strip" aria-label="Market data and live gate summary">
+      <div class="provider-pill-strip" id="mm-provider-strip" aria-label="Market data, Kronos and live gate summary">
         <span class="status-pill" id="mm-pill-upstox-data">UPSTOX DATA · DISCONNECTED</span>
         <span class="status-pill" id="mm-pill-alpaca-data">ALPACA DATA · DISCONNECTED</span>
+        <span class="status-pill" id="mm-pill-kronos-state">KRONOS · NOT_INSTALLED</span>
         <span class="status-pill info" id="mm-pill-live-default">LIVE EXECUTION · OFF BY DEFAULT</span>
       </div>
       <div class="freshness" id="global-freshness"><span class="status-pill">NO BROKER DATA</span></div>
     </div>
+
+    <nav class="quick-nav-strip" id="mm-quick-nav-bar" aria-label="Direct workspace shortcuts">
+      <span class="quick-nav-label">DIRECT ACCESS:</span>
+      <button type="button" class="button secondary xs" data-go="connections">Connections</button>
+      <button type="button" class="button secondary xs" data-go="charts">Charts &amp; Ticket</button>
+      <button type="button" class="button secondary xs" data-go="orders">Orders &amp; Positions</button>
+      <button type="button" class="button secondary xs" data-go="strategies">Strategies &amp; Modes</button>
+      <button type="button" class="button secondary xs" data-go="risk">Risk &amp; Live Gates</button>
+      <button type="button" class="button secondary xs" data-go="activity">Activity &amp; Audit</button>
+      <button type="button" class="button primary xs" data-go="modellab">AI &amp; Model Lab</button>
+    </nav>
 
     <main id="main-content" tabindex="-1">
       <section class="execution-boundary" id="execution-boundary" aria-label="Execution, market-data and authorization boundaries">
@@ -159,6 +172,24 @@
           <div class="inline-status" id="paper-run-summary">No paper run has started in this process.</div>
           <dl class="detail-list" id="paper-run-details"></dl>
           <p class="muted small" id="paper-run-pnl-note">Current-run results are separate from persisted account totals. All values are simulated.</p>
+        </article>
+
+        <article class="panel" id="mm-readiness-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">PRIORITY 1 · LIVE-MARKET PAPER &amp; LIVE READINESS</p>
+              <h3>Per-Market &amp; Per-Mode Readiness Checklists (Owner Verification Required)</h3>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button secondary xs" id="mm-ready-verify-nse">Verify NSE Quote (Read-Only)</button>
+              <button type="button" class="button secondary xs" id="mm-ready-verify-nasdaq">Verify AAPL Quote (Read-Only)</button>
+              <button type="button" class="text-button" data-go="connections">Open Connections →</button>
+            </div>
+          </div>
+          <p class="muted small" id="mm-readiness-note">CI and mocked tests never prove owner connectivity. Anything not tested with your credentials in AXIOM’s local UI remains NOT VERIFIED.</p>
+          <div class="content-grid two top-space" id="mm-readiness-grid">
+            <p class="empty-state">Loading NSE &amp; NASDAQ readiness checklists…</p>
+          </div>
         </article>
 
         <article class="panel">
@@ -517,6 +548,9 @@
                   <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
                   <option value="rsi">rsi (14-bar RSI 30/70)</option>
                   <option value="breakout">breakout (20-bar channel)</option>
+                  <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
+                  <option value="momentum">momentum (10-bar ROC cross)</option>
+                  <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
                 </select>
               </div>
               <div class="field">
@@ -547,6 +581,9 @@
                   <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
                   <option value="rsi">rsi (14-bar RSI 30/70)</option>
                   <option value="breakout">breakout (20-bar channel)</option>
+                  <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
+                  <option value="momentum">momentum (10-bar ROC cross)</option>
+                  <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
                 </select>
               </div>
               <div class="field">
@@ -875,6 +912,224 @@
           </div>
         </article>
         <article class="panel"><div class="panel-head"><div><p class="eyebrow">COMPATIBILITY</p><h3>Additional surfaces</h3></div></div><div class="button-row"><a class="button secondary" href="/autonomy">Upstox NSE Autonomy Console</a><a class="button secondary" href="/chart">Legacy paper chart</a><a class="button secondary" href="/dashboard">Legacy research dashboard</a></div></article>
+      </section>
+
+      <!-- 10 AI & MODEL LAB -->
+      <section class="page" id="page-modellab" aria-labelledby="modellab-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">RESEARCH &amp; PAPER-ADVISORY ONLY · ZERO BROKER EXECUTION</p>
+            <h2 id="modellab-title">AI &amp; Model Lab — Frozen Kronos CPU Inference, Leak-Free Walk-Forward &amp; Model Registry.</h2>
+            <p>Inspect pinned <code>NeoQuasar/Kronos-small</code> readiness, run validated NSE &amp; NASDAQ bar forecasts, execute chronological train/validation/untouched-test + 2.0× cost-stress comparisons, and manage SHA-256 model bundles.</p>
+          </div>
+          <div class="button-row">
+            <span class="status-pill info" id="ml-kronos-state-pill">NOT_INSTALLED</span>
+            <button type="button" class="button secondary" id="ml-refresh-btn">Refresh Lab</button>
+          </div>
+        </div>
+
+        <article class="panel accent-live" id="ml-warning-banner" role="note">
+          <div class="panel-head">
+            <div><p class="eyebrow">MANDATORY RISK &amp; SCOPE DISCLOSURE</p><h3>Training &amp; Backtests Never Guarantee Profit and Never Authorize Live Trading</h3></div>
+            <span class="mode-badge paper">PAPER / RESEARCH ONLY</span>
+          </div>
+          <p id="ml-warning-text">Historical walk-forward Sharpe, untouched out-of-sample returns, and Kronos probability bands never guarantee future paper or live returns and never arm, activate, or authorize LIVE-MARKET LIVE real-money execution.</p>
+          <p class="muted small"><strong>Architecture Policy:</strong> (1) <em>Rule Parameter Tuning</em> optimizes window/threshold grids on Train/Validation only; (2) <em>AXIOM Decision Model</em> fits a causal Ridge classifier on Train bars only; (3) <em>Kronos Foundation Weights</em> remain frozen, SHA-256-verified CPU inference artifacts (no foundation weight fine-tuning).</p>
+        </article>
+
+        <!-- 1 & 2 & 4: KRONOS STATUS, CONTROLS & RESOURCE/LATENCY DIAGNOSTICS -->
+        <div class="content-grid two">
+          <article class="panel" id="ml-kronos-identity-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">PINNED FOUNDATION ARTIFACTS · MIT LICENSE</p><h3>1. Kronos Model Status, SHA-256 &amp; Self-Test</h3></div>
+              <span class="status-pill" id="ml-kronos-runtime-badge">NOT_INSTALLED</span>
+            </div>
+            <div class="inline-status" id="ml-kronos-summary">Inspecting pinned NeoQuasar/Kronos-small + Tokenizer status…</div>
+            <dl class="detail-list" id="ml-kronos-details"></dl>
+            <div class="button-row top-space">
+              <button type="button" class="button primary xs" id="ml-kronos-install-btn">Install Pinned Kronos (CPU)</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-verify-btn">Verify SHA-256</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-selftest-btn">Offline CPU Self-Test</button>
+              <button type="button" class="button warning xs" id="ml-kronos-repair-btn">Repair</button>
+              <button type="button" class="button danger-outline xs" id="ml-kronos-cancel-btn">Cancel Op</button>
+            </div>
+          </article>
+
+          <article class="panel" id="ml-kronos-controls-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">FORECASTING ONLY · ZERO TRADING PERMISSION</p><h3>2 &amp; 4. Load/Unload, Cadence &amp; Latency Diagnostics</h3></div>
+              <span class="status-pill info" id="ml-kronos-toggle-pill">FORECASTING DISABLED</span>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button bull xs" id="ml-kronos-enable-btn">Enable Forecasting</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-disable-btn">Disable Forecasting</button>
+              <button type="button" class="button primary xs" id="ml-kronos-load-btn">Load Model</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-unload-btn">Unload Worker</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-clear-err-btn">Clear Error</button>
+            </div>
+            <form id="ml-kronos-config-form" class="top-space">
+              <div class="form-grid">
+                <div class="field"><label for="ml-cfg-cadence">Cadence (sec)</label><input id="ml-cfg-cadence" type="number" min="15" max="86400" value="300"></div>
+                <div class="field"><label for="ml-cfg-timeout">Timeout (sec)</label><input id="ml-cfg-timeout" type="number" min="1" max="300" step="1" value="45"></div>
+                <div class="field"><label for="ml-cfg-horizon">Horizon (bars)</label><input id="ml-cfg-horizon" type="number" min="1" max="60" value="5"></div>
+                <div class="field"><label for="ml-cfg-samples">MC Samples</label><input id="ml-cfg-samples" type="number" min="4" max="32" value="8"></div>
+              </div>
+              <button type="submit" class="button secondary xs">Save Inference Config</button>
+            </form>
+            <dl class="detail-list top-space" id="ml-kronos-diagnostics"></dl>
+          </article>
+        </div>
+
+        <!-- 3: FORECAST INSPECTOR -->
+        <article class="panel" id="ml-forecast-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">ADVISORY PROBABILITY BANDS · NEVER A TRADE INSTRUCTION</p><h3>3. Kronos Bar Forecast Inspector (NSE &amp; NASDAQ)</h3></div>
+            <span class="status-pill info" id="ml-fc-freshness-pill">NO FORECAST RUN</span>
+          </div>
+          <form id="ml-forecast-form" class="toolbar">
+            <div class="field">
+              <label for="ml-fc-market">Market</label>
+              <select id="ml-fc-market"><option value="NSE">NSE (INR)</option><option value="NASDAQ">NASDAQ (USD)</option></select>
+            </div>
+            <div class="field">
+              <label for="ml-fc-symbol">Symbol</label>
+              <input id="ml-fc-symbol" value="RELIANCE" maxlength="40" required>
+            </div>
+            <div class="field">
+              <label for="ml-fc-tf">Timeframe</label>
+              <select id="ml-fc-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1d">1d</option></select>
+            </div>
+            <div class="field grow">
+              <label for="ml-fc-dataset">Input Source (Live Read-Only Feed or Registered Dataset)</label>
+              <select id="ml-fc-dataset"><option value="">Live Read-Only Provider Bars (No Mock Fallback)</option></select>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button type="submit" class="button primary" id="ml-fc-run-btn">Run Validated Forecast</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ml-fc-output">Enable forecasting and verify Kronos CPU readiness to generate a timestamped bar forecast. Missing runtime/weights always report UNAVAILABLE.</div>
+        </article>
+
+        <!-- 5: HISTORICAL DATASET MANAGER -->
+        <article class="panel" id="ml-datasets-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SHA-256 FINGERPRINTS · SURVIVORSHIP &amp; MISSING-BAR AUDIT</p><h3>5. Historical Dataset Manager (NSE &amp; NASDAQ)</h3></div>
+            <span class="status-pill info" id="ml-datasets-count">0 DATASETS</span>
+          </div>
+          <div class="content-grid two">
+            <form id="ml-capture-ds-form">
+              <h4>Capture Read-Only Provider History</h4>
+              <div class="form-grid">
+                <div class="field"><label for="ml-cap-market">Market</label><select id="ml-cap-market"><option value="NSE">NSE (Upstox v3)</option><option value="NASDAQ">NASDAQ (Alpaca v2)</option></select></div>
+                <div class="field"><label for="ml-cap-symbol">Symbol</label><input id="ml-cap-symbol" value="AAPL" required></div>
+                <div class="field"><label for="ml-cap-tf">Timeframe</label><select id="ml-cap-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1d">1d</option></select></div>
+              </div>
+              <button type="submit" class="button secondary xs" id="ml-cap-btn">Capture &amp; Fingerprint Live History</button>
+            </form>
+            <form id="ml-import-ds-form">
+              <h4>Import Local OHLCV CSV</h4>
+              <div class="form-grid">
+                <div class="field"><label for="ml-imp-market">Market</label><select id="ml-imp-market"><option value="NSE">NSE (INR)</option><option value="NASDAQ">NASDAQ (USD)</option></select></div>
+                <div class="field"><label for="ml-imp-symbol">Symbol</label><input id="ml-imp-symbol" value="INFY" required></div>
+                <div class="field"><label for="ml-imp-tf">Timeframe</label><select id="ml-imp-tf"><option value="1h" selected>1h</option><option value="1d">1d</option><option value="5m">5m</option></select></div>
+              </div>
+              <div class="field"><label for="ml-imp-csv">CSV rows (<code>timestamp,open,high,low,close,volume</code>; >= 60 chronological bars)</label><textarea id="ml-imp-csv" rows="2" placeholder="timestamp,open,high,low,close,volume"></textarea></div>
+              <button type="submit" class="button secondary xs" id="ml-imp-btn">Validate &amp; Register CSV Dataset</button>
+            </form>
+          </div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead><tr><th>Dataset ID</th><th>Market / Symbol</th><th>TF</th><th>Bars</th><th>Coverage (UTC)</th><th>Missing</th><th>Data Class</th><th>SHA-256</th></tr></thead>
+              <tbody id="ml-datasets-rows"><tr><td colspan="8" class="empty-state">Loading datasets…</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 6: CHRONOLOGICAL RESEARCH & WALK-FORWARD RUNNER -->
+        <article class="panel" id="ml-research-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">CHRONOLOGICAL TRAIN · EMBARGO · VALIDATION · UNTOUCHED TEST</p><h3>6. Research &amp; Walk-Forward Pipeline Runner</h3></div>
+            <div class="button-row">
+              <span class="status-pill info" id="ml-run-active-pill">IDLE</span>
+              <button type="button" class="button danger-outline xs" id="ml-run-cancel-btn">Cancel Active Run</button>
+            </div>
+          </div>
+          <form id="ml-run-form">
+            <div class="form-grid">
+              <div class="field"><label for="ml-run-dataset">Dataset</label><select id="ml-run-dataset" required></select></div>
+              <div class="field"><label for="ml-run-market">Market Fee Model</label><select id="ml-run-market"><option value="NSE">NSE (STT/NSE/SEBI/Stamp/GST)</option><option value="NASDAQ">NASDAQ (SEC/FINRA/USD)</option></select></div>
+              <div class="field"><label for="ml-run-train">Train Fraction</label><input id="ml-run-train" type="number" step="0.05" min="0.45" max="0.75" value="0.60"></div>
+              <div class="field"><label for="ml-run-val">Validation Fraction</label><input id="ml-run-val" type="number" step="0.05" min="0.10" max="0.30" value="0.20"></div>
+              <div class="field"><label for="ml-run-embargo">Embargo Bars</label><input id="ml-run-embargo" type="number" min="1" max="30" value="5"></div>
+              <div class="field"><label for="ml-run-spread">Spread (bps)</label><input id="ml-run-spread" type="number" step="0.5" min="0" max="100" value="4.0"></div>
+              <div class="field"><label for="ml-run-slippage">Slippage (bps)</label><input id="ml-run-slippage" type="number" step="0.5" min="0" max="100" value="5.0"></div>
+              <div class="field"><label for="ml-run-stress">Cost Stress Multiplier</label><input id="ml-run-stress" type="number" step="0.25" min="1.25" max="5.0" value="2.0"></div>
+              <div class="field"><label for="ml-run-mintrades">Min Trades Gate</label><input id="ml-run-mintrades" type="number" min="1" max="50" value="5"></div>
+              <div class="field"><label for="ml-run-kronos">Kronos Ablation</label><select id="ml-run-kronos"><option value="false">Baselines + AXIOM Ridge Only</option><option value="true">Include Paired Kronos Ablation</option></select></div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ml-run-start-btn">Run Research (Explicit Start)</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ml-run-progress">No research job running. Jobs never auto-start on launch or restart.</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead><tr><th>Run ID</th><th>Market</th><th>Dataset</th><th>Status</th><th>Progress</th><th>Manifest SHA-256</th><th>Action</th></tr></thead>
+              <tbody id="ml-runs-rows"><tr><td colspan="7" class="empty-state">No research runs recorded yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 7: BASELINE, WALK-FORWARD, UNTOUCHED TEST & COST-STRESS COMPARISON -->
+        <article class="panel" id="ml-comparison-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SEPARATED TRAIN · VALIDATION · UNTOUCHED TEST · 2.0× COST STRESS</p><h3>7. Baseline &amp; Strategy Comparison Matrix</h3></div>
+            <span class="status-pill info" id="ml-comp-run-label">SELECT A COMPLETED RUN</span>
+          </div>
+          <div class="inline-status" id="ml-split-summary">Run or select a research job above to inspect leak-free split boundaries, 90% block-bootstrap CIs, regime breakdowns, and 2.0× stressed-cost verdicts.</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Candidate / Family</th>
+                  <th>Train Sharpe</th>
+                  <th>Val Sharpe</th>
+                  <th>Untouched Test Net % (90% CI)</th>
+                  <th>Test Sharpe / Sortino</th>
+                  <th>Max DD %</th>
+                  <th>PF / Win%</th>
+                  <th>Trades / Turn</th>
+                  <th>Stressed (2×) Net %</th>
+                  <th>Regimes (T/R/V)</th>
+                  <th>Gate Verdict</th>
+                </tr>
+              </thead>
+              <tbody id="ml-candidates-rows"><tr><td colspan="11" class="empty-state">No run selected.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 8: MODEL REGISTRY & SHA-256 EXPORT / IMPORT -->
+        <article class="panel" id="ml-registry-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">PAPER-REFERENCE PROMOTION ONLY · HASH-VALIDATED BUNDLES</p><h3>8. Model Registry, Manual Promotion &amp; SHA-256 Export/Import</h3></div>
+            <span class="status-pill info" id="ml-models-count">0 MODELS</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Model ID</th><th>Candidate</th><th>Market / TF</th><th>Status</th><th>Test Net %</th><th>2× Stress %</th><th>Artifact SHA-256</th><th>Actions</th></tr></thead>
+              <tbody id="ml-models-rows"><tr><td colspan="8" class="empty-state">Run research to populate evaluated candidates.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="field top-space">
+            <label for="ml-bundle-json">Model Bundle JSON (Exported or Paste to Import — SHA-256 Verified)</label>
+            <textarea id="ml-bundle-json" rows="4" placeholder='{"schema":"axiom.model_lab.bundle.v1", ...}'></textarea>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" id="ml-import-bundle-btn">Verify SHA-256 &amp; Import Model Bundle</button>
+          </div>
+        </article>
       </section>
     </main>
   </div>

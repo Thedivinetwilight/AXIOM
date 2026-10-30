@@ -59,6 +59,7 @@ jobs:
           node tests/js/chart_smoke.mjs
           node tests/js/terminal_smoke.mjs
           node tests/js/multimarket_terminal_smoke.mjs
+          node tests/js/model_lab_smoke.mjs
           node tests/js/autonomy_smoke.mjs
 
   full:

@@ -252,7 +252,7 @@ jobs:
             'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
             'dist\kronos-status.json',
             '..\..\config\kronos-small.json', '..\..\config\kronos-runtime-requirements.txt',
-            'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log',
+            'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log', 'js-multimarket.log', 'js-modellab.log',
             'benchmark-python.log', 'js-terminal-benchmark.log',
             'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
             'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
@@ -261,6 +261,7 @@ jobs:
             '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md',
             '..\..\docs\AUTONOMY.md', '..\..\docs\ARCHITECTURE_AUDIT.md',
             '..\..\docs\BASELINE_AUDIT_AND_ISSUES.md', '..\..\docs\OWNER_SETUP_GUIDE.md',
+            '..\..\docs\MODEL_LAB_AND_KRONOS_AUDIT.md', '..\..\docs\AI_MODEL_LAB_MANUAL.md', '..\..\docs\RESEARCH_COMPARISON_REPORT.md',
             '..\..\docs\autonomy-shakedown.template.json'
           )
           $sums = @()
@@ -313,6 +314,7 @@ jobs:
             src/packaging/windows/js-chart.log
             src/packaging/windows/js-terminal.log
             src/packaging/windows/js-multimarket.log
+            src/packaging/windows/js-modellab.log
             src/packaging/windows/benchmark-python.log
             src/packaging/windows/js-terminal-benchmark.log
             src/packaging/windows/TERMINAL_BENCHMARK.json
@@ -327,6 +329,9 @@ jobs:
             src/docs/ARCHITECTURE_AUDIT.md
             src/docs/BASELINE_AUDIT_AND_ISSUES.md
             src/docs/OWNER_SETUP_GUIDE.md
+            src/docs/MODEL_LAB_AND_KRONOS_AUDIT.md
+            src/docs/AI_MODEL_LAB_MANUAL.md
+            src/docs/RESEARCH_COMPARISON_REPORT.md
             src/docs/autonomy-shakedown.template.json
           if-no-files-found: warn
           retention-days: 30

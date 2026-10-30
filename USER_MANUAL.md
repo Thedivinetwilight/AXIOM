@@ -1,8 +1,10 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a6**
+**Current source version: 3.7.0a7**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
+
+> **Version 3.7.0a7 Multi-Market Desktop & AI Model Lab:** The dark `/terminal` console (`01`–`10`) now includes a persistent Direct Access Quick-Nav bar, explicit 4-mode Readiness Checklists (`NSE LIVE-MARKET PAPER`, `NASDAQ LIVE-MARKET PAPER`, `NSE LIVE-MARKET LIVE`, `NASDAQ LIVE-MARKET LIVE`), and Workspace **`10 AI & Model Lab`** (`docs/AI_MODEL_LAB_MANUAL.md`, `docs/OWNER_SETUP_GUIDE.md`). Model Lab and Kronos forecasting are strictly PAPER/RESEARCH ONLY and never authorize or alter live execution.
 
 AXIOM now has three mutually exclusive execution modes:
 

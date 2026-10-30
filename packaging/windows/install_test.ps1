@@ -427,6 +427,16 @@ try {
     Check ($kronos.last_self_test.input_label -match 'SYNTHETIC_INFERENCE_SMOKE_ONLY' -and -not $kronos.last_self_test.market_evaluation -and -not $kronos.last_self_test.profitability_evidence) 'self-test is explicitly separated from market/profitability evidence'
     $afterKronos = Invoke-RestMethod -Headers $headers ('{0}/api/autonomy/status' -f $base) -TimeoutSec 15
     Check ($afterKronos.sessions.Count -eq $beforeKronos.sessions.Count -and $afterKronos.sessions.Count -eq 0) 'Kronos setup created no autonomy session or execution state'
+    # Verify Model Lab KronosForecastProvider & genuine CPU bar forecast on the installed Windows package
+    $mlOverview = Invoke-RestMethod -Headers $headers ('{0}/api/model-lab/overview' -f $base) -TimeoutSec 30
+    Check ($mlOverview.paper_and_research_only -eq $true -and $mlOverview.live_execution_authorized -eq $false -and $mlOverview.kronos.provider_state -eq 'READY') 'Model Lab overview reports Kronos READY and strictly paper/research-only'
+    $null = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ enabled = $true } | ConvertTo-Json) ('{0}/api/model-lab/kronos/toggle' -f $base) -TimeoutSec 15
+    $null = Invoke-RestMethod -Method Post -Headers $headers ('{0}/api/model-lab/kronos/load' -f $base) -TimeoutSec 15
+    $mlForecastBody = @{ market = 'NSE'; symbol = 'DEMO_NSE_SYNTH'; timeframe = '1h'; dataset_id = 'bundled_nse_synthetic_1h'; horizon = 5; samples = 4 } | ConvertTo-Json
+    $mlForecast = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $mlForecastBody ('{0}/api/model-lab/kronos/forecast' -f $base) -TimeoutSec 120
+    Check ($mlForecast.advisory_only -eq $true -and $mlForecast.execution_authorized -eq $false -and [double]$mlForecast.mean_close -gt 0 -and [double]$mlForecast.latency_ms.inference_ms -gt 0 -and $mlForecast.model_identity.manifest_sha256 -eq $kronos.install_plan.manifest_sha256) 'Model Lab executed genuine CPU Kronos bar forecast with verified manifest digest and positive latency'
+    $null = Invoke-RestMethod -Method Post -Headers $headers ('{0}/api/model-lab/kronos/unload' -f $base) -TimeoutSec 15
+    $null = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ enabled = $false } | ConvertTo-Json) ('{0}/api/model-lab/kronos/toggle' -f $base) -TimeoutSec 15
     $tradingAfterKronos = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
     Check ($tradingAfterKronos.mode -eq 'AXIOM_PAPER' -and -not $tradingAfterKronos.armed -and -not $tradingAfterKronos.active) 'Kronos setup preserved disarmed PAPER execution'
     $installedWeights = @(Get-ChildItem -Path $installDir -Recurse -Filter '*.safetensors' -ErrorAction SilentlyContinue)

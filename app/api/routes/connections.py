@@ -124,6 +124,14 @@ def alpaca_credentials_status(request: Request):
     }
 
 
+def _receipts(request: Request) -> dict[str, dict]:
+    rec = getattr(request.app.state, "owner_verification_receipts", None)
+    if not isinstance(rec, dict):
+        rec = {}
+        request.app.state.owner_verification_receipts = rec
+    return rec
+
+
 @router.post("/alpaca/credentials")
 def alpaca_credentials_save(body: AlpacaDataCredentialBody, request: Request):
     store = getattr(request.app.state, "alpaca_data_store", None)
@@ -133,6 +141,7 @@ def alpaca_credentials_save(body: AlpacaDataCredentialBody, request: Request):
         saved = store.save(body.api_key, body.api_secret, body.feed)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    _receipts(request).pop("ALPACA_MARKET_DATA", None)
     return {
         "saved": True,
         **saved,
@@ -148,6 +157,7 @@ def alpaca_credentials_delete(request: Request):
     if store is None:
         raise HTTPException(503, "Protected Alpaca market-data store is unavailable on this host")
     deleted = store.delete()
+    _receipts(request).pop("ALPACA_MARKET_DATA", None)
     return {
         "deleted": deleted,
         **store.status(),
@@ -173,11 +183,21 @@ def verify_upstox_quote(
 ):
     """Harmless read-only Upstox profile + market-quote verification."""
     tok, src = _resolve_upstox_readonly(request)
-    return verify_upstox_market_data(
+    res = verify_upstox_market_data(
         tok,
         credential_source=src,
         instrument_key=instrument_key or DEFAULT_NSE_TEST_KEY,
     )
+    if res.get("authenticated"):
+        _receipts(request)["UPSTOX_MARKET_DATA"] = {
+            "verified": True,
+            "connection_state": res.get("connection_state"),
+            "verified_at": res.get("checked_at"),
+            "instrument_key": instrument_key or DEFAULT_NSE_TEST_KEY,
+        }
+    else:
+        _receipts(request).pop("UPSTOX_MARKET_DATA", None)
+    return res
 
 
 @router.post("/alpaca/test")
@@ -202,10 +222,21 @@ def verify_alpaca_quote(
 ):
     """Harmless read-only Alpaca snapshot + listing verification."""
     creds, src = _resolve_alpaca_readonly(request)
-    return verify_alpaca_market_data(
+    res = verify_alpaca_market_data(
         creds["api_key"],
         creds["api_secret"],
         feed=creds["feed"],
         credential_source=src,
         symbol=symbol or DEFAULT_NASDAQ_TEST_SYMBOL,
     )
+    if res.get("authenticated"):
+        _receipts(request)["ALPACA_MARKET_DATA"] = {
+            "verified": True,
+            "connection_state": res.get("connection_state"),
+            "verified_at": res.get("checked_at"),
+            "symbol": symbol or DEFAULT_NASDAQ_TEST_SYMBOL,
+            "feed": creds["feed"],
+        }
+    else:
+        _receipts(request).pop("ALPACA_MARKET_DATA", None)
+    return res

@@ -17,7 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
-    market_data, listed_assets, connections, alpaca_broker, markets,
+    market_data, listed_assets, connections, alpaca_broker, markets, model_lab,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -262,10 +262,65 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     raise RuntimeError("Alpaca read-only market-data credentials are not configured")
                 return quote
 
+            def _nse_live_bars_lookup(symbol_or_key: str, timeframe: str):
+                inst = _resolve_nse_instrument(symbol_or_key)
+                if inst is None:
+                    raise RuntimeError(f"Unknown NSE instrument {symbol_or_key!r}")
+                tok, _ = resolve_token(app.state.upstox_token)
+                if not tok:
+                    tok = str(getattr(settings, "market_data_access_token", "") or "").strip()
+                if not tok:
+                    raise RuntimeError("Upstox read-only market-data token is not configured")
+                tf_fetch = "1D" if timeframe == "1d" else timeframe
+                reader = UpstoxReadOnly(lambda: tok)
+                bars = reader.historical_candles(inst["instrument_key"], inst["display_symbol"], tf_fetch)
+                return bars
+
+            def _nasdaq_live_bars_lookup(symbol_or_key: str, timeframe: str):
+                creds, _ = resolve_alpaca_data_credentials(app.state.alpaca_data_store, settings)
+                if not creds["api_key"] or not creds["api_secret"]:
+                    raise RuntimeError("Alpaca read-only market-data credentials are not configured")
+                from app.data.alpaca import AlpacaDataProvider
+
+                tf_fetch = "1h" if timeframe == "4h" else ("1d" if timeframe == "1D" else timeframe)
+                prov = AlpacaDataProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
+                try:
+                    return prov.fetch_recent(symbol_or_key.strip().upper(), tf_fetch, limit=240)
+                finally:
+                    prov.close()
+
+            import tempfile
+            from app.model_lab.kronos_provider import KronosForecastProvider
+            from app.model_lab.registry import ModelLabService
+
+            ephemeral_model_lab_tmp = None
+            if runtime_base is None:
+                ephemeral_model_lab_tmp = tempfile.TemporaryDirectory(prefix="axiom_model_lab_")
+                model_lab_dir = Path(ephemeral_model_lab_tmp.name)
+            else:
+                model_lab_dir = runtime_base / "model_lab"
+
+            app.state.owner_verification_receipts = {}
+            app.state.nse_bars_provider = _nse_live_bars_lookup
+            app.state.nasdaq_bars_provider = _nasdaq_live_bars_lookup
+            app.state.kronos_provider = KronosForecastProvider(
+                app.state.autonomy.kronos if app.state.autonomy is not None else None,
+                setup_manager=app.state.autonomy.kronos_setup if app.state.autonomy is not None else None,
+                config_path=(model_lab_dir / "kronos-lab-config.json") if runtime_base is not None else None,
+            )
+            app.state.model_lab = ModelLabService(
+                model_lab_dir,
+                kronos_provider=app.state.kronos_provider,
+                repo_data_dir=ROOT / "data",
+            )
+
             app.state.live_paper_engine = LiveMarketPaperEngine(
                 ":memory:" if runtime_base is None else (runtime_base / "live_market_paper.sqlite3"),
                 nse_quote_provider=_nse_live_quote_lookup,
                 nasdaq_quote_provider=_nasdaq_live_quote_lookup,
+                nse_bars_provider=_nse_live_bars_lookup,
+                nasdaq_bars_provider=_nasdaq_live_bars_lookup,
+                kronos_provider=app.state.kronos_provider,
                 nse_instrument_resolver=_resolve_nse_instrument,
                 nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
             )
@@ -273,6 +328,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             yield
             if getattr(app.state, "live_paper_engine", None) is not None:
                 app.state.live_paper_engine.close()
+            if ephemeral_model_lab_tmp is not None:
+                ephemeral_model_lab_tmp.cleanup()
             if getattr(app.state, "alpaca_broker_runtime", None) is not None and app.state.alpaca_broker_runtime.journal is not None:
                 app.state.alpaca_broker_runtime.journal.close()
             if app.state.autonomy_runner is not None:
@@ -397,7 +454,10 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     # Chart terminal: the PAGE keeps the loopback-open contract of /dashboard,
     # every data route declares its own bearer dependency.
     app.include_router(chart.router)
-    for module in (market, strategies, backtests, paper, v2, market_events, vantage, market_data, listed_assets, connections, alpaca_broker, markets):
+    for module in (
+        market, strategies, backtests, paper, v2, market_events, vantage,
+        market_data, listed_assets, connections, alpaca_broker, markets, model_lab,
+    ):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no
     # remote script, and nothing secret is ever placed here. Assets are served

@@ -1,10 +1,10 @@
 # AXIOM Desktop Terminal — Owner Setup Guide & Architecture Reference
 
-**Version:** `3.7.0a6`  
-**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a6-windows-x64-no-temp-install.zip` or `*-portable.zip`)
+**Version:** `3.7.0a7`  
+**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a7-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
 
 > **Safety & Non-Claim Notice**  
-> - Real-money execution (`LIVE-MARKET LIVE`) is **OFF by default** and is never enabled by startup, restart, crash recovery, config import, or paper trading.  
+> - Real-money execution (`LIVE-MARKET LIVE`) is **OFF by default** and is never enabled by startup, restart, crash recovery, config import, Kronos inference, or paper trading.  
 > - `LIVE-MARKET PAPER` uses real read-only market data (when owner credentials are connected) and simulates 100% of orders, fills, and regulatory fees locally in SQLite with **zero broker order API calls**.  
 > - Automated tests, mock/fake provider tests, and CI runs **do not** verify real owner broker accounts, real live fills, or strategy profitability. External provider/account checks without owner credentials in CI are explicitly marked **`NOT VERIFIED / BLOCKED`**.
 
@@ -12,12 +12,30 @@
 
 ## 1. Owner Quick-Start Setup (Windows x64)
 
-### Step 1 — Verify SHA-256 & Launch AXIOM
+### Option A — Packaged Windows Installer or Portable Archive (Recommended)
 1. Verify your downloaded installer or portable archive against `SHA256SUMS.txt`:
    ```powershell
-   Get-FileHash .\AXIOM-Operator-3.7.0a6-windows-x64-portable.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-no-temp-install.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-portable.zip -Algorithm SHA256
    ```
-2. Extract and launch `AXIOM-Chart.exe`. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens the dark TradingView-inspired terminal at `/terminal`. All user databases and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
+2. Extract and run either `AXIOM-Operator-3.7.0a7-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
+
+### Option B — Windows 10/11 x64 Source Checkout Setup
+```powershell
+git clone https://github.com/Thedivinetwilight/AXIOM.git
+cd AXIOM
+git checkout arena/ffd46191-axiom
+py -3.11-64 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+npm ci --ignore-scripts --no-audit --no-fund
+# Run verification suites locally:
+.\.venv\Scripts\python.exe -m pytest -q
+npm test
+# Launch AXIOM Desktop Terminal from source (loopback-only):
+.\.venv\Scripts\python.exe axiom_launcher.py
+```
+> **Optional Pinned Kronos CPU Setup (Installer, Portable, or Source):** Ensure CPython `3.11` or `3.12` x64 with `pip` is installed on Windows, open **`10 AI & Model Lab`** in `/terminal`, click **Install Pinned Kronos (CPU)** (~110 MiB weights + locked CPU `torch==2.7.1+cpu` wheels into `%LOCALAPPDATA%\AXIOM\autonomy\kronos`), then click **Offline CPU Self-Test** to transition Kronos from `NOT_INSTALLED` / `NOT_VERIFIED` to `READY`.
 
 ### Step 2 — Connect Read-Only Market Data (`07 Connections`)
 1. **Indian NSE (`INR ₹`) — Upstox Market Data**:
@@ -91,6 +109,8 @@ Keep disabled unless you deliberately intend to risk capital and satisfy every e
 | **`07 Connections`** | DPAPI save/verify/delete for `Upstox Read-Only`, `Alpaca Market Data`, `Alpaca Broker Paper/Live`, `Upstox Live`, plus Vantage MT5 | `/api/connections/*`, `/api/autonomy/upstox*`, `/api/alpaca-broker/credentials/*` | `multimarket_terminal_smoke.mjs` (Step 3), `test_provider_verification.py` |
 | **`08 Activity & audit`** | Tamper-evident SHA-256 hash-chained Multi-Market Paper audit table + Redacted JSON export | `/api/markets/overview`, `/api/trading/activity` | `multimarket_terminal_smoke.mjs` (Step 10) |
 | **`09 Settings & manuals`** | Session API token, Lock tab, Auto-refresh interval, Latency p50/p95/p99, Redacted diagnostics, Links to `/manual` & `/autonomy/manual` | `/api/trading/performance`, `/manual`, `/autonomy/manual` | `terminal_smoke.mjs` |
+| **`10 AI & Model Lab`** | Pinned Kronos setup/self-test, Load/Unload & Enable/Disable, Forecast Inspector, Latency/RSS diagnostics, Dataset Manager, Walk-Forward & `2.0x` Cost-Stress Research Runner, SHA-256 Model Registry | `/api/model-lab/*`, `/api/autonomy/kronos/*` | `model_lab_smoke.mjs`, `test_kronos_model_lab.py`, `test_research_pipeline_leakage.py` |
+| **Persistent Quick-Nav & Readiness** | Always-visible direct jump buttons (`Connections`, `Charts`, `Orders`, `Strategies`, `Risk`, `Activity`, `Model Lab`) + 4-mode Readiness Checklists with read-only verify buttons | `/api/markets/readiness`, `/api/connections/*/verify-quote` | `model_lab_smoke.mjs`, `test_kronos_model_lab.py` |
 
 ---
 

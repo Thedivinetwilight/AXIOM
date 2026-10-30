@@ -14,6 +14,7 @@ const PAGE_TITLES = {
   strategies: ["MODES & STRATEGIES", "Strategies & modes"],
   risk: ["FAIL-CLOSED CONTROLS", "Risk & live gates"], connections: ["PROVIDER CONNECTIONS", "Connections"],
   activity: ["SHA-256 & LOCAL AUDIT", "Activity & audit"], settings: ["PREFERENCES & HELP", "Settings & manuals"],
+  modellab: ["RESEARCH & KRONOS LAB", "AI & Model Lab"],
 };
 const UNRESOLVED = new Set([
   "INTENT_RECORDED", "SUBMISSION_ATTEMPTED", "MODIFICATION_ATTEMPTED", "UNKNOWN",
@@ -29,6 +30,7 @@ const state = {
   chartSymbolsLoaded: false, chartRequest: 0, riskDirty: false, credentialMode: null,
   performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
   mm: { available: false, activeVenue: "NSE", overview: null, catalogItems: [], side: "BUY", chartFeed: "SESSION", lastPreview: null },
+  ml: { available: false, overview: null, selectedRunId: "" },
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -306,7 +308,7 @@ async function loadBrokerDestination() {
 }
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets(), loadBrokerDestination(), loadMultiMarketOverview()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadMarketData(), loadPerformance(), loadListedAssets(), loadBrokerDestination(), loadMultiMarketOverview(), loadModelLabOverview()]);
   if (state.page === "instruments" && currentStatus().connected) await loadInstruments();
   if (state.page === "instruments" && state.mm.available) await searchMultiMarketCatalog();
   if (state.page === "charts") {
@@ -1726,6 +1728,7 @@ async function goPage(page) {
   if (page === "instruments") { renderInstruments(); if (currentStatus().connected && !state.instruments.length) await loadInstruments(); }
   if (page === "charts") await loadChartSymbols();
   if (page === "activity") await loadActivity();
+  if (page === "modellab") await loadModelLabOverview();
   renderAll();
 }
 
@@ -1971,6 +1974,35 @@ function renderMultiMarketDesk() {
   };
   renderLedgerList("mm-nse-overview-list", "mm-nse-paper-state", nse, "₹");
   renderLedgerList("mm-nasdaq-overview-list", "mm-nasdaq-paper-state", nasdaq, "$");
+
+  // 4-Mode Readiness Checklists (Priority 1)
+  if ($("mm-readiness-grid") && ov.readiness?.modes) {
+    if ($("mm-readiness-note") && ov.readiness.verification_note) {
+      $("mm-readiness-note").textContent = ov.readiness.verification_note;
+    }
+    const modeOrder = ["NSE_PAPER", "NASDAQ_PAPER", "NSE_LIVE", "NASDAQ_LIVE"];
+    $("mm-readiness-grid").innerHTML = modeOrder.map((key) => {
+      const m = ov.readiness.modes[key];
+      if (!m) return "";
+      const stCls = m.overall_status === "READY" || m.overall_status === "MARKET_CLOSED_READY" || m.overall_status === "READY_TO_ARM"
+        ? "ok"
+        : m.overall_status === "NOT_VERIFIED" || m.overall_status === "AVAILABLE_BEHIND_GATE"
+          ? "warn"
+          : "err";
+      const itemsHtml = (m.items || []).map((it) => {
+        const itCls = it.state === "PASS" ? "ok" : it.state === "NOT_VERIFIED" ? "warn" : it.state === "BLOCKED" ? "err" : "info";
+        return `<li><span>${escapeHtml(it.label)}<br><small class="muted">${escapeHtml(it.detail)}</small></span>${statusPill(it.state, itCls)}</li>`;
+      }).join("");
+      return `<div class="readiness-card">
+        <div class="panel-head" style="margin-bottom:4px">
+          <div><p class="eyebrow">${escapeHtml(m.market)} · ${escapeHtml(m.currency)}</p><h4>${escapeHtml(m.mode)}</h4></div>
+          ${statusPill(m.overall_status, stCls)}
+        </div>
+        <ul class="readiness-list">${itemsHtml}</ul>
+        <div class="inline-status ${stCls}"><strong>Next step:</strong> ${escapeHtml(m.next_action || "")}</div>
+      </div>`;
+    }).join("");
+  }
 
   // Overview 5-Role Provider Matrix
   if ($("mm-overview-providers")) {
@@ -2611,16 +2643,27 @@ function bindMultiMarketEvents() {
       toast("Upstox token saved", "Encrypted in local protected store; never echoed.", "ok");
     } catch (err) { toast("Upstox token save failed", err.message, "err"); }
   });
-  $("mm-upstox-verify-btn")?.addEventListener("click", async () => {
-    $("mm-upstox-data-pill").textContent = "AUTHENTICATING";
+  const runUpstoxVerify = async () => {
+    if ($("mm-upstox-data-pill")) $("mm-upstox-data-pill").textContent = "AUTHENTICATING";
     try {
       const v = await api("/api/connections/upstox/verify-quote", { body: { instrument_key: "NSE_EQ|INE002A01018" } });
-      $("mm-upstox-data-pill").textContent = v.connection_state;
-      $("mm-upstox-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
-      $("mm-upstox-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
-      $("mm-upstox-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""} ${v.quote?.last ? `(RELIANCE ₹${v.quote.last})` : ""}`;
-    } catch (err) { $("mm-upstox-verify-result").textContent = err.message; }
-  });
+      if ($("mm-upstox-data-pill")) {
+        $("mm-upstox-data-pill").textContent = v.connection_state;
+        $("mm-upstox-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
+      }
+      if ($("mm-upstox-verify-result")) {
+        $("mm-upstox-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
+        $("mm-upstox-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""} ${v.quote?.last ? `(RELIANCE ₹${v.quote.last})` : ""}`;
+      }
+      await loadMultiMarketOverview();
+      toast("NSE quote probe completed", `${v.connection_state} — zero order endpoints called.`, v.authenticated ? "ok" : "warn");
+    } catch (err) {
+      if ($("mm-upstox-verify-result")) $("mm-upstox-verify-result").textContent = err.message;
+      toast("NSE verify failed", err.message, "err");
+    }
+  };
+  $("mm-upstox-verify-btn")?.addEventListener("click", runUpstoxVerify);
+  $("mm-ready-verify-nse")?.addEventListener("click", runUpstoxVerify);
   $("mm-upstox-delete-btn")?.addEventListener("click", async () => {
     try {
       await api("/api/autonomy/upstox-token", { method: "DELETE" });
@@ -2644,16 +2687,28 @@ function bindMultiMarketEvents() {
       toast("Alpaca data keys saved", "Encrypted in ALPACA_MARKET_DATA slot; secrets cleared from DOM.", "ok");
     } catch (err) { toast("Alpaca save failed", err.message, "err"); }
   });
-  $("mm-alpaca-data-verify-btn")?.addEventListener("click", async () => {
-    $("mm-alpaca-data-pill").textContent = "AUTHENTICATING";
+  const runAlpacaVerify = async () => {
+    if ($("mm-alpaca-data-pill")) $("mm-alpaca-data-pill").textContent = "AUTHENTICATING";
     try {
-      const v = await api("/api/connections/alpaca/verify-quote", { body: { symbol: "AAPL", feed: $("mm-alpaca-data-feed").value } });
-      $("mm-alpaca-data-pill").textContent = v.connection_state;
-      $("mm-alpaca-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
-      $("mm-alpaca-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
-      $("mm-alpaca-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""}`;
-    } catch (err) { $("mm-alpaca-verify-result").textContent = err.message; }
-  });
+      const feed = $("mm-alpaca-data-feed")?.value || "iex";
+      const v = await api("/api/connections/alpaca/verify-quote", { body: { symbol: "AAPL", feed } });
+      if ($("mm-alpaca-data-pill")) {
+        $("mm-alpaca-data-pill").textContent = v.connection_state;
+        $("mm-alpaca-data-pill").className = `status-pill ${connStatePillClass(v.connection_state)}`;
+      }
+      if ($("mm-alpaca-verify-result")) {
+        $("mm-alpaca-verify-result").className = `inline-status top-space ${v.ok ? "ok" : "err"}`;
+        $("mm-alpaca-verify-result").textContent = `${v.connection_state}: ${v.guidance || ""}`;
+      }
+      await loadMultiMarketOverview();
+      toast("NASDAQ quote probe completed", `${v.connection_state} — zero order endpoints called.`, v.authenticated ? "ok" : "warn");
+    } catch (err) {
+      if ($("mm-alpaca-verify-result")) $("mm-alpaca-verify-result").textContent = err.message;
+      toast("NASDAQ verify failed", err.message, "err");
+    }
+  };
+  $("mm-alpaca-data-verify-btn")?.addEventListener("click", runAlpacaVerify);
+  $("mm-ready-verify-nasdaq")?.addEventListener("click", runAlpacaVerify);
   $("mm-alpaca-data-delete-btn")?.addEventListener("click", async () => {
     try {
       await api("/api/connections/alpaca/credentials", { method: "DELETE" });
@@ -2715,8 +2770,430 @@ function bindMultiMarketEvents() {
   });
 }
 
+function kronosPillClass(st) {
+  if (st === "READY") return "ok";
+  if (st === "RUNNING") return "info";
+  if (st === "NOT_VERIFIED" || st === "STALE") return "warn";
+  return "err";
+}
+
+async function loadModelLabOverview() {
+  try {
+    const ov = await api("/api/model-lab/overview", { keepAuth: true });
+    state.ml.available = true;
+    state.ml.overview = ov;
+    if (!state.ml.selectedRunId && Array.isArray(ov.runs) && ov.runs.length) {
+      state.ml.selectedRunId = ov.runs[0].run_id;
+    }
+    renderModelLab();
+  } catch (_) {
+    state.ml.available = false;
+  }
+}
+
+function renderModelLab() {
+  const ov = state.ml.overview;
+  if (!ov) return;
+  const k = ov.kronos || {};
+  const pState = k.provider_state || "NOT_INSTALLED";
+  const kEngine = k.kronos_engine || {};
+  const diag = k.diagnostics || {};
+  const cfg = k.config || {};
+
+  if ($("mm-pill-kronos-state")) {
+    $("mm-pill-kronos-state").textContent = `KRONOS · ${pState}`;
+    $("mm-pill-kronos-state").className = `status-pill ${kronosPillClass(pState)}`;
+  }
+  if ($("ml-kronos-state-pill")) {
+    $("ml-kronos-state-pill").textContent = pState;
+    $("ml-kronos-state-pill").className = `status-pill ${kronosPillClass(pState)}`;
+  }
+  if ($("ml-kronos-runtime-badge")) {
+    $("ml-kronos-runtime-badge").textContent = `${pState} · ${kEngine.inference_runtime || "MISSING"}`;
+    $("ml-kronos-runtime-badge").className = `status-pill ${kronosPillClass(pState)}`;
+  }
+  if ($("ml-kronos-summary")) {
+    $("ml-kronos-summary").className = `inline-status ${kronosPillClass(pState)}`;
+    $("ml-kronos-summary").textContent = k.summary || "Kronos status loaded.";
+  }
+  if ($("ml-kronos-toggle-pill")) {
+    $("ml-kronos-toggle-pill").textContent = k.inference_enabled ? "FORECASTING ENABLED" : "FORECASTING DISABLED";
+    $("ml-kronos-toggle-pill").className = `status-pill ${k.inference_enabled ? "ok" : "info"}`;
+  }
+
+  if ($("ml-kronos-details")) {
+    const plan = k.install_plan || {};
+    const rows = [
+      ["Provider State", pState],
+      ["Upstream Source", `${plan.upstream?.repository || "shiyu-coder/Kronos"} @ ${String(plan.upstream?.commit || "67b630e67f6a").slice(0, 12)}`],
+      ["License", k.license || "MIT License"],
+      ["Model Pin", `NeoQuasar/Kronos-small @ ${String(kEngine.model_revision || plan.model?.revision || "").slice(0, 12)}`],
+      ["Tokenizer Pin", `NeoQuasar/Kronos-Tokenizer-base @ ${String(kEngine.tokenizer_revision || plan.tokenizer?.revision || "").slice(0, 12)}`],
+      ["Manifest SHA-256", `${String(kEngine.manifest_sha256 || plan.manifest_sha256 || "—").slice(0, 20)}…`],
+      ["Weights Verified", String(Boolean(kEngine.artifact_verified))],
+      ["Self-Test Verdict", kEngine.last_self_test?.status || "NOT_VERIFIED"],
+      ["Trading Effect", k.execution_authorization_effect || "NONE"],
+    ];
+    $("ml-kronos-details").innerHTML = rows.map(([dt, dd]) => `<dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd>`).join("");
+  }
+
+  if ($("ml-cfg-cadence") && cfg.cadence_seconds) $("ml-cfg-cadence").value = String(cfg.cadence_seconds);
+  if ($("ml-cfg-timeout") && cfg.timeout_seconds) $("ml-cfg-timeout").value = String(cfg.timeout_seconds);
+  if ($("ml-cfg-horizon") && cfg.horizon) $("ml-cfg-horizon").value = String(cfg.horizon);
+  if ($("ml-cfg-samples") && cfg.samples) $("ml-cfg-samples").value = String(cfg.samples);
+
+  if ($("ml-kronos-diagnostics")) {
+    const dRows = [
+      ["Model Loaded", k.model_loaded ? "YES (CPU Ready)" : "NO (Unloaded / Lazy)"],
+      ["Load Latency p50 / p95", `${diag.load_ms_p50 != null ? `${diag.load_ms_p50} ms` : "not measured"} / ${diag.load_ms_p95 != null ? `${diag.load_ms_p95} ms` : "not measured"}`],
+      ["Inference p50 / p95", `${diag.inference_ms_p50 != null ? `${diag.inference_ms_p50} ms` : "not measured"} / ${diag.inference_ms_p95 != null ? `${diag.inference_ms_p95} ms` : "not measured"}`],
+      ["Measured Forecasts", String(diag.inference_count ?? 0)],
+      ["Process RSS / Weights Disk", `${diag.process_rss_mb != null ? `${diag.process_rss_mb} MiB` : "n/a"} / ~${diag.expected_weights_mb || 109.5} MiB`],
+      ["Device & Mock Policy", `${diag.device || "cpu"} · mock_outputs_used=${String(Boolean(diag.mock_outputs_used))}`],
+    ];
+    $("ml-kronos-diagnostics").innerHTML = dRows.map(([dt, dd]) => `<dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd>`).join("");
+  }
+
+  // Datasets
+  const datasets = ov.datasets || [];
+  if ($("ml-datasets-count")) $("ml-datasets-count").textContent = `${datasets.length} DATASETS`;
+  if ($("ml-datasets-rows")) {
+    $("ml-datasets-rows").innerHTML = datasets.length ? datasets.map((d) => `
+      <tr>
+        <td><code>${escapeHtml(d.dataset_id)}</code></td>
+        <td><strong>${escapeHtml(d.market)}</strong> · ${escapeHtml(d.symbol)}</td>
+        <td>${escapeHtml(d.timeframe)}</td>
+        <td>${d.bar_count}</td>
+        <td><small>${escapeHtml(String(d.start_timestamp || "").slice(0, 10))} → ${escapeHtml(String(d.end_timestamp || "").slice(0, 10))}</small></td>
+        <td>${d.estimated_missing_bars ?? 0}</td>
+        <td>${d.real_market_data ? statusPill("IMPORTED / CAPTURED", "ok") : statusPill("SYNTHETIC FIXTURE", "warn")}</td>
+        <td><code>${escapeHtml(String(d.sha256 || "").slice(0, 14))}…</code></td>
+      </tr>
+    `).join("") : `<tr><td colspan="8" class="empty-state">No datasets registered.</td></tr>`;
+  }
+
+  if ($("ml-run-dataset")) {
+    const prev = $("ml-run-dataset").value;
+    $("ml-run-dataset").innerHTML = datasets.map((d) =>
+      `<option value="${escapeHtml(d.dataset_id)}">${escapeHtml(`${d.dataset_id} (${d.market} · ${d.symbol} · ${d.bar_count} bars)`)}</option>`
+    ).join("");
+    if (prev && datasets.some((d) => d.dataset_id === prev)) $("ml-run-dataset").value = prev;
+  }
+  if ($("ml-fc-dataset")) {
+    const prevFc = $("ml-fc-dataset").value;
+    $("ml-fc-dataset").innerHTML = `<option value="">Live Read-Only Provider Bars (No Mock Fallback)</option>` +
+      datasets.map((d) => `<option value="${escapeHtml(d.dataset_id)}">${escapeHtml(`Dataset: ${d.dataset_id} (${d.market})`)}</option>`).join("");
+    if (prevFc) $("ml-fc-dataset").value = prevFc;
+  }
+
+  // Research Runs
+  const runs = ov.runs || [];
+  const activeRun = runs.find((r) => r.status === "RUNNING" || r.status === "QUEUED");
+  if ($("ml-run-active-pill")) {
+    $("ml-run-active-pill").textContent = activeRun ? `${activeRun.status} (${activeRun.progress_pct}%)` : "IDLE";
+    $("ml-run-active-pill").className = `status-pill ${activeRun ? "warn" : "info"}`;
+  }
+  if ($("ml-run-progress") && activeRun) {
+    $("ml-run-progress").className = "inline-status top-space warn";
+    $("ml-run-progress").textContent = `${activeRun.run_id}: [${activeRun.phase} · ${activeRun.progress_pct}%] ${activeRun.status_detail}`;
+  }
+  if ($("ml-runs-rows")) {
+    $("ml-runs-rows").innerHTML = runs.length ? runs.map((r) => `
+      <tr>
+        <td><code>${escapeHtml(r.run_id)}</code></td>
+        <td>${escapeHtml(r.market)} · ${escapeHtml(r.timeframe)}</td>
+        <td><code>${escapeHtml(r.dataset_id)}</code></td>
+        <td>${statusPill(r.status, r.status === "COMPLETED" ? "ok" : r.status === "RUNNING" ? "warn" : "err")}</td>
+        <td>${r.progress_pct}% · <small>${escapeHtml(r.phase)}</small></td>
+        <td><code>${escapeHtml(String(r.manifest_sha256 || "—").slice(0, 14))}</code></td>
+        <td><button type="button" class="button secondary xs" data-ml-inspect-run="${escapeHtml(r.run_id)}">Inspect</button></td>
+      </tr>
+    `).join("") : `<tr><td colspan="7" class="empty-state">No research runs recorded yet. Click 'Run Research (Explicit Start)' above.</td></tr>`;
+  }
+
+  const chosenRun = runs.find((r) => r.run_id === state.ml.selectedRunId) || runs.find((r) => r.manifest) || null;
+  renderModelLabSelectedRun(chosenRun);
+
+  // Model Registry
+  const models = ov.models || [];
+  if ($("ml-models-count")) $("ml-models-count").textContent = `${models.length} MODELS`;
+  if ($("ml-models-rows")) {
+    $("ml-models-rows").innerHTML = models.length ? models.map((m) => {
+      const testRet = m.metrics_summary?.untouched_test?.net_return_pct;
+      const stressRet = m.metrics_summary?.stressed_test?.net_return_pct;
+      const stCls = m.registry_status === "PROMOTED_PAPER_CANDIDATE" || m.registry_status === "VALIDATED_CANDIDATE"
+        ? "ok"
+        : m.registry_status === "IMPORTED_PAPER_CANDIDATE"
+          ? "info"
+          : "err";
+      return `<tr>
+        <td><code>${escapeHtml(m.model_id)}</code></td>
+        <td><strong>${escapeHtml(m.candidate_id)}</strong><br><small class="muted">${escapeHtml(m.family)}</small></td>
+        <td>${escapeHtml(m.market)} · ${escapeHtml(m.timeframe)}</td>
+        <td>${statusPill(m.registry_status, stCls)}</td>
+        <td class="${Number(testRet) >= 0 ? "pnl-pos" : "pnl-neg"}">${testRet != null ? `${fmt(testRet, 2)}%` : "—"}</td>
+        <td class="${Number(stressRet) >= 0 ? "pnl-pos" : "pnl-neg"}">${stressRet != null ? `${fmt(stressRet, 2)}%` : "—"}</td>
+        <td><code>${escapeHtml(String(m.artifact_sha256 || "").slice(0, 12))}…</code></td>
+        <td>
+          <div class="button-row">
+            ${m.promotion_eligible ? `<button type="button" class="button bull xs" data-ml-promote="${escapeHtml(m.model_id)}">Promote (Paper)</button>` : ""}
+            <button type="button" class="button danger-outline xs" data-ml-reject="${escapeHtml(m.model_id)}">Reject</button>
+            <button type="button" class="button secondary xs" data-ml-export="${escapeHtml(m.model_id)}">Export JSON</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="8" class="empty-state">No registered candidate models yet.</td></tr>`;
+  }
+}
+
+function renderModelLabSelectedRun(run) {
+  if (!run || !run.manifest) {
+    if ($("ml-comp-run-label")) $("ml-comp-run-label").textContent = "NO COMPLETED RUN";
+    return;
+  }
+  const mf = run.manifest;
+  const sp = mf.splits || {};
+  if ($("ml-comp-run-label")) $("ml-comp-run-label").textContent = `${run.run_id} · ${mf.market}`;
+  if ($("ml-split-summary")) {
+    $("ml-split-summary").className = "inline-status ok";
+    $("ml-split-summary").textContent =
+      `Dataset ${mf.dataset?.dataset_id} (${mf.dataset?.real_market_data ? "Real Historical" : "Bundled Synthetic Fixture"}) · ` +
+      `Train [${sp.train?.bars} bars: ${String(sp.train?.start_ts || "").slice(0, 10)}→${String(sp.train?.end_ts || "").slice(0, 10)}] → ` +
+      `Embargo(${sp.embargo_1_bars}) → Val [${sp.validation?.bars} bars] → Embargo(${sp.embargo_2_bars}) → ` +
+      `Untouched Test [${sp.untouched_test?.bars} bars, selection_touched_test=${String(sp.untouched_test?.selection_touched_test)}] · ` +
+      `Manifest SHA-256: ${String(run.manifest_sha256 || "").slice(0, 16)}…`;
+  }
+  if ($("ml-candidates-rows")) {
+    $("ml-candidates-rows").innerHTML = (mf.candidates || []).map((c) => {
+      if (!c.untouched_test) {
+        return `<tr>
+          <td><strong>${escapeHtml(c.candidate_id)}</strong><br><small class="muted">${escapeHtml(c.family)}</small></td>
+          <td colspan="9"><span class="muted">${escapeHtml(c.skip_reason || c.status || "Skipped")}</span></td>
+          <td>${statusPill(c.status || "SKIPPED", "warn")}</td>
+        </tr>`;
+      }
+      const tr = c.train || {};
+      const va = c.validation || {};
+      const te = c.untouched_test || {};
+      const st = c.stressed_test || {};
+      const ci = te.uncertainty || {};
+      const rg = te.regime_breakdown || {};
+      return `<tr>
+        <td><strong>${escapeHtml(c.candidate_id)}</strong><br><small class="muted">${escapeHtml(c.family)}</small></td>
+        <td>${fmt(tr.sharpe, 2)}</td>
+        <td>${fmt(va.sharpe, 2)}</td>
+        <td class="${Number(te.net_return_pct) >= 0 ? "pnl-pos" : "pnl-neg"}"><strong>${fmt(te.net_return_pct, 2)}%</strong><br><small class="muted">[${fmt(ci.net_return_ci90_low_pct, 1)}%, ${fmt(ci.net_return_ci90_high_pct, 1)}%]</small></td>
+        <td>${fmt(te.sharpe, 2)} / ${fmt(te.sortino, 2)}</td>
+        <td>${fmt(te.max_drawdown_pct, 2)}%</td>
+        <td>${fmt(te.profit_factor, 2)} / ${fmt(te.win_rate_pct, 0)}%</td>
+        <td>${te.trade_count} / ${fmt(te.turnover_x, 2)}×</td>
+        <td class="${Number(st.net_return_pct) >= 0 ? "pnl-pos" : "pnl-neg"}">${fmt(st.net_return_pct, 2)}%</td>
+        <td><small>T:${fmt(rg.TREND?.return_pct || 0, 1)}% R:${fmt(rg.RANGE?.return_pct || 0, 1)}% V:${fmt(rg.VOLATILE?.return_pct || 0, 1)}%</small></td>
+        <td>${c.promotion_eligible ? statusPill("ELIGIBLE", "ok") : `<span title="${escapeHtml((c.rejection_reasons || []).join("; "))}">${statusPill("REJECTED", "err")}</span>`}</td>
+      </tr>`;
+    }).join("");
+  }
+}
+
+function bindModelLabEvents() {
+  $("ml-refresh-btn")?.addEventListener("click", loadModelLabOverview);
+
+  const kronosAction = async (path, label) => {
+    try {
+      await api(path, { body: {} });
+      await loadModelLabOverview();
+      toast(label, "Kronos operation updated (forecasting-only; zero execution effect).", "ok");
+    } catch (err) {
+      await loadModelLabOverview();
+      toast(`${label} failed`, err.message, "err");
+    }
+  };
+  $("ml-kronos-install-btn")?.addEventListener("click", () => kronosAction("/api/autonomy/kronos/install", "Kronos install started"));
+  $("ml-kronos-verify-btn")?.addEventListener("click", () => kronosAction("/api/autonomy/kronos/verify", "Kronos SHA-256 verification"));
+  $("ml-kronos-selftest-btn")?.addEventListener("click", () => kronosAction("/api/autonomy/kronos/self-test", "Kronos offline CPU self-test"));
+  $("ml-kronos-repair-btn")?.addEventListener("click", () => kronosAction("/api/autonomy/kronos/repair", "Kronos repair started"));
+  $("ml-kronos-cancel-btn")?.addEventListener("click", () => kronosAction("/api/autonomy/kronos/cancel", "Kronos operation cancelled"));
+
+  $("ml-kronos-enable-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/model-lab/kronos/toggle", { body: { enabled: true } });
+      await loadModelLabOverview();
+      toast("Forecasting enabled", "Kronos forecasting enabled for Model Lab & paper advisory only.", "ok");
+    } catch (err) { toast("Enable failed", err.message, "err"); }
+  });
+  $("ml-kronos-disable-btn")?.addEventListener("click", async () => {
+    try {
+      await api("/api/model-lab/kronos/toggle", { body: { enabled: false } });
+      await loadModelLabOverview();
+      toast("Forecasting disabled", "Kronos forecasting disabled.", "warn");
+    } catch (err) { toast("Disable failed", err.message, "err"); }
+  });
+  $("ml-kronos-load-btn")?.addEventListener("click", () => kronosAction("/api/model-lab/kronos/load", "Kronos model load"));
+  $("ml-kronos-unload-btn")?.addEventListener("click", () => kronosAction("/api/model-lab/kronos/unload", "Kronos worker unloaded"));
+  $("ml-kronos-clear-err-btn")?.addEventListener("click", () => kronosAction("/api/model-lab/kronos/clear-error", "Kronos error state cleared"));
+
+  $("ml-kronos-config-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/model-lab/kronos/config", {
+        body: {
+          cadence_seconds: Number($("ml-cfg-cadence").value || 300),
+          timeout_seconds: Number($("ml-cfg-timeout").value || 45),
+          horizon: Number($("ml-cfg-horizon").value || 5),
+          samples: Number($("ml-cfg-samples").value || 8),
+        },
+      });
+      await loadModelLabOverview();
+      toast("Inference config saved", "Cadence, timeout, horizon, and MC samples updated.", "ok");
+    } catch (err) { toast("Config rejected", err.message, "err"); }
+  });
+
+  $("ml-forecast-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("ml-fc-output").className = "inline-status top-space warn";
+    $("ml-fc-output").textContent = "Running validated Kronos CPU inference (no mock fallback)…";
+    try {
+      const fc = await api("/api/model-lab/kronos/forecast", {
+        body: {
+          market: $("ml-fc-market").value,
+          symbol: $("ml-fc-symbol").value.trim(),
+          timeframe: $("ml-fc-tf").value,
+          dataset_id: $("ml-fc-dataset").value || null,
+        },
+      });
+      $("ml-fc-freshness-pill").textContent = fc.freshness_state || "FRESH";
+      $("ml-fc-freshness-pill").className = "status-pill ok";
+      $("ml-fc-output").className = "inline-status top-space ok";
+      $("ml-fc-output").textContent =
+        `[ADVISORY FORECAST ONLY — NOT A TRADE INSTRUCTION] ${fc.market}:${fc.symbol} (${fc.timeframe}, ${fc.context_bars_used} bars ending ${fc.input_end}) → ` +
+        `Horizon ${fc.horizon_bars} bars: Mean ${fc.mean_close} (${fc.expected_return_pct >= 0 ? "+" : ""}${fc.expected_return_pct}%), ` +
+        `q10..q90 [${fc.q10_close}, ${fc.q90_close}], P(up)=${fc.up_probability}, Latency=${fc.latency_ms?.inference_ms}ms, Manifest=${String(fc.model_identity?.manifest_sha256 || "").slice(0, 12)}…`;
+      await loadModelLabOverview();
+    } catch (err) {
+      $("ml-fc-freshness-pill").textContent = "UNAVAILABLE";
+      $("ml-fc-freshness-pill").className = "status-pill err";
+      $("ml-fc-output").className = "inline-status top-space err";
+      $("ml-fc-output").textContent = `UNAVAILABLE (Fail-Closed): ${err.message}`;
+    }
+  });
+
+  $("ml-capture-ds-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const res = await api("/api/model-lab/datasets/capture-live", {
+        body: {
+          market: $("ml-cap-market").value,
+          symbol: $("ml-cap-symbol").value.trim(),
+          timeframe: $("ml-cap-tf").value,
+        },
+      });
+      await loadModelLabOverview();
+      toast("Dataset captured", `Registered ${res.dataset.dataset_id} (${res.dataset.bar_count} bars, SHA-256 ${res.dataset.sha256.slice(0, 12)}…).`, "ok");
+    } catch (err) { toast("Capture blocked", err.message, "err"); }
+  });
+
+  $("ml-import-ds-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const res = await api("/api/model-lab/datasets/import", {
+        body: {
+          market: $("ml-imp-market").value,
+          symbol: $("ml-imp-symbol").value.trim(),
+          timeframe: $("ml-imp-tf").value,
+          csv_text: $("ml-imp-csv").value,
+        },
+      });
+      $("ml-imp-csv").value = "";
+      await loadModelLabOverview();
+      toast("CSV dataset imported", `Registered ${res.dataset.dataset_id} (${res.dataset.bar_count} bars).`, "ok");
+    } catch (err) { toast("CSV import rejected", err.message, "err"); }
+  });
+
+  $("ml-run-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("ml-run-progress").className = "inline-status top-space warn";
+    $("ml-run-progress").textContent = "Starting chronological walk-forward & untouched-test evaluation…";
+    try {
+      const run = await api("/api/model-lab/runs", {
+        body: {
+          dataset_id: $("ml-run-dataset").value,
+          market: $("ml-run-market").value,
+          train_frac: Number($("ml-run-train").value || 0.6),
+          val_frac: Number($("ml-run-val").value || 0.2),
+          embargo_bars: Number($("ml-run-embargo").value || 5),
+          spread_bps: Number($("ml-run-spread").value || 4.0),
+          slippage_bps: Number($("ml-run-slippage").value || 5.0),
+          stress_multiplier: Number($("ml-run-stress").value || 2.0),
+          min_trades: Number($("ml-run-mintrades").value || 5),
+          include_kronos: $("ml-run-kronos").value === "true",
+          async_execution: false,
+        },
+      });
+      state.ml.selectedRunId = run.run_id;
+      $("ml-run-progress").className = `inline-status top-space ${run.status === "COMPLETED" ? "ok" : "warn"}`;
+      $("ml-run-progress").textContent = `${run.run_id}: ${run.status} — ${run.status_detail}`;
+      await loadModelLabOverview();
+      toast("Research run finished", `${run.run_id} (${run.status}) — zero execution changes.`, "ok");
+    } catch (err) {
+      $("ml-run-progress").className = "inline-status top-space err";
+      $("ml-run-progress").textContent = `Research run failed: ${err.message}`;
+      toast("Research run failed", err.message, "err");
+    }
+  });
+
+  $("ml-run-cancel-btn")?.addEventListener("click", async () => {
+    const runs = state.ml.overview?.runs || [];
+    const active = runs.find((r) => r.status === "RUNNING" || r.status === "QUEUED") || runs[0];
+    if (!active) { toast("No active run", "There is no running research job to cancel.", "info"); return; }
+    try {
+      await api(`/api/model-lab/runs/${encodeURIComponent(active.run_id)}/cancel`, { body: {} });
+      await loadModelLabOverview();
+      toast("Research run cancelled", `${active.run_id} marked CANCELLED.`, "warn");
+    } catch (err) { toast("Cancel failed", err.message, "err"); }
+  });
+
+  $("ml-runs-rows")?.addEventListener("click", (e) => {
+    const runId = e.target.closest("[data-ml-inspect-run]")?.dataset.mlInspectRun;
+    if (!runId) return;
+    state.ml.selectedRunId = runId;
+    renderModelLab();
+  });
+
+  $("ml-models-rows")?.addEventListener("click", async (e) => {
+    const promoteId = e.target.closest("[data-ml-promote]")?.dataset.mlPromote;
+    const rejectId = e.target.closest("[data-ml-reject]")?.dataset.mlReject;
+    const exportId = e.target.closest("[data-ml-export]")?.dataset.mlExport;
+    try {
+      if (promoteId) {
+        await api(`/api/model-lab/models/${encodeURIComponent(promoteId)}/promote`, { body: { note: "Operator promoted for paper reference" } });
+        await loadModelLabOverview();
+        toast("Promoted for Paper Reference", `${promoteId} marked PROMOTED_PAPER_CANDIDATE (zero live authorization).`, "ok");
+      } else if (rejectId) {
+        await api(`/api/model-lab/models/${encodeURIComponent(rejectId)}/reject`, { body: { note: "Rejected by operator in Model Lab" } });
+        await loadModelLabOverview();
+        toast("Model rejected", `${rejectId} marked REJECTED.`, "warn");
+      } else if (exportId) {
+        const bundle = await api(`/api/model-lab/models/${encodeURIComponent(exportId)}/export`);
+        if ($("ml-bundle-json")) $("ml-bundle-json").value = JSON.stringify(bundle, null, 2);
+        toast("Model bundle exported", `SHA-256 ${bundle.bundle_sha256.slice(0, 14)}… written to inspector.`, "ok");
+      }
+    } catch (err) { toast("Model registry action failed", err.message, "err"); }
+  });
+
+  $("ml-import-bundle-btn")?.addEventListener("click", async () => {
+    const raw = $("ml-bundle-json")?.value.trim();
+    if (!raw) { toast("Bundle JSON empty", "Paste or export a valid axiom.model_lab.bundle.v1 JSON first.", "warn"); return; }
+    try {
+      const parsed = JSON.parse(raw);
+      const res = await api("/api/model-lab/models/import", { body: { bundle: parsed } });
+      await loadModelLabOverview();
+      toast("Bundle SHA-256 verified & imported", `Imported ${res.model.model_id} (paper reference only).`, "ok");
+    } catch (err) { toast("Bundle import rejected", err.message, "err"); }
+  });
+}
+
 function init() {
-  bindEvents(); $("refresh-interval").value = "10000"; renderActivity();
+  bindEvents(); bindModelLabEvents(); $("refresh-interval").value = "10000"; renderActivity();
   const saved = storageGet("axiom-api-token");
   if (saved) unlock(saved); else showAuth();
 }
