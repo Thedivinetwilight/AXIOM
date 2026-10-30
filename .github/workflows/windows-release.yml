@@ -250,7 +250,7 @@ jobs:
             (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName,
             'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
             'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
-            'dist\kronos-status.json',
+            'dist\kronos-status.json', 'dist\model-lab-kronos-forecast.json',
             '..\..\config\kronos-small.json', '..\..\config\kronos-runtime-requirements.txt',
             'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log', 'js-multimarket.log', 'js-modellab.log',
             'benchmark-python.log', 'js-terminal-benchmark.log',
@@ -303,6 +303,7 @@ jobs:
             src/packaging/windows/dist/installer-test-log.txt
             src/packaging/windows/dist/portable-test-log.txt
             src/packaging/windows/dist/kronos-status.json
+            src/packaging/windows/dist/model-lab-kronos-forecast.json
             src/config/kronos-small.json
             src/config/kronos-runtime-requirements.txt
             src/packaging/windows/dist/INSTALL_TEST_ERROR.txt

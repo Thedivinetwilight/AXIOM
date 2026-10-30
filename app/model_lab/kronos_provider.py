@@ -496,6 +496,7 @@ class KronosForecastProvider:
             "is_forecast": True,
             "advisory_only": True,
             "trade_instruction": False,
+            "execution_authorized": False,
             "certainty_claim": "none",
             "mock_outputs_used": False,
             "market": mkt,
