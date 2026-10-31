@@ -422,9 +422,6 @@ main {
   font-family: var(--mono);
   font-size: 11.5px;
 }
-body[data-mode="VANTAGE_DEMO"] .execution-boundary strong { color: var(--warning); }
-body[data-mode="VANTAGE_LIVE"] .execution-boundary { border-color: var(--bear); background: linear-gradient(90deg, #2b141c, #1e222d 65%); }
-body[data-mode="VANTAGE_LIVE"] .execution-boundary strong { color: #ff808b; }
 
 /* Pages & Panels */
 .page { display: grid; gap: 13px; }

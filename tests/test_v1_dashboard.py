@@ -44,7 +44,8 @@ class TestDashboardAuthAndBadges:
         response = client.get("/dashboard", headers=H)
         assert response.status_code == 200
         assert "LEGACY PAPER/SANDBOX ONLY" in response.text
-        assert "VANTAGE OPERATOR" in response.text
+        assert "OPERATOR TERMINAL" in response.text
+        assert "VANTAGE OPERATOR" not in response.text
         assert 'href="/terminal"' in response.text
         assert "EMERGENCY STOP" in response.text
 

@@ -2,8 +2,8 @@
 # Windows version resource embedded in AXIOM-Chart.exe.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(3, 7, 0, 8),
-    prodvers=(3, 7, 0, 8),
+    filevers=(3, 7, 0, 9),
+    prodvers=(3, 7, 0, 9),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,13 +16,13 @@ VSVersionInfo(
       StringTable(
         '040904B0',
         [StringStruct('CompanyName', 'AXIOM'),
-         StringStruct('FileDescription', 'AXIOM Operator (paper + guarded Vantage MT5)'),
-         StringStruct('FileVersion', '3.7.0.8'),
+         StringStruct('FileDescription', 'AXIOM Operator (local paper + Upstox NSE & Alpaca NASDAQ)'),
+         StringStruct('FileVersion', '3.7.0.9'),
          StringStruct('InternalName', 'AXIOM-Chart'),
          StringStruct('LegalCopyright', ''),
          StringStruct('OriginalFilename', 'AXIOM-Chart.exe'),
          StringStruct('ProductName', 'AXIOM Operator'),
-         StringStruct('ProductVersion', '3.7.0a8')])
+         StringStruct('ProductVersion', '3.7.0a9')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

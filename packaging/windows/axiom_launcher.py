@@ -2,9 +2,10 @@
 
 Writable configuration, SQLite state, logs and DPAPI blobs live in the per-user
 data directory and survive upgrades. The legacy engine configuration remains
-hard-pinned to local paper; Vantage is a separate in-app session that always
-starts disconnected and disarmed. The launcher opens the authenticated operator
-shell on loopback and never prints the local API token or broker credentials.
+hard-pinned to local paper; NSE (Upstox) and NASDAQ (Alpaca) live execution
+gates always start disarmed and OFF by default. The launcher opens the
+authenticated operator shell on loopback and never prints the local API token
+or broker credentials.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 
 APP_NAME = "AXIOM"
 APP_TITLE = "AXIOM Operator"
-BUILD_LABEL = "local paper + guarded Vantage MT5"
+BUILD_LABEL = "local paper + Upstox (NSE) & Alpaca (NASDAQ)"
 DEFAULT_PORT = 8000
 TOKEN_ENV = "API_TOKEN"
 LOOPBACK = "127.0.0.1"
@@ -31,8 +32,8 @@ CONFIG_TEMPLATE = """\
 # Keep it private. It can contain a local API token and market-data keys.
 
 # --- legacy engine safety switches (do not change) ---
-# Vantage is selected separately in the operator UI and always starts
-# disconnected/disarmed. Never put an MT5 login or password in this file.
+# Upstox (NSE) and Alpaca (NASDAQ) credentials are stored separately in
+# Windows DPAPI via the operator UI and always start disarmed.
 MODE=PAPER
 LIVE_TRADING=false
 BROKER=LOCAL_PAPER
@@ -75,7 +76,7 @@ BANNER = r"""
   ___  _  _ ___  __  __
  / _ \| || |_ _| \ \/ /   {title}
 | (_) | __ || |   >  <    {label}
- \___/|_||_|___| /_/\_\   PAPER DEFAULT - VANTAGE DISARMED
+ \___/|_||_|___| /_/\_\   PAPER DEFAULT - LIVE GATES DISARMED
 
 """
 
@@ -211,7 +212,7 @@ def build_app():
     if settings.broker.upper() != "LOCAL_PAPER":
         raise LaunchError(
             f"refusing to start: BROKER={settings.broker}; the legacy engine requires "
-            "LOCAL_PAPER (select Vantage only in the operator UI)"
+            "LOCAL_PAPER (configure Upstox and Alpaca only in the operator UI)"
         )
     # create_app() resolves its data directory from the application root, which
     # inside a frozen bundle is the extracted payload (sys._MEIPASS). The sample
@@ -256,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  data     {data_dir}")
         print(f"  feed     {config['data_source']}")
         print("  token    read API_TOKEN from the private config file (not printed)")
-        print("           enter it in the operator page; it is separate from MT5 credentials")
+        print("           enter it in the operator page; it is separate from Upstox and Alpaca credentials")
         app = build_app()
         preferred = int(os.environ.get("AXIOM_PORT") or DEFAULT_PORT)
         port = free_port(preferred)

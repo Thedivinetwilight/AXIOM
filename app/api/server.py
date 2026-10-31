@@ -373,7 +373,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
         title="Arena",
         version=__version__,
         lifespan=lifespan,
-        description="Local paper plus guarded Vantage MT5 demo/live sessions; startup is disconnected and disarmed.",
+        description="Local paper plus NSE (Upstox) and NASDAQ (Alpaca) multi-market operator console; startup is paper-only and disarmed.",
         docs_url="/docs",
         redoc_url=None,
     )

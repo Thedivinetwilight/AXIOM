@@ -216,7 +216,7 @@ border-radius:8px;font-size:14px;text-decoration:none}
 <strong>AXIOM legacy research</strong><span class="badge" id="mode">…</span>
 <span class="badge warn">LEGACY PAPER/SANDBOX ONLY</span>
 <span id="conn" class="badge">…</span>
-<a class="chartlink" href="/terminal">VANTAGE OPERATOR</a>
+<a class="chartlink" href="/terminal">OPERATOR TERMINAL</a>
 <a class="chartlink" href="/chart" title="Legacy chart and local paper ticket">CHARTS + PAPER</a>
 <button class="chartlink" id="resume">RESUME LEGACY PAPER</button>
 <button class="stop" id="stop">LEGACY EMERGENCY STOP</button><span id="err"></span>
@@ -299,13 +299,13 @@ document.getElementById('err').onclick = () => {
   if (t) { sessionStorage.setItem('arena_token', t); tick(); }
 };
 document.getElementById('resume').onclick = async () => {
-  if(!confirm('Resume only the legacy paper engine? Vantage remains unchanged and disarmed.'))return;
+  if(!confirm('Resume only the legacy paper engine? Upstox and Alpaca live gates remain unchanged and disarmed.'))return;
   const r = await fetch('/engine/resume',{method:'POST',headers:H});
   document.getElementById('err').textContent = r.ok ? 'legacy resume confirmed' : 'legacy resume failed ('+r.status+')';
   tick();
 };
 document.getElementById('stop').onclick = async () => {
-  if(!confirm('LEGACY EMERGENCY STOP: halt legacy paper/sandbox work? Use the operator console for Vantage.'))return;
+  if(!confirm('LEGACY EMERGENCY STOP: halt legacy paper/sandbox work? Use the operator console (/terminal) for NSE and NASDAQ sessions.'))return;
   const r = await fetch('/engine/stop',{method:'POST',headers:H});
   document.getElementById('err').textContent = r.ok ? 'legacy stop recorded' : 'legacy stop failed ('+r.status+')';
   tick();

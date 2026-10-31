@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller recipe for AXIOM Operator (local paper + guarded Vantage MT5).
+"""PyInstaller recipe for AXIOM Operator (local paper + Upstox NSE & Alpaca NASDAQ).
 
 Bundle contents that matter at runtime:
 
@@ -62,7 +62,6 @@ datas = [
     # PyInstaller data destinations are directories, not target filenames.
     # /manual reads USER_MANUAL.md at the frozen resource root.
     (str(ROOT / "USER_MANUAL.md"), "."),
-    (str(ROOT / "docs" / "VANTAGE_NEXT_VERSION_PLAN.md"), "docs"),
     (str(ROOT / "docs" / "TERMINAL_REDESIGN_PLAN.md"), "docs"),
     (str(ROOT / "docs" / "TERMINAL_PERFORMANCE.md"), "docs"),
     (str(ROOT / "docs" / "LISTED_ASSETS.md"), "docs"),

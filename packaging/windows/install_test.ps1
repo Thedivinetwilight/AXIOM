@@ -245,10 +245,10 @@ try {
     Step 'operator-and-chart' 'checking installed pages, assets and token gates'
     $terminal = Invoke-WebRequest -UseBasicParsing ('{0}/terminal' -f $base) -TimeoutSec 20
     Check ($terminal.StatusCode -eq 200) ('/terminal returns 200 (got {0})' -f $terminal.StatusCode)
-    Check ($terminal.Content -match 'LOCAL PAPER' -and $terminal.Content -match 'VANTAGE LIVE') '/terminal names all explicit execution modes'
-    Check ($terminal.Content -match 'execution-boundary' -and $terminal.Content -match 'watchlist-only' -and $terminal.Content -match 'drawing-tool' -and $terminal.Content -match 'performance-summary') 'installed terminal includes boundary, watchlist, drawing and diagnostics controls'
+    Check ($terminal.Content -match 'LOCAL PAPER' -and $terminal.Content -match 'Upstox' -and $terminal.Content -match 'Alpaca' -and $terminal.Content -notmatch 'VANTAGE LIVE') '/terminal names LOCAL PAPER, Upstox (NSE), and Alpaca (NASDAQ) without Vantage UI'
+    Check ($terminal.Content -match 'execution-boundary' -and $terminal.Content -match 'mm-watchlist-grid' -and $terminal.Content -match 'drawing-tool' -and $terminal.Content -match 'performance-summary') 'installed terminal includes boundary, watchlist, drawing and diagnostics controls'
     $terminalJs = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.js' -f $base) -TimeoutSec 20
-    Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'submitVantageReview' -and $terminalJs.Content -match 'bindChartCanvas' -and $terminalJs.Content -match 'renderTicketEstimate') 'operator JavaScript and chart/ticket interactions are served from the installed package'
+    Check ($terminalJs.StatusCode -eq 200 -and $terminalJs.Content -match 'loadMultiMarketOverview' -and $terminalJs.Content -match 'bindChartCanvas' -and $terminalJs.Content -match 'renderTicketEstimate') 'operator JavaScript and chart/ticket interactions are served from the installed package'
     $terminalCss = Invoke-WebRequest -UseBasicParsing ('{0}/static/terminal/terminal.css' -f $base) -TimeoutSec 20
     Check ($terminalCss.StatusCode -eq 200) 'operator CSS is served from the installed package'
     $autonomy = Invoke-WebRequest -UseBasicParsing ('{0}/autonomy' -f $base) -TimeoutSec 20
@@ -258,7 +258,7 @@ try {
     $autonomyManual = Invoke-WebRequest -UseBasicParsing ('{0}/autonomy/manual' -f $base) -TimeoutSec 20
     Check ($autonomyManual.StatusCode -eq 200 -and $autonomyManual.Content -match 'not a live-readiness certificate') 'installed autonomy manual preserves limitations'
     $manual = Invoke-WebRequest -UseBasicParsing ('{0}/manual' -f $base) -TimeoutSec 20
-    Check ($manual.StatusCode -eq 200 -and $manual.Content -match 'Vantage' -and $manual.Content -match 'Activate') 'installed manual covers Vantage and Activate'
+    Check ($manual.StatusCode -eq 200 -and $manual.Content -match 'Upstox' -and $manual.Content -match 'Alpaca' -and $manual.Content -match 'Activate') 'installed manual covers Upstox, Alpaca, and Activate'
 
     $chart = Invoke-WebRequest -UseBasicParsing ('{0}/chart' -f $base) -TimeoutSec 20
     Check ($chart.StatusCode -eq 200) ('/chart returns 200 (got {0})' -f $chart.StatusCode)

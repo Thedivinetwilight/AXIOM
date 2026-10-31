@@ -288,14 +288,14 @@ try {
     $Ok = (Check ($Chart.Content -match 'PAPER') 'chart page displays the PAPER badge') -and $Ok
 
     $Terminal = Invoke-WebRequest -UseBasicParsing "$Base/terminal" -TimeoutSec 10
-    $Ok = (Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'VANTAGE LIVE' -and $Terminal.Content -match 'LOCAL PAPER') '/terminal returns all explicit execution modes') -and $Ok
-    $Ok = (Check ($Terminal.Content -match 'execution-boundary' -and $Terminal.Content -match 'watchlist-only' -and $Terminal.Content -match 'chart-indicator' -and $Terminal.Content -match 'drawing-tool' -and $Terminal.Content -match 'performance-summary') 'redesigned boundary, watchlist, chart tools and diagnostics are bundled') -and $Ok
+    $Ok = (Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'LOCAL PAPER' -and $Terminal.Content -match 'Upstox' -and $Terminal.Content -match 'Alpaca' -and $Terminal.Content -notmatch 'VANTAGE LIVE') '/terminal presents LOCAL PAPER, Upstox (NSE), and Alpaca (NASDAQ) without Vantage UI') -and $Ok
+    $Ok = (Check ($Terminal.Content -match 'execution-boundary' -and $Terminal.Content -match 'mm-watchlist-grid' -and $Terminal.Content -match 'chart-indicator' -and $Terminal.Content -match 'drawing-tool' -and $Terminal.Content -match 'performance-summary') 'redesigned boundary, watchlist, chart tools and diagnostics are bundled') -and $Ok
     $TerminalJs = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.js" -TimeoutSec 10
-    $Ok = (Check ($TerminalJs.StatusCode -eq 200 -and $TerminalJs.Content -match 'submitVantageReview' -and $TerminalJs.Content -match 'bindChartCanvas' -and $TerminalJs.Content -match 'renderTicketEstimate') 'operator terminal.js and reviewed ticket/chart interactions served from the bundle') -and $Ok
+    $Ok = (Check ($TerminalJs.StatusCode -eq 200 -and $TerminalJs.Content -match 'loadMultiMarketOverview' -and $TerminalJs.Content -match 'bindChartCanvas' -and $TerminalJs.Content -match 'renderTicketEstimate') 'operator terminal.js and reviewed ticket/chart interactions served from the bundle') -and $Ok
     $TerminalCss = Invoke-WebRequest -UseBasicParsing "$Base/static/terminal/terminal.css" -TimeoutSec 10
     $Ok = (Check ($TerminalCss.StatusCode -eq 200) 'operator terminal.css served from the bundle') -and $Ok
     $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 10
-    $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Vantage' -and $Manual.Content -match 'Arm' -and $Manual.Content -match 'Owner-run Vantage DEMO execution rehearsal' -and $Manual.Content -match 'LIVE-readiness checklist') 'bundled user manual covers lifecycle, owner DEMO verification and LIVE checklist') -and $Ok
+    $Ok = (Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Upstox' -and $Manual.Content -match 'Alpaca' -and $Manual.Content -match 'Arm' -and $Manual.Content -match 'Activate') 'bundled user manual covers Upstox (NSE), Alpaca (NASDAQ), and Arm/Activate lifecycle') -and $Ok
     $Autonomy = Invoke-WebRequest -UseBasicParsing "$Base/autonomy" -TimeoutSec 10
     $Ok = (Check ($Autonomy.StatusCode -eq 200 -and $Autonomy.Content -match 'PAPER' -and $Autonomy.Content -match 'UPSTOX_LIVE' -and $Autonomy.Content -match 'static/autonomy/autonomy.js') 'autonomy page and explicit execution boundaries are bundled') -and $Ok
     $AutonomyJs = Invoke-WebRequest -UseBasicParsing "$Base/static/autonomy/autonomy.js" -TimeoutSec 10
@@ -517,7 +517,7 @@ Copy-Item $Setup.FullName $InstallStage
 foreach ($part in $SetupParts) { Copy-Item $part $InstallStage }
 Copy-Item -Recurse $OnedirRoot $PortableApp
 $Docs = @(
-    'US_EQUITIES_PAPER.md', 'VANTAGE_NEXT_VERSION_PLAN.md', 'TERMINAL_REDESIGN_PLAN.md',
+    'US_EQUITIES_PAPER.md', 'TERMINAL_REDESIGN_PLAN.md',
     'TERMINAL_PERFORMANCE.md', 'LISTED_ASSETS.md', 'WINDOWS_APP_CONTROL.md',
     'RESEARCH_CANDIDATES.md'
 )

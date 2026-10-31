@@ -1,10 +1,10 @@
 ; AXIOM Operator - Windows x64 installer (Inno Setup 6).
 ;
-; Ships local paper and the guarded official Vantage MT5 integration. No
-; credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
+; Ships local paper and the multi-market Upstox (NSE) + Alpaca (NASDAQ) console.
+; No credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
 ; live in %LOCALAPPDATA%\AXIOM, preserved on upgrade and silent uninstall.
 ;
-; Build with:  ISCC.exe /DMyAppVersion=3.7.0a8 axiom.iss
+; Build with:  ISCC.exe /DMyAppVersion=3.7.0a9 axiom.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
@@ -61,7 +61,6 @@ Source: "dist\SOURCE_COMMIT.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "WINDOWS_INSTALL_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\USER_MANUAL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\US_EQUITIES_PAPER.md"; DestDir: "{app}\docs"; Flags: ignoreversion
-Source: "..\..\docs\VANTAGE_NEXT_VERSION_PLAN.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\TERMINAL_REDESIGN_PLAN.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\TERMINAL_PERFORMANCE.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\LISTED_ASSETS.md"; DestDir: "{app}\docs"; Flags: ignoreversion
@@ -83,8 +82,8 @@ Name: "{group}\AXIOM user manual"; Filename: "{app}\WINDOWS_INSTALL_MANUAL.md"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-; Opens the operator console; Vantage remains disconnected and disarmed.
-Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName} (paper default; Vantage disarmed)"; Flags: nowait postinstall skipifsilent
+; Opens the operator console; live broker gates remain OFF and disarmed.
+Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName} (paper default; live gates disarmed)"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Nothing here: program files are handled by Inno, and the operator's paper

@@ -14,7 +14,7 @@
     <div class="brand-mark" aria-hidden="true">A</div>
     <p class="eyebrow">LOCAL OPERATOR ACCESS · MULTI-MARKET DESKTOP</p>
     <h1 id="auth-title">Unlock AXIOM Terminal</h1>
-    <p>Enter AXIOM’s local <strong>API_TOKEN</strong>. This is kept only in this browser tab’s session storage and is completely separate from Upstox, Alpaca, and Vantage credentials.</p>
+    <p>Enter AXIOM’s local <strong>API_TOKEN</strong>. This is kept only in this browser tab’s session storage and is completely separate from Upstox (NSE) and Alpaca (NASDAQ) credentials.</p>
     <label for="auth-token">AXIOM API token</label>
     <input id="auth-token" type="password" autocomplete="current-password" required>
     <button class="button primary" type="submit">Unlock operator console</button>
@@ -49,7 +49,7 @@
     <div class="sidebar-foot">
       <span class="status-pill" id="global-lifecycle">DISARMED</span>
       <p id="global-lock-note">No broker session is active.</p>
-      <p class="small muted" id="sidebar-automation">No paper strategy active. Vantage automation OFF. No profitability claim.</p>
+      <p class="small muted" id="sidebar-automation">No paper strategy active. Live execution OFF by default. No profitability claim.</p>
     </div>
   </aside>
 
@@ -74,7 +74,7 @@
       </div>
 
       <div class="topbar-identity">
-        <span id="global-server">No MT5 server</span>
+        <span id="global-server">NSE (Upstox) · NASDAQ (Alpaca)</span>
         <strong id="global-account">Local paper</strong>
       </div>
       <button type="button" class="button secondary" id="refresh-all">Refresh</button>
@@ -83,13 +83,8 @@
 
     <div class="environment-bar">
       <div class="environment-select">
-        <label for="session-mode">Execution session</label>
-        <select id="session-mode">
-          <option value="AXIOM_PAPER">LOCAL PAPER · local simulated fills</option>
-          <option value="VANTAGE_DEMO">VANTAGE DEMO · MT5 demo account</option>
-          <option value="VANTAGE_LIVE">VANTAGE LIVE · real account, locked by default</option>
-        </select>
-        <button type="button" class="button secondary" id="apply-mode">Apply mode</button>
+        <span class="eyebrow">EXECUTION MODES</span>
+        <span class="status-pill info" id="session-mode-summary">LOCAL PAPER · NSE (UPSTOX) · NASDAQ (ALPACA)</span>
       </div>
       <div class="provider-pill-strip" id="mm-provider-strip" aria-label="Market data, Kronos and live gate summary">
         <span class="status-pill" id="mm-pill-upstox-data">UPSTOX DATA · DISCONNECTED</span>
@@ -168,7 +163,7 @@
           <article class="metric-card"><span>Selected session equity</span><strong id="metric-equity">—</strong><small id="metric-currency">account currency</small></article>
           <article class="metric-card bull"><span>Unrealized P&amp;L</span><strong id="metric-unrealized">—</strong><small id="metric-unrealized-note">broker/local confirmed view</small></article>
           <article class="metric-card"><span>Realized P&amp;L</span><strong id="metric-realized">—</strong><small id="realized-window">visible history</small></article>
-          <article class="metric-card warn"><span>Available cash / margin</span><strong id="metric-margin">—</strong><small id="metric-margin-note">paper cash / MT5 free margin</small></article>
+          <article class="metric-card warn"><span>Available cash</span><strong id="metric-margin">—</strong><small id="metric-margin-note">local simulated cash</small></article>
         </div>
 
         <article class="panel" id="paper-run-panel" hidden>
@@ -295,27 +290,6 @@
           </div>
           <div id="mm-watchlist-grid" class="provider-grid"></div>
         </article>
-
-        <article class="panel">
-          <div class="panel-head"><div><p class="eyebrow">MT5 ACCOUNT-DISCOVERED UNIVERSE (VANTAGE)</p><h3>MT5 Symbols &amp; Contract Inspector</h3></div></div>
-          <div class="toolbar">
-            <div class="field grow"><label for="instrument-search">Search broker symbol, name or path</label><input id="instrument-search" type="search" placeholder="e.g. EURUSD or Apple"></div>
-            <div class="field"><label for="product-filter">Product</label><select id="product-filter"><option value="">All product types</option></select></div>
-            <label class="check-label"><input type="checkbox" id="selected-only"> Execution selection only</label>
-            <label class="check-label"><input type="checkbox" id="watchlist-only"> Watchlist only</label>
-            <button type="button" class="button secondary" id="watch-visible">Watch visible</button>
-            <button type="button" class="button secondary" id="clear-watchlist">Clear watchlist</button>
-            <button type="button" class="button secondary" id="reload-instruments">Reload discovered</button>
-            <button type="button" class="button primary" id="save-instruments">Save execution selection</button>
-          </div>
-          <div class="inline-status" id="instrument-status" role="status"></div>
-          <p class="muted small" id="watchlist-status">Watchlist is local to this browser tab. Watching a symbol never selects it for execution, connects a feed, or changes Arm/Activate.</p>
-          <div class="table-wrap tall"><table><thead><tr><th>Watch</th><th>Select</th><th>Symbol / name</th><th>Product</th><th>Trade mode</th><th>Min / step</th><th>Tick / digits</th><th>Freshness</th><th>Contract</th></tr></thead><tbody id="instrument-rows"></tbody></table></div>
-        </article>
-        <article class="panel" id="contract-panel">
-          <div class="panel-head"><div><p class="eyebrow">CONTRACT INSPECTOR</p><h3 id="contract-title">Choose an instrument</h3></div><span class="status-pill" id="contract-tradable">—</span></div>
-          <div id="contract-details" class="contract-grid"><p class="empty-state">Broker metadata and limitations will appear here.</p></div>
-        </article>
       </section>
 
       <!-- 03 SUPERCHARTS & ORDER TICKET -->
@@ -336,7 +310,7 @@
               <div class="field">
                 <label for="mm-chart-source-mode">Data feed</label>
                 <select id="mm-chart-source-mode">
-                  <option value="SESSION">Session / Local Replay / MT5</option>
+                  <option value="SESSION">Local Paper / Replay Session</option>
                   <option value="NSE">NSE Live Read-Only (Upstox)</option>
                   <option value="NASDAQ">NASDAQ Live Read-Only (Alpaca)</option>
                 </select>
@@ -373,18 +347,18 @@
 
           <aside class="panel order-panel">
             <div class="ticket-tabs" role="tablist" aria-label="Order ticket target">
-              <button type="button" class="ticket-tab active" id="ticket-tab-session" data-ticket-tab="SESSION">Session / MT5 Ticket</button>
+              <button type="button" class="ticket-tab active" id="ticket-tab-session" data-ticket-tab="SESSION">Local Paper Ticket</button>
               <button type="button" class="ticket-tab" id="ticket-tab-mm" data-ticket-tab="MULTIMARKET">NSE / NASDAQ Paper</button>
             </div>
 
-            <!-- Preserved Session / MT5 Ticket -->
+            <!-- Local Paper Ticket -->
             <div id="session-ticket-pane">
               <div class="panel-head"><div><p class="eyebrow">MANUAL ORDER</p><h3 id="ticket-title">Paper ticket · simulated</h3></div><span class="status-pill" id="ticket-mode">PAPER</span></div>
               <form id="order-form">
                 <div class="segmented" aria-label="Order side"><button type="button" class="buy active" id="order-buy">BUY</button><button type="button" class="sell" id="order-sell">SELL</button></div>
-                <div class="field"><label for="order-symbol">Broker symbol</label><input id="order-symbol" readonly></div>
+                <div class="field"><label for="order-symbol">Instrument symbol</label><input id="order-symbol" readonly></div>
                 <div class="form-grid">
-                  <div class="field"><label for="order-volume" id="volume-label">Quantity / lots</label><input id="order-volume" type="number" min="0" step="any" required></div>
+                  <div class="field"><label for="order-volume" id="volume-label">Quantity</label><input id="order-volume" type="number" min="0" step="any" required></div>
                   <div class="field"><label for="order-type">Order type</label><select id="order-type"><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select></div>
                 </div>
                 <div class="field" id="limit-field" hidden><label for="order-limit">Limit price</label><input id="order-limit" type="number" min="0" step="any"></div>
@@ -485,7 +459,6 @@
           </div>
           <div class="button-row">
             <button type="button" class="button secondary" id="mm-reconcile-paper-btn">Reconcile NSE &amp; NASDAQ SQLite</button>
-            <button type="button" class="button secondary" id="reconcile-now">Reconcile session</button>
           </div>
         </div>
 
@@ -523,9 +496,9 @@
           </article>
         </div>
 
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">SESSION / MT5 OPEN RISK</p><h3>Session positions</h3></div><span id="position-count" class="status-pill">0</span></div><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Volume</th><th>Open / current</th><th>Unrealized</th><th>SL / TP</th><th>Ownership</th><th>Action</th></tr></thead><tbody id="position-rows"></tbody></table></div></article>
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">INTENTS &amp; WORKING ORDERS</p><h3>Session order state</h3></div></div><div class="table-wrap tall"><table><thead><tr><th>Created</th><th>Instrument</th><th>Side / type</th><th>Volume</th><th>Status</th><th>Broker order</th><th>Last confirmation</th><th>Action</th></tr></thead><tbody id="order-rows"></tbody></table></div></article>
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">FILLS / DEALS</p><h3>Session execution history</h3></div><span class="status-pill" id="deals-label">SIMULATED</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Instrument</th><th>Side / entry</th><th>Volume</th><th>Price</th><th>P&amp;L</th><th>Commission / swap / fee</th></tr></thead><tbody id="deal-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL PAPER POSITIONS</p><h3>Local paper positions</h3></div><span id="position-count" class="status-pill">0</span></div><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Quantity</th><th>Open / current</th><th>Unrealized</th><th>SL / TP</th><th>Ownership</th><th>Action</th></tr></thead><tbody id="position-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL PAPER WORKING &amp; RECORDED ORDERS</p><h3>Local paper order state</h3></div></div><div class="table-wrap tall"><table><thead><tr><th>Created</th><th>Instrument</th><th>Side / type</th><th>Quantity</th><th>Status</th><th>Order ID</th><th>Detail</th><th>Action</th></tr></thead><tbody id="order-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL SIMULATED FILLS</p><h3>Local paper execution history</h3></div><span class="status-pill" id="deals-label">SIMULATED</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Instrument</th><th>Side / entry</th><th>Quantity</th><th>Price</th><th>P&amp;L</th><th>Fee</th></tr></thead><tbody id="deal-rows"></tbody></table></div></article>
       </section>
 
       <!-- 05 STRATEGIES & EXECUTION MODES -->
@@ -643,7 +616,7 @@
           <div>
             <p class="eyebrow">FAIL-CLOSED CONTROLS</p>
             <h2 id="risk-title">Risk bounds, kill switches &amp; live lifecycle</h2>
-            <p>Positive server-side risk caps across NSE (INR), NASDAQ (USD), Alpaca Broker, and Vantage MT5. Arm and Activate are always separate operator actions.</p>
+            <p>Positive server-side risk caps across NSE (INR · Upstox) and NASDAQ (USD · Alpaca). Arm and Activate are always separate operator actions.</p>
           </div>
           <span class="status-pill" id="risk-emergency">STOP CLEAR</span>
         </div>
@@ -679,41 +652,16 @@
           </article>
         </div>
 
-        <div class="content-grid lifecycle-grid">
-          <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">VANTAGE MT5 READINESS</p><h3>Every blocker, in plain language</h3></div><button type="button" class="button secondary" id="run-readiness">Run readiness</button></div>
-            <div id="readiness-summary" class="inline-status">Readiness has not been run in this browser session.</div>
-            <div class="readiness-list" id="readiness-list"></div>
-          </article>
-          <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">OPERATOR LIFECYCLE</p><h3 id="lifecycle-current">DISARMED</h3></div></div>
-            <div class="lifecycle-actions">
-              <button type="button" class="button warning" id="arm-session">1. Arm — no orders</button>
-              <button type="button" class="button danger" id="activate-session">2. Activate — separate confirmation</button>
-              <button type="button" class="button secondary" id="pause-session">Pause new entries</button>
-              <button type="button" class="button secondary" id="stop-session">Stop &amp; reconcile</button>
-              <button type="button" class="button danger-outline" id="clear-emergency">Clear emergency stop</button>
-            </div>
-            <p class="muted small" id="lifecycle-help">Select Vantage and pass readiness before Arm. Credentials alone never authorize activation.</p>
-          </article>
-        </div>
         <article class="panel">
-          <div class="panel-head"><div><p class="eyebrow">VANTAGE MT5 HARD BOUNDS</p><h3>Server-side MT5 risk limits</h3></div><button type="button" class="button primary" id="save-risk">Save risk limits</button></div>
-          <p class="muted">Zero means unconfigured—not unlimited—and blocks Vantage entries. Monetary exposure uses MT5 account-currency margin estimates; deals remain authoritative for costs.</p>
-          <form id="risk-form" class="risk-grid">
-            <div class="field"><label for="risk-max_order_volume">Max order volume (lots)</label><input id="risk-max_order_volume" name="max_order_volume" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_symbol_volume">Max symbol volume (lots)</label><input id="risk-max_symbol_volume" name="max_symbol_volume" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_order_margin">Max order margin</label><input id="risk-max_order_margin" name="max_order_margin" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_total_margin">Max aggregate margin exposure</label><input id="risk-max_total_margin" name="max_total_margin" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_open_positions">Max open positions</label><input id="risk-max_open_positions" name="max_open_positions" type="number" min="0" step="1"></div>
-            <div class="field"><label for="risk-max_daily_loss">Max daily loss</label><input id="risk-max_daily_loss" name="max_daily_loss" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_drawdown_pct">Max drawdown (%)</label><input id="risk-max_drawdown_pct" name="max_drawdown_pct" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_trades_per_day">Max order attempts / day</label><input id="risk-max_trades_per_day" name="max_trades_per_day" type="number" min="0" step="1"></div>
-            <div class="field"><label for="risk-max_margin_usage_pct">Max margin usage (%)</label><input id="risk-max_margin_usage_pct" name="max_margin_usage_pct" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_spread_bps">Max spread (bps)</label><input id="risk-max_spread_bps" name="max_spread_bps" type="number" min="0" step="any"></div>
-            <div class="field"><label for="risk-max_slippage_points">Max slippage (points)</label><input id="risk-max_slippage_points" name="max_slippage_points" type="number" min="0" step="1"></div>
-            <div class="field"><label for="risk-max_quote_age_seconds">Max quote age (seconds)</label><input id="risk-max_quote_age_seconds" name="max_quote_age_seconds" type="number" min="0" step="1"></div>
-          </form>
+          <div class="panel-head"><div><p class="eyebrow">LOCAL PAPER &amp; DURABLE EMERGENCY CONTROLS</p><h3 id="lifecycle-current">PAPER · STOPPED</h3></div></div>
+          <div class="lifecycle-actions">
+            <button type="button" class="button secondary" id="pause-session">Pause paper strategy</button>
+            <button type="button" class="button secondary" id="stop-session">Stop paper session</button>
+            <button type="button" class="button danger-outline" id="clear-emergency">Clear emergency stop</button>
+            <button type="button" class="button secondary" data-go="strategies">Open Alpaca NASDAQ Live Gate →</button>
+            <a class="button secondary" href="/autonomy">Open Upstox NSE Live Gate (/autonomy)</a>
+          </div>
+          <p class="muted small" id="lifecycle-help">Local paper uses the independent simulator. NSE (Upstox) and NASDAQ (Alpaca) live execution gates remain OFF by default and require separate readiness, Arm, and Activate confirmation.</p>
         </article>
       </section>
 
@@ -722,7 +670,7 @@
         <div class="page-intro">
           <div>
             <p class="eyebrow">WINDOWS DPAPI PROTECTED CREDENTIALS · READ-ONLY VERIFICATION</p>
-            <h2 id="connections-title">Upstox (NSE), Alpaca (NASDAQ) &amp; Vantage Connections</h2>
+            <h2 id="connections-title">Upstox (NSE) &amp; Alpaca (NASDAQ) Connections</h2>
             <p>Market-data credentials and live-execution credentials are stored in separate encrypted DPAPI slots and never echoed back. Test buttons execute harmless read-only GET probes with zero order calls.</p>
           </div>
           <span class="status-pill" id="secret-store-status">STORE —</span>
@@ -820,46 +768,6 @@
             </form>
           </div>
         </article>
-
-        <!-- Preserved Vantage MT5 Connections -->
-        <div class="content-grid two">
-          <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">PROTECTED PROFILE (VANTAGE MT5)</p><h3 id="credential-environment">Vantage credential</h3></div><button type="button" class="text-button" id="edit-credential">Edit / replace</button></div>
-            <form id="credential-form">
-              <div class="form-grid">
-                <div class="field"><label for="mt5-login">MT5 account login</label><input id="mt5-login" inputmode="numeric" autocomplete="off" required></div>
-                <div class="field"><label for="mt5-password">Trading password</label><input id="mt5-password" type="password" autocomplete="new-password" required></div>
-              </div>
-              <div class="field"><label for="mt5-server">Exact MT5 server</label><input id="mt5-server" list="mt5-servers" autocomplete="off" required><datalist id="mt5-servers"><option value="VantageMarkets-Live 13"></option></datalist></div>
-              <div class="field"><label for="mt5-path">MT5 terminal64.exe path (optional if auto-detected)</label><input id="mt5-path" autocomplete="off" placeholder="C:\Program Files\MetaTrader 5\terminal64.exe"></div>
-              <div class="field"><label for="mt5-label">Optional account label</label><input id="mt5-label" maxlength="80" autocomplete="off"></div>
-              <p class="muted small">Password fields always remain blank after save and when editing. Replace requires the full credential again.</p>
-              <div class="button-row">
-                <button type="submit" class="button primary" id="save-credential">Save new credential</button>
-                <button type="button" class="button warning" id="replace-credential">Replace credential</button>
-                <button type="button" class="button danger-outline" id="delete-credential">Delete</button>
-              </div>
-            </form>
-          </article>
-          <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">MT5 CONNECTION</p><h3 id="connection-state">NOT CONFIGURED</h3></div><span class="connection-dot" id="connection-state-dot"></span></div>
-            <p id="connection-detail" class="inline-status">Select VANTAGE DEMO or VANTAGE LIVE to configure a profile.</p>
-            <dl class="detail-list" id="connection-account"></dl>
-            <div class="button-row">
-              <button type="button" class="button primary" id="test-connection">Test connection — read-only</button>
-              <button type="button" class="button secondary" id="disconnect-connection">Disconnect</button>
-            </div>
-          </article>
-        </div>
-        <article class="panel">
-          <div class="panel-head"><div><p class="eyebrow">INDEPENDENT READ-ONLY MARKET DATA</p><h3>VANTAGE DEMO quotes for LOCAL PAPER</h3></div><span class="status-pill" id="market-data-state">DISCONNECTED</span></div>
-          <div class="inline-status" id="market-data-detail" role="status">Save the DEMO credential locally, then connect. Execution remains LOCAL PAPER.</div>
-          <dl class="detail-list" id="market-data-account"></dl>
-          <div class="button-row">
-            <button type="button" class="button primary" id="connect-market-data">Connect demo market data — read-only</button>
-            <button type="button" class="button secondary" id="disconnect-market-data">Disconnect market data</button>
-          </div>
-        </article>
       </section>
 
       <!-- 08 ACTIVITY & AUDIT -->
@@ -901,7 +809,7 @@
           <article class="panel"><div class="panel-head"><div><p class="eyebrow">DISPLAY</p><h3>Refresh &amp; redacted diagnostics</h3></div></div><div class="field"><label for="refresh-interval">Background refresh</label><select id="refresh-interval"><option value="5000">Every 5 seconds</option><option value="10000">Every 10 seconds</option><option value="30000">Every 30 seconds</option><option value="0">Off</option></select></div><div class="button-row top-space"><button type="button" class="button secondary" id="download-diagnostics">Download redacted diagnostics</button></div><p class="muted small">Exports contain no password, API token, ciphertext or full account login.</p></article>
         </div>
         <article class="panel"><div class="panel-head"><div><p class="eyebrow">MEASURED, NOT PROMISED</p><h3>Latency &amp; render diagnostics</h3></div><button type="button" class="button secondary" id="reload-performance">Refresh measurements</button></div><div id="performance-summary" class="performance-grid"><p class="empty-state">Unlock the workspace to load measured samples. Empty means not measured, not zero.</p></div></article>
-        <article class="panel"><div class="panel-head"><div><p class="eyebrow">PRODUCT SCOPE</p><h3>Listed shares &amp; ETFs vs CFDs</h3></div><span class="status-pill warn" id="listed-scope-badge">SEPARATE PROVIDER REQUIRED</span></div><p>Vantage MT5 CFDs never substitute for owned NSE or NASDAQ shares/ETFs. Owned listed instruments route strictly via Upstox (NSE INR) or Alpaca (NASDAQ USD).</p><div id="listed-asset-status" class="inline-status">Loading provider boundary…</div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">PRODUCT SCOPE</p><h3>Listed shares &amp; ETFs</h3></div><span class="status-pill warn" id="listed-scope-badge">SEPARATE PROVIDER REQUIRED</span></div><p>Owned listed equities and ETFs route strictly via Upstox (NSE INR) or Alpaca (NASDAQ USD) using exact exchange, symbol, ISIN, and currency identity—never CFD substitutes.</p><div id="listed-asset-status" class="inline-status">Loading provider boundary…</div></article>
         <article class="panel">
           <div class="panel-head">
             <div><p class="eyebrow">OWNER SETUP &amp; LIMITATIONS</p><h3>Read before paper-on-live-data or live-money use</h3></div>

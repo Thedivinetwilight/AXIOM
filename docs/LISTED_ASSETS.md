@@ -2,28 +2,27 @@
 
 ## Current product boundary
 
-AXIOM's Vantage integration is an MT5/CFD integration. A symbol such as a share
-CFD or ETF CFD does **not** represent ownership of the underlying listed share or
-ETF. A ticker alone is not a portable instrument identity.
+Owned listed shares and ETFs require exact venue and currency identity (`NSE` `INR` via **Upstox** and `NASDAQ` `USD` via **Alpaca**). CFD products never represent ownership of an underlying listed share or ETF, and a bare ticker alone is not a portable instrument identity.
 
 This build includes the `listed-assets-v1` safety interface and authenticated,
-read-only status/policy APIs. It does **not** include a verified listed execution
-adapter or an entitled listed reference/quote provider. Consequently:
+read-only status/policy APIs, alongside the explicit multi-market Upstox (NSE)
+and Alpaca (NASDAQ) adapters on `/terminal` and `/autonomy`. At the `listed-assets-v1`
+policy boundary:
 
-- listed data is unconfigured and fails closed at this boundary;
-- listed execution is unsupported and cannot be enabled by configuration;
-- MT5 routing and CFD substitution are always rejected by this boundary;
+- unconfigured generic listed data fails closed;
+- generic `listed-assets-v1` execution is disabled and never substitutes CFDs;
+- CFD substitution is always prohibited;
 - no order, review, intent, connection, Arm or Activate action is created by a
   routing-policy request;
 - AXIOM local paper remains a simulation, not owned-share execution.
 
-The existing Alpaca integration is separate legacy **read-only US market data
-for local paper fills**. It is not an Alpaca trading client and does not change
-this listed-execution boundary.
+For NSE (`INR ₹`) and NASDAQ (`USD $`) connections, quotes, and paper/gated-live
+controls, use the dedicated Upstox and Alpaca workflows documented in
+`docs/OWNER_SETUP_GUIDE.md` and `USER_MANUAL.md`.
 
 ## Required identity
 
-A future listed provider must preserve all of these fields end to end:
+Every listed instrument path preserves all of these fields end to end:
 
 ```text
 symbol + explicit exchange/MIC + currency + LISTED_SHARE or LISTED_ETF
@@ -43,7 +42,7 @@ Example policy identity (not a claim that a data entitlement exists):
 The canonical key is `LISTED:NASDAQ:AAPL:USD`. Unknown products, missing
 exchange/currency, CFD product types and provider responses with a mismatched
 key are rejected. Do not infer a primary exchange from a ticker, company name,
-website instrument list, or similarly named MT5 symbol.
+or website instrument list.
 
 ## Verify the current fail-closed interface
 

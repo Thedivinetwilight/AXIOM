@@ -141,8 +141,8 @@ async function fetchFake(url, options = {}) {
   if (path === "/api/trading/status") return response(current.status);
   if (path === "/api/trading/performance") return response({
     unit: "milliseconds", sample_capacity_per_metric: 512,
-    metrics: { "vantage.feed.gateway_receipt": { samples: 3, window_samples: 3, p50_ms: 1.2, p95_ms: 2.4, p99_ms: 2.8, max_ms: 3, last_ms: 1.1 } },
-    boundaries: { "vantage.feed.gateway_receipt": "Fake local receipt measurement" },
+    metrics: { "markets.feed.quote_receipt": { samples: 3, window_samples: 3, p50_ms: 1.2, p95_ms: 2.4, p99_ms: 2.8, max_ms: 3, last_ms: 1.1 } },
+    boundaries: { "markets.feed.quote_receipt": "Fake local receipt measurement" },
     note: "Observed local-process timing only; no universal or zero-latency claim.",
     evidence: "No real DEMO or LIVE latency is established by fake-provider tests.",
   });
@@ -452,7 +452,8 @@ try {
   assert.match(element("paper-run-details").textContent, /Current-run realized P&L/);
   assert.match(element("realized-window").textContent, /persisted local history/i);
   assert.match(element("metric-unrealized-note").textContent, /open positions/i);
-  assert.match(element("overview-checklist").textContent, /Daily Upstox live-market PAPER/);
+  assert.match(element("overview-checklist").textContent, /Upstox.*Alpaca/);
+  assert.equal(element("global-server").textContent, "NSE (Upstox) · NASDAQ (Alpaca)");
   await click("start-paper");
   await click("modal-confirm");
   assert.equal(element("global-lifecycle").textContent, "PAPER STOPPED");
@@ -463,149 +464,49 @@ try {
   await submit("order-form");
   assert.equal(element("modal").hidden, false, "paper order has a review dialog");
   assert.match(element("modal-body").textContent, /LOCAL PAPER ONLY/);
+  assert.doesNotMatch(element("modal-body").textContent, /Vantage|MT5/i);
+  assert.equal(window.eval("globalThis.__axiomTerminalTest.ticketSignature(globalThis.__axiomTerminalTest.orderFormValues())"), window.eval("globalThis.__axiomTerminalTest.state.ticketReview?.signature"), "docked ticket must match the reviewed values");
+  assert.match(element("ticket-estimate").textContent, /Server review passed/);
   await click("modal-confirm");
   const paperOrder = calls.find((call) => call.path === "/paper/order");
   assert.equal(paperOrder.body.quantity, 2, "reviewed paper quantity is the submitted quantity");
   assert.equal(paperOrder.body.side, "BUY");
   assert.match(paperOrder.body.idempotency_key, /^paper-order-/, "paper review binds an idempotency key");
-
-  await navigate("connections");
-  assert.equal(element("mt5-login").disabled, false, "paper mode permits the DEMO-only protected credential form");
-  assert.equal(element("test-connection").disabled, true, "execution connection test remains disabled in paper mode");
-  element("mt5-login").value = "123456";
-  element("mt5-password").value = FAKE_PASSWORD;
-  element("mt5-server").value = "VantageMarkets-Demo";
-  await submit("credential-form");
-  assert.equal(calls.find((call) => call.path === "/api/trading/credentials").body.environment, "VANTAGE_DEMO");
-  assert.equal(element("mt5-password").value, "", "password field clears after save");
-  assert.equal(window.document.documentElement.innerHTML.includes(FAKE_PASSWORD), false, "password is never rendered");
-  assert.equal(element("mt5-login").value, "", "full login is not retained in the form");
-  assert.equal(element("global-mode").textContent, "LOCAL PAPER", "saving DEMO credentials never changes execution");
-  await click("connect-market-data");
-  assert.equal(marketData.authenticated, true);
-  assert.equal(element("global-mode").textContent, "LOCAL PAPER", "quote connection never changes execution");
-  assert.match(element("boundary-execution").textContent, /LOCAL PAPER/);
-  assert.match(element("boundary-data").textContent, /VANTAGE DEMO · READ-ONLY/);
-  assert.equal(current.status.active, false);
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
-
-  await navigate("charts");
-  assert.equal(element("order-symbol").value, "AAPL", "the exact previously selected broker symbol is preserved");
-  assert.match(element("chart-source").textContent, /READ-ONLY MARKET DATA/);
-  element("chart-symbol").value = "AAPL";
-  element("chart-symbol").dispatchEvent(new window.Event("change", { bubbles: true }));
-  await settle();
-  assert.equal(element("order-symbol").value, "AAPL");
-  assert.match(element("chart-contract").textContent, /CFD · no underlying share\/ETF ownership/);
-  assert.match(element("chart-contract").textContent, /Contract size/);
-  assert.match(element("volume-label").textContent, /not MT5 lots/);
-  await click("start-paper");
-  const livePaperStart = calls.find((call) => call.path === "/paper/start");
-  assert.equal(livePaperStart.body.source, "vantage_mt5");
-  assert.equal(livePaperStart.body.symbol, "AAPL");
-  assert.equal(livePaperStart.body.strategy, "manual_only");
-  assert.equal(element("boundary-auth").textContent, "LOCAL REVIEW · AUTOMATION OFF");
-  assert.match(element("boundary-auth-note").textContent, /manual_only creates no strategy orders/);
-  assert.match(element("sidebar-automation").textContent, /manual_only automation OFF/);
-  assert.match(element("paper-run-summary").textContent, /MANUAL-ONLY · automation OFF/);
-  assert.equal(calls.filter((call) => call.path === "/paper/order").length, 1, "starting live prices creates no order");
-  element("order-volume").value = "0.25";
-  await submit("order-form");
-  assert.match(element("modal-body").textContent, /VANTAGE_DEMO_MT5/);
-  assert.match(element("modal-body").textContent, /Quote \/ bar ID/);
-  await click("modal-confirm");
-  const mt5PaperOrder = calls.filter((call) => call.path === "/paper/order").at(-1);
-  assert.equal(mt5PaperOrder.body.symbol, "AAPL");
-  assert.equal(mt5PaperOrder.body.quantity, 0.25);
-  assert.match(mt5PaperOrder.body.idempotency_key, /^paper-order-/);
-
-  await navigate("connections");
-  element("session-mode").value = "VANTAGE_DEMO";
-  await click("apply-mode");
-  assert.equal(element("global-mode").textContent, "VANTAGE DEMO");
-  assert.equal(current.status.active, false, "mode selection never activates");
-  assert.equal(marketData.authenticated, false, "execution selection disconnects the independent feed");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
-  await click("test-connection");
-  assert.equal(current.status.connected, true);
-  assert.equal(current.status.active, false, "read-only connection test never activates");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0);
-
-  await navigate("instruments");
-  assert.match(element("instrument-rows").textContent, /Apple share CFD/);
-  assert.match(element("instrument-rows").textContent, /CFD, not underlying ownership/);
-  assert.match(element("instrument-rows").textContent, /untradable/i);
-  const watchCallCount = calls.length;
-  window.document.querySelector('[data-watch-symbol="AAPL"]').click(); await settle();
-  assert.equal(window.document.querySelector('[data-watch-symbol="AAPL"]').getAttribute("aria-pressed"), "true");
-  assert.equal(window.document.querySelector('[data-select-symbol="AAPL"]').checked, false, "watching never selects execution");
-  assert.match(element("watchlist-status").textContent, /1 watched symbol/);
-  element("watchlist-only").checked = true;
-  element("watchlist-only").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
-  assert.match(element("instrument-rows").textContent, /AAPL/);
-  assert.doesNotMatch(element("instrument-rows").textContent, /Euro vs US Dollar/);
-  element("watchlist-only").checked = false;
-  element("watchlist-only").dispatchEvent(new window.Event("change", { bubbles: true })); await settle();
-  await click("watch-visible");
-  assert.match(element("watchlist-status").textContent, /3 watched symbol/);
-  await click("clear-watchlist");
-  assert.match(element("watchlist-status").textContent, /0 watched symbol/);
-  assert.equal(calls.length, watchCallCount, "watchlist edits and filters emit no selection, feed or order request");
-  const select = window.document.querySelector('[data-select-symbol="EURUSD"]');
-  select.checked = true; select.dispatchEvent(new window.Event("change", { bubbles: true }));
-  await click("save-instruments");
-  assert.deepEqual(calls.find((call) => call.path === "/api/trading/instruments/selection").body.symbols, ["EURUSD"]);
-
-  await navigate("risk");
-  await click("run-readiness");
-  await click("arm-session");
-  await phraseAndConfirm("ARM VANTAGE DEMO");
-  assert.equal(current.status.lifecycle, "ARMED");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0, "Arm submits no order");
-  await click("activate-session");
-  await phraseAndConfirm("ACTIVATE VANTAGE DEMO");
-  assert.equal(current.status.active, true);
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0, "Activate submits no order");
-
-  await navigate("charts");
-  assert.equal(element("order-symbol").value, "EURUSD");
-  assert.match(element("chart-source").textContent, /SAME MT5 ACCOUNT AS EXECUTION/);
-  element("order-volume").value = "0.1";
-  await submit("order-form");
-  assert.match(element("modal-body").textContent, /VANTAGE_DEMO/);
-  assert.equal(window.eval("globalThis.__axiomTerminalTest.ticketSignature(globalThis.__axiomTerminalTest.orderFormValues())"), window.eval("globalThis.__axiomTerminalTest.state.ticketReview?.signature"), "docked ticket must match the reviewed values");
-  assert.match(element("ticket-estimate").textContent, /Server review passed/);
-  assert.match(element("ticket-estimate").textContent, /10\.00 USD/, "docked ticket uses actual MT5 review margin");
-  await phraseAndConfirm("SUBMIT DEMO ORDER");
-  const submissions = calls.filter((call) => call.path === "/api/trading/orders/submit");
-  assert.equal(submissions.length, 1);
-  assert.equal(submissions[0].body.volume, 0.1);
-  assert.equal(submissions[0].body.confirmation, "SUBMIT DEMO ORDER");
   window.eval(`const test = globalThis.__axiomTerminalTest;
     test.state.ticketReview.review.expires_at = new Date(Date.now() - 1000).toISOString();
     test.renderTicketEstimate();`);
   assert.match(element("ticket-estimate").textContent, /Not reviewed · no submission/, "expired review is not presented as current");
-  window.eval(`const test = globalThis.__axiomTerminalTest;
-    test.state.ticketReview.review.expires_at = new Date(Date.now() + 30000).toISOString();
-    test.renderTicketEstimate();`);
+
+  // Verify Vantage MT5 controls were removed from every page while Upstox (NSE) & Alpaca (NASDAQ) remain intact
+  const removedVantageIds = [
+    "credential-form", "mt5-login", "mt5-password", "mt5-server", "mt5-path", "mt5-label",
+    "save-credential", "replace-credential", "delete-credential", "connection-state",
+    "test-connection", "disconnect-connection", "connect-market-data", "disconnect-market-data",
+    "session-mode", "apply-mode", "run-readiness", "arm-session", "activate-session",
+    "risk-form", "save-risk", "instrument-rows", "watchlist-only", "contract-panel", "reconcile-now",
+  ];
+  for (const id of removedVantageIds) {
+    assert.equal(element(id), null, `Vantage/MT5 element #${id} must be removed from terminal DOM`);
+  }
+
+  await navigate("connections");
+  assert.equal(element("secret-store-status").textContent, "DPAPI PROTECTED");
+  assert.match(element("connections-title").textContent, /Upstox \(NSE\) & Alpaca \(NASDAQ\) Connections/);
+  assert.ok(element("mm-upstox-data-form"), "Upstox NSE market-data connection form present");
+  assert.ok(element("mm-alpaca-data-form"), "Alpaca NASDAQ market-data connection form present");
+  assert.ok(element("mm-alpaca-broker-cred-form"), "Alpaca NASDAQ execution credential form present");
+  assert.ok(element("mm-upstox-live-cred-form"), "Upstox NSE live execution credential form present");
+  assert.doesNotMatch(element("page-connections").textContent, /Vantage|MT5|MetaTrader/i);
+
+  await navigate("instruments");
+  assert.ok(element("mm-catalog-rows"), "Unified NSE & NASDAQ catalog present");
+  assert.ok(element("mm-watchlist-grid"), "Pinned NSE & NASDAQ watchlist grid present");
+  assert.doesNotMatch(element("page-instruments").textContent, /Vantage|MT5|MetaTrader/i);
 
   await navigate("orders");
-  await click("reconcile-now");
-  const modifyButton = window.document.querySelector("[data-modify]");
-  assert.ok(modifyButton, "confirmed position exposes modification control");
-  modifyButton.click(); await settle();
-  element("modify-sl").value = "1.09"; element("modify-tp").value = "1.12";
-  await click("modal-confirm");
-  assert.match(element("modal-body").textContent, /Proposed SL \/ TP/);
-  await phraseAndConfirm("MODIFY DEMO POSITION");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/positions/modify/submit").length, 1);
-
-  const closeButton = window.document.querySelector("[data-close]");
-  assert.ok(closeButton, "confirmed position exposes close control");
-  closeButton.click(); await settle();
-  await phraseAndConfirm("CLOSE DEMO POSITION");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 2);
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit")[1].body.position_id, "1001");
+  assert.ok(element("mm-reconcile-paper-btn"), "NSE & NASDAQ SQLite paper reconcile control present");
+  assert.ok(element("position-rows"), "Local paper positions table present");
+  assert.doesNotMatch(element("page-orders").textContent, /Vantage|MT5|MetaTrader/i);
 
   await click("emergency-stop");
   assert.equal(element("modal").hidden, false);
@@ -613,27 +514,25 @@ try {
   assert.equal(current.status.emergency_stop, true);
   assert.equal(element("global-lifecycle").textContent, "EMERGENCY STOP");
   await navigate("risk");
+  assert.ok(element("mm-nse-risk-form"), "NSE INR risk form present");
+  assert.ok(element("mm-nasdaq-risk-form"), "NASDAQ USD & Alpaca Broker risk form present");
+  assert.doesNotMatch(element("page-risk").textContent, /Vantage|MT5|MetaTrader/i);
   await click("clear-emergency");
   await phraseAndConfirm("CLEAR EMERGENCY STOP");
   assert.equal(current.status.emergency_stop, false);
   assert.equal(current.status.active, false, "clearing emergency never reactivates");
 
-  element("session-mode").value = "VANTAGE_LIVE";
-  await click("apply-mode");
-  assert.equal(element("global-mode").textContent, "VANTAGE LIVE");
-  assert.equal(window.document.body.dataset.mode, "VANTAGE_LIVE");
-  assert.match(element("boundary-execution").textContent, /VANTAGE LIVE · DISCONNECTED/);
-  assert.equal(current.status.active, false, "selecting LIVE never infers activation");
-  assert.equal(current.status.connected, false, "selecting LIVE never auto-connects");
   await navigate("activity");
   await navigate("settings");
   await click("reload-performance");
-  assert.match(element("performance-summary").textContent, /vantage.feed.gateway_receipt/);
+  assert.match(element("performance-summary").textContent, /browser\.chart\.load/);
   assert.match(element("performance-summary").textContent, /p50/);
   assert.match(element("listed-asset-status").textContent, /execution supported: no/);
-  assert.match(element("listed-asset-status").textContent, /substitution: prohibited/);
+  assert.match(element("listed-asset-status").textContent, /CFD substitution: prohibited/);
+  assert.doesNotMatch(element("page-settings").textContent, /Vantage|MT5|MetaTrader/i);
   await navigate("overview");
-  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 2, "no hidden order submission occurred");
+  assert.equal(calls.filter((call) => call.path === "/api/trading/orders/submit").length, 0, "zero Vantage/broker order submissions occurred");
+  assert.equal(calls.filter((call) => call.path === "/paper/order").length, 1, "exactly one reviewed simulated paper order occurred");
   assert.equal(calls.some((call) => /^https?:/i.test(call.path)), false, "browser code makes only relative local API requests");
   if (benchmarkOutput) {
     const browser = window.eval("JSON.parse(JSON.stringify(globalThis.__axiomTerminalTest.state.performance.browser))");
@@ -649,12 +548,12 @@ try {
         render_iterations: benchmarkRenderIterations,
       },
       browser_metrics_ms: Object.fromEntries(Object.entries(browser).filter(([, values]) => values.length).map(([name, values]) => [name, metricSummary(values)])),
-      functional_evidence: { authenticated_fake_api_calls: calls.length, canvas_calls: draws, expected_reviewed_order_submissions: 2, unexpected_order_submissions: 0 },
+      functional_evidence: { authenticated_fake_api_calls: calls.length, canvas_calls: draws, expected_reviewed_order_submissions: 1, unexpected_order_submissions: 0 },
       limitations: [
         "This measures JavaScript and fake canvas command execution, not GPU/raster or human-perceived frame latency.",
         "The terminal's performance panel measures real browser canvas duration when an owner runs it locally.",
         "p50/p95/p99 apply only to this run; no universal or zero-latency claim is made.",
-        "Fake DOM/canvas and any later DEMO results establish neither profitability nor LIVE readiness.",
+        "Fake DOM/canvas and paper simulation results establish neither profitability nor LIVE readiness.",
       ],
     };
     writeFileSync(resolve(root, benchmarkOutput), `${JSON.stringify(report, null, 2)}\n`);

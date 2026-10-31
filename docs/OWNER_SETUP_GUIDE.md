@@ -1,7 +1,7 @@
 # AXIOM Desktop Terminal — Owner Setup Guide & Architecture Reference
 
-**Version:** `3.7.0a8`  
-**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a8-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
+**Version:** `3.7.0a9`  
+**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a9-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
 
 > **Safety & Non-Claim Notice**  
 > - Real-money execution (`LIVE-MARKET LIVE`) is **OFF by default** and is never enabled by startup, restart, crash recovery, config import, Kronos inference, or paper trading.  
@@ -15,10 +15,10 @@
 ### Option A — Packaged Windows Installer or Portable Archive (Recommended)
 1. Verify your downloaded installer or portable archive against `SHA256SUMS.txt`:
    ```powershell
-   Get-FileHash .\AXIOM-Operator-3.7.0a8-windows-x64-no-temp-install.zip -Algorithm SHA256
-   Get-FileHash .\AXIOM-Operator-3.7.0a8-windows-x64-portable.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-no-temp-install.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-portable.zip -Algorithm SHA256
    ```
-2. Extract and run either `AXIOM-Operator-3.7.0a8-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
+2. Extract and run either `AXIOM-Operator-3.7.0a9-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
 
 ### Option B — Windows 10/11 x64 Source Checkout Setup
 ```powershell
@@ -100,13 +100,13 @@ Keep disabled unless you deliberately intend to risk capital and satisfy every e
 | Workspace / Region | Key Controls | Backing API Routes | Automated Test Evidence |
 |---|---|---|---|
 | **Top Header** | `NSE · INR ₹` / `NASDAQ · USD $` switcher, Quick Symbol Jump, IST/ET clocks, Refresh, Global **Emergency stop** | `/api/markets/overview`, `/api/markets/emergency-stop` | `tests/js/multimarket_terminal_smoke.mjs` (Steps 1, 2, 9) |
-| **`01 Overview`** | Mode separation strip, NSE ₹ & NASDAQ $ paper ledgers, `Sync quotes`, `Chart RELIANCE/AAPL`, 5-Role Provider Matrix, Vantage/MT5 summary | `/api/markets/overview`, `/api/markets/paper/*/sync`, `/api/trading/workspace` | `multimarket_terminal_smoke.mjs` (Step 1), `terminal_smoke.mjs` |
+| **`01 Overview`** | Mode separation strip, NSE ₹ & NASDAQ $ paper ledgers, `Sync quotes`, `Chart RELIANCE/AAPL`, 4-Role Provider Matrix, Local Paper summary | `/api/markets/overview`, `/api/markets/paper/*/sync`, `/api/trading/workspace` | `multimarket_terminal_smoke.mjs` (Step 1), `terminal_smoke.mjs` |
 | **`02 Watchlists & search`** | Unified search, Market/Subclass filters, `Refresh NSE BOD master`, `Sync NASDAQ universe`, `+ Watch` / `Remove`, `Chart`, `Trade Paper` | `/api/markets/search`, `/nse/refresh`, `/nasdaq/sync`, `/watchlists` | `multimarket_terminal_smoke.mjs` (Step 4), `test_nse_reconciliation.py`, `test_us_calendar_and_nasdaq.py` |
 | **`03 Supercharts & ticket`** | Feed selector (`SESSION`, `NSE`, `NASDAQ`), TF/Indicators (`EMA20`, `SMA50`), Drawing tools, Dual-tab Ticket (`Preview fees & checks`, `Submit simulated order`) | `/api/markets/chart`, `/api/markets/paper/preview`, `/api/markets/paper/orders` | `multimarket_terminal_smoke.mjs` (Steps 2, 5), `terminal_smoke.mjs` |
 | **`04 Orders & positions`** | Open NSE/NASDAQ paper positions (`SL/TP` modal, `Close`), Working Orders (`Cancel`), Fills + Fees, `Reconcile NSE & NASDAQ SQLite` | `/api/markets/paper/positions/*`, `/orders/*`, `/reconcile` | `multimarket_terminal_smoke.mjs` (Step 6), `test_live_market_paper_and_unified_api.py` |
 | **`05 Strategies & modes`** | NSE & NASDAQ Paper `Start`, `Pause`, `Resume`, `Stop`, `Reset`; `LIVE-MARKET LIVE` availability cards; Strategy Decisions log | `/api/markets/paper/session/*`, `/paper/reset`, `/live/status` | `multimarket_terminal_smoke.mjs` (Step 7) |
 | **`06 Risk & live gates`** | NSE ₹ & NASDAQ $ paper bounds, Alpaca Broker hard limits, `Run Readiness`, `Arm Gate`, phrase-confirmed `Activate LIVE`, `Disarm`, `Recover`, `Clear Emergency Stop` | `/api/markets/paper/config`, `/api/alpaca-broker/limits`, `/readiness`, `/gate/*`, `/recover` | `multimarket_terminal_smoke.mjs` (Steps 8, 9), `test_alpaca_broker_hardening.py` |
-| **`07 Connections`** | DPAPI save/verify/delete for `Upstox Read-Only`, `Alpaca Market Data`, `Alpaca Broker Paper/Live`, `Upstox Live`, plus Vantage MT5 | `/api/connections/*`, `/api/autonomy/upstox*`, `/api/alpaca-broker/credentials/*` | `multimarket_terminal_smoke.mjs` (Step 3), `test_provider_verification.py` |
+| **`07 Connections`** | DPAPI save/verify/delete for `Upstox Read-Only`, `Alpaca Market Data`, `Alpaca Broker Paper/Live`, and `Upstox Live` | `/api/connections/*`, `/api/autonomy/upstox*`, `/api/alpaca-broker/credentials/*` | `multimarket_terminal_smoke.mjs` (Step 3), `test_provider_verification.py` |
 | **`08 Activity & audit`** | Tamper-evident SHA-256 hash-chained Multi-Market Paper audit table + Redacted JSON export | `/api/markets/overview`, `/api/trading/activity` | `multimarket_terminal_smoke.mjs` (Step 10) |
 | **`09 Settings & manuals`** | Session API token, Lock tab, Auto-refresh interval, Latency p50/p95/p99, Redacted diagnostics, Links to `/manual` & `/autonomy/manual` | `/api/trading/performance`, `/manual`, `/autonomy/manual` | `terminal_smoke.mjs` |
 | **`10 AI & Model Lab`** | Pinned Kronos setup/self-test, Load/Unload & Enable/Disable, Forecast Inspector, Latency/RSS diagnostics, Dataset Manager, Walk-Forward & `2.0x` Cost-Stress Research Runner, SHA-256 Model Registry | `/api/model-lab/*`, `/api/autonomy/kronos/*` | `model_lab_smoke.mjs`, `test_kronos_model_lab.py`, `test_research_pipeline_leakage.py` |

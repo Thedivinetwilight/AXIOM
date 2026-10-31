@@ -107,10 +107,10 @@ try {
     if ($NewTemp.Count) { Say ('unexpected TEMP directories: ' + ($NewTemp -join ', ')) }
 
     $Terminal = Invoke-WebRequest -UseBasicParsing "$Base/terminal" -TimeoutSec 20
-    Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'LOCAL PAPER' -and $Terminal.Content -match 'VANTAGE LIVE') 'portable serves all explicit execution modes'
+    Check ($Terminal.StatusCode -eq 200 -and $Terminal.Content -match 'LOCAL PAPER' -and $Terminal.Content -match 'Upstox' -and $Terminal.Content -match 'Alpaca' -and $Terminal.Content -notmatch 'VANTAGE LIVE') 'portable serves LOCAL PAPER, Upstox (NSE), and Alpaca (NASDAQ) without Vantage UI'
     Check ($Terminal.Content -match 'execution-boundary' -and $Terminal.Content -match 'drawing-tool' -and $Terminal.Content -match 'performance-summary') 'portable serves the redesigned terminal controls'
     $Manual = Invoke-WebRequest -UseBasicParsing "$Base/manual" -TimeoutSec 20
-    Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Owner-run Vantage DEMO execution rehearsal') 'portable serves the bundled operator manual'
+    Check ($Manual.StatusCode -eq 200 -and $Manual.Content -match 'Upstox' -and $Manual.Content -match 'Alpaca') 'portable serves the bundled operator manual'
     $Autonomy = Invoke-WebRequest -UseBasicParsing "$Base/autonomy" -TimeoutSec 20
     Check ($Autonomy.StatusCode -eq 200 -and $Autonomy.Content -match 'UPSTOX_LIVE') 'portable serves the daily autonomy boundary'
     $AutonomyManual = Invoke-WebRequest -UseBasicParsing "$Base/autonomy/manual" -TimeoutSec 20

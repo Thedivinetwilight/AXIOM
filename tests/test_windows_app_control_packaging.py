@@ -30,15 +30,15 @@ def payload_guard():
 
 def test_version_is_consistent_across_frozen_and_operator_metadata():
     version = read(KIT / "VERSION").strip()
-    assert version == "3.7.0a8"
+    assert version == "3.7.0a9"
     assert f'__version__ = "{version}"' in read(ROOT / "app" / "__init__.py")
     assert f'version = "{version}"' in read(ROOT / "pyproject.toml")
     assert f"**Current source version: `{version}`.**" in read(ROOT / "README.md")
     assert f"**Current source version: {version}**" in read(ROOT / "USER_MANUAL.md")
     version_info = read(KIT / "version_info.txt")
-    assert "filevers=(3, 7, 0, 8)" in version_info
-    assert "prodvers=(3, 7, 0, 8)" in version_info
-    assert "StringStruct('FileVersion', '3.7.0.8')" in version_info
+    assert "filevers=(3, 7, 0, 9)" in version_info
+    assert "prodvers=(3, 7, 0, 9)" in version_info
+    assert "StringStruct('FileVersion', '3.7.0.9')" in version_info
     assert f"StringStruct('ProductVersion', '{version}')" in version_info
     manual = read(KIT / "WINDOWS_INSTALL_MANUAL.md")
     assert f"**Version:** {version}" in manual
@@ -48,7 +48,7 @@ def test_version_is_consistent_across_frozen_and_operator_metadata():
 
 
 def test_release_workflow_derives_a_new_tag_and_requires_explicit_publication():
-    assert read(KIT / "VERSION").strip() == "3.7.0a8"
+    assert read(KIT / "VERSION").strip() == "3.7.0a9"
     workflow = read(ROOT / ".github" / "workflows" / "windows-release.yml")
     assert "Get-Content _kit/packaging/windows/VERSION" in workflow
     assert '$tag = "v$($env:VERSION)"' in workflow

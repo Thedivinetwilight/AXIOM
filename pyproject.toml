@@ -1,6 +1,6 @@
 [project]
 name = "arena"
-version = "3.7.0a8"
+version = "3.7.0a9"
 requires-python = ">=3.11"
 [tool.pytest.ini_options]
 pythonpath = ["."]

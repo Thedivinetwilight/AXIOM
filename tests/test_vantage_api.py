@@ -82,7 +82,9 @@ def test_all_trading_apis_require_bearer_and_paper_is_default(client):
     terminal = client.get("/terminal")
     assert terminal.status_code == 200
     assert 'id="page-connections"' in terminal.text
-    assert "VantageMarkets-Live 13" in terminal.text
+    assert "Upstox (NSE) &amp; Alpaca (NASDAQ) Connections" in terminal.text
+    assert "VantageMarkets-Live 13" not in terminal.text
+    assert 'id="mt5-login"' not in terminal.text
     assert client.get("/static/terminal/terminal.js").status_code == 200
     assert client.get("/static/terminal/terminal.css").status_code == 200
     capabilities = client.get("/api/trading/connection", headers=HEADERS).json()
