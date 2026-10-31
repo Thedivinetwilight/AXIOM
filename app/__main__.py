@@ -1229,7 +1229,32 @@ def parser() -> argparse.ArgumentParser:
     bak.add_argument("--label", default="manual")
     bak.add_argument("--backup-dir", default="backups")
     bak.set_defaults(func=cmd_backup)
+
+    op = sub.add_parser(
+        "operator",
+        help="launch the local AXIOM Operator console (/terminal) in PAPER mode",
+    )
+    op.add_argument("--no-browser", action="store_true", help="do not open a browser window automatically")
+    op.add_argument("--port", type=int, default=0, help="preferred local loopback port (default 8000)")
+    op.add_argument("--check-deps", action="store_true", help="verify required Python dependencies and exit")
+    op.add_argument("--smoke", action="store_true", help="run isolated local /terminal + /health smoke check and exit")
+    op.set_defaults(func=cmd_operator)
     return p
+
+
+def cmd_operator(args) -> int:
+    from app.source_launcher import cli_main
+
+    fwd: list[str] = []
+    if args.check_deps:
+        fwd.append("--check-deps")
+    if args.smoke:
+        fwd.append("--smoke")
+    if args.no_browser:
+        fwd.append("--no-browser")
+    if args.port and int(args.port) > 0:
+        fwd.extend(["--port", str(int(args.port))])
+    return cli_main(fwd)
 
 
 def main(argv=None) -> None:

@@ -1,9 +1,10 @@
-# AXIOM Parallel Strategy Ensemble, Portfolio Risk Allocator & Live Trade Monitor — Evidence & Benchmarks (`v3.7.0a8`)
+# AXIOM Parallel Strategy Ensemble, Portfolio Risk Allocator & Live Trade Monitor — Methodology Audit, Synthetic Engineering Evidence & Benchmarks (`v3.7.0a10`)
 
-> **Strict Honesty & Verification Boundary**
+> **SYNTHETIC ENGINEERING EVIDENCE — NOT EXPECTED RETURNS OR LIVE READINESS**
 > - All strategy evaluation, empirical calibration, walk-forward weighting, Kronos advisory blending, and ablation studies are **PAPER / RESEARCH ONLY** (`live_execution_authorized = false`). Nothing in `app/ensemble/` or `app/markets/trade_monitor.py` can arm, activate, or submit a real broker order.
-> - The walk-forward and untouched out-of-sample (OOS) metrics below are reproducible verification runs on AXIOM's bundled deterministic OHLCV fixtures (`real_market_data = false`). **Synthetic or single-symbol fixture results do NOT establish real-market profitability or Kronos real-market alpha.**
-> - Real Upstox (NSE) and Alpaca (NASDAQ) owner-account market-data verification, real-market Kronos incremental OOS value, and live broker order execution remain **NOT VERIFIED / INTENTIONALLY NOT EXECUTED** until run by the owner on their Windows machine with real read-only provider credentials.
+> - Every ablation result computed on AXIOM's bundled OHLCV fixtures (`bundled_nse_synthetic_1h` and `bundled_nasdaq_synthetic_1h`, `real_market_data = false`) is explicitly classified in code and UI as **`SYNTHETIC_ENGINEERING_EVIDENCE` (`expected_returns_claim = false`, `live_readiness_claim = false`)**. These results verify chronological split/embargo machinery, fee/slippage/partial-fill math, and allocator risk controls — **they are NOT expected returns, NOT strategy profitability proof, and NOT live-readiness evidence.**
+> - Risk thresholds, calibration cutoffs, and exposure caps were **NOT tuned or relaxed** to improve headline metrics.
+> - Real Upstox (NSE) and Alpaca (NASDAQ) owner-account market-data verification, real-market Kronos incremental out-of-sample (OOS) value (`ensemble_with_kronos` minus `ensemble_no_kronos`), and live broker order execution remain **`NOT VERIFIED`** in this environment.
 
 ---
 
@@ -83,9 +84,36 @@ Individual strategies have zero access to order APIs. Exactly **one `PortfolioRi
 | **`ensemble_no_kronos`** (Calibrated OOS + Risk Allocator) | **EVALUATED** | **`+3.60%`** | **`6.10` / `11.02`** | **`0.65%`** | **`8.92`** | **`7` / `333`** | **`71.4%` `[40.9–90.0%]`** | **`37.9%` / `1.64x`** | **`+3.31%` (`5.87`)** |
 | `ensemble_with_kronos` (Advisory Kronos ON) | `SKIPPED_KRONOS_UNAVAILABLE` | — | — | — | — | — | — | — | **NOT VERIFIED** locally (weights not cached in CI sandbox; 0 mock forecasts used) |
 
-### 2.5 Honest Interpretation & Kronos OOS Value Assessment
-1. **Risk-Controlled Capital Preservation vs Unconstrained Baselines**: On both fixtures, unconstrained single-indicator `baseline_rsi` suffered `-15.28%` / `-12.92%` losses and `buy_and_hold` suffered `-2.88%` / `-16.52%` drawdowns (`23.35%` Max DD on NASDAQ). While unconstrained `baseline_moving_average` posted higher raw return on `3–4` full-notional trades, its tiny trade count (`3–4` trades) fails statistical promotion gates. By contrast, `ensemble_no_kronos` sized positions strictly from stop-distance risk budgets (`0.50%` equity risk per trade), stood aside (`NO_TRADE`) on `92%–96%` of bars when calibrated OOS confidence or consensus fell below threshold, achieved the **lowest maximum drawdown on both markets (`1.56%` NSE, `0.65%` NASDAQ)**, and remained positive under `2.0x` stressed transaction costs (`+2.61%` NSE, `+3.31%` NASDAQ).
-2. **Does Kronos Add Measurable OOS Value?**: **NOT VERIFIED on real market data.** In offline/CI environments without HuggingFace weight downloads, `ensemble_with_kronos` refuses to fabricate forecasts and reports `SKIPPED_KRONOS_UNAVAILABLE`. On the owner's Windows machine—after capturing real NSE/Upstox and NASDAQ/Alpaca datasets in `10 · AI & Model Lab` and installing pinned CPU `NeoQuasar/Kronos-small`—run Panel 4 (`Run Walk-Forward & Untouched OOS Ablation`) in `12 · Ensemble & Allocation` to measure exact real-market incremental OOS return and Sharpe delta (`ensemble_with_kronos` minus `ensemble_no_kronos`) before enabling `Kronos Advisory Input = ON`.
+### 2.5 Regime-Sliced Out-of-Sample Comparison (`RANGE` vs `TREND`, Synthetic Engineering Evidence)
+
+Causal bar regimes (`classify_bar_regime`) evaluated strictly on trailing completed bars at each untouched OOS step (`selection_touched_test = false`):
+
+- **NSE Synthetic Fixture (`bundled_nse_synthetic_1h`, `346` OOS steps = `124 RANGE` + `222 TREND`)**:
+  - `buy_and_hold`: `RANGE` **`-0.35%`**, `TREND` **`-2.54%`** (`2.0x` cost-stress total **`-2.89%`**)
+  - `baseline_moving_average` (`SMA 10/30`): `RANGE` **`+0.32%`**, `TREND` **`+9.41%`** (`4` trades total; `2.0x` cost-stress **`+9.66%`**)
+  - `baseline_rsi` (`RSI 14`): `RANGE` **`-0.86%`**, `TREND` **`-14.54%`** (`2.0x` cost-stress **`-15.34%`**)
+  - `ensemble_no_kronos` (Single `PortfolioRiskAllocator`, Kronos OFF): `RANGE` **`+0.08%`** (`62` active bars), `TREND` **`+3.97%`** (`76` active bars), `2.0x` cost-stress total **`+3.80%`**
+  - `ensemble_with_kronos` (Paired Advisory Kronos ON): **`NOT VERIFIED`** on real OOS market data (`SKIPPED_KRONOS_UNAVAILABLE` offline; `0` mock forecasts substituted)
+
+- **NASDAQ Synthetic Fixture (`bundled_nasdaq_synthetic_1h`, `346` OOS steps = `134 RANGE` + `212 TREND`)**:
+  - `buy_and_hold`: `RANGE` **`+1.93%`**, `TREND` **`-18.10%`** (`2.0x` cost-stress total **`-16.62%`**)
+  - `baseline_moving_average` (`SMA 10/30`): `RANGE` **`+3.84%`**, `TREND` **`+3.55%`** (`3` trades total; `2.0x` cost-stress **`+7.30%`**)
+  - `baseline_rsi` (`RSI 14`): `RANGE` **`-0.41%`**, `TREND` **`-12.56%`** (`2.0x` cost-stress **`-12.97%`**)
+  - `ensemble_no_kronos` (Single `PortfolioRiskAllocator`, Kronos OFF): `RANGE` **`+2.05%`** (`70` active bars), `TREND` **`+1.52%`** (`64` active bars), `2.0x` cost-stress total **`+3.28%`**
+  - `ensemble_with_kronos` (Paired Advisory Kronos ON): **`NOT VERIFIED`** on real OOS market data (`SKIPPED_KRONOS_UNAVAILABLE` offline; `0` mock forecasts substituted)
+
+### 2.6 Full Quantitative Methodology & Leakage / Realism Audit Disclosures
+
+| Audit Dimension | Verified Behavior in Code | Remaining Real-World Limitation |
+|---|---|---|
+| **Single Risk Allocator & Zero Bypass** | Individual strategy functions (`evaluate_variant_on_context`) return pure `StrategyCandidateSignal` dataclasses and hold zero references to `paper_engine` or broker clients. Every automated ensemble trade must pass through `PortfolioRiskAllocator.allocate_symbol()`. | Applies to ensemble/paper routing; live gates remain separately disabled by default. |
+| **Kronos Advisory Role & Paired Ablation** | `kronos_weight` is hard-capped at `<= 0.25`; Kronos cannot override risk checks or submit orders alone. Paired `use_kronos=False` vs `use_kronos=True` runs on identical bars, splits, and `1.0x`/`2.0x` costs. | Real-market incremental OOS value of `NeoQuasar/Kronos-small` is **`NOT VERIFIED`** in this environment (weights/real feeds unavailable in sandbox). |
+| **Chronological Splits, Embargo & Leakage** | Strict forward-only `[0 : dev_end)` expanding walk-forward folds, `embargo_bars >= 5` gap, and `[dev_end + embargo : end)` untouched OOS test (`selection_touched_test = false`). Unclosed tail bars are stripped (`validate_completed_bars`). | Single-series fixtures test temporal leakage only, not cross-sectional point-in-time fundamental joins. |
+| **Survivorship Bias** | `methodology_audit_disclosures.survivorship_status` explicitly reports `"UNVERIFIED_STATIC_SYMBOL_SELECTION"` unless a point-in-time survivorship-aware universe (`survivorship_aware = true`) is supplied. | Today's NSE BOD or Alpaca `/v2/assets` list omits delisted/bankrupt historical tickers; backtests on static current constituents carry survivorship bias. |
+| **Corporate Actions (Splits/Dividends/Bonuses)** | `corporate_actions_status` reports `"UNVERIFIED_CORPORATE_ACTION_ADJUSTMENT"` unless verified adjusted series are provided. | Unadjusted split/bonus jumps distort multi-month indicators unless feed candles are split-adjusted. |
+| **Fees, Spreads, Slippage & Partial Fills** | Models full statutory NSE (`STT`, NSE txn, SEBI, stamp duty, `18%` GST) and US (`SEC Section 31`, `FINRA TAF`) fees, half-spread + adverse slippage (`1.0x` and `2.0x` stress), tick rounding against the trader, and `max_bar_participation = 10%` bar-volume partial-fill caps. | Completed-bar next-open fill model does not simulate Level-2 limit-order queue priority or auction Halt/LULD microstructure. |
+| **Short-Sale & Product Rules** | NSE `CNC` (`D`) and US `CASH` enforce long-only cash delivery (`SELL` requires existing settled/open long quantity; naked short entries are rejected). NSE `MIS` intraday requires explicit product selection during open IST session hours. | Intraday stock-borrow recalls and NSE F&O ban lists are not modeled in cash-equity paper. |
+| **Session & Holiday Calendar Handling** | NSE checks `Asia/Kolkata` (`09:15–15:30 IST`, holiday list); NASDAQ checks `America/New_York` (`09:30–16:00 ET`, NYSE/NASDAQ holidays + `13:00 ET` early closes). Off-hours market entries fail closed. | Extraordinary unscheduled exchange halts require live feed status updates. |
 
 ---
 

@@ -7,6 +7,18 @@ import json
 from pathlib import Path
 import signal
 import sys
+
+_REPO_ROOT = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from app.source_launcher import check_runtime_dependencies, format_missing_dependencies_error
+
+_DEP_CHECK = check_runtime_dependencies(repo_root=_REPO_ROOT)
+if not _DEP_CHECK["ok"]:
+    print(f"AXIOM did not start:\n\n{format_missing_dependencies_error(_DEP_CHECK)}", file=sys.stderr)
+    raise SystemExit(2)
+
 from app.config.settings import ROOT, Settings
 from app.backtesting.costs import ExecutionConfig
 from app.backtesting.engine import BacktestEngine
@@ -40,9 +52,14 @@ def parser():
             "robustness",
             "paper",
             "api",
+            "operator",
         ],
         default="paper",
     )
+    p.add_argument("--smoke", action="store_true", help="Run isolated local operator smoke check and exit")
+    p.add_argument("--check-deps", action="store_true", help="Verify required Python packages and IANA timezones and exit")
+    p.add_argument("--register-venv", action="store_true", help="Register repo root in active site-packages (.pth) and exit")
+    p.add_argument("--no-browser", action="store_true", help="Do not open browser in operator mode")
     p.add_argument("--csv", type=Path, default=ROOT / "data/sample.csv")
     p.add_argument("--symbol")
     p.add_argument("--timeframe", choices=["1m", "5m", "15m", "30m", "1h", "4h", "1D"])
@@ -151,6 +168,21 @@ async def run_paper(settings, args, repository, config, strategy, bars, calendar
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.mode == "operator" or args.check_deps or args.register_venv:
+        from app.source_launcher import cli_main
+
+        fwd: list[str] = []
+        if args.check_deps:
+            fwd.append("--check-deps")
+        if args.register_venv:
+            fwd.append("--register-venv")
+        if args.smoke:
+            fwd.append("--smoke")
+        if args.no_browser:
+            fwd.append("--no-browser")
+        if getattr(args, "port", None):
+            fwd.extend(["--port", str(args.port)])
+        raise SystemExit(cli_main(fwd))
     settings = Settings.from_env()
     settings = replace(
         settings,

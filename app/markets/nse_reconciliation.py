@@ -404,9 +404,12 @@ def search_nse_catalog(
     if include_indices:
         for idx in indices:
             idx_pub = dict(idx)
+            idx_pub.setdefault("asset_category", "INDEX")
             idx_seg = str(idx_pub.get("segment") or "").upper()
-            if seg_filter and idx_seg != seg_filter:
-                continue
+            if seg_filter:
+                allowed_idx_segs = {"NSE_INDEX"} if seg_filter == "NSE_EQ" else ({"BSE_INDEX"} if seg_filter == "BSE_EQ" else {seg_filter})
+                if idx_seg not in allowed_idx_segs:
+                    continue
             if sub_filter and sub_filter != "INDEX":
                 continue
             key_u = str(idx_pub.get("instrument_key") or "").upper()
@@ -459,6 +462,110 @@ def search_nse_catalog(
     }
 
 
+def resolve_nse_instrument_strict(
+    catalog: Any,
+    symbol_or_key: str,
+    *,
+    allow_index: bool = False,
+) -> dict[str, Any]:
+    """Resolve an NSE cash equity/ETF (or watch-only NSE index when allowed) with zero key loss.
+
+    - Exact `NSE_EQ|INE...` keys resolve directly from `catalog.instruments` (`O(1)`),
+      preserving the exact ISIN/series even when multiple NSE series share `trading_symbol`.
+    - Explicitly rejects `BSE_EQ|...`, derivative segments (`NCD_FO|...`, `BCD_FO|...`,
+      `NSE_FO|...`, `BSE_FO|...`, `MCX_FO|...`), and watch-only `NSE_INDEX|...` (when
+      `allow_index=False`) so categories are never silently substituted.
+    """
+    cleaned = clean_nse_identity(symbol_or_key)
+    if not cleaned:
+        raise ValueError("NSE instrument symbol or instrument_key cannot be empty")
+
+    instruments_map: dict[str, Any] = getattr(catalog, "instruments", None) or {}
+    indices_map: dict[str, Any] = getattr(catalog, "indices", None) or {}
+
+    tokens = normalize_nse_search_tokens(cleaned)
+    key_cand = tokens["key_candidate"]
+
+    # Case-insensitive exact key map for O(1) exact Upstox instrument_key preservation
+    if "|" in cleaned or key_cand:
+        raw_probe = key_cand or cleaned
+        raw_probe_upper = raw_probe.upper()
+        seg_prefix = raw_probe_upper.split("|", 1)[0].strip() if "|" in raw_probe_upper else ""
+        if seg_prefix == "BSE_EQ" or seg_prefix == "BSE_INDEX":
+            raise ValueError(
+                f"Rejected {raw_probe}: belongs to {seg_prefix} (BSE), not NSE cash equities (NSE_EQ)"
+            )
+        if seg_prefix in {"NCD_FO", "BCD_FO", "NSE_FO", "BSE_FO", "MCX_FO"}:
+            raise ValueError(
+                f"Rejected {raw_probe}: {seg_prefix} is a derivative contract, not an NSE cash equity/ETF"
+            )
+        if seg_prefix == "NSE_INDEX":
+            for k, idx_val in indices_map.items():
+                if k.upper() == raw_probe_upper:
+                    if not allow_index:
+                        raise ValueError(
+                            f"Rejected {k}: watch-only NSE benchmark index (INDEX) is not tradable in NSE cash-equity PAPER"
+                        )
+                    out_idx = dict(idx_val)
+                    out_idx.setdefault("asset_category", "INDEX")
+                    return out_idx
+            raise ValueError(f"Unknown NSE benchmark index key: {raw_probe}")
+        if seg_prefix == "NSE_EQ":
+            for k, inst_obj in instruments_map.items():
+                if k.upper() == raw_probe_upper:
+                    pub = inst_obj.public() if hasattr(inst_obj, "public") else dict(inst_obj)
+                    pub.setdefault("asset_category", "CASH_EQUITY_OR_ETF")
+                    return pub
+            raise ValueError(f"Unknown or excluded NSE_EQ instrument_key: {raw_probe}")
+
+    # Plain symbol or ISIN query — search strictly within NSE_EQ (and NSE_INDEX if allow_index)
+    res = search_nse_catalog(
+        instruments_map.values(),
+        indices=indices_map.values(),
+        query=cleaned,
+        segment="NSE_EQ",
+        include_indices=allow_index,
+        limit=10,
+    )
+    if res["items"]:
+        top = dict(res["items"][0])
+        top.setdefault(
+            "asset_category",
+            "INDEX" if str(top.get("segment") or "").upper().endswith("INDEX") else "CASH_EQUITY_OR_ETF",
+        )
+        return top
+
+    # Check if the symbol exists ONLY as an index, derivative, or BSE equity so the error is exact
+    if not allow_index:
+        idx_probe = search_nse_catalog(
+            [],
+            indices=indices_map.values(),
+            query=cleaned,
+            segment="NSE_EQ",
+            include_indices=True,
+            limit=1,
+        )
+        if idx_probe["items"]:
+            hit = idx_probe["items"][0]
+            raise ValueError(
+                f"Rejected {hit['instrument_key']} ({hit['trading_symbol']}): watch-only NSE index (INDEX) is not tradable"
+            )
+    other_probe = search_nse_catalog(
+        instruments_map.values(),
+        indices=[],
+        query=cleaned,
+        segment="",
+        include_indices=False,
+        limit=1,
+    )
+    if other_probe["items"]:
+        hit = other_probe["items"][0]
+        raise ValueError(
+            f"Rejected {hit['instrument_key']}: belongs to {hit.get('segment')} ({hit.get('asset_category', 'NON_NSE_EQ')}), not NSE cash equities (NSE_EQ)"
+        )
+    raise ValueError(f"Unknown or unsupported NSE instrument: {cleaned}")
+
+
 def build_nse_reconciliation_report(catalog: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Build an auditable NSE coverage & exclusion reconciliation report."""
     stats = dict(getattr(catalog, "stats", None) or {})
@@ -470,6 +577,8 @@ def build_nse_reconciliation_report(catalog: Any, *, now: datetime | None = None
     nse_eq = [i for i in instruments if i.segment == "NSE_EQ"]
     bse_eq = [i for i in instruments if i.segment == "BSE_EQ"]
     ccy_deriv = [i for i in instruments if i.currency_derivative]
+    nse_indices = [idx for idx in indices if str(idx.get("segment") or "").upper() == "NSE_INDEX"]
+    bse_indices = [idx for idx in indices if str(idx.get("segment") or "").upper() == "BSE_INDEX"]
 
     subclass_counts: dict[str, int] = {}
     nse_series_counts: dict[str, int] = {}
@@ -521,11 +630,20 @@ def build_nse_reconciliation_report(catalog: Any, *, now: datetime | None = None
             "bse_eq_tradable": len(bse_eq),
             "currency_derivatives_tradable": len(ccy_deriv),
             "watch_only_indices": len(indices),
+            "watch_only_nse_indices": len(nse_indices),
+            "watch_only_bse_indices": len(bse_indices),
             "nse_eq_by_subclass": subclass_counts,
             "nse_eq_by_series": nse_series_counts,
             "nse_eq_mis_intraday_allowed": mis_eligible_count,
             "nse_eq_delivery_only": delivery_only_count,
         },
+        "nse_cash_equity_reconciliation": _build_nse_eq_reconciliation_block(
+            stats=stats,
+            nse_eq_count=len(nse_eq),
+            nse_indices_count=len(nse_indices),
+            bse_eq_count=len(bse_eq),
+            derivatives_count=len(ccy_deriv),
+        ),
         "exclusions_and_anomalies": {
             "dropped_suspended": int(stats.get("dropped_suspended", 0)),
             "dropped_unsupported": int(stats.get("dropped_unsupported", 0)),
@@ -554,3 +672,45 @@ def build_nse_reconciliation_report(catalog: Any, *, now: datetime | None = None
             )
         ),
     }
+
+
+def _build_nse_eq_reconciliation_block(
+    *,
+    stats: dict[str, Any],
+    nse_eq_count: int,
+    nse_indices_count: int,
+    bse_eq_count: int,
+    derivatives_count: int,
+) -> dict[str, Any]:
+    """Reconcile BOD `NSE_EQ` source rows against searchable `NSE_EQ` catalog with zero unexplained gap."""
+    ex_susp = int(stats.get("nse_eq_excluded_suspended", 0))
+    ex_unsup = int(stats.get("nse_eq_excluded_unsupported", 0))
+    ex_inv = int(stats.get("nse_eq_excluded_invalid", 0))
+    dup_keys = list(stats.get("nse_eq_duplicate_keys") or [])
+    dup_cnt = len(dup_keys)
+    bod_nse_eq = int(
+        stats.get("nse_eq_bod_source_rows")
+        or (nse_eq_count + ex_susp + ex_unsup + ex_inv + dup_cnt)
+    )
+    accounted = nse_eq_count + ex_susp + ex_unsup + ex_inv + dup_cnt
+    gap = bod_nse_eq - accounted
+    return {
+        "bod_nse_eq_source_rows": bod_nse_eq,
+        "searchable_nse_eq_included": nse_eq_count,
+        "excluded_suspended_nse_eq": ex_susp,
+        "excluded_unsupported_nse_eq": ex_unsup,
+        "excluded_invalid_nse_eq": ex_inv,
+        "excluded_invalid_nse_eq_reasons": dict(stats.get("nse_eq_excluded_invalid_reasons") or {}),
+        "duplicate_nse_eq_keys_overwritten": dup_cnt,
+        "duplicate_nse_eq_keys": dup_keys,
+        "accounted_nse_eq_rows": accounted,
+        "unexplained_nse_eq_row_gap": gap,
+        "reconciled_exact": gap == 0,
+        "category_separation": {
+            "nse_cash_equities_and_etfs": nse_eq_count,
+            "nse_watch_only_indices": nse_indices_count,
+            "bse_cash_equities_isolated": bse_eq_count,
+            "currency_derivatives_isolated": derivatives_count,
+        },
+    }
+

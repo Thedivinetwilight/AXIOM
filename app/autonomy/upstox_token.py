@@ -2,8 +2,8 @@
 
 The operator pastes an Upstox access token (daily OAuth login token or an
 Analytics Token) on the Daily Autonomy page. The value is stored encrypted for
-the current Windows user through ``app/vantage/secrets.DpapiSecretStore`` —
-the same DPAPI approach as the Vantage and Alpaca broker credentials. On
+the current Windows user through ``app/security/dpapi_secrets.DpapiSecretStore`` —
+the same DPAPI approach as the Alpaca market-data and broker credentials. On
 POSIX a clearly labelled owner-only (0600) file supports local development;
 ``MemoryUpstoxTokenStore`` exists for tests only and is never selected
 automatically.
@@ -89,7 +89,7 @@ class DpapiUpstoxTokenStore:
     def __init__(self, directory: Path, key: str = TOKEN_KEY):
         if os.name != "nt":
             raise UpstoxTokenStoreUnavailable("DPAPI is only available on Windows")
-        from app.vantage.secrets import DpapiSecretStore
+        from app.security.dpapi_secrets import DpapiSecretStore
 
         self._inner = DpapiSecretStore(Path(directory), allowed_keys={key})
         self._key = key
@@ -100,7 +100,7 @@ class DpapiUpstoxTokenStore:
         return self.status()
 
     def token(self) -> str:
-        from app.vantage.secrets import SecretNotFound
+        from app.security.dpapi_secrets import SecretNotFound
 
         try:
             value = self._inner.get(self._key)

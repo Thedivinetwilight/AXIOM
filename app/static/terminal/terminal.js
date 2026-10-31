@@ -1334,13 +1334,18 @@ function renderMultiMarketDesk() {
       $(badgeId).className = `status-pill ${snap.session_state === "RUNNING" ? "ok" : snap.session_state === "EMERGENCY_STOPPED" ? "err" : "info"}`;
     }
     if ($(elId)) {
+      const curSessPnl = acct.current_session_total_pnl ?? 0;
+      const histRealPnl = acct.persisted_historical_realized_pnl ?? acct.realized_pnl ?? 0;
       const rows = [
-        ["Execution mode", "LIVE-MARKET PAPER · Simulated · 0 Broker Orders"],
+        ["Execution destination", `${snap.execution_destination || "LIVE-MARKET PAPER · Simulated · 0 Broker Orders"}`],
+        ["Market-data source", `${snap.market_data_source || "Read-only live provider (0 sample fallback)"}`],
+        ["Fill type & automation", `${snap.fill_type || "SIMULATED"} · ${snap.automation_state || "MANUAL_ONLY"}`],
         ["Exchange session", `${snap.exchange_session?.state || "—"} (${snap.exchange_session?.timezone || ""})`],
         ["Equity", `${symPrefix}${fmt(acct.equity, 2)}`],
         ["Available cash", `${symPrefix}${fmt(acct.cash, 2)}`],
         ["Open market value", `${symPrefix}${fmt(acct.market_value, 2)} (${(snap.positions || []).length} pos)`],
-        ["Day / Realized P&L", `${symPrefix}${fmt(acct.day_pnl, 2)} / ${symPrefix}${fmt(acct.realized_pnl, 2)}`],
+        ["Current-session run P&L", `${symPrefix}${fmt(curSessPnl, 2)} (${acct.current_session_run_id ? "active run" : "not running"})`],
+        ["Today / Persisted hist. P&L", `${symPrefix}${fmt(acct.day_pnl, 2)} / ${symPrefix}${fmt(histRealPnl, 2)} (history)`],
         ["Regulatory fees simulated", `${symPrefix}${fmt(acct.total_fees_paid, 2)}`],
         ["Strategy", `${snap.strategy || "manual_only"} · ${snap.timeframe || "5m"}`],
       ];
@@ -1417,11 +1422,11 @@ function renderMultiMarketDesk() {
           <strong>${escapeHtml(w.symbol)}</strong>
           ${statusPill(w.market, w.market === "NSE" ? "info" : "ok")}
         </div>
-        <div class="muted small">${escapeHtml(w.name || w.instrument_key)}</div>
+        <div class="muted small">${escapeHtml(w.name || w.instrument_key)}<br><code>${escapeHtml(w.instrument_key || w.symbol)}</code></div>
         <div class="button-row">
-          <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}">Chart</button>
-          <button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${w.market}:${w.symbol}`)}">Paper Ticket</button>
-          <button type="button" class="button danger-outline xs" data-mm-unwatch="${escapeHtml(`${w.market}:${w.symbol}`)}">Remove</button>
+          <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}" data-mm-ikey="${escapeHtml(w.instrument_key || "")}">Chart</button>
+          <button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${w.market}:${w.symbol}`)}" data-mm-ikey="${escapeHtml(w.instrument_key || "")}">Paper Ticket</button>
+          <button type="button" class="button danger-outline xs" data-mm-unwatch="${escapeHtml(`${w.market}:${w.symbol}`)}" data-mm-ikey="${escapeHtml(w.instrument_key || "")}">Remove</button>
         </div>
       </div>
     `).join("") : `<p class="empty-state">No pinned watchlist symbols.</p>`;
@@ -1429,7 +1434,7 @@ function renderMultiMarketDesk() {
 
   if ($("mm-chart-watchlist-bar")) {
     $("mm-chart-watchlist-bar").innerHTML = allWatch.map((w) =>
-      `<button type="button" class="wl-pill" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}"><span>${escapeHtml(w.market)}</span><strong>${escapeHtml(w.symbol)}</strong></button>`
+      `<button type="button" class="wl-pill" data-mm-jump-chart="${escapeHtml(`${w.market}:${w.symbol}`)}" data-mm-ikey="${escapeHtml(w.instrument_key || "")}"><span>${escapeHtml(w.market)}</span><strong>${escapeHtml(w.symbol)}</strong></button>`
     ).join("");
   }
 
@@ -1443,7 +1448,7 @@ function renderMultiMarketDesk() {
     $("mm-paper-position-rows").innerHTML = allPos.length ? allPos.map((p) => `
       <tr>
         <td>${statusPill(`${p.market} · PAPER`, p.market === "NSE" ? "info" : "ok")}</td>
-        <td><strong>${escapeHtml(p.symbol)}</strong></td>
+        <td><strong>${escapeHtml(p.symbol)}</strong><br><small class="muted"><code>${escapeHtml(p.instrument_key || p.symbol)}</code></small></td>
         <td>${fmt(p.qty, 4)}</td>
         <td>${p.curSym}${fmt(p.avg_entry_price, 2)}</td>
         <td>${p.curSym}${fmt(p.last_price, 2)}</td>
@@ -1452,8 +1457,8 @@ function renderMultiMarketDesk() {
         <td>SL ${p.stop_loss ?? "—"} / TP ${p.take_profit ?? "—"}</td>
         <td>
           <div class="button-row">
-            <button type="button" class="button secondary xs" data-mm-pos-prot="${escapeHtml(`${p.market}:${p.symbol}:${p.stop_loss ?? ""}:${p.take_profit ?? ""}`)}">SL/TP</button>
-            <button type="button" class="button danger xs" data-mm-pos-close="${escapeHtml(`${p.market}:${p.symbol}`)}">Close</button>
+            <button type="button" class="button secondary xs" data-mm-pos-prot="${escapeHtml(`${p.market}:${p.symbol}:${p.stop_loss ?? ""}:${p.take_profit ?? ""}`)}" data-mm-ikey="${escapeHtml(p.instrument_key || "")}">SL/TP</button>
+            <button type="button" class="button danger xs" data-mm-pos-close="${escapeHtml(`${p.market}:${p.symbol}`)}" data-mm-ikey="${escapeHtml(p.instrument_key || "")}">Close</button>
           </div>
         </td>
       </tr>
@@ -1466,7 +1471,7 @@ function renderMultiMarketDesk() {
       const open = ["WORKING", "PARTIALLY_FILLED"].includes(o.status);
       return `<tr>
         <td>${escapeHtml(o.market)}</td>
-        <td><strong>${escapeHtml(o.symbol)}</strong></td>
+        <td><strong>${escapeHtml(o.symbol)}</strong><br><small class="muted"><code>${escapeHtml(o.instrument_key || o.symbol)}</code></small></td>
         <td>${escapeHtml(o.side)} · ${escapeHtml(o.order_type)}</td>
         <td>${fmt(o.filled_qty, 4)} / ${fmt(o.qty, 4)}</td>
         <td>${fmt(o.avg_fill_price || o.limit_price || o.stop_price, 2)}</td>
@@ -1481,8 +1486,8 @@ function renderMultiMarketDesk() {
     $("mm-paper-fill-rows").innerHTML = allFills.length ? allFills.map((f) => {
       const c = f.currency === "INR" ? "₹" : "$";
       return `<tr>
-        <td><small>${escapeHtml(timeText(f.created_at))}</small></td>
-        <td><strong>${escapeHtml(f.market)}:${escapeHtml(f.symbol)}</strong></td>
+        <td><small>${escapeHtml(timeText(f.created_at))}</small><br><span class="status-pill info">${escapeHtml(f.fill_type || "SIMULATED")}</span></td>
+        <td><strong>${escapeHtml(f.market)}:${escapeHtml(f.symbol)}</strong><br><small class="muted"><code>${escapeHtml(f.instrument_key || f.symbol)}</code></small></td>
         <td>${escapeHtml(f.side)}</td>
         <td>${fmt(f.qty, 4)} @ ${c}${fmt(f.fill_price, 2)}</td>
         <td>${c}${fmt(f.fees_total, 2)}</td>
@@ -1566,18 +1571,21 @@ async function searchMultiMarketCatalog() {
     $("mm-catalog-rows").innerHTML = state.mm.catalogItems.map((it) => {
       const sym = it.trading_symbol || it.symbol;
       const mkt = it.market || "NSE";
+      const exch = it.exchange || it.venue || mkt;
+      const ikey = it.instrument_key || sym;
+      const catBadge = it.asset_category || (it.tradable === false ? "INDEX" : "CASH_EQUITY_OR_ETF");
       return `<tr>
-        <td><button type="button" class="button secondary xs" data-mm-watch="${escapeHtml(`${mkt}:${sym}`)}">+ Watch</button></td>
-        <td>${statusPill(mkt, mkt === "NSE" ? "info" : "ok")}</td>
-        <td><strong>${escapeHtml(sym)}</strong><br><small class="muted">${escapeHtml(it.instrument_key || sym)}</small></td>
+        <td><button type="button" class="button secondary xs" data-mm-watch="${escapeHtml(`${mkt}:${sym}`)}" data-mm-ikey="${escapeHtml(ikey)}" data-mm-exchange="${escapeHtml(exch)}">+ Watch</button></td>
+        <td>${statusPill(exch, mkt === "NSE" ? "info" : "ok")}</td>
+        <td><strong>${escapeHtml(sym)}</strong><br><small class="muted"><code>${escapeHtml(ikey)}</code></small></td>
         <td>${escapeHtml(it.name || sym)}</td>
-        <td><code>${escapeHtml(it.asset_subclass || it.instrument_type || "EQ")}</code></td>
+        <td><code>${escapeHtml(it.asset_subclass || it.instrument_type || "EQ")}</code><br><small class="muted">${escapeHtml(catBadge)}</small></td>
         <td>Lot ${fmt(it.quantity_step || it.lot_size || 1, 0)} · Tick ${fmt(it.tick_size, 4)}</td>
-        <td>${it.tradable === false ? statusPill("WATCH ONLY", "warn") : escapeHtml(it.product_label || (it.fractionable ? "USD Cash · Fractionable" : "Cash / Delivery"))}</td>
+        <td>${it.tradable === false ? statusPill("WATCH ONLY · INDEX", "warn") : escapeHtml(it.product_label || (it.fractionable ? "USD Cash · Fractionable" : "Cash / Delivery"))}</td>
         <td>
           <div class="button-row">
-            <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${mkt}:${sym}`)}">Chart</button>
-            ${it.tradable === false ? "" : `<button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${mkt}:${sym}`)}">Trade Paper</button>`}
+            <button type="button" class="button secondary xs" data-mm-jump-chart="${escapeHtml(`${mkt}:${sym}`)}" data-mm-ikey="${escapeHtml(ikey)}" data-mm-exchange="${escapeHtml(exch)}">Chart</button>
+            ${it.tradable === false ? "" : `<button type="button" class="button primary xs" data-mm-jump-ticket="${escapeHtml(`${mkt}:${sym}`)}" data-mm-ikey="${escapeHtml(ikey)}" data-mm-exchange="${escapeHtml(exch)}">Trade Paper</button>`}
           </div>
         </td>
       </tr>`;
@@ -1603,15 +1611,27 @@ async function loadMultiMarketChart() {
   $("mm-load-live-chart-btn").hidden = false;
   const symbol = ($("mm-chart-symbol-input")?.value || (feedMode === "NSE" ? "RELIANCE" : "AAPL")).trim();
   const timeframe = $("chart-timeframe")?.value || "5m";
+  const selectedIkey = feedMode === "NSE"
+    ? (symbol.includes("|") ? symbol : (state.mm.selectedChartSym === symbol ? (state.mm.selectedInstrumentKey || "") : ""))
+    : "";
   if ($("mm-chart-feed-badge")) $("mm-chart-feed-badge").textContent = `${feedMode} LIVE READ-ONLY`;
   try {
     const q = new URLSearchParams({ market: feedMode, symbol, timeframe });
+    if (selectedIkey) q.set("instrument_key", selectedIkey);
     const payload = await api(`/api/markets/chart?${q}`);
     const bars = normalizeBars(payload.bars || []);
+    const resolvedKey = payload.instrument_key || payload.instrument?.instrument_key || selectedIkey || "";
+    if (feedMode === "NSE" && resolvedKey) {
+      state.mm.selectedInstrumentKey = resolvedKey;
+      state.mm.selectedChartSym = payload.symbol || symbol;
+      state.mm.ticketInstrumentKey = resolvedKey;
+      state.mm.ticketSymbol = payload.symbol || symbol;
+    }
     state.chart = {
       mode: currentStatus().mode,
       feed: `mm_${feedMode.toLowerCase()}`,
       symbol: payload.symbol || symbol,
+      instrument_key: resolvedKey,
       timeframe,
       bars,
       quote: payload.quote || null,
@@ -1622,14 +1642,20 @@ async function loadMultiMarketChart() {
     $("chart-source").textContent = payload.data_feed_label || `${feedMode} READ-ONLY`;
     $("chart-source").className = `status-pill ${connStatePillClass(payload.connection_state)}`;
     $("chart-feed-context").className = `inline-status ${bars.length ? "ok" : "warn"}`;
+    const entInfo = payload.feed_entitlement_label ? ` · Entitlement: ${payload.feed_entitlement_label}` : "";
+    const keyInfo = resolvedKey ? ` · Key: ${resolvedKey} (${payload.exchange || feedMode})` : "";
+    const ageInfo = payload.quote_age_seconds != null ? ` · Quote age: ${payload.quote_age_seconds}s` : (payload.bar_age_seconds != null ? ` · Bar age: ${payload.bar_age_seconds}s` : "");
+    const sessInfo = payload.market_session_status ? ` · Session: ${payload.market_session_status}` : "";
     $("chart-feed-context").textContent = bars.length
-      ? `${payload.data_feed_label} · Source: ${payload.data_source} · ${bars.length} real OHLCV bars loaded.`
-      : `${payload.data_feed_label} (${payload.connection_state}). AXIOM never substitutes sample or replay bars for live ${feedMode} market data.`;
+      ? `${payload.data_feed_label} · Source: ${payload.data_source} · ${bars.length} real OHLCV bars loaded${keyInfo}${entInfo}${ageInfo}${sessInfo}.`
+      : `${payload.data_feed_label} (${payload.connection_state})${keyInfo}${entInfo}${sessInfo}. AXIOM never substitutes sample or replay bars for live ${feedMode} market data.`;
     if (!bars.length && $("chart-empty")) {
       $("chart-empty").hidden = false;
       $("chart-empty").textContent = `${feedMode} live bars unavailable (${payload.connection_state}). Save ${feedMode === "NSE" ? "Upstox daily access_token" : "Alpaca Market Data API Key & Secret"} on Connections.`;
     }
-    $("chart-legend").textContent = `${bars.length} real bars · ${payload.data_source} · checked ${timeText(payload.generated_at)}`;
+    const srcTs = payload.source_timestamp ? `src ${timeText(payload.source_timestamp)} · ` : "";
+    const recvTs = payload.local_received_at || payload.generated_at;
+    $("chart-legend").textContent = `${bars.length} real bars · ${payload.data_source}${resolvedKey ? ` · ${resolvedKey}` : ""} · ${srcTs}recv ${timeText(recvTs)}`;
     if ($("mm-order-market")) $("mm-order-market").value = feedMode;
     if ($("mm-order-symbol")) $("mm-order-symbol").value = payload.symbol || symbol;
     if ($("mm-ticket-currency-badge")) $("mm-ticket-currency-badge").textContent = feedMode === "NSE" ? "INR ₹" : "USD $";
@@ -1642,9 +1668,14 @@ async function loadMultiMarketChart() {
 
 function getMultiMarketTicketBody() {
   const numOrNull = (id) => ($(id)?.value ? Number($(id).value) : null);
-  return {
-    market: $("mm-order-market").value,
-    symbol: $("mm-order-symbol").value.trim(),
+  const mkt = $("mm-order-market").value;
+  const sym = $("mm-order-symbol").value.trim();
+  const ikey = mkt === "NSE"
+    ? (sym.includes("|") ? sym : (state.mm.ticketSymbol === sym ? (state.mm.ticketInstrumentKey || null) : null))
+    : null;
+  const body = {
+    market: mkt,
+    symbol: sym,
     side: state.mm.side,
     qty: Number($("mm-order-qty").value),
     order_type: $("mm-order-type").value,
@@ -1656,6 +1687,8 @@ function getMultiMarketTicketBody() {
     take_profit: numOrNull("mm-order-tp"),
     allow_off_hours_working: Boolean($("mm-order-offhours")?.checked),
   };
+  if (ikey) body.instrument_key = ikey;
+  return body;
 }
 
 function renderMultiMarketPreview(prev) {
@@ -1665,11 +1698,13 @@ function renderMultiMarketPreview(prev) {
   const fees = prev.estimated_fees || {};
   box.innerHTML = `
     <div class="inline-status ${prev.ok ? "ok" : "err"}" style="margin-bottom:6px">
-      <strong>${prev.ok ? "SIMULATED PREVIEW PASSED" : "BLOCKED BY GUARDRAILS"}</strong> · 0 Broker Calls
+      <strong>${prev.ok ? "SIMULATED PREVIEW PASSED" : "BLOCKED BY GUARDRAILS"}</strong> · 0 Broker Calls · Fill: ${escapeHtml(prev.fill_type || "SIMULATED")}
     </div>
+    <div class="small muted">Instrument: <code>${escapeHtml(prev.instrument_key || prev.symbol || "")}</code> (${escapeHtml(prev.exchange || prev.market || "")}) · Session: <strong>${escapeHtml(prev.market_session_status || prev.session?.state || "—")}</strong></div>
     <div>Ref / Est Fill: <strong>${c}${fmt(prev.reference_price, 2)} → ${c}${fmt(prev.estimated_fill_price, 2)}</strong></div>
     <div>Est Notional: <strong>${c}${fmt(prev.estimated_notional, 2)}</strong> · Total Fees: <strong>${c}${fmt(fees.total, 2)}</strong></div>
-    <div class="muted small">Quote: ${escapeHtml(prev.quote_source || "unavailable")} (${prev.quote_age_seconds !== null && prev.quote_age_seconds !== undefined ? `${prev.quote_age_seconds}s old` : "no fresh quote"})</div>
+    <div class="muted small">Quote: ${escapeHtml(prev.quote_source || "unavailable")} · ${escapeHtml(prev.feed_entitlement_label || "")} (${prev.quote_age_seconds !== null && prev.quote_age_seconds !== undefined ? `${prev.quote_age_seconds}s old` : "no fresh quote"})</div>
+    ${prev.source_timestamp ? `<div class="muted small">Src TS: ${escapeHtml(prev.source_timestamp)} · Recv TS: ${escapeHtml(prev.local_received_at || prev.checked_at || "")}</div>` : ""}
     ${(prev.rejection_reasons || []).length ? `<div class="pnl-neg small" style="margin-top:5px">${escapeHtml(prev.rejection_reasons.join(" · "))}</div>` : ""}
   `;
 }
@@ -1714,6 +1749,10 @@ function bindMultiMarketEvents() {
     } else if (["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "NIFTYBEES"].includes(raw) || raw.startsWith("NSE_")) {
       mkt = "NSE";
     }
+    state.mm.selectedInstrumentKey = sym.includes("|") ? sym : "";
+    state.mm.selectedChartSym = sym;
+    state.mm.ticketInstrumentKey = sym.includes("|") ? sym : "";
+    state.mm.ticketSymbol = sym;
     await goPage("charts");
     if ($("mm-chart-source-mode")) $("mm-chart-source-mode").value = mkt;
     if ($("mm-chart-symbol-input")) $("mm-chart-symbol-input").value = sym;
@@ -1728,31 +1767,51 @@ function bindMultiMarketEvents() {
     const target = e.target.closest("button");
     if (!target) return;
     if (target.dataset.mmJumpChart) {
-      const [mkt, sym] = target.dataset.mmJumpChart.split(":");
+      const idx = target.dataset.mmJumpChart.indexOf(":");
+      const mkt = idx >= 0 ? target.dataset.mmJumpChart.slice(0, idx) : state.mm.activeVenue;
+      const sym = idx >= 0 ? target.dataset.mmJumpChart.slice(idx + 1) : target.dataset.mmJumpChart;
+      const ikey = target.dataset.mmIkey || "";
+      state.mm.selectedInstrumentKey = mkt === "NSE" ? ikey : "";
+      state.mm.selectedChartSym = sym;
+      state.mm.ticketInstrumentKey = mkt === "NSE" ? ikey : "";
+      state.mm.ticketSymbol = sym;
       await goPage("charts");
       $("mm-chart-source-mode").value = mkt;
       $("mm-chart-symbol-input").value = sym;
       await loadMultiMarketChart();
     } else if (target.dataset.mmJumpTicket) {
-      const [mkt, sym] = target.dataset.mmJumpTicket.split(":");
+      const idx = target.dataset.mmJumpTicket.indexOf(":");
+      const mkt = idx >= 0 ? target.dataset.mmJumpTicket.slice(0, idx) : state.mm.activeVenue;
+      const sym = idx >= 0 ? target.dataset.mmJumpTicket.slice(idx + 1) : target.dataset.mmJumpTicket;
+      const ikey = target.dataset.mmIkey || "";
+      state.mm.ticketInstrumentKey = mkt === "NSE" ? ikey : "";
+      state.mm.ticketSymbol = sym;
       await goPage("charts");
       switchTicketTab("MULTIMARKET");
       $("mm-order-market").value = mkt;
       $("mm-order-symbol").value = sym;
       $("mm-ticket-currency-badge").textContent = mkt === "NSE" ? "INR ₹" : "USD $";
     } else if (target.dataset.mmWatch) {
-      const [market, symbol] = target.dataset.mmWatch.split(":");
+      const idx = target.dataset.mmWatch.indexOf(":");
+      const market = idx >= 0 ? target.dataset.mmWatch.slice(0, idx) : state.mm.activeVenue;
+      const symbol = idx >= 0 ? target.dataset.mmWatch.slice(idx + 1) : target.dataset.mmWatch;
+      const ikey = target.dataset.mmIkey || "";
       try {
-        await api("/api/markets/watchlists", { body: { market, symbol } });
+        const watchBody = { market, symbol };
+        if (market === "NSE" && ikey) watchBody.instrument_key = ikey;
+        await api("/api/markets/watchlists", { body: watchBody });
         await loadMultiMarketOverview();
-        toast("Added to watchlist", `${market}:${symbol} pinned.`, "ok");
+        toast("Added to watchlist", `${market}:${ikey || symbol} pinned.`, "ok");
       } catch (err) { toast("Watchlist failed", err.message, "err"); }
     } else if (target.dataset.mmUnwatch) {
-      const [market, symbol] = target.dataset.mmUnwatch.split(":");
+      const idx = target.dataset.mmUnwatch.indexOf(":");
+      const market = idx >= 0 ? target.dataset.mmUnwatch.slice(0, idx) : state.mm.activeVenue;
+      const symbol = idx >= 0 ? target.dataset.mmUnwatch.slice(idx + 1) : target.dataset.mmUnwatch;
+      const targetRef = (market === "NSE" && target.dataset.mmIkey) ? target.dataset.mmIkey : symbol;
       try {
-        await api(`/api/markets/watchlists/${encodeURIComponent(market)}/${encodeURIComponent(symbol)}`, { method: "DELETE" });
+        await api(`/api/markets/watchlists/${encodeURIComponent(market)}/${encodeURIComponent(targetRef)}`, { method: "DELETE" });
         await loadMultiMarketOverview();
-        toast("Removed from watchlist", `${market}:${symbol} removed.`, "ok");
+        toast("Removed from watchlist", `${market}:${targetRef} removed.`, "ok");
       } catch (err) { toast("Watchlist failed", err.message, "err"); }
     } else if (target.dataset.mmCancelOrder) {
       try {
@@ -1762,24 +1821,28 @@ function bindMultiMarketEvents() {
       } catch (err) { toast("Cancel failed", err.message, "err"); }
     } else if (target.dataset.mmPosClose) {
       const [mkt, sym] = target.dataset.mmPosClose.split(":");
+      const targetRef = (mkt === "NSE" && target.dataset.mmIkey) ? target.dataset.mmIkey : sym;
       try {
-        await api(`/api/markets/paper/positions/${encodeURIComponent(mkt)}/${encodeURIComponent(sym)}/close`, { body: {} });
+        await api(`/api/markets/paper/positions/${encodeURIComponent(mkt)}/${encodeURIComponent(targetRef)}/close`, { body: {} });
         await loadMultiMarketOverview();
-        toast("Paper position closed", `${mkt}:${sym} closed against live quote.`, "ok");
+        toast("Paper position closed", `${mkt}:${targetRef} closed against live quote.`, "ok");
       } catch (err) { toast("Position close blocked", err.message, "err"); }
     } else if (target.dataset.mmPosProt) {
       const [mkt, sym, slCur, tpCur] = target.dataset.mmPosProt.split(":");
+      const ikey = target.dataset.mmIkey || "";
       openDialog({
-        title: `Update ${mkt}:${sym} Paper Protection (SL / TP)`,
+        title: `Update ${mkt}:${ikey || sym} Paper Protection (SL / TP)`,
         body: `<div class="form-grid"><div class="field"><label for="mm-mod-sl">Stop-loss</label><input id="mm-mod-sl" type="number" step="any" value="${escapeHtml(slCur)}"></div><div class="field"><label for="mm-mod-tp">Take-profit</label><input id="mm-mod-tp" type="number" step="any" value="${escapeHtml(tpCur)}"></div></div>`,
         confirmLabel: "Save SL / TP",
         confirmClass: "primary",
         onConfirm: async () => {
           const stop_loss = $("mm-mod-sl").value ? Number($("mm-mod-sl").value) : null;
           const take_profit = $("mm-mod-tp").value ? Number($("mm-mod-tp").value) : null;
-          await api("/api/markets/paper/positions/protection", { body: { market: mkt, symbol: sym, stop_loss, take_profit } });
+          const protBody = { market: mkt, symbol: sym, stop_loss, take_profit };
+          if (mkt === "NSE" && ikey) protBody.instrument_key = ikey;
+          await api("/api/markets/paper/positions/protection", { body: protBody });
           await loadMultiMarketOverview();
-          toast("Protection updated", `${mkt}:${sym} SL/TP updated.`, "ok");
+          toast("Protection updated", `${mkt}:${ikey || sym} SL/TP updated.`, "ok");
         },
       });
     }
@@ -1827,7 +1890,16 @@ function bindMultiMarketEvents() {
   });
 
   // Superchart Feed Mode & Multi-Market Ticket
-  $("mm-chart-source-mode")?.addEventListener("change", loadMultiMarketChart);
+  $("mm-chart-source-mode")?.addEventListener("change", () => {
+    state.mm.selectedInstrumentKey = "";
+    state.mm.selectedChartSym = "";
+    loadMultiMarketChart();
+  });
+  $("mm-chart-symbol-input")?.addEventListener("input", () => {
+    const val = ($("mm-chart-symbol-input")?.value || "").trim();
+    state.mm.selectedInstrumentKey = val.includes("|") ? val : "";
+    state.mm.selectedChartSym = val;
+  });
   $("mm-load-live-chart-btn")?.addEventListener("click", loadMultiMarketChart);
   $("ticket-tab-session")?.addEventListener("click", () => switchTicketTab("SESSION"));
   $("ticket-tab-mm")?.addEventListener("click", () => switchTicketTab("MULTIMARKET"));
@@ -1835,8 +1907,15 @@ function bindMultiMarketEvents() {
   $("mm-order-market")?.addEventListener("change", () => {
     const m = $("mm-order-market").value;
     $("mm-ticket-currency-badge").textContent = m === "NSE" ? "INR ₹" : "USD $";
+    state.mm.ticketInstrumentKey = "";
+    state.mm.ticketSymbol = "";
     if (m === "NASDAQ" && $("mm-order-symbol").value === "RELIANCE") $("mm-order-symbol").value = "AAPL";
     if (m === "NSE" && $("mm-order-symbol").value === "AAPL") $("mm-order-symbol").value = "RELIANCE";
+  });
+  $("mm-order-symbol")?.addEventListener("input", () => {
+    const val = ($("mm-order-symbol")?.value || "").trim();
+    state.mm.ticketInstrumentKey = val.includes("|") ? val : "";
+    state.mm.ticketSymbol = val;
   });
   $("mm-side-buy")?.addEventListener("click", () => { state.mm.side = "BUY"; $("mm-side-buy").classList.add("active"); $("mm-side-sell").classList.remove("active"); });
   $("mm-side-sell")?.addEventListener("click", () => { state.mm.side = "SELL"; $("mm-side-sell").classList.add("active"); $("mm-side-buy").classList.remove("active"); });
@@ -3175,8 +3254,9 @@ function renderEnsembleAblation(abl) {
   const ks = abl.kronos_ablation_summary || {};
   const cal = abl.calibration || {};
   if ($("ens-ablation-summary")) {
+    const evBanner = abl.evidence_classification?.banner || (abl.dataset?.real_market_data ? "HISTORICAL OOS EVIDENCE — NOT EXPECTED FUTURE RETURNS" : "SYNTHETIC ENGINEERING EVIDENCE — NOT EXPECTED RETURNS OR LIVE READINESS");
     $("ens-ablation-summary").textContent =
-      `Run ${abl.ablation_id} (${abl.market} · ${abl.dataset?.dataset_id} · real_market_data=${abl.dataset?.real_market_data}): ` +
+      `[${evBanner}] Run ${abl.ablation_id} (${abl.market} · ${abl.dataset?.dataset_id} · real_market_data=${abl.dataset?.real_market_data}): ` +
       `Tested ${mt.variants_tested || 0} variants (Multiple-Testing Sharpe Haircut=${mt.sharpe_haircut_threshold || 0}; Accepted OOS=${mt.accepted_count || 0}) · ` +
       `Calibrator OOS N=${cal.total_oos_samples || 0}, Brier=${cal.brier_score ?? "—"}, ECE=${cal.ece ?? "—"} · ` +
       `Kronos Verdict: ${ks.verdict || "N/A"}`;

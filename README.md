@@ -1,69 +1,107 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.7.0a9`.** AXIOM provides a dark multi-market
-Operator console (`/terminal`, workspaces `01`–`12`) for **Indian NSE (`INR ₹` via Upstox)**
-and **US NASDAQ (`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation.
-All Vantage MT5 operator UI surfaces and MT5 configuration guides have been removed
-from the desktop console and documentation while preserving Upstox (NSE) and
-Alpaca (NASDAQ) credentials, order routing, risk gates, and execution behavior.
+**Current source version: `3.7.0a10`.** AXIOM runs directly from a cloned Git
+repository (**source-first workflow — no Windows installer required**) and serves
+a loopback-only (`127.0.0.1`) dark multi-market Operator console (`/terminal`,
+workspaces `01`–`12`) for **Indian NSE (`INR ₹` via Upstox)** and **US NASDAQ
+(`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation.
 
-- **NSE (`INR ₹` via Upstox)**: Read-only daily `UPSTOX_ACCESS_TOKEN` for NSE quotes,
-  intraday/daily candles, Beginning-of-Day (`complete.json.gz`) instrument master
-  reconciliation, and `LIVE-MARKET PAPER` simulation (with Indian STT, NSE txn,
-  SEBI, stamp duty, and 18% GST modeling). Separate default-OFF `UPSTOX_LIVE`
-  execution via `/autonomy` requires `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`,
-  SEBI static IP registration, bounded INR risk limits, and separate **Arm** and
-  **Activate** confirmations.
-- **NASDAQ (`USD $` via Alpaca)**: Read-only `ALPACA_MARKET_DATA` (`IEX` free real-time
-  or paid `SIP` consolidated tape) for US snapshots, historical bars, active NASDAQ
-  equity/ETF synchronization, and `LIVE-MARKET PAPER` simulation (with US SEC Section 31
-  and FINRA TAF fee modeling). Separate `ALPACA_BROKER_PAPER` and default-OFF
-  `ALPACA_BROKER_LIVE` execution slots require `ALPACA_BROKER_ENABLED=true`, bounded USD
-  risk limits, passing readiness checks, and separate **Arm** and phrase-confirmed
-  **Activate** steps.
-- **Independent Local Paper (`AXIOM_PAPER`)**: The default local replay runs
-  `moving_average` with **local strategy automation ON** on labeled sample CSV data
-  and records durable allowlisted audit events (`PAPER_SESSION_STARTED`,
-  `PAPER_STRATEGY_SIGNAL`, `PAPER_ORDER_SIMULATED`, `PAPER_FILL_SIMULATED`,
-  `PAPER_SESSION_STOPPED` including `END_OF_DATA`). Current-run P&L deltas remain
-  strictly separated from persisted local history and open-position unrealized P&L.
-- **AI & Model Lab (`10`), Live Trade Monitor (`11`), and Ensemble & Allocation (`12`)**:
-  Manifest-pinned optional CPU `NeoQuasar/Kronos-small` setup and offline inference
-  self-test, leak-free chronological walk-forward + `2.0x` cost-stress evaluation,
-  strictly read-only `11 Live Trade Monitor` (with explicit `PAPER` vs `LIVE` badges
-  and `"not trading"` inactive states), and `12 Ensemble & Allocation` (`1,024+`
-  bounded parallel strategy variants, out-of-sample empirical calibration, and a
-  single per-market `PortfolioRiskAllocator`). All research, Kronos, and ensemble
-  surfaces are **PAPER / RESEARCH ONLY** and never arm or activate live execution.
+All live execution switches (`UPSTOX_LIVE`, `ALPACA_LIVE`, Arm, Activate, and
+unattended execution) start **OFF / DISARMED** by default and are never enabled
+by startup, restart, crash recovery, or research runs. Existing user state under
+`%LOCALAPPDATA%\AXIOM` (`axiom.env`, SQLite journals, Kronos runtime/weights, and
+Windows DPAPI credentials) is preserved intact across source updates.
 
-Version 3.6.0a2's research candidate repairs and Version 3.5.0a2's Windows Error
-4551 packaging workaround (loaderless Inno installer ZIP with required `-0.bin` /
-`-1.bin` sidecars and complete onedir portable ZIP) are retained. Release packages
-remain unsigned unless release metadata explicitly proves signing, and do not
-disable or bypass Windows Application Control.
+---
 
-> **No profitability or live-readiness claim.** Automated tests, simulated paper
-> fills, and read-only connection checks establish neither profitability nor
-> real-money readiness. No live login or real broker order is permitted in CI.
-> Read the exact release's `BUILD_METADATA.json` for real-Windows, skipped, and
-> unverified checks.
+## Quickstart — Source-First Workflow (Windows PowerShell, No Installer Required)
+
+### 1. Clone & Set Up Dependencies
+```powershell
+git clone https://github.com/Thedivinetwilight/AXIOM.git
+Set-Location .\AXIOM
+git checkout arena/ffd46191-axiom
+
+py -3.11-64 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+
+# Register repo root in .venv site-packages (enables `python -m app operator` from ANY directory)
+.\.venv\Scripts\python.exe .\axiom_launcher.py --register-venv
+
+# Verify required Python packages + IANA timezones (Asia/Kolkata & America/New_York via tzdata)
+.\.venv\Scripts\python.exe .\axiom_launcher.py --check-deps
+```
+
+### 2. Smoke-Check & Launch from Source (Works from Repo Root OR Any Working Directory)
+```powershell
+# Non-destructive loopback smoke check (verifies /health & /terminal with 0 broker calls)
+.\Start-Axiom.ps1 -Smoke
+
+# Launch AXIOM Operator Console on http://127.0.0.1:8765/terminal
+.\Start-Axiom.ps1
+```
+Supported equivalent source-launch commands (no manual `PYTHONPATH` needed):
+- From inside the repository: `.\Start-Axiom.ps1`, `.\.venv\Scripts\python.exe .\axiom_launcher.py`, `.\.venv\Scripts\python.exe -m app operator`, `.\.venv\Scripts\python.exe .\run.py --mode operator`, or `.\.venv\Scripts\python.exe packaging\windows\axiom_launcher.py`.
+- From **any other working directory** (`C:\Users\you`, `D:\work`, `/tmp`, etc.):
+  ```powershell
+  & C:\path\to\AXIOM\Start-Axiom.ps1
+  # or:
+  C:\path\to\AXIOM\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py
+  # or (after --register-venv):
+  C:\path\to\AXIOM\.venv\Scripts\python.exe -m app operator
+  ```
+
+### 3. Stop & Update Source Checkout
+- **Stop:** Press `Ctrl+C` in the PowerShell terminal running AXIOM (cleanly closes Uvicorn and SQLite WAL handles; `0` broker orders touched).
+- **Update:**
+  ```powershell
+  Set-Location C:\path\to\AXIOM
+  git pull --ff-only
+  .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+  .\Start-Axiom.ps1 -CheckDeps
+  ```
+
+### 4. Troubleshooting Source Startup
+- **`Missing required Python dependencies` / `ZoneInfoNotFoundError` on Windows:** Run the exact install command printed by preflight (`.\.venv\Scripts\python.exe -m pip install -r C:\path\to\AXIOM\requirements-lock.txt`, which installs `tzdata==2026.6` on Windows for `Asia/Kolkata` and `America/New_York`).
+- **`No module named 'app'` when running `python -m app operator` outside the repo:** Run `.\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py --register-venv` once (writes `axiom_source.pth` into `.venv`), or invoke `Start-Axiom.ps1` / `axiom_launcher.py` directly by path.
+- **Browser asks for local `API_TOKEN`:** Open `%LOCALAPPDATA%\AXIOM\axiom.env` (Windows) or `~/.local/share/axiom/axiom.env` (Linux) and copy the value after `API_TOKEN=`. This local bearer token protects loopback API routes only and is never printed to stdout.
+- **Port `8765` busy:** `axiom_launcher.py` automatically falls back to a free ephemeral `127.0.0.1` port unless `--port` is pinned (`.\Start-Axiom.ps1 -Port 8770`).
+
+---
+
+## Multi-Market Architecture & Unambiguous PAPER Modes
+
+| Mode | Market-Data Source | Execution Destination | Automation State | Fill Type | P&L Attribution |
+|---|---|---|---|---|---|
+| **`1 · LOCAL_REPLAY_PAPER` (`AXIOM_PAPER`)** | Labeled bundled sample CSV (`data/sample*.csv` — **not** live market data) | Local SQLite paper broker (`0` external calls) | `moving_average` replay automation ON (or manual) | **`SIMULATED`** | Current-run P&L isolated from persisted account history |
+| **`2 · LIVE_MARKET_LOCAL_PAPER`** | Real read-only Upstox (`NSE_EQ`) & Alpaca (`IEX` single-venue / paid `SIP` consolidated tape; **zero** sample fallback) | Local SQLite simulator (`live_market_paper.sqlite3`, `0` broker order calls) | Manual or completed-bar strategy (`manual_only`, `ema_crossover`, `rsi_mean_reversion`, `parallel_ensemble`) | **`SIMULATED`** | `current_session_total_pnl` strictly separated from `persisted_historical_realized_pnl` |
+| **`3 · ALPACA_BROKER_PAPER`** | Isolated `ALPACA_MARKET_DATA` read-only slot | `https://paper-api.alpaca.markets` via isolated `ALPACA_BROKER_PAPER` slot | Explicit operator submit only (`ALPACA_BROKER_ENABLED=true`) | **`BROKER_PAPER_SANDBOX_CONFIRMED`** | Tracked separately from local SQLite paper & live accounts |
+
+- **NSE (`INR ₹` via Upstox)**: Exact Upstox `instrument_key` (`NSE_EQ|INE002A01018`) and exchange (`NSE`) are preserved end-to-end across BOD `complete.json.gz` reconciliation (`CASH_EQUITY_OR_ETF` strictly separated from `DERIVATIVE` and watch-only `INDEX`), search, watchlists, quotes, candles, charts, and `LIVE-MARKET PAPER` orders. Separate default-OFF `UPSTOX_LIVE` execution via `/autonomy` requires `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, SEBI static IP registration, bounded INR risk limits, and separate **Arm** and **Activate** confirmations.
+- **NASDAQ (`USD $` via Alpaca)**: Explicitly distinguishes **`iex`** (single-venue IEX feed, ~2–3% US volume — **not** consolidated US tape), **`sip`** (paid consolidated US SIP tape), and **`delayed_sip`** (15-min delayed SIP — blocked for live-market PAPER entries). Separate default-OFF `ALPACA_BROKER_LIVE` execution requires `ALPACA_BROKER_ENABLED=true`, distinct live keys, bounded USD risk limits, passing readiness checks, **Arm**, and phrase-confirmed **Activate**.
+- **AI & Model Lab (`10`), Read-Only Live Trade Monitor (`11`), and Ensemble & Allocation (`12`)**:
+  Manifest-pinned optional CPU `NeoQuasar/Kronos-small` (advisory-only, `0` mock fallbacks), strictly read-only `11 Live Trade Monitor` (`0` order-mutation actions), and `12 Ensemble & Allocation` (`1,024+` bounded strategy variants routed through a single per-market `PortfolioRiskAllocator` with `0` allocator bypass paths). Bundled fixture ablations are explicitly labeled **`SYNTHETIC ENGINEERING EVIDENCE — NOT EXPECTED RETURNS OR LIVE READINESS`**.
+
+Optional Windows frozen packaging (`packaging/windows/build_windows.ps1`, retaining Version 3.5.0a2's Error 4551 loaderless Inno / onedir portable layout) remains tested in CI as build verification only and is **not** required to develop or run AXIOM.
+
+> **No profitability or live-readiness claim.** Automated tests, synthetic fixture benchmarks, simulated paper fills, and read-only connection checks establish neither profitability nor real-money readiness. No live login or real broker order is permitted in CI.
 
 - **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
 - **Owner setup & architecture guide:** [`docs/OWNER_SETUP_GUIDE.md`](docs/OWNER_SETUP_GUIDE.md)
+- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
+- **Ensemble & strategy audit evidence:** [`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`](docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md)
+- **Vantage/MT5 isolation audit:** [`docs/VANTAGE_MT5_ISOLATION_AUDIT.md`](docs/VANTAGE_MT5_ISOLATION_AUDIT.md)
 - **Daily Upstox autonomy:** [`docs/AUTONOMY.md`](docs/AUTONOMY.md)
 - **AI & Model Lab manual:** [`docs/AI_MODEL_LAB_MANUAL.md`](docs/AI_MODEL_LAB_MANUAL.md)
-- **Ensemble & Live Trade Monitor evidence:** [`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`](docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md)
 - **Research candidates and evidence limits:** [`docs/RESEARCH_CANDIDATES.md`](docs/RESEARCH_CANDIDATES.md)
-- **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
+- **Optional Windows packaging manual:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
 - **Error 4551 / App Control boundary:** [`docs/WINDOWS_APP_CONTROL.md`](docs/WINDOWS_APP_CONTROL.md)
 - **Redesign audit/acceptance:** [`docs/TERMINAL_REDESIGN_PLAN.md`](docs/TERMINAL_REDESIGN_PLAN.md)
 - **Performance definitions and benchmark conditions:** [`docs/TERMINAL_PERFORMANCE.md`](docs/TERMINAL_PERFORMANCE.md)
 - **Listed-share/ETF provider boundary:** [`docs/LISTED_ASSETS.md`](docs/LISTED_ASSETS.md)
 - **US-paper feed/risk evidence:** [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md)
 
-Launch the frozen Windows app and open `/terminal`. From source, use the existing
-virtual environment and run `python -m uvicorn app.main:create_app --factory
---host 127.0.0.1 --port 8000`; read `API_TOKEN` from your private local config.
 Do not paste local tokens, Upstox/Alpaca credentials, or DPAPI files into issues or chat.
 
 ---

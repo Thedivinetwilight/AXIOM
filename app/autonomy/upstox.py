@@ -912,8 +912,15 @@ class InstrumentCatalog:
             "missing_isin_count": 0,
             "watch_only_indices": 0,
             "segment_field_mismatch": 0,
+            "nse_eq_bod_source_rows": 0,
+            "nse_eq_excluded_suspended": 0,
+            "nse_eq_excluded_unsupported": 0,
+            "nse_eq_excluded_invalid": 0,
+            "nse_eq_excluded_invalid_reasons": {},
+            "nse_eq_duplicate_keys": [],
         }
         for raw in complete:
+            raw_seg_probe = ""
             try:
                 if not isinstance(raw, dict):
                     raise TypeError("record must be a JSON object")
@@ -926,15 +933,22 @@ class InstrumentCatalog:
                 # authoritative for the segment; a drifted `segment` field is
                 # counted, never trusted over the key.
                 segment = key.split("|", 1)[0].strip().upper() if "|" in key else segment_field
+                raw_seg_probe = segment
+                if segment == "NSE_EQ":
+                    stats["nse_eq_bod_source_rows"] += 1
                 if segment_field and segment_field != segment:
                     stats["segment_field_mismatch"] += 1
                 kind = _clean_identity(str(raw.get("instrument_type") or "")).upper()
                 if key in suspended_keys:
                     stats["dropped_suspended"] += 1
+                    if segment == "NSE_EQ":
+                        stats["nse_eq_excluded_suspended"] += 1
                     continue
                 is_duplicate_key = key in parsed or key in indices
                 if is_duplicate_key:
                     stats["duplicate_keys"].append(key)
+                    if segment == "NSE_EQ":
+                        stats["nse_eq_duplicate_keys"].append(key)
                     warnings.append(f"{key}: duplicate instrument_key encountered in BOD source")
                 # The official field description states instrument_type on
                 # equity segments carries the NSE/BSE share-series code (EQ,
@@ -950,6 +964,8 @@ class InstrumentCatalog:
                     supported = segment in {"NCD_FO", "BCD_FO"} and kind in {"FUT", "CE", "PE"}
                 if not supported:
                     stats["dropped_unsupported"] += 1
+                    if segment == "NSE_EQ":
+                        stats["nse_eq_excluded_unsupported"] += 1
                     bucket = f"{segment}|{kind or '(blank)'}"
                     by = stats["dropped_unsupported_by"]
                     by[bucket] = by.get(bucket, 0) + 1
@@ -966,6 +982,7 @@ class InstrumentCatalog:
                             "name": idx_name,
                             "instrument_type": "INDEX",
                             "market_kind": "INDEX",
+                            "asset_category": "INDEX",
                             "asset_subclass": "INDEX",
                             "currency": "INR",
                             "tradable": False,
@@ -1018,6 +1035,8 @@ class InstrumentCatalog:
                     name=name,
                     security_type=security_type,
                 )
+                if segment in {"NSE_EQ", "BSE_EQ"} and not trading_symbol:
+                    raise ValueError("Equity trading_symbol cannot be blank")
                 if multiplier is not None:
                     instrument.validate(now=self.clock())
                 elif instrument.currency_derivative:
@@ -1039,6 +1058,17 @@ class InstrumentCatalog:
                 reason_key = type(error).__name__
                 reasons = stats["dropped_invalid_reasons"]
                 reasons[reason_key] = reasons.get(reason_key, 0) + 1
+                if not raw_seg_probe and isinstance(raw, dict):
+                    probe_k = _clean_identity(str(raw.get("instrument_key") or ""))
+                    raw_seg_probe = (
+                        probe_k.split("|", 1)[0].strip().upper()
+                        if "|" in probe_k
+                        else _clean_identity(str(raw.get("segment") or "")).upper()
+                    )
+                if raw_seg_probe == "NSE_EQ":
+                    stats["nse_eq_excluded_invalid"] += 1
+                    nse_reasons = stats["nse_eq_excluded_invalid_reasons"]
+                    nse_reasons[reason_key] = nse_reasons.get(reason_key, 0) + 1
                 if len(stats["dropped_invalid_samples"]) < 5:
                     sample = raw.get("instrument_key") if isinstance(raw, dict) else "?"
                     stats["dropped_invalid_samples"].append(f"{sample}: {type(error).__name__}: {error}")

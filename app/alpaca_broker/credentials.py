@@ -5,7 +5,7 @@ Broker credentials never share a namespace with market-data keys
 are ``ALPACA_BROKER_PAPER`` and ``ALPACA_BROKER_LIVE`` — a credential saved for
 one environment can never be read for the other.
 
-Protection: Windows DPAPI (current user) following ``app/vantage/secrets.py``;
+Protection: Windows DPAPI (current user) following ``app/security/dpapi_secrets.py``;
 on POSIX an owner-only (0600) file inside the private data directory, clearly
 labelled as file-permission protection. ``MemoryBrokerSecretStore`` exists for
 tests only and is never selected automatically. Values are never logged or
@@ -61,12 +61,12 @@ class DpapiBrokerSecretStore:
     def __init__(self, directory: Path):
         if os.name != "nt":
             raise BrokerSecretStoreUnavailable("DPAPI is only available on Windows")
-        from app.vantage.secrets import DpapiSecretStore
+        from app.security.dpapi_secrets import DpapiSecretStore
 
         self._inner = DpapiSecretStore(Path(directory), allowed_keys=set(BROKER_KEYS))
 
     def put(self, key: str, value: dict) -> None:
-        from app.vantage.secrets import SecretStoreUnavailable
+        from app.security.dpapi_secrets import SecretStoreUnavailable
 
         try:
             self._inner.put(_validate_key(key), value)
@@ -74,7 +74,7 @@ class DpapiBrokerSecretStore:
             raise BrokerSecretStoreUnavailable(str(exc)) from exc
 
     def get(self, key: str) -> dict:
-        from app.vantage.secrets import SecretNotFound, SecretStoreUnavailable
+        from app.security.dpapi_secrets import SecretNotFound, SecretStoreUnavailable
 
         valid_key = _validate_key(key)
         try:

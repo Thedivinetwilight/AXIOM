@@ -218,6 +218,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     autonomy_lease.release()
 
             from app.markets.live_paper import LiveMarketPaperEngine
+            from app.markets.nse_reconciliation import resolve_nse_instrument_strict
             from app.autonomy.upstox import UpstoxReadOnly
             from app.autonomy.upstox_token import resolve_token
 
@@ -232,8 +233,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     if (app.state.autonomy is not None and app.state.autonomy.catalog.instruments)
                     else app.state.nse_seed_catalog
                 )
-                res = cat.search(symbol_or_key, include_indices=False, limit=1)
-                return res["items"][0] if res["items"] else None
+                return resolve_nse_instrument_strict(cat, symbol_or_key, allow_index=False)
 
             def _resolve_nasdaq_instrument(symbol_or_key: str):
                 found = app.state.nasdaq_catalog.get(symbol_or_key)
@@ -246,6 +246,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 if not tok:
                     raise RuntimeError("Upstox read-only market-data token is not configured")
                 snap = UpstoxReadOnly(lambda: tok).quote_snapshot(instrument_key)
+                recv_iso = datetime.now(timezone.utc).isoformat()
                 return {
                     "instrument_key": snap.instrument_key,
                     "bid": snap.bid,
@@ -253,6 +254,11 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     "last": snap.last,
                     "volume": snap.volume,
                     "timestamp": snap.timestamp.isoformat(),
+                    "source_timestamp": snap.timestamp.isoformat(),
+                    "local_received_at": recv_iso,
+                    "feed": "upstox_nse_v2",
+                    "feed_entitlement_label": "Upstox NSE Cash Read-Only Feed (NSE_EQ)",
+                    "is_delayed": False,
                     "source": "upstox-market-quote-v2",
                 }
 
@@ -280,12 +286,20 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 creds, _ = resolve_alpaca_data_credentials(app.state.alpaca_data_store, settings)
                 if not creds["api_key"] or not creds["api_secret"]:
                     raise RuntimeError("Alpaca read-only market-data credentials are not configured")
-                from app.data.alpaca import AlpacaDataProvider
+                from datetime import timedelta as _td
+                from app.data.alpaca import AlpacaHistoricalProvider
 
-                tf_fetch = "1h" if timeframe == "4h" else ("1d" if timeframe == "1D" else timeframe)
-                prov = AlpacaDataProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
+                tf_fetch = "1h" if timeframe == "4h" else ("1D" if timeframe in {"1d", "1D"} else timeframe)
+                lookback_days = 240 if tf_fetch == "1D" else (30 if tf_fetch == "1h" else 7)
+                now_utc = datetime.now(timezone.utc)
+                prov = AlpacaHistoricalProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
                 try:
-                    return prov.fetch_recent(symbol_or_key.strip().upper(), tf_fetch, limit=240)
+                    return prov.get_candles(
+                        symbol_or_key.strip().upper(),
+                        tf_fetch,
+                        now_utc - _td(days=lookback_days),
+                        now_utc,
+                    )
                 finally:
                     prov.close()
 

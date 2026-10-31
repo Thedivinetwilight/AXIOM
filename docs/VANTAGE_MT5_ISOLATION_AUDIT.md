@@ -1,0 +1,17 @@
+# Vantage / MetaTrader 5 Removal & Legacy Isolation Audit (`v3.7.0a10`)
+
+## 1. Executive Summary
+- **Operator UI (`app/static/terminal/*`)**: **100% removed** (`0` Vantage/MT5 forms, tabs, buttons, API calls, or strings — enforced by `tests/test_vantage_ui_removal.py`).
+- **Active Multi-Market Runtime (`app/markets/*`, `app/autonomy/*`, `app/alpaca_broker/*`, `app/ensemble/*`, `app/model_lab/*`, `app/source_launcher.py`, `axiom_launcher.py`, `Start-Axiom.ps1`)**: **100% decoupled** (`0` `vantage`/`mt5` imports or references). Shared Windows DPAPI storage now lives in neutral **`app/security/dpapi_secrets.py`**, preserving 100% compatibility with existing `%LOCALAPPDATA%\AXIOM\credentials\*.dpapi` files.
+- **Remaining Repository References**: Every remaining `vantage`/`mt5` occurrence in the repository falls into one of four explicitly bounded, non-interfering legacy categories documented below so nothing can affect Upstox (NSE `INR`) or Alpaca (NASDAQ `USD`) data, paper simulation, or gated execution.
+
+---
+
+## 2. Complete Classification by Subsystem
+
+| Category | Paths | Status | Why Retained / How Isolated |
+|---|---|---|---|
+| **A. Neutralized Active Modules (Cleaned in `v3.7.0a9`–`v3.7.0a10`)** | `app/static/terminal/{index.html,terminal.js,terminal.css}`, `app/security/dpapi_secrets.py`, `app/alpaca_broker/credentials.py`, `app/autonomy/upstox_token.py`, `app/markets/alpaca_credentials.py`, `app/api/routes/markets.py`, `app/ensemble/__init__.py`, `app/model_lab/__init__.py` | **CLEAN (`0` MT5/Vantage refs)** | Operator UI and all Upstox/Alpaca/Kronos/Ensemble runtime packages have zero imports or references to `app.vantage` or `mt5`. |
+| **B. Negative Boundary Guards (Explicitly Reject CFD Substitution)** | `app/listed_assets.py`, `docs/LISTED_ASSETS.md` | **ACTIVE GUARDRAIL** | Enforces `"mt5_routing_allowed": False` and `"vantage_mt5_allowed": False` so listed NSE/US equities can never be substituted with CFDs. |
+| **C. Dormant Legacy Backend Compatibility Shims** | `app/vantage/{__init__,connector,gateway,models,risk,secrets,service,store}.py`, `app/api/routes/{vantage,paper,market_data,dashboard,health}.py`, `app/market_data/{__init__,mt5,paper_provider,read_only_gateway}.py`, `app/api/{schemas,server}.py`, `app/paper_trading/simulator.py` | **DORMANT / ISOLATED** | Unreferenced by `/terminal`. Retained solely so legacy schema/API isolation tests (`test_vantage_*.py`, `test_mt5_market_data.py`, `test_upstox_live.py` `/health` fields `real_order_routing` & `vantage_startup`) continue passing without breaking backward-compatible health/audit schemas. Never contacts any broker on startup (`0` network calls). |
+| **D. Historical Packaging, CI Artifact Slug & Historical Docs/Tests** | `.github/workflows/{paper-checks,windows-release}.yml`, `packaging/windows/{axiom.iss,axiom.spec,build_windows.ps1,install_test.ps1,portable_test.ps1,requirements-build.txt,diagnostics/*}`, `docs/{AI_MODEL_LAB_MANUAL,ARCHITECTURE_AUDIT,AUTONOMY,BASELINE_AUDIT_AND_ISSUES,RESEARCH_CANDIDATES,TERMINAL_BENCHMARK.json,TERMINAL_PERFORMANCE,TERMINAL_REDESIGN_PLAN,WINDOWS_APP_CONTROL}.md`, `scripts/benchmark_terminal.py`, `tests/{mt5_*,test_mt5_*,test_vantage_*,...}` | **CI / HISTORICAL EVIDENCE ONLY** | Historical audit logs, regression tests asserting UI removal (`tests/test_vantage_ui_removal.py`), and optional CI Windows build scripts. None are required by the source-first workflow (`Start-Axiom.ps1` / `axiom_launcher.py`). |

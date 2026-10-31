@@ -349,6 +349,7 @@ class LiveMarketPaperEngine:
         self.nse_instrument_resolver = nse_instrument_resolver
         self.nasdaq_instrument_resolver = nasdaq_instrument_resolver
         self.us_calendar = USEquitiesCalendar()
+        self._last_quote_ts_by_key: dict[tuple[str, str], datetime] = {}
 
         self.configs: dict[str, PaperMarketConfig] = {
             "NSE": PaperMarketConfig.default_nse(),
@@ -383,6 +384,9 @@ class LiveMarketPaperEngine:
                     timeframe TEXT NOT NULL,
                     symbols_json TEXT NOT NULL,
                     config_json TEXT NOT NULL,
+                    session_run_id TEXT,
+                    session_start_equity REAL,
+                    session_start_realized_pnl REAL,
                     started_at TEXT,
                     updated_at TEXT NOT NULL
                 );
@@ -438,6 +442,8 @@ class LiveMarketPaperEngine:
                     market TEXT NOT NULL,
                     currency TEXT NOT NULL,
                     symbol TEXT NOT NULL,
+                    instrument_key TEXT,
+                    session_run_id TEXT,
                     side TEXT NOT NULL,
                     fill_qty REAL NOT NULL,
                     fill_price REAL NOT NULL,
@@ -481,6 +487,29 @@ class LiveMarketPaperEngine:
                 );
                 """
             )
+            # Idempotent column migrations so existing %LOCALAPPDATA%\AXIOM DBs are preserved intact
+            acct_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(live_paper_accounts)").fetchall()
+            }
+            for col_name, col_def in (
+                ("session_run_id", "TEXT"),
+                ("session_start_equity", "REAL"),
+                ("session_start_realized_pnl", "REAL"),
+            ):
+                if col_name not in acct_cols:
+                    conn.execute(f"ALTER TABLE live_paper_accounts ADD COLUMN {col_name} {col_def}")
+
+            fill_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(live_paper_fills)").fetchall()
+            }
+            for col_name, col_def in (
+                ("instrument_key", "TEXT"),
+                ("session_run_id", "TEXT"),
+            ):
+                if col_name not in fill_cols:
+                    conn.execute(f"ALTER TABLE live_paper_fills ADD COLUMN {col_name} {col_def}")
 
     def _bootstrap_or_recover(self) -> None:
         now = _utc_now(self._clock)
@@ -635,14 +664,238 @@ class LiveMarketPaperEngine:
                 out.setdefault(str(row["market"]), []).append(dict(row))
         return out
 
+    def _validate_quote_for_paper(
+        self,
+        market: str,
+        inst: dict[str, Any],
+        quote_data: dict[str, Any] | None,
+        now: datetime,
+        *,
+        sess_info: dict[str, Any],
+        record_monotonic_watermark: bool = True,
+    ) -> dict[str, Any]:
+        """Validate a read-only provider quote fail-closed for live-market PAPER decisions/fills."""
+        cfg = self.configs[market]
+        ikey = str(inst.get("instrument_key") or f"{market}|{inst.get('symbol')}")
+        if not isinstance(quote_data, dict) or not quote_data:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MISSING_QUOTE",
+                "reason_detail": f"live {market} quote is missing (zero sample/replay fallback)",
+                "quote_age_seconds": None,
+                "source_timestamp": None,
+                "local_received_at": now.isoformat(),
+                "feed": None,
+                "feed_entitlement_label": None,
+                "is_delayed": False,
+            }
+        try:
+            q_last = float(quote_data.get("last") if quote_data.get("last") is not None else 0.0)
+            q_bid = float(quote_data.get("bid") if quote_data.get("bid") is not None else q_last)
+            q_ask = float(quote_data.get("ask") if quote_data.get("ask") is not None else q_last)
+            q_vol = float(quote_data.get("volume") if quote_data.get("volume") is not None else 0.0)
+        except (TypeError, ValueError):
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MALFORMED_QUOTE",
+                "reason_detail": f"malformed non-numeric quote fields for {ikey}",
+                "quote_age_seconds": None,
+                "source_timestamp": None,
+                "local_received_at": now.isoformat(),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+
+        if (
+            not all(math.isfinite(v) for v in (q_last, q_bid, q_ask, q_vol))
+            or q_last <= 0.0
+            or q_bid < 0.0
+            or q_ask < 0.0
+            or q_vol < 0.0
+            or (q_bid > 0.0 and q_ask > 0.0 and q_bid > q_ask)
+        ):
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MALFORMED_QUOTE",
+                "reason_detail": (
+                    f"malformed {market} quote for {ikey}: last={q_last}, bid={q_bid}, ask={q_ask}, volume={q_vol}"
+                ),
+                "quote_age_seconds": None,
+                "source_timestamp": str(quote_data.get("timestamp") or "") or None,
+                "local_received_at": now.isoformat(),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+
+        raw_ts = quote_data.get("timestamp")
+        if raw_ts is None or str(raw_ts).strip() == "":
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MALFORMED_QUOTE",
+                "reason_detail": f"missing source timestamp in {market} quote for {ikey}",
+                "quote_age_seconds": None,
+                "source_timestamp": None,
+                "local_received_at": now.isoformat(),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+        try:
+            q_ts = parse_timestamp(str(raw_ts))
+        except (TypeError, ValueError) as exc:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MALFORMED_QUOTE",
+                "reason_detail": f"invalid quote timestamp for {ikey}: {exc}",
+                "quote_age_seconds": None,
+                "source_timestamp": str(raw_ts),
+                "local_received_at": now.isoformat(),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+
+        future_skew = (q_ts - now).total_seconds()
+        if future_skew > 5.0:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "MALFORMED_QUOTE",
+                "reason_detail": f"future-skewed quote timestamp (+{future_skew:.1f}s ahead of local clock) for {ikey}",
+                "quote_age_seconds": 0.0,
+                "source_timestamp": q_ts.isoformat(),
+                "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+
+        prev_ts = self._last_quote_ts_by_key.get((market, ikey))
+        if prev_ts is not None and q_ts < prev_ts:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "OUT_OF_ORDER_QUOTE",
+                "reason_detail": (
+                    f"out-of-order quote timestamp for {ikey}: {q_ts.isoformat()} < previous {prev_ts.isoformat()}"
+                ),
+                "quote_age_seconds": round(max(0.0, (now - q_ts).total_seconds()), 2),
+                "source_timestamp": q_ts.isoformat(),
+                "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+                "feed": quote_data.get("feed"),
+                "feed_entitlement_label": quote_data.get("feed_entitlement_label") or quote_data.get("feed_label"),
+                "is_delayed": bool(quote_data.get("is_delayed", False)),
+            }
+
+        feed_val = str(quote_data.get("feed") or ("upstox_nse_v2" if market == "NSE" else "iex")).lower()
+        is_delayed = bool(quote_data.get("is_delayed", False)) or feed_val == "delayed_sip"
+        entitlement_lbl = str(
+            quote_data.get("feed_entitlement_label")
+            or quote_data.get("feed_label")
+            or (
+                "Upstox NSE Cash Read-Only Feed (NSE_EQ)"
+                if market == "NSE"
+                else (
+                    "IEX single-venue feed — NOT the consolidated SIP tape"
+                    if feed_val == "iex"
+                    else (
+                        "SIP consolidated feed delayed 15 minutes — NOT real-time"
+                        if is_delayed
+                        else "SIP consolidated feed (all US exchanges)"
+                    )
+                )
+            )
+        )
+        quote_age = round(max(0.0, (now - q_ts).total_seconds()), 2)
+
+        if is_delayed:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "DELAYED_FEED_BLOCKED",
+                "reason_detail": f"delayed feed ({feed_val}: {entitlement_lbl}) cannot drive live-market PAPER entries",
+                "quote_age_seconds": quote_age,
+                "source_timestamp": q_ts.isoformat(),
+                "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+                "feed": feed_val,
+                "feed_entitlement_label": entitlement_lbl,
+                "is_delayed": True,
+            }
+
+        if not sess_info["is_open"]:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "CLOSED_MARKET_SESSION",
+                "reason_detail": f"{market} regular market session is closed ({sess_info['state']})",
+                "quote_age_seconds": quote_age,
+                "source_timestamp": q_ts.isoformat(),
+                "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+                "feed": feed_val,
+                "feed_entitlement_label": entitlement_lbl,
+                "is_delayed": False,
+            }
+
+        if quote_age > cfg.max_quote_age_seconds:
+            return {
+                "valid_for_fill": False,
+                "reason_code": "STALE_QUOTE",
+                "reason_detail": (
+                    f"stale {market} quote for {ikey}: age={quote_age:.1f}s exceeds max_quote_age_seconds={cfg.max_quote_age_seconds:.0f}s"
+                ),
+                "quote_age_seconds": quote_age,
+                "source_timestamp": q_ts.isoformat(),
+                "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+                "feed": feed_val,
+                "feed_entitlement_label": entitlement_lbl,
+                "is_delayed": False,
+            }
+
+        if record_monotonic_watermark:
+            self._last_quote_ts_by_key[(market, ikey)] = q_ts
+
+        return {
+            "valid_for_fill": True,
+            "reason_code": "OK",
+            "reason_detail": f"fresh live {market} quote ({quote_age:.1f}s old · {entitlement_lbl})",
+            "quote_age_seconds": quote_age,
+            "source_timestamp": q_ts.isoformat(),
+            "local_received_at": str(quote_data.get("local_received_at") or now.isoformat()),
+            "feed": feed_val,
+            "feed_entitlement_label": entitlement_lbl,
+            "is_delayed": False,
+        }
+
+    @staticmethod
+    def _classify_fetch_exception(market: str, exc: Exception) -> tuple[str, str]:
+        msg = str(exc)
+        low = msg.lower()
+        if "429" in low or "rate limit" in low:
+            return "RATE_LIMITED", f"{market} market-data rate limited (HTTP 429): {msg[:180]}"
+        if "rejected" in low or "401" in low or "403" in low or "expired" in low:
+            return "AUTH_REJECTED", f"{market} market-data credential rejected/expired: {msg[:180]}"
+        if "not configured" in low or "missing" in low:
+            return "DISCONNECTED", f"{market} market-data disconnected: {msg[:180]}"
+        if "malformed" in low or "invalid" in low or "future" in low or "no usable quote" in low:
+            return "MALFORMED_QUOTE", f"{market} market-data returned malformed quote: {msg[:180]}"
+        return "DISCONNECTED", f"live {market} market data unavailable: {msg[:180]}"
+
     def add_watchlist_symbol(self, market: str, symbol_or_key: str) -> dict[str, Any]:
         mkt = self._validate_market(market)
         inst = self._resolve_instrument(mkt, symbol_or_key)
-        sym = str(inst.get("trading_symbol") or inst.get("symbol") or symbol_or_key).upper()
-        ikey = str(inst.get("instrument_key") or f"{mkt}|{sym}")
-        name = str(inst.get("name") or sym)
+        base_sym = str(inst.get("trading_symbol") or inst.get("symbol") or symbol_or_key).upper()
+        ikey = str(inst.get("instrument_key") or f"{mkt}|{base_sym}")
+        series = str(inst.get("instrument_type") or "EQ").upper()
+        name = str(inst.get("name") or base_sym)
         now_iso = _utc_now(self._clock).isoformat()
         with self._lock, self._connect() as conn:
+            existing = conn.execute(
+                "SELECT instrument_key FROM live_paper_watchlists WHERE market = ? AND symbol = ?",
+                (mkt, base_sym),
+            ).fetchone()
+            sym = (
+                f"{base_sym}-{series}"
+                if (existing is not None and str(existing["instrument_key"]) != ikey and mkt == "NSE")
+                else base_sym
+            )
             conn.execute(
                 """
                 INSERT OR REPLACE INTO live_paper_watchlists (market, symbol, instrument_key, name, added_at)
@@ -712,16 +965,30 @@ class LiveMarketPaperEngine:
         resolved_syms: list[str] = []
         for s in (symbols or []):
             inst = self._resolve_instrument(mkt, s)
-            resolved_syms.append(str(inst.get("trading_symbol") or inst.get("symbol")))
+            if mkt == "NSE" and "|" in str(s):
+                resolved_syms.append(str(inst.get("instrument_key") or inst.get("trading_symbol")))
+            else:
+                resolved_syms.append(str(inst.get("trading_symbol") or inst.get("symbol")))
+        run_id = f"run-{mkt.lower()}-{uuid.uuid4().hex[:12]}"
+        today_str = str((sess.get("detail") or {}).get("trading_day") or now.date().isoformat())
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT session_state FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
+            row = conn.execute("SELECT * FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
             if row and str(row["session_state"]) == "EMERGENCY_STOPPED":
                 raise RuntimeError("Emergency Stop is engaged; reset Emergency Stop before starting a session")
+            pos_val = sum(
+                float(r["qty"]) * float(r["last_price"])
+                for r in conn.execute("SELECT qty, last_price FROM live_paper_positions WHERE market = ?", (mkt,))
+            )
+            curr_eq = round(float(row["cash"]) + pos_val, 4)
+            curr_realized = round(float(row["realized_pnl"]), 4)
+            day_eq = curr_eq if str(row["trading_day"]) != today_str else float(row["day_start_equity"])
             conn.execute(
                 """
                 UPDATE live_paper_accounts
                 SET session_state = ?, state_reason = ?, strategy = ?, timeframe = ?,
-                    symbols_json = ?, started_at = COALESCE(started_at, ?), updated_at = ?
+                    symbols_json = ?, session_run_id = ?, session_start_equity = ?,
+                    session_start_realized_pnl = ?, day_start_equity = ?, trading_day = ?,
+                    started_at = ?, updated_at = ?
                 WHERE market = ?
                 """,
                 (
@@ -730,6 +997,11 @@ class LiveMarketPaperEngine:
                     strategy.strip() or "manual_only",
                     timeframe.strip() or "5m",
                     json.dumps(resolved_syms),
+                    run_id,
+                    curr_eq,
+                    curr_realized,
+                    day_eq,
+                    today_str,
                     now.isoformat(),
                     now.isoformat(),
                     mkt,
@@ -739,13 +1011,30 @@ class LiveMarketPaperEngine:
                 conn,
                 mkt,
                 "PAPER_SESSION_STARTED",
-                {"state": state, "strategy": strategy, "timeframe": timeframe, "symbols": resolved_syms},
+                {
+                    "session_run_id": run_id,
+                    "state": state,
+                    "strategy": strategy,
+                    "timeframe": timeframe,
+                    "symbols": resolved_syms,
+                    "session_start_equity": curr_eq,
+                    "persisted_historical_realized_pnl": curr_realized,
+                },
             )
         return self.market_snapshot(mkt)
 
     def transition_session(self, market: str, action: str, *, reason: str = "") -> dict[str, Any]:
         mkt = self._validate_market(market)
         act = action.strip().lower()
+        if act == "start":
+            with self._lock, self._connect() as conn:
+                r_cfg = conn.execute(
+                    "SELECT strategy, timeframe FROM live_paper_accounts WHERE market = ?",
+                    (mkt,),
+                ).fetchone()
+                strat = str(r_cfg["strategy"]) if r_cfg and r_cfg["strategy"] else self.configs[mkt].strategy
+                tf = str(r_cfg["timeframe"]) if r_cfg and r_cfg["timeframe"] else self.configs[mkt].timeframe
+            return self.start_session(mkt, strategy=strat, timeframe=tf)
         now = _utc_now(self._clock)
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT session_state FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
@@ -764,10 +1053,16 @@ class LiveMarketPaperEngine:
                 next_reason = reason or "OPERATOR_STOP"
             else:
                 raise ValueError(f"Unsupported session transition {action!r}")
-            conn.execute(
-                "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, updated_at = ? WHERE market = ?",
-                (next_state, next_reason, now.isoformat(), mkt),
-            )
+            if next_state == "STOPPED":
+                conn.execute(
+                    "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, session_run_id = NULL, updated_at = ? WHERE market = ?",
+                    (next_state, next_reason, now.isoformat(), mkt),
+                )
+            else:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, updated_at = ? WHERE market = ?",
+                    (next_state, next_reason, now.isoformat(), mkt),
+                )
             self._append_audit_conn(
                 conn,
                 mkt,
@@ -792,10 +1087,11 @@ class LiveMarketPaperEngine:
                 UPDATE live_paper_accounts
                 SET cash = ?, realized_pnl = 0.0, day_start_equity = ?, trading_day = ?,
                     session_state = 'STOPPED', state_reason = 'Account reset by operator',
+                    session_run_id = NULL, session_start_equity = ?, session_start_realized_pnl = 0.0,
                     started_at = NULL, updated_at = ?
                 WHERE market = ?
                 """,
-                (cfg.starting_cash, cfg.starting_cash, now.date().isoformat(), now.isoformat(), mkt),
+                (cfg.starting_cash, cfg.starting_cash, now.date().isoformat(), cfg.starting_cash, now.isoformat(), mkt),
             )
             self._append_audit_conn(conn, mkt, "PAPER_ACCOUNT_RESET", {"starting_cash": cfg.starting_cash})
         return self.market_snapshot(mkt)
@@ -900,35 +1196,62 @@ class LiveMarketPaperEngine:
         quote_data: dict[str, Any] | None = None
         quote_age = None
         sess_info = self._market_session_info(mkt, now)
+        quote_val: dict[str, Any] = {
+            "valid_for_fill": False,
+            "reason_code": "UNCHECKED",
+            "reason_detail": "",
+            "quote_age_seconds": None,
+            "source_timestamp": None,
+            "local_received_at": now.isoformat(),
+            "feed": None,
+            "feed_entitlement_label": None,
+            "is_delayed": False,
+        }
         try:
             quote_data = self._fetch_live_quote(mkt, inst, quote_override=quote_override)
-            q_last = float(quote_data.get("last") or 0.0)
-            q_ts = parse_timestamp(str(quote_data["timestamp"]))
-            quote_age = round(max(0.0, (now - q_ts).total_seconds()), 2)
-            is_fresh = quote_age <= cfg.max_quote_age_seconds and not bool(quote_data.get("is_delayed", False))
-            if otype_u == "MARKET":
-                check(
-                    "live_quote_fresh",
-                    is_fresh and sess_info["is_open"],
-                    f"fresh live {mkt} quote ({quote_age:.1f}s old)"
-                    if (is_fresh and sess_info["is_open"])
-                    else (
-                        f"MARKET paper fill blocked: {mkt} session={sess_info['state']}, "
-                        f"quote age={quote_age:.1f}s (max {cfg.max_quote_age_seconds:.0f}s)"
-                    ),
-                )
-            else:
+            quote_val = self._validate_quote_for_paper(
+                mkt,
+                inst,
+                quote_data,
+                now,
+                sess_info=sess_info,
+                record_monotonic_watermark=False,
+            )
+            quote_age = quote_val["quote_age_seconds"]
+            hard_integrity_failure = quote_val["reason_code"] in {
+                "MALFORMED_QUOTE",
+                "OUT_OF_ORDER_QUOTE",
+                "DELAYED_FEED_BLOCKED",
+            }
+            if otype_u == "LIMIT" and allow_off_hours_working and not hard_integrity_failure and limit_price is not None:
                 check(
                     "live_quote_available",
-                    q_last > 0 and (is_fresh or allow_off_hours_working or otype_u == "LIMIT"),
-                    f"reference quote {q_last} ({quote_age:.1f}s old)",
+                    True,
+                    f"off-hours working LIMIT staged ({quote_val['reason_code']}: {quote_val['reason_detail']})",
+                )
+            else:
+                check(
+                    "live_quote_fresh",
+                    bool(quote_val["valid_for_fill"]),
+                    quote_val["reason_detail"]
+                    if quote_val["valid_for_fill"]
+                    else f"[{quote_val['reason_code']}] {quote_val['reason_detail']}",
                 )
         except Exception as exc:
+            err_code, err_detail = self._classify_fetch_exception(mkt, exc)
+            quote_val["reason_code"] = err_code
+            quote_val["reason_detail"] = err_detail
             q_last = float(limit_price or stop_price or 0.0)
-            if otype_u == "LIMIT" and allow_off_hours_working and q_last > 0:
-                check("live_quote_available", True, "working limit staged against limit_price while feed offline")
+            if (
+                otype_u == "LIMIT"
+                and allow_off_hours_working
+                and q_last > 0
+                and err_code in {"DISCONNECTED"}
+                and not sess_info["is_open"]
+            ):
+                check("live_quote_available", True, "working limit staged against limit_price while feed offline off-hours")
             else:
-                check("live_quote_fresh", False, f"live {mkt} market data unavailable: {str(exc)[:180]}")
+                check("live_quote_fresh", False, f"[{err_code}] {err_detail}")
 
         ref_price = float(quote_data["last"]) if (quote_data and float(quote_data.get("last") or 0) > 0) else float(limit_price or stop_price or 0.0)
         half_spread = ref_price * (cfg.spread_bps / 20_000.0)
@@ -1013,6 +1336,8 @@ class LiveMarketPaperEngine:
             "currency": cfg.currency,
             "symbol": sym_clean,
             "instrument_key": ikey,
+            "exchange": str(inst.get("exchange") or mkt),
+            "asset_category": str(inst.get("asset_category") or "CASH_EQUITY_OR_ETF"),
             "side": side_u,
             "qty": qty,
             "order_type": otype_u,
@@ -1026,10 +1351,18 @@ class LiveMarketPaperEngine:
             "estimated_fill_price": est_price if est_price else None,
             "estimated_notional": notional,
             "estimated_fees": fees,
+            "provider": "upstox_market_data" if mkt == "NSE" else "alpaca_market_data",
+            "feed": quote_val.get("feed"),
+            "feed_entitlement_label": quote_val.get("feed_entitlement_label"),
             "quote_source": quote_data.get("source") if quote_data else None,
-            "quote_timestamp": quote_data.get("timestamp") if quote_data else None,
+            "quote_timestamp": quote_val.get("source_timestamp") or (quote_data.get("timestamp") if quote_data else None),
+            "source_timestamp": quote_val.get("source_timestamp") or (quote_data.get("timestamp") if quote_data else None),
+            "local_received_at": quote_val.get("local_received_at"),
             "quote_age_seconds": quote_age,
+            "quote_validation_code": quote_val.get("reason_code"),
+            "market_session_status": sess_info["state"],
             "session": sess_info,
+            "fill_type": "SIMULATED",
             "checks": checks,
             "rejection_reasons": [c["detail"] for c in checks if not c["ok"]],
             "checked_at": now.isoformat(),
@@ -1112,8 +1445,22 @@ class LiveMarketPaperEngine:
                 "preview": preview,
             }
 
-        inst = self._resolve_instrument(mkt, preview["symbol"])
+        lookup_target = preview["instrument_key"] if mkt == "NSE" else preview["symbol"]
+        inst = self._resolve_instrument(mkt, lookup_target)
         quote_data = self._fetch_live_quote(mkt, inst, quote_override=quote_override) if preview.get("quote_timestamp") else None
+        sess_now = self._market_session_info(mkt, now)
+        quote_fill_val = (
+            self._validate_quote_for_paper(
+                mkt,
+                inst,
+                quote_data,
+                now,
+                sess_info=sess_now,
+                record_monotonic_watermark=True,
+            )
+            if quote_data is not None
+            else {"valid_for_fill": False}
+        )
 
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -1155,9 +1502,17 @@ class LiveMarketPaperEngine:
                 conn,
                 mkt,
                 "PAPER_ORDER_ACCEPTED",
-                {"client_order_id": cid, "order_id": order_id, "symbol": preview["symbol"], "side": preview["side"], "qty": qty, "order_type": preview["order_type"]},
+                {
+                    "client_order_id": cid,
+                    "order_id": order_id,
+                    "symbol": preview["symbol"],
+                    "instrument_key": preview["instrument_key"],
+                    "side": preview["side"],
+                    "qty": qty,
+                    "order_type": preview["order_type"],
+                },
             )
-            if quote_data is not None and self._market_session_info(mkt, now)["is_open"]:
+            if quote_data is not None and bool(quote_fill_val.get("valid_for_fill")):
                 self._try_fill_order_conn(conn, cid, inst, quote_data, now)
             elif preview["time_in_force"] == "IOC":
                 conn.execute(
@@ -1392,13 +1747,14 @@ class LiveMarketPaperEngine:
 
         fill_id = f"fill-{uuid.uuid4().hex[:12]}"
         slip_amt = round(abs(fill_px - last) * fill_qty, 4)
+        active_run_id = acct["session_run_id"] if "session_run_id" in acct.keys() else None
         conn.execute(
             """
             INSERT INTO live_paper_fills
-            (fill_id, client_order_id, order_id, market, currency, symbol, side,
-             fill_qty, fill_price, mid_reference_price, slippage_amount, fees_total,
-             fees_json, realized_pnl_delta, quote_source, quote_timestamp, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (fill_id, client_order_id, order_id, market, currency, symbol, instrument_key,
+             session_run_id, side, fill_qty, fill_price, mid_reference_price, slippage_amount,
+             fees_total, fees_json, realized_pnl_delta, quote_source, quote_timestamp, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 fill_id,
@@ -1407,6 +1763,8 @@ class LiveMarketPaperEngine:
                 mkt,
                 str(order["currency"]),
                 sym,
+                str(order["instrument_key"]),
+                active_run_id,
                 side,
                 fill_qty,
                 fill_px,
@@ -1426,8 +1784,11 @@ class LiveMarketPaperEngine:
             "PAPER_ORDER_FILL",
             {
                 "fill_id": fill_id,
+                "fill_type": "SIMULATED",
                 "client_order_id": client_order_id,
                 "symbol": sym,
+                "instrument_key": str(order["instrument_key"]),
+                "session_run_id": active_run_id,
                 "side": side,
                 "fill_qty": fill_qty,
                 "fill_price": fill_px,
@@ -1483,7 +1844,8 @@ class LiveMarketPaperEngine:
             if str(row["status"]) not in OPEN_ORDER_STATUSES:
                 raise ValueError(f"Cannot replace terminal paper order ({row['status']})")
             mkt = str(row["market"])
-            inst = self._resolve_instrument(mkt, str(row["symbol"]))
+            lookup_key = str(row["instrument_key"] or row["symbol"]) if mkt == "NSE" else str(row["symbol"])
+            inst = self._resolve_instrument(mkt, lookup_key)
             tick_size = float(inst.get("tick_size") or (0.05 if mkt == "NSE" else 0.01))
             new_qty = float(qty) if qty is not None else float(row["qty"])
             if new_qty <= float(row["filled_qty"]):
@@ -1523,8 +1885,8 @@ class LiveMarketPaperEngine:
         take_profit: float | None,
     ) -> dict[str, Any]:
         mkt = self._validate_market(market)
-        sym = symbol.strip().upper()
-        inst = self._resolve_instrument(mkt, sym)
+        inst = self._resolve_instrument(mkt, symbol.strip())
+        sym = str(inst.get("trading_symbol") or inst.get("symbol") or symbol).strip().upper()
         tick_size = float(inst.get("tick_size") or (0.05 if mkt == "NSE" else 0.01))
         if stop_loss is not None and not _valid_tick(float(stop_loss), tick_size, market=mkt):
             raise ValueError("stop_loss violates exchange tick increment")
@@ -1533,22 +1895,24 @@ class LiveMarketPaperEngine:
         now_iso = _utc_now(self._clock).isoformat()
         with self._lock, self._connect() as conn:
             pos = conn.execute(
-                "SELECT * FROM live_paper_positions WHERE market = ? AND symbol = ?", (mkt, sym)
+                "SELECT * FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
+                (mkt, sym, str(inst.get("instrument_key") or "")),
             ).fetchone()
             if pos is None:
                 raise ValueError(f"No open {mkt} paper position for {sym}")
+            pos_sym = str(pos["symbol"])
             conn.execute(
                 "UPDATE live_paper_positions SET stop_loss = ?, take_profit = ?, updated_at = ? WHERE market = ? AND symbol = ?",
-                (stop_loss, take_profit, now_iso, mkt, sym),
+                (stop_loss, take_profit, now_iso, mkt, pos_sym),
             )
             self._append_audit_conn(
                 conn,
                 mkt,
                 "PAPER_POSITION_PROTECTION_UPDATED",
-                {"symbol": sym, "stop_loss": stop_loss, "take_profit": take_profit},
+                {"symbol": pos_sym, "instrument_key": pos["instrument_key"], "stop_loss": stop_loss, "take_profit": take_profit},
             )
             updated = dict(
-                conn.execute("SELECT * FROM live_paper_positions WHERE market = ? AND symbol = ?", (mkt, sym)).fetchone()
+                conn.execute("SELECT * FROM live_paper_positions WHERE market = ? AND symbol = ?", (mkt, pos_sym)).fetchone()
             )
         return {"ok": True, "simulated": True, "position": updated}
 
@@ -1561,19 +1925,22 @@ class LiveMarketPaperEngine:
         reason: str = "operator explicit close",
     ) -> dict[str, Any]:
         mkt = self._validate_market(market)
-        sym = symbol.strip().upper()
+        sym_raw = symbol.strip()
+        sym = sym_raw.upper()
         with self._lock, self._connect() as conn:
             pos = conn.execute(
-                "SELECT * FROM live_paper_positions WHERE market = ? AND symbol = ?", (mkt, sym)
+                "SELECT * FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
+                (mkt, sym, sym_raw),
             ).fetchone()
             if pos is None:
                 raise ValueError(f"No open {mkt} paper position for {sym}")
             qty = float(pos["qty"])
             prod = str(pos["product"])
+            order_target = str(pos["instrument_key"]) if mkt == "NSE" and pos["instrument_key"] else str(pos["symbol"])
         return self.submit_order(
             client_order_id=f"lmp-close-{mkt.lower()}-{uuid.uuid4().hex[:10]}",
             market=mkt,
-            symbol=sym,
+            symbol=order_target,
             side="SELL",
             qty=qty,
             order_type="MARKET",
@@ -1627,22 +1994,59 @@ class LiveMarketPaperEngine:
             | {o["symbol"] for o in open_orders}
             | set(watched_syms)
         )
+        ikey_by_sym: dict[str, str] = {}
+        for p in pos_rows:
+            if p.get("instrument_key"):
+                ikey_by_sym[str(p["symbol"])] = str(p["instrument_key"])
+        for o in open_orders:
+            if o.get("instrument_key"):
+                ikey_by_sym.setdefault(str(o["symbol"]), str(o["instrument_key"]))
+
         fetched_quotes: dict[str, dict[str, Any]] = {}
-        stale_detected = False
+        stale_reasons: dict[str, str] = {}
         disconnect_error: str | None = None
 
         for sym in active_symbols:
             try:
-                inst = self._resolve_instrument(mkt, sym)
-                q = (quotes_by_symbol or {}).get(sym) or self._fetch_live_quote(mkt, inst)
-                q_ts = parse_timestamp(str(q["timestamp"]))
-                age = (now - q_ts).total_seconds()
-                if age > cfg.max_quote_age_seconds:
-                    stale_detected = True
-                else:
+                lookup_ref = ikey_by_sym.get(sym, sym) if mkt == "NSE" else sym
+                inst = self._resolve_instrument(mkt, lookup_ref)
+                q = (
+                    (quotes_by_symbol or {}).get(sym)
+                    or (quotes_by_symbol or {}).get(str(inst.get("instrument_key") or ""))
+                    or self._fetch_live_quote(mkt, inst)
+                )
+                q_val = self._validate_quote_for_paper(
+                    mkt,
+                    inst,
+                    q,
+                    now,
+                    sess_info=sess,
+                    record_monotonic_watermark=True,
+                )
+                if q_val["valid_for_fill"]:
                     fetched_quotes[sym] = q
+                    if mkt == "NSE" and inst.get("trading_symbol"):
+                        fetched_quotes.setdefault(str(inst["trading_symbol"]), q)
+                elif q_val["reason_code"] in {"STALE_QUOTE", "OUT_OF_ORDER_QUOTE", "DELAYED_FEED_BLOCKED", "MALFORMED_QUOTE"}:
+                    stale_reasons[sym] = f"[{q_val['reason_code']}] {q_val['reason_detail']}"
             except Exception as exc:
-                disconnect_error = str(exc)[:180]
+                err_code, err_detail = self._classify_fetch_exception(mkt, exc)
+                disconnect_error = f"[{err_code}] {err_detail}"
+
+        if curr_state in {"STALE_FEED_PAUSED", "DISCONNECTED_PAUSED", "MARKET_CLOSED_WAITING"}:
+            if sess["is_open"] and (not active_symbols or (fetched_quotes and not stale_reasons and not disconnect_error)):
+                with self._lock, self._connect() as conn:
+                    conn.execute(
+                        "UPDATE live_paper_accounts SET session_state = 'RUNNING', state_reason = NULL, updated_at = ? WHERE market = ?",
+                        (now.isoformat(), mkt),
+                    )
+                    self._append_audit_conn(
+                        conn,
+                        mkt,
+                        "PAPER_SESSION_RECONNECTED",
+                        {"previous_state": curr_state, "resumed_at": now.isoformat()},
+                    )
+                curr_state = "RUNNING"
 
         if curr_state == "RUNNING":
             if disconnect_error and not fetched_quotes:
@@ -1653,13 +2057,14 @@ class LiveMarketPaperEngine:
                     )
                     self._append_audit_conn(conn, mkt, "PAPER_SESSION_DISCONNECTED", {"detail": disconnect_error})
                 return self.market_snapshot(mkt)
-            if stale_detected and not fetched_quotes:
+            if stale_reasons and not fetched_quotes:
+                first_stale = next(iter(stale_reasons.values()))
                 with self._lock, self._connect() as conn:
                     conn.execute(
-                        "UPDATE live_paper_accounts SET session_state = 'STALE_FEED_PAUSED', state_reason = 'Live quote exceeded freshness limit; new entries paused.', updated_at = ? WHERE market = ?",
-                        (now.isoformat(), mkt),
+                        "UPDATE live_paper_accounts SET session_state = 'STALE_FEED_PAUSED', state_reason = ?, updated_at = ? WHERE market = ?",
+                        (f"New entries paused: {first_stale}", now.isoformat(), mkt),
                     )
-                    self._append_audit_conn(conn, mkt, "PAPER_SESSION_STALE_FEED", {})
+                    self._append_audit_conn(conn, mkt, "PAPER_SESSION_STALE_FEED", {"reasons": stale_reasons})
                 return self.market_snapshot(mkt)
 
         protective_triggers: list[tuple[str, float, dict[str, Any], str]] = []
@@ -1686,7 +2091,8 @@ class LiveMarketPaperEngine:
                     sym = ord_row["symbol"]
                     q = fetched_quotes.get(sym)
                     if q:
-                        inst = self._resolve_instrument(mkt, sym)
+                        lookup_ref = str(ord_row["instrument_key"] or sym) if mkt == "NSE" else sym
+                        inst = self._resolve_instrument(mkt, lookup_ref)
                         self._try_fill_order_conn(conn, str(ord_row["client_order_id"]), inst, q, now)
 
         triggered_orders: list[str] = []
@@ -1759,6 +2165,42 @@ class LiveMarketPaperEngine:
             for sym, bars in resolved_bars_map.items():
                 if not bars:
                     continue
+                bar_err: str | None = None
+                prev_bts: datetime | None = None
+                for b in bars:
+                    if (
+                        not all(math.isfinite(v) and v > 0 for v in (b.open, b.high, b.low, b.close))
+                        or not math.isfinite(b.volume)
+                        or b.volume < 0
+                        or b.low > min(b.open, b.close)
+                        or b.high < max(b.open, b.close)
+                    ):
+                        bar_err = "MALFORMED_BAR_OHLCV"
+                        break
+                    if prev_bts is not None and b.timestamp <= prev_bts:
+                        bar_err = "OUT_OF_ORDER_OR_DUPLICATE_BAR"
+                        break
+                    prev_bts = b.timestamp
+                if bar_err is not None:
+                    with self._lock, self._connect() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO live_paper_decisions
+                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp, order_client_id, created_at)
+                            VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, NULL, ?)
+                            """,
+                            (
+                                f"dec-{uuid.uuid4().hex[:12]}",
+                                mkt,
+                                sym,
+                                strategy,
+                                timeframe,
+                                f"BLOCKED [{bar_err}]: bar series failed integrity validation",
+                                bars[-1].timestamp.isoformat(),
+                                now.isoformat(),
+                            ),
+                        )
+                    continue
                 latest_bar_iso = bars[-1].timestamp.isoformat()
                 with self._lock, self._connect() as conn:
                     already_evaluated = conn.execute(
@@ -1794,7 +2236,7 @@ class LiveMarketPaperEngine:
                     lot = int(inst.get("quantity_step") or inst.get("lot_size") or 1)
                     sub = self.submit_order(
                         market=mkt,
-                        symbol=sym,
+                        symbol=str(inst.get("instrument_key") or sym) if mkt == "NSE" else sym,
                         side="BUY",
                         qty=float(lot),
                         order_type="MARKET",
@@ -1806,10 +2248,11 @@ class LiveMarketPaperEngine:
                 elif decision["action"] == "SELL" and q:
                     with self._lock, self._connect() as conn:
                         held = conn.execute(
-                            "SELECT qty FROM live_paper_positions WHERE market = ? AND symbol = ?", (mkt, sym)
+                            "SELECT symbol, qty FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
+                            (mkt, sym, sym),
                         ).fetchone()
                     if held and float(held["qty"]) > 0:
-                        closed = self.close_position(mkt, sym, quote_override=q, reason=f"strategy:{strategy}")
+                        closed = self.close_position(mkt, str(held["symbol"]), quote_override=q, reason=f"strategy:{strategy}")
                         if closed.get("ok") and closed.get("order"):
                             order_cid = str(closed["order"]["client_order_id"])
 
@@ -1995,7 +2438,13 @@ class LiveMarketPaperEngine:
                 )
             ]
             fills = [
-                {**dict(r), "fee_breakdown": json.loads(r["fees_json"] or "{}")}
+                {
+                    **dict(r),
+                    "simulated": True,
+                    "fill_type": "SIMULATED",
+                    "execution_destination": f"LOCAL_PAPER_SQLITE ({mkt})",
+                    "fee_breakdown": json.loads(r["fees_json"] or "{}"),
+                }
                 for r in conn.execute(
                     "SELECT * FROM live_paper_fills WHERE market = ? ORDER BY created_at DESC, rowid DESC LIMIT 100", (mkt,)
                 )
@@ -2019,6 +2468,7 @@ class LiveMarketPaperEngine:
             enriched_positions.append({
                 **p,
                 "simulated": True,
+                "fill_type": "SIMULATED",
                 "market_value": mv,
                 "unrealized_pnl": upnl,
                 "unrealized_pnl_pct": upnl_pct,
@@ -2026,27 +2476,61 @@ class LiveMarketPaperEngine:
 
         cash = round(float(acct["cash"]), 2)
         equity = round(cash + market_value, 2)
-        realized = round(float(acct["realized_pnl"]), 2)
-        day_pnl = round(equity - float(acct["day_start_equity"]), 2)
+        persisted_realized = round(float(acct["realized_pnl"]), 2)
+        today_str = str((sess.get("detail") or {}).get("trading_day") or now.date().isoformat())
+        if str(acct["trading_day"]) != today_str:
+            with self._lock, self._connect() as conn:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET day_start_equity = ?, trading_day = ? WHERE market = ?",
+                    (equity, today_str, mkt),
+                )
+            day_start_eq = equity
+        else:
+            day_start_eq = float(acct["day_start_equity"])
+        day_pnl = round(equity - day_start_eq, 2)
+
+        active_run_id = acct.get("session_run_id")
+        session_active = bool(active_run_id) and str(acct["session_state"]) not in {"STOPPED"}
+        sess_start_eq = float(acct["session_start_equity"]) if acct.get("session_start_equity") is not None else equity
+        sess_start_real = float(acct["session_start_realized_pnl"]) if acct.get("session_start_realized_pnl") is not None else persisted_realized
+        current_session_realized = round(persisted_realized - sess_start_real, 2) if session_active else 0.0
+        current_session_total = round(equity - sess_start_eq, 2) if session_active else 0.0
         total_fees = round(sum(float(f["fees_total"]) for f in fills), 2)
+        strat_name = str(acct["strategy"] or "manual_only")
+        auto_state = (
+            "ENABLED_COMPLETED_BARS"
+            if (session_active and strat_name.lower() != "manual_only")
+            else "MANUAL_ONLY_NO_AUTO_ORDERS"
+        )
 
         return {
             "market": mkt,
             "currency": acct["currency"],
             "simulated": True,
+            "fill_type": "SIMULATED",
             "real_order_api_used": False,
             "execution_mode": "LIVE_MARKET_PAPER",
+            "market_data_source": (
+                "upstox_market_data (read-only NSE REST/BOD)"
+                if mkt == "NSE"
+                else "alpaca_market_data (read-only NASDAQ REST IEX/SIP)"
+            ),
+            "execution_destination": f"LOCAL_SQLITE_SIMULATOR ({mkt} · {acct['currency']} · zero broker orders)",
+            "automation_state": auto_state,
             "mode_banner": f"SIMULATED LOCAL PAPER ({mkt} · {acct['currency']}) — REAL MARKET DATA · ZERO BROKER ORDERS",
             "session_state": acct["session_state"],
             "state_reason": acct["state_reason"],
             "session": {
                 "state": acct["session_state"],
                 "reason": acct["state_reason"],
-                "strategy": acct["strategy"],
+                "strategy": strat_name,
                 "timeframe": acct["timeframe"],
+                "automation_state": auto_state,
+                "session_run_id": active_run_id if session_active else None,
+                "fill_type": "SIMULATED",
             },
             "exchange_session": sess,
-            "strategy": acct["strategy"],
+            "strategy": strat_name,
             "timeframe": acct["timeframe"],
             "watched_symbols": json.loads(acct["symbols_json"]),
             "account": {
@@ -2055,10 +2539,28 @@ class LiveMarketPaperEngine:
                 "cash": cash,
                 "market_value": round(market_value, 2),
                 "equity": equity,
-                "realized_pnl": realized,
+                "realized_pnl": persisted_realized,
+                "persisted_historical_realized_pnl": persisted_realized,
+                "current_session_run_id": active_run_id if session_active else None,
+                "current_session_realized_pnl": current_session_realized,
+                "current_session_total_pnl": current_session_total,
                 "unrealized_pnl": round(unrealized_pnl, 2),
                 "day_pnl": day_pnl,
                 "total_fees_paid": total_fees,
+                "pnl_scope_note": (
+                    "current_session_* tracks strictly the active session run; "
+                    "persisted_historical_realized_pnl tracks cumulative local history across prior runs."
+                ),
+            },
+            "pnl_attribution": {
+                "current_session_active": session_active,
+                "current_session_run_id": active_run_id if session_active else None,
+                "current_session_realized_pnl": current_session_realized,
+                "current_session_total_pnl": current_session_total,
+                "persisted_historical_realized_pnl": persisted_realized,
+                "open_position_unrealized_pnl": round(unrealized_pnl, 2),
+                "trading_day": today_str,
+                "trading_day_pnl": day_pnl,
             },
             "risk_limits": asdict(self.configs[mkt]),
             "positions": enriched_positions,
@@ -2093,3 +2595,26 @@ class LiveMarketPaperEngine:
             }
             for r in rows
         ]
+
+    def export_audit_bundle(self, *, market: str = "", limit: int = 500) -> dict[str, Any]:
+        """Export an auditable SHA-256 chain-verified bundle of paper sessions, fills, and events."""
+        now_iso = _utc_now(self._clock).isoformat()
+        target_markets = [self._validate_market(market)] if market else list(MARKETS)
+        snapshots = {m: self.market_snapshot(m) for m in target_markets}
+        reconciliations = {m: self.reconcile(m) for m in target_markets}
+        events = self.audit_log(market=market, limit=limit)
+        bundle_core = {
+            "exported_at": now_iso,
+            "execution_mode": "LIVE_MARKET_PAPER",
+            "simulated": True,
+            "fill_type": "SIMULATED",
+            "real_order_api_used": False,
+            "markets_included": target_markets,
+            "all_audit_chains_valid": all(r["audit_chain_valid"] for r in reconciliations.values()),
+            "reconciliation": reconciliations,
+            "snapshots": snapshots,
+            "audit_events": events,
+        }
+        digest = hashlib.sha256(json.dumps(bundle_core, sort_keys=True).encode("utf-8")).hexdigest()
+        return {"bundle_sha256": digest, **bundle_core}
+

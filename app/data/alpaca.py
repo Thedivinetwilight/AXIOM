@@ -401,15 +401,23 @@ class AlpacaQuoteReader:
         trade = payload.get("latestTrade") or {}
         daily = payload.get("dailyBar") or {}
         prev_daily = payload.get("prevDailyBar") or {}
+        import math as _math
+
         bid = float(quote.get("bp") or 0.0)
         ask = float(quote.get("ap") or 0.0)
         last = float(trade.get("p") or daily.get("c") or 0.0)
+        vol = float(daily.get("v") or trade.get("s") or 0.0)
+        if not all(_math.isfinite(v) for v in (bid, ask, last, vol)) or bid < 0 or ask < 0 or vol < 0:
+            raise ValueError(f"Alpaca returned malformed non-finite or negative quote fields for {symbol}")
+        if bid > 0 and ask > 0 and ask < bid:
+            raise ValueError(f"Alpaca returned malformed inverted quote (bid {bid} > ask {ask}) for {symbol}")
         if last <= 0 and bid > 0 and ask >= bid:
             last = round((bid + ask) / 2.0, 4)
         stamp_raw = trade.get("t") or quote.get("t") or daily.get("t")
         if not stamp_raw or last <= 0:
             raise ValueError(f"Alpaca returned no usable quote/trade price for {symbol}")
         stamp = parse_timestamp(stamp_raw)
+        received_at = datetime.now(timezone.utc)
         prev_close = float(prev_daily.get("c") or 0.0) or None
         change_pct = (
             round(((last - prev_close) / prev_close) * 100.0, 3)
@@ -418,17 +426,22 @@ class AlpacaQuoteReader:
         )
         return {
             "symbol": symbol,
+            "instrument_key": f"NASDAQ|{symbol}",
             "market": "NASDAQ",
             "currency": "USD",
             "bid": bid if bid > 0 else last,
             "ask": ask if ask >= max(bid, 0.0) and ask > 0 else last,
             "last": last,
-            "volume": float(daily.get("v") or trade.get("s") or 0.0),
+            "volume": vol,
             "previous_close": prev_close,
             "change_pct": change_pct,
             "timestamp": stamp.isoformat(),
+            "source_timestamp": stamp.isoformat(),
+            "local_received_at": received_at.isoformat(),
             "feed": self.feed,
             "feed_label": feed_label(self.feed),
+            "feed_entitlement_label": feed_label(self.feed),
+            "feed_is_consolidated": self.feed == "sip",
             "is_delayed": self.feed == "delayed_sip",
             "source": f"alpaca-market-data:{self.feed}",
             "read_only": True,

@@ -2,7 +2,7 @@
 
 Hard safety & isolation invariants:
 - Evaluates strictly on validated, timestamped, completed OHLCV bars.
-- Never imports or invokes any live broker order client (Alpaca, Upstox GTT, MT5 order_send).
+- Never imports or invokes any live broker order client (Alpaca Trading API v2 or Upstox GTT v3).
 - Individual strategies emit advisory candidate signals only; orders can only be proposed
   by one per-market PortfolioRiskAllocator and (in LIVE-MARKET PAPER) simulated locally.
 - Research, calibration, walk-forward weighting, benchmarks, and restarts never arm or

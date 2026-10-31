@@ -32,6 +32,7 @@ from app.ensemble.calibration import (
     ANNUALIZATION_BARS,
     EmpiricalCalibrator,
     WalkForwardWeightLearner,
+    classify_bar_regime,
     wilson_ci90,
 )
 from app.ensemble.registry import (
@@ -733,9 +734,14 @@ class StrategyEnsembleService:
                     and dec["final_action"] in {"BUY", "SELL"}
                     and dec["selected_qty"] > 0
                 ):
+                    target_paper_sym = (
+                        str(inst_meta.get("instrument_key"))
+                        if (mkt == "NSE" and inst_meta.get("instrument_key"))
+                        else sym
+                    )
                     sub = self.paper_engine.submit_order(
                         market=mkt,
-                        symbol=sym,
+                        symbol=target_paper_sym,
                         side=dec["final_action"],
                         qty=float(dec["selected_qty"]),
                         order_type="MARKET",
@@ -888,6 +894,39 @@ class StrategyEnsembleService:
         product = "D" if mkt == "NSE" else "CASH"
         tick_size = 0.05 if mkt == "NSE" else 0.01
 
+        oos_regimes: list[str] = [
+            classify_bar_regime(SharedIndicatorContext(bars[: t + 1], max_tail=160))
+            for t in range(test_start, len(bars) - 1)
+        ]
+
+        def _regime_slice_metrics(equity_curve: list[float]) -> dict[str, dict[str, Any]]:
+            buckets: dict[str, dict[str, Any]] = {}
+            prev_eq = starting_cash
+            for idx, eq in enumerate(equity_curve):
+                reg = oos_regimes[idx] if idx < len(oos_regimes) else "MEAN_REVERTING_RANGE"
+                step_ret_pct = ((eq - prev_eq) / max(1e-9, prev_eq)) * 100.0
+                prev_eq = eq
+                rec = buckets.setdefault(
+                    reg,
+                    {"bars": 0, "compounded_factor": 1.0, "positive_bars": 0, "active_bars": 0},
+                )
+                rec["bars"] += 1
+                rec["compounded_factor"] *= max(0.0001, 1.0 + step_ret_pct / 100.0)
+                if abs(step_ret_pct) > 1e-9:
+                    rec["active_bars"] += 1
+                if step_ret_pct > 1e-9:
+                    rec["positive_bars"] += 1
+            out: dict[str, dict[str, Any]] = {}
+            for reg, rec in sorted(buckets.items()):
+                n_b = int(rec["bars"])
+                out[reg] = {
+                    "bars": n_b,
+                    "net_return_pct": round((float(rec["compounded_factor"]) - 1.0) * 100.0, 4),
+                    "active_bars": int(rec["active_bars"]),
+                    "positive_bar_rate": round(int(rec["positive_bars"]) / max(1, n_b), 4),
+                }
+            return out
+
         def _sim_single_rule(rule_spec: StrategyVariantSpec | str, cost_mult: float) -> dict[str, Any]:
             cash = starting_cash
             qty = 0.0
@@ -953,7 +992,7 @@ class StrategyEnsembleService:
                 if curve:
                     curve[-1] = cash
 
-            return _compute_curve_metrics(
+            metrics = _compute_curve_metrics(
                 starting_cash=starting_cash,
                 final_equity=cash,
                 equity_curve=curve,
@@ -964,6 +1003,8 @@ class StrategyEnsembleService:
                 no_trade_bars=no_trade,
                 timeframe=tf,
             )
+            metrics["regime_breakdown"] = _regime_slice_metrics(curve)
+            return metrics
 
         def _sim_allocator(*, use_kronos: bool, cost_mult: float) -> dict[str, Any]:
             sim_cfg = PortfolioAllocationConfig(**base_cfg.to_dict())
@@ -1127,7 +1168,7 @@ class StrategyEnsembleService:
                 if curve:
                     curve[-1] = cash
 
-            return _compute_curve_metrics(
+            metrics_alloc = _compute_curve_metrics(
                 starting_cash=starting_cash,
                 final_equity=cash,
                 equity_curve=curve,
@@ -1138,6 +1179,8 @@ class StrategyEnsembleService:
                 no_trade_bars=no_trade,
                 timeframe=tf,
             )
+            metrics_alloc["regime_breakdown"] = _regime_slice_metrics(curve)
+            return metrics_alloc
 
         ma_spec = StrategyVariantSpec("baseline_sma_10_30", "sma_crossover", {"fast": 10, "slow": 30, "min_edge_bps": 8.0})
         rsi_spec = StrategyVariantSpec("baseline_rsi_14", "rsi_reversion", {"period": 14, "oversold": 30.0, "overbought": 70.0})
@@ -1246,10 +1289,55 @@ class StrategyEnsembleService:
                 "verdict": "NOT VERIFIED — Kronos runtime/weights unavailable in this environment; zero mock forecasts substituted.",
             }
 
+        is_real_data = bool(ds_meta.get("real_market_data"))
+        evidence_classification = {
+            "evidence_type": (
+                "HISTORICAL_MARKET_OOS_EVIDENCE"
+                if is_real_data
+                else "SYNTHETIC_ENGINEERING_EVIDENCE"
+            ),
+            "expected_returns_claim": False,
+            "live_readiness_claim": False,
+            "banner": (
+                "HISTORICAL OUT-OF-SAMPLE EVIDENCE — NOT EXPECTED FUTURE RETURNS OR LIVE READINESS"
+                if is_real_data
+                else "SYNTHETIC ENGINEERING EVIDENCE — NOT EXPECTED RETURNS OR LIVE READINESS"
+            ),
+        }
+        methodology_audit_disclosures = {
+            "single_allocator_enforced": True,
+            "direct_strategy_order_submission_allowed": False,
+            "kronos_advisory_only": True,
+            "thresholds_tuned_for_headline_metrics": False,
+            "chronological_split_with_embargo": True,
+            "oos_regime_bar_counts": {
+                reg: oos_regimes.count(reg) for reg in sorted(set(oos_regimes))
+            },
+            "survivorship_status": (
+                "SURVIVORSHIP_AWARE"
+                if bool(ds_meta.get("survivorship_aware"))
+                else "UNVERIFIED_STATIC_SYMBOL_SELECTION"
+            ),
+            "corporate_actions_status": (
+                "CORPORATE_ACTIONS_VERIFIED"
+                if bool(ds_meta.get("corporate_actions_adjusted"))
+                else "UNVERIFIED_CORPORATE_ACTION_ADJUSTMENT"
+            ),
+            "cost_stress_multipliers_evaluated": [1.0, 2.0],
+            "partial_fill_bar_volume_cap": base_cfg.max_bar_participation,
+            "short_sale_constraints": (
+                "CASH_DELIVERY_LONG_ONLY_NO_NAKED_SHORTS"
+                if product in {"D", "CASH"}
+                else "INTRADAY_SHORT_ELIGIBLE"
+            ),
+        }
+
         manifest_core = {
             "schema": "axiom.ensemble.ablation_evidence.v1",
             "paper_and_research_only": True,
             "live_execution_authorized": False,
+            "evidence_classification": evidence_classification,
+            "methodology_audit_disclosures": methodology_audit_disclosures,
             "market": mkt,
             "timeframe": tf,
             "dataset": {

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config.settings import Settings
-from app.vantage.secrets import DpapiSecretStore, SecretNotFound, SecretStoreUnavailable
+from app.security.dpapi_secrets import DpapiSecretStore, SecretNotFound, SecretStoreUnavailable
 
 SLOT_ALPACA_MARKET_DATA = "ALPACA_MARKET_DATA"
 VALID_FEEDS = frozenset({"iex", "sip", "delayed_sip"})

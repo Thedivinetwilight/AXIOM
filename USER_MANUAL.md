@@ -1,19 +1,19 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a9**
+**Current source version: 3.7.0a10**
 
-**Audience:** the account owner operating AXIOM on Windows x64.
+**Audience:** the account owner operating AXIOM on Windows x64 (directly from a cloned Git checkout — no installer required).
 
-> **Version 3.7.0a9 Multi-Market NSE (Upstox) & NASDAQ (Alpaca) Operator Console:** The dark `/terminal` console (`01`–`12`) presents **Indian NSE (`INR ₹` via Upstox)** and **US NASDAQ (`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation, `10 AI & Model Lab` (frozen CPU `NeoQuasar/Kronos-small`), `11 Live Trade Monitor` (strictly read-only candlestick & signal/order/fill/SL/TP/exit inspector), and `12 Ensemble & Allocation` (`1,024+` bounded parallel strategy variants + OOS calibrator + `PortfolioRiskAllocator`). All research, calibration, and monitor surfaces are strictly PAPER/RESEARCH/READ-ONLY and never authorize or alter live execution.
+> **Version 3.7.0a10 Multi-Market NSE (Upstox) & NASDAQ (Alpaca) Source-First Operator Console:** The dark `/terminal` console (`01`–`12`) runs directly from a cloned source repository (`.\Start-Axiom.ps1` or `python .\axiom_launcher.py`) and presents **Indian NSE (`INR ₹` via Upstox)** and **US NASDAQ (`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation, `10 AI & Model Lab` (frozen CPU `NeoQuasar/Kronos-small`), `11 Live Trade Monitor` (strictly read-only candlestick & signal/order/fill/SL/TP/exit inspector), and `12 Ensemble & Allocation` (`1,024+` bounded parallel strategy variants + OOS calibrator + single `PortfolioRiskAllocator`). All research, calibration, and monitor surfaces are strictly PAPER/RESEARCH/READ-ONLY and never authorize or alter live execution.
 
-AXIOM separates execution scopes explicitly across its multi-market console:
+AXIOM separates execution scopes, data sources, fill types, and session P&L explicitly across its multi-market console:
 
-| Scope | Market & Currency | Execution Boundary |
+| Scope | Market & Currency | Data Source, Execution Destination & Fill Type |
 |---|---|---|
-| **LOCAL PAPER** (`AXIOM_PAPER`) | Local simulator | Independent simulated cash, orders, positions, and replay/manual paper fills. Zero broker order routing. |
-| **NSE LIVE-MARKET PAPER** | NSE (`INR ₹` via Upstox) | Read-only Upstox quotes, candles, and BOD master reconciliation with 100% locally simulated SQLite fills and Indian statutory fee modeling (STT, NSE txn, SEBI, stamp duty, 18% GST). |
-| **NASDAQ LIVE-MARKET PAPER** | NASDAQ (`USD $` via Alpaca) | Read-only Alpaca `IEX` / `SIP` market data with 100% locally simulated SQLite fills and US SEC Section 31 / FINRA TAF fee modeling. |
-| **ALPACA BROKER (`PAPER` / `LIVE`)** | NASDAQ (`USD $` via Alpaca) | Separate Trading API v2 credentials, disabled by default (`ALPACA_BROKER_ENABLED=true` required for live), guarded by USD risk limits, readiness checks, **Arm**, and phrase-confirmed **Activate**. |
+| **1 · LOCAL REPLAY PAPER** (`AXIOM_PAPER`) | Local simulator | Bundled labeled sample CSV data (`data/sample*.csv`) → local SQLite paper broker (`0` network/broker calls). Fill type: **`SIMULATED`**. Current-run P&L isolated from persisted history. |
+| **2 · NSE LIVE-MARKET PAPER** | NSE (`INR ₹` via Upstox) | Real read-only Upstox `NSE_EQ` quotes, candles, and BOD master reconciliation (`0` sample fallback) → 100% locally simulated SQLite fills with Indian statutory fees (STT, NSE txn, SEBI, stamp duty, 18% GST). Fill type: **`SIMULATED`**. `current_session_total_pnl` separated from `persisted_historical_realized_pnl`. |
+| **2 · NASDAQ LIVE-MARKET PAPER** | NASDAQ (`USD $` via Alpaca) | Real read-only Alpaca `iex` (single-venue IEX feed — **not** consolidated US tape) or paid `sip` (consolidated US tape) market data (`0` sample fallback; `delayed_sip` blocked for entries) → 100% locally simulated SQLite fills with US SEC Section 31 / FINRA TAF fees. Fill type: **`SIMULATED`**. |
+| **3 · ALPACA BROKER (`PAPER` / `LIVE`)** | NASDAQ (`USD $` via Alpaca) | Separate Trading API v2 credentials (`ALPACA_BROKER_PAPER` → `paper-api.alpaca.markets`, fill type **`BROKER_PAPER_SANDBOX_CONFIRMED`**; `ALPACA_BROKER_LIVE` → `api.alpaca.markets`, fill type **`BROKER_CONFIRMED`**), disabled by default (`ALPACA_BROKER_ENABLED=true` required), guarded by USD risk limits, readiness checks, **Arm**, and phrase-confirmed **Activate**. |
 | **UPSTOX LIVE (`/autonomy`)** | NSE (`INR ₹` via Upstox) | Separate daily `UPSTOX_LIVE_ACCESS_TOKEN`, disabled by default (`AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, and SEBI static IP required), guarded by INR risk limits, 3-leg GTT protection, **Arm**, and **Activate**. |
 
 > **No profitability or live-readiness claim.** Automated tests, read-only connection checks, and simulated or broker-paper fills do not establish profitability or readiness for real money. Live credentials and live activation are solely the account owner's responsibility.
@@ -46,17 +46,36 @@ AXIOM stores market-data credentials and broker-execution credentials in separat
 
 ---
 
-## 2. Requirements and Windows installation
+## 2. Requirements, Source-First Startup, and Optional Packaging
 
 ### 2.1 System requirements
 
-- Windows 10/11 **x64** for the packaged application.
-- A current Edge, Chrome, or Firefox browser. Keep the AXIOM console window open while using the app.
-- Optional for **`10 AI & Model Lab`** Kronos CPU setup: CPython `3.11` or `3.12` **x64** with `pip` (`py -3.11-64` / `py -3.12-64` or a validated full `python.exe` path). Weights and locked CPU wheels install into `%LOCALAPPDATA%\AXIOM\autonomy\kronos`, never into the application folder.
+- Windows 10/11 **x64** with CPython `3.11+` x64 (`py -3.11-64`) and Git for the primary source-first workflow.
+- A current Edge, Chrome, or Firefox browser. Keep the PowerShell window running AXIOM open while using `/terminal`.
+- Optional for **`10 AI & Model Lab`** Kronos CPU setup: CPython `3.11` or `3.12` **x64** with `pip` (`py -3.11-64` / `py -3.12-64` or a validated full `python.exe` path). Weights and locked CPU wheels install into `%LOCALAPPDATA%\AXIOM\autonomy\kronos`, never into the repository folder.
 
-### 2.2 Install or run portable
+### 2.2 Run directly from cloned source (Recommended — no installer required)
 
-1. Download the Windows x64 `*-no-temp-install.zip` or `*-portable.zip` and the published `SHA256SUMS.txt` from the same release.
+1. Clone the repository, create `.venv`, and install locked dependencies (including Windows `tzdata` for `Asia/Kolkata` and `America/New_York` market-session calendars):
+   ```powershell
+   git clone https://github.com/Thedivinetwilight/AXIOM.git
+   Set-Location .\AXIOM
+   py -3.11-64 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install --upgrade pip
+   .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+   .\.venv\Scripts\python.exe .\axiom_launcher.py --register-venv
+   .\.venv\Scripts\python.exe .\axiom_launcher.py --check-deps
+   ```
+2. Run a non-destructive loopback smoke check (`0` broker calls, `0` user-data mutations):
+   ```powershell
+   .\Start-Axiom.ps1 -Smoke
+   ```
+3. Launch AXIOM from inside the repository (`.\Start-Axiom.ps1`, `.\.venv\Scripts\python.exe .\axiom_launcher.py`, `.\.venv\Scripts\python.exe -m app operator`, or `.\.venv\Scripts\python.exe .\run.py --mode operator`) **or** from any other working directory (`& C:\path\to\AXIOM\Start-Axiom.ps1` or `C:\path\to\AXIOM\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py`) without setting `PYTHONPATH` manually.
+4. Stop AXIOM cleanly with `Ctrl+C` in PowerShell. Update at any time with `git pull --ff-only` followed by `.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt`; existing `%LOCALAPPDATA%\AXIOM` data, credentials, and SQLite databases remain untouched and all live gates stay OFF.
+
+### 2.3 Optional frozen Windows package / portable ZIP (CI artifact workflow)
+
+1. If using optional CI-built Windows x64 archives instead of source, download `*-no-temp-install.zip` or `*-portable.zip` and the published `SHA256SUMS.txt` from the same release.
 2. Verify the exact ZIP hash before extracting it. Release binaries are **unsigned unless the release metadata explicitly says otherwise**; SmartScreen/Smart App Control can warn or block them.
 3. For installation, extract the entire installer ZIP, keep the setup EXE and matching `-0.bin`/`-1.bin` together, then run the EXE. The per-user installer does not require administrator rights and installs under `%LOCALAPPDATA%\Programs\AXIOM-Chart` for upgrade compatibility, while the product name is **AXIOM Operator**.
 4. Alternatively, extract the entire portable ZIP and run `AXIOM-Chart.exe` inside `AXIOM-Operator` with `_internal` beside it. The onedir folder avoids onefile TEMP extraction and stores operator data in the per-user data directory, not beside the executable.
@@ -64,7 +83,7 @@ AXIOM stores market-data credentials and broker-execution credentials in separat
 
 For the reported Error 4551, these loaderless/onedir packages avoid the identified Inno setup-loader and onefile runtime TEMP paths. They do not make unsigned code trusted or bypass Windows policy. Keep Application Control enabled; if the device still blocks the package, trusted signing or administrator approval is required. Read `WINDOWS_APP_CONTROL.md`.
 
-### 2.3 Local API token
+### 2.4 Local API token
 
 The local `API_TOKEN` protects AXIOM's loopback API. It is **not** an Upstox token or Alpaca key, and the launcher never prints it to the console.
 

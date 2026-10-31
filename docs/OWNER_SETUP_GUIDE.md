@@ -1,51 +1,65 @@
 # AXIOM Desktop Terminal — Owner Setup Guide & Architecture Reference
 
-**Version:** `3.7.0a9`  
-**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a9-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
+**Version:** `3.7.0a10`  
+**Target Platform:** Windows 10 / 11 x64 — **Cloned Git Source Checkout (Primary Recommended Workflow — No Installer Required)**; optional Windows `3.7.0a10` frozen archives retained for CI verification only.
 
 > **Safety & Non-Claim Notice**  
 > - Real-money execution (`LIVE-MARKET LIVE`) is **OFF by default** and is never enabled by startup, restart, crash recovery, config import, Kronos inference, or paper trading.  
-> - `LIVE-MARKET PAPER` uses real read-only market data (when owner credentials are connected) and simulates 100% of orders, fills, and regulatory fees locally in SQLite with **zero broker order API calls**.  
-> - Automated tests, mock/fake provider tests, and CI runs **do not** verify real owner broker accounts, real live fills, or strategy profitability. External provider/account checks without owner credentials in CI are explicitly marked **`NOT VERIFIED / BLOCKED`**.
+> - `LIVE-MARKET PAPER` uses real read-only market data (when owner credentials are connected; **zero** silent fallback to sample/replay data) and simulates 100% of orders, fills (`SIMULATED`), and regulatory fees locally in SQLite with **zero broker order API calls**. Current-session run P&L is strictly separated from persisted historical account P&L.  
+> - Automated tests, synthetic fixture benchmarks, mock/fake provider tests, and CI runs **do not** verify real owner broker accounts, real live fills, or strategy profitability. External provider/account checks and real-data Kronos OOS value without owner credentials in CI are explicitly marked **`NOT VERIFIED`**.
 
 ---
 
-## 1. Owner Quick-Start Setup (Windows x64)
+## 1. Owner Quick-Start Setup (Windows 10/11 x64 — Source-First Workflow)
 
-### Option A — Packaged Windows Installer or Portable Archive (Recommended)
-1. Verify your downloaded installer or portable archive against `SHA256SUMS.txt`:
-   ```powershell
-   Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-no-temp-install.zip -Algorithm SHA256
-   Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-portable.zip -Algorithm SHA256
-   ```
-2. Extract and run either `AXIOM-Operator-3.7.0a9-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
-
-### Option B — Windows 10/11 x64 Source Checkout Setup
+### Step 1A — Clone, Install Dependencies & Launch from Source (Primary Recommended Path)
 ```powershell
 git clone https://github.com/Thedivinetwilight/AXIOM.git
-cd AXIOM
+Set-Location .\AXIOM
 git checkout arena/ffd46191-axiom
+
 py -3.11-64 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
 npm ci --ignore-scripts --no-audit --no-fund
-# Run verification suites locally:
+
+# Register repo root in .venv site-packages & verify dependencies (incl. Windows tzdata)
+.\.venv\Scripts\python.exe .\axiom_launcher.py --register-venv
+.\.venv\Scripts\python.exe .\axiom_launcher.py --check-deps
+
+# Run local verification & non-destructive loopback smoke check (0 broker calls):
 .\.venv\Scripts\python.exe -m pytest -q
 npm test
-# Launch AXIOM Desktop Terminal from source (loopback-only):
-.\.venv\Scripts\python.exe axiom_launcher.py
-```
-> **Optional Pinned Kronos CPU Setup (Installer, Portable, or Source):** Ensure CPython `3.11` or `3.12` x64 with `pip` is installed on Windows, open **`10 AI & Model Lab`** in `/terminal`, click **Install Pinned Kronos (CPU)** (~110 MiB weights + locked CPU `torch==2.7.1+cpu` wheels into `%LOCALAPPDATA%\AXIOM\autonomy\kronos`), then click **Offline CPU Self-Test** to transition Kronos from `NOT_INSTALLED` / `NOT_VERIFIED` to `READY`.
+.\Start-Axiom.ps1 -Smoke
 
-### Step 2 — Connect Read-Only Market Data (`07 Connections`)
+# Launch AXIOM Operator Console (works from repo root OR any working directory without PYTHONPATH):
+.\Start-Axiom.ps1
+```
+- **Launch from any other directory:** `& C:\path\to\AXIOM\Start-Axiom.ps1`, `C:\path\to\AXIOM\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py`, or `C:\path\to\AXIOM\.venv\Scripts\python.exe -m app operator`.
+- **Stop:** Press `Ctrl+C` in PowerShell.
+- **Update:** `git pull --ff-only` then `.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt`. Existing `%LOCALAPPDATA%\AXIOM` configuration, DPAPI credentials, Kronos runtime/weights, and SQLite journals are preserved untouched.
+
+### Step 1B — Optional Frozen Windows Archive (CI Verification / Optional Distribution Only)
+1. If using an optional frozen build, verify hashes against `SHA256SUMS.txt`:
+   ```powershell
+   Get-FileHash .\AXIOM-Operator-3.7.0a10-windows-x64-no-temp-install.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a10-windows-x64-portable.zip -Algorithm SHA256
+   ```
+2. Extract and run either `AXIOM-Operator-3.7.0a10-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. All user data still lives under `%LOCALAPPDATA%\AXIOM`.
+> **Optional Pinned Kronos CPU Setup:** Ensure CPython `3.11` or `3.12` x64 with `pip` is installed on Windows, open **`10 AI & Model Lab`** in `/terminal`, click **Install Pinned Kronos (CPU)** (~110 MiB weights + locked CPU `torch==2.7.1+cpu` wheels into `%LOCALAPPDATA%\AXIOM\autonomy\kronos`), then click **Offline CPU Self-Test** to transition Kronos from `NOT_INSTALLED` / `NOT_VERIFIED` to `READY`.
+
+### Step 2 — Connect Read-Only Market Data (`02 Connections`)
 1. **Indian NSE (`INR ₹`) — Upstox Market Data**:
    - Generate a daily read-only `access_token` from your Upstox developer app (note: Upstox daily tokens expire around `03:30 IST` daily; AXIOM inspects the JWT `exp` claim automatically).
-   - Open **`07 Connections` → Upstox Read-Only Token (NSE Market Data)**, paste the token, and click **Save Upstox token** (encrypted via Windows DPAPI; input cleared immediately).
-   - Click **Verify NSE quote (`RELIANCE`)** to run a harmless `GET` probe (`0` order endpoints touched) and confirm `CONNECTED_READ_ONLY`.
+   - Open **`02 Connections` → Upstox Read-Only Token (NSE Market Data)**, paste the token, and click **Save Upstox token** (encrypted via Windows DPAPI in `app.security.dpapi_secrets`; input cleared immediately).
+   - Click **Verify NSE quote (`RELIANCE`)** to run a harmless `GET` probe (`0` order endpoints touched) on `NSE_EQ|INE002A01018` and confirm `CONNECTED_READ_ONLY`.
 2. **US NASDAQ (`USD $`) — Alpaca Market Data**:
-   - Create an API Key & Secret in your Alpaca dashboard (free **IEX** real-time US feed works out of the box; select **SIP** only if your account holds a paid CTA/UTP consolidated tape subscription).
-   - Open **`07 Connections` → Alpaca Market Data Keys (`ALPACA_MARKET_DATA`)**, select `IEX` or `SIP`, paste Key & Secret, and click **Save Alpaca data keys**.
-   - Click **Verify NASDAQ quote (`AAPL`)** to confirm `CONNECTED_READ_ONLY`. If `SIP` is selected without entitlement, AXIOM reports HTTP `403` with actionable guidance to switch to `IEX`.
+   - Create a Market Data API Key & Secret in your Alpaca dashboard (`ALPACA_MARKET_DATA` slot — isolated from `ALPACA_BROKER_PAPER` / `ALPACA_BROKER_LIVE`).
+   - Understand feed entitlements explicitly:
+     - **`iex`**: Free real-time **single-venue IEX feed** (~2–3% US volume — **never** treated as the consolidated US tape).
+     - **`sip`**: Paid **consolidated US SIP tape** across all US exchanges (requires Algo Trader Plus; returns HTTP `403` without subscription).
+     - **`delayed_sip`**: **15-minute delayed SIP** (historical/chart inspection only — **blocks** live-market PAPER entries).
+   - Open **`02 Connections` → Alpaca Market Data Keys (`ALPACA_MARKET_DATA`)**, select `iex` or `sip`, paste Key & Secret, click **Save Alpaca data keys**, and click **Verify NASDAQ quote (`AAPL`)** (`0` order endpoints touched).
 
 ### Step 3 — Reconcile Instrument Universes (`02 Watchlists & search`)
 - Click **Refresh NSE BOD master** to download and reconcile the official daily Upstox NSE `complete.json.gz` master (reporting exact counts by segment/type, alias mappings, suspended exclusions, and SHA-256 digest).

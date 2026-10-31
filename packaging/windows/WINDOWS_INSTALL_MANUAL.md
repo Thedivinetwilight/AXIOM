@@ -1,6 +1,8 @@
 # AXIOM Operator — Windows x64 Install Guide
 
-**Version:** 3.7.0a9
+**Version:** 3.7.0a10
+
+> **Source-First Workflow Note (`v3.7.0a10`):** Running AXIOM directly from a cloned Git checkout (`.\Start-Axiom.ps1` or `python .\axiom_launcher.py`) is now the primary recommended workflow and requires **no Windows installer**. The packaging workflow documented below remains available for optional frozen distribution and automated CI regression checks.
 
 **Applies to:** the AXIOM Operator loaderless installer and portable onedir folder built from the exact commit named in `BUILD_METADATA.json`.
 
@@ -47,8 +49,8 @@ SHA256SUMS.txt
 Before running a download, verify its SHA-256 against `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-no-temp-install.zip -Algorithm SHA256
-Get-FileHash .\AXIOM-Operator-3.7.0a9-windows-x64-portable.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a10-windows-x64-no-temp-install.zip -Algorithm SHA256
+Get-FileHash .\AXIOM-Operator-3.7.0a10-windows-x64-portable.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -56,7 +58,7 @@ The file name and full 64-character hash must match the same release. **Signing:
 
 ### 2.1 Error 4551 / Application Control
 
-The workaround introduced in 3.5.0a2 is retained in 3.7.0a9: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids Inno Setup's temporary `setup.tmp` and PyInstaller onefile `_MEI` TEMP extraction paths.
+The workaround introduced in 3.5.0a2 is retained in 3.7.0a10: Inno `UseSetupLdr=no` for the installer and a PyInstaller onedir runtime for installation and portable use. This avoids Inno Setup's temporary `setup.tmp` and PyInstaller onefile `_MEI` TEMP extraction paths.
 
 It is a packaging workaround, **not a policy bypass**. The packages remain unsigned. Keep Windows security and Application Control enabled; if an enforced Smart App Control or WDAC policy blocks unsigned binaries, trusted signing or administrator approval is required. See `WINDOWS_APP_CONTROL.md`.
 
@@ -149,7 +151,7 @@ Maintainers can reproduce the full Windows x64 build and smoke gates from a clea
 ```powershell
 cd packaging\windows
 powershell -ExecutionPolicy Bypass -File .\build_windows.ps1 `
-  -ExpectedCommit <full-source-commit> -Version 3.7.0a9
+  -ExpectedCommit <full-source-commit> -Version 3.7.0a10
 powershell -ExecutionPolicy Bypass -File .\install_test.ps1 -DistDir dist
 ```
 

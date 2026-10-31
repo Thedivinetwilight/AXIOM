@@ -10,6 +10,7 @@ or broker credentials.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
@@ -17,6 +18,14 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+
+if not getattr(sys, "frozen", False):
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+    _REPO_ROOT = _SCRIPT_DIR.parents[1]
+    if str(_SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPT_DIR))
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
 
 APP_NAME = "AXIOM"
 APP_TITLE = "AXIOM Operator"
@@ -195,6 +204,12 @@ def free_port(preferred: int) -> int:
 
 def build_app():
     """Construct the same application the test suite uses."""
+    if not getattr(sys, "frozen", False):
+        from app.source_launcher import check_runtime_dependencies, format_missing_dependencies_error
+
+        dep_report = check_runtime_dependencies()
+        if not dep_report["ok"]:
+            raise LaunchError(format_missing_dependencies_error(dep_report))
     try:
         from app.api.server import create_app
         from app.config.settings import Settings
@@ -245,9 +260,55 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from frozen_blocker_smoke import run
         return run()
+    if "--check-deps" in argv:
+        from app.source_launcher import check_runtime_dependencies, format_missing_dependencies_error
+
+        report = check_runtime_dependencies()
+        if not report["ok"]:
+            print(f"AXIOM dependency check failed:\n\n{format_missing_dependencies_error(report)}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    if "--register-venv" in argv:
+        from app.source_launcher import register_repo_in_active_site_packages
+
+        pth = register_repo_in_active_site_packages()
+        print(json.dumps({"registered": True, "pth_file": str(pth), "repo_root": str(_REPO_ROOT)}, sort_keys=True))
+        return 0
+    if "--smoke" in argv:
+        from app.source_launcher import (
+            check_runtime_dependencies,
+            format_missing_dependencies_error,
+            run_source_smoke_check,
+        )
+
+        dep_report = check_runtime_dependencies()
+        if not dep_report["ok"]:
+            print(f"AXIOM did not start:\n\n{format_missing_dependencies_error(dep_report)}", file=sys.stderr)
+            return 2
+        result = run_source_smoke_check()
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result.get("status") == "PASS" else 1
+    port_override: int | None = None
+    if "--port" in argv:
+        idx = argv.index("--port")
+        if idx + 1 >= len(argv):
+            print("--port requires an integer port number", file=sys.stderr)
+            return 2
+        try:
+            port_override = int(argv[idx + 1])
+        except ValueError:
+            print(f"invalid --port value: {argv[idx + 1]!r}", file=sys.stderr)
+            return 2
     no_browser = "--no-browser" in argv
     print(BANNER.format(title=APP_TITLE, label=BUILD_LABEL))
     try:
+        if not getattr(sys, "frozen", False):
+            from app.source_launcher import check_runtime_dependencies, format_missing_dependencies_error
+
+            dep_report = check_runtime_dependencies()
+            if not dep_report["ok"]:
+                raise LaunchError(format_missing_dependencies_error(dep_report))
         data_dir = user_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "logs").mkdir(exist_ok=True)
@@ -259,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  token    read API_TOKEN from the private config file (not printed)")
         print("           enter it in the operator page; it is separate from Upstox and Alpaca credentials")
         app = build_app()
-        preferred = int(os.environ.get("AXIOM_PORT") or DEFAULT_PORT)
+        preferred = port_override if port_override is not None else int(os.environ.get("AXIOM_PORT") or DEFAULT_PORT)
         port = free_port(preferred)
         url = f"http://{LOOPBACK}:{port}/terminal"
         ready = threading.Event()

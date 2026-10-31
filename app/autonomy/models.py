@@ -150,6 +150,9 @@ class Instrument:
         result = asdict(self)
         result["expiry"] = self.expiry.isoformat() if self.expiry else None
         result["market_kind"] = self.market_kind
+        result["asset_category"] = (
+            "DERIVATIVE" if self.currency_derivative else "CASH_EQUITY_OR_ETF"
+        )
         result["asset_subclass"] = self.asset_subclass
         result["currency"] = "INR"
         result["tradable"] = self.contract_multiplier is not None

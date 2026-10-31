@@ -711,9 +711,9 @@
               <div class="field">
                 <label for="mm-alpaca-data-feed">Market Data Feed Entitlement</label>
                 <select id="mm-alpaca-data-feed">
-                  <option value="iex">iex · Free real-time IEX exchange feed (~2–3% US volume)</option>
-                  <option value="sip">sip · Full consolidated US tape (Algo Trader Plus required)</option>
-                  <option value="delayed_sip">delayed_sip · 15-minute delayed SIP (charts only; paper market orders blocked)</option>
+                  <option value="iex">iex · Single-venue IEX feed (~2–3% US volume — NOT consolidated US SIP tape)</option>
+                  <option value="sip">sip · Consolidated US SIP tape (all US exchanges — paid Algo Trader Plus required)</option>
+                  <option value="delayed_sip">delayed_sip · 15-minute delayed SIP (NOT real-time — blocks live PAPER entries)</option>
                 </select>
               </div>
               <div class="button-row">

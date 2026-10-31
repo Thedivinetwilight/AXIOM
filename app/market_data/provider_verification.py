@@ -257,6 +257,21 @@ def verify_upstox_market_data(
             "guidance": "Authenticated profile, but market-quote read failed; failing closed.",
         }
 
+    raw_skew = (snap.timestamp - current).total_seconds()
+    if raw_skew > 5.0:
+        return {
+            **base,
+            "ok": False,
+            "authenticated": True,
+            "connection_state": "UNAVAILABLE",
+            "verdict": "malformed_future_timestamp",
+            "profile": profile_view,
+            "token_expiry": expiry_info,
+            "quote": None,
+            "detail": f"Upstox quote timestamp is {raw_skew:.1f}s in the future relative to local UTC clock",
+            "guidance": "Rejected future-skewed quote timestamp; verify local clock sync and Upstox feed.",
+        }
+
     age_seconds = round(max(0.0, (current - snap.timestamp).total_seconds()), 2)
     is_fresh = age_seconds <= freshness_seconds and session["is_open"]
     state = "CONNECTED_READ_ONLY" if is_fresh else "STALE"
@@ -265,12 +280,20 @@ def verify_upstox_market_data(
         if is_fresh
         else ("STALE_MARKET_CLOSED" if not session["is_open"] else "STALE_QUOTE")
     )
+    entitlement_label = "Upstox NSE Cash Read-Only Feed (NSE_EQ entitled; zero order capability)"
     return {
         **base,
         "ok": True,
         "authenticated": True,
         "connection_state": state,
         "verdict": "connected_fresh" if is_fresh else "connected_stale",
+        "feed": "upstox_nse_v2",
+        "feed_label": entitlement_label,
+        "feed_entitlement_label": entitlement_label,
+        "source_timestamp": snap.timestamp.isoformat(),
+        "local_received_at": current.isoformat(),
+        "quote_age_seconds": age_seconds,
+        "market_session_status": session["state"],
         "profile": profile_view,
         "token_expiry": expiry_info,
         "quote": {
@@ -280,10 +303,15 @@ def verify_upstox_market_data(
             "last": snap.last,
             "volume": snap.volume,
             "timestamp": snap.timestamp.isoformat(),
+            "source_timestamp": snap.timestamp.isoformat(),
+            "local_received_at": current.isoformat(),
             "age_seconds": age_seconds,
             "fresh": is_fresh,
             "freshness": freshness_label,
             "freshness_label": freshness_label,
+            "feed": "upstox_nse_v2",
+            "feed_entitlement_label": entitlement_label,
+            "market_session_status": session["state"],
             "currency": "INR",
             "source": "upstox-market-quote-v2",
         },
@@ -433,16 +461,23 @@ def verify_alpaca_market_data(
             ),
         }
     except (httpx.HTTPError, ValueError) as exc:
+        msg = str(exc)
+        is_rate = "429" in msg or "rate limit" in msg.lower()
+        verdict = "unreachable" if isinstance(exc, httpx.HTTPError) else ("rate_limited" if is_rate else "invalid_quote")
         return {
             **base,
             "ok": False,
             "authenticated": False,
             "connection_state": "UNAVAILABLE",
-            "verdict": "unreachable" if isinstance(exc, httpx.HTTPError) else "invalid_quote",
-            "detail": str(exc)[:240],
+            "verdict": verdict,
+            "detail": msg[:240],
             "quote": None,
             "listing": None,
-            "guidance": "Alpaca Market Data endpoint unreachable or returned incomplete quote; not verified.",
+            "guidance": (
+                "Alpaca rate limit reached (HTTP 429). Wait and retry within plan limits."
+                if is_rate
+                else "Alpaca Market Data endpoint unreachable or returned incomplete quote; not verified."
+            ),
         }
     finally:
         http_client.close()
@@ -450,6 +485,19 @@ def verify_alpaca_market_data(
     from app.data.models import parse_timestamp
 
     quote_ts = parse_timestamp(quote["timestamp"])
+    raw_skew = (quote_ts - current).total_seconds()
+    if raw_skew > 5.0:
+        return {
+            **base,
+            "ok": False,
+            "authenticated": True,
+            "connection_state": "UNAVAILABLE",
+            "verdict": "malformed_future_timestamp",
+            "detail": f"Alpaca quote timestamp is {raw_skew:.1f}s in the future relative to local UTC clock",
+            "quote": None,
+            "listing": listing,
+            "guidance": "Rejected future-skewed Alpaca quote timestamp; verify local clock sync.",
+        }
     age_seconds = round(max(0.0, (current - quote_ts).total_seconds()), 2)
     is_delayed = feed_norm == "delayed_sip"
     is_fresh = (not is_delayed) and age_seconds <= freshness_seconds and bool(session["market_open"])
@@ -465,10 +513,16 @@ def verify_alpaca_market_data(
     )
     quote_out = {
         **quote,
+        "source_timestamp": quote_ts.isoformat(),
+        "local_received_at": current.isoformat(),
         "age_seconds": age_seconds,
         "fresh": is_fresh,
         "freshness": freshness_label,
         "freshness_label": freshness_label,
+        "feed": feed_norm,
+        "feed_entitlement_label": feed_label(feed_norm),
+        "feed_is_consolidated": feed_norm == "sip",
+        "market_session_status": session["status"],
     }
     return {
         **base,
@@ -476,6 +530,11 @@ def verify_alpaca_market_data(
         "authenticated": True,
         "connection_state": state,
         "verdict": "connected_fresh" if is_fresh else "connected_stale",
+        "feed_entitlement_label": feed_label(feed_norm),
+        "source_timestamp": quote_ts.isoformat(),
+        "local_received_at": current.isoformat(),
+        "quote_age_seconds": age_seconds,
+        "market_session_status": session["status"],
         "quote": quote_out,
         "listing": listing,
         "guidance": (

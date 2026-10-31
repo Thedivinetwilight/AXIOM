@@ -1,6 +1,6 @@
 """Regression tests verifying removal of Vantage MT5 UI surfaces and MT5 operator docs
 while preserving Upstox (NSE INR) and Alpaca (NASDAQ USD) connections, risk gates,
-paper/live separation, and execution behavior (v3.7.0a9).
+paper/live separation, and execution behavior (v3.7.0a10).
 """
 
 from __future__ import annotations

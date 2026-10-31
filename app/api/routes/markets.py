@@ -26,7 +26,7 @@ from app.market_data.provider_verification import (
     verify_upstox_market_data,
 )
 from app.markets.alpaca_credentials import resolve_alpaca_data_credentials
-from app.markets.nse_reconciliation import nse_session_status
+from app.markets.nse_reconciliation import nse_session_status, resolve_nse_instrument_strict
 from app.markets.us_calendar import USEquitiesCalendar
 
 router = APIRouter(prefix="/api/markets")
@@ -35,6 +35,7 @@ router = APIRouter(prefix="/api/markets")
 class WatchlistItemBody(BaseModel):
     market: str = Field(pattern="^(NSE|NASDAQ|nse|nasdaq)$")
     symbol: str = Field(min_length=1, max_length=64)
+    instrument_key: str | None = Field(default=None, max_length=64)
 
 
 class PaperSessionStartBody(BaseModel):
@@ -73,6 +74,7 @@ class PaperConfigBody(BaseModel):
 class PaperOrderBody(BaseModel):
     market: str = Field(pattern="^(NSE|NASDAQ|nse|nasdaq)$")
     symbol: str = Field(min_length=1, max_length=64)
+    instrument_key: str | None = Field(default=None, max_length=64)
     side: str = Field(pattern="^(BUY|SELL|buy|sell)$")
     qty: float = Field(gt=0)
     order_type: str = Field(default="MARKET", pattern="^(MARKET|LIMIT|STOP|STOP_LIMIT|market|limit|stop|stop_limit)$")
@@ -95,6 +97,7 @@ class PaperReplaceBody(BaseModel):
 class PaperProtectionBody(BaseModel):
     market: str = Field(pattern="^(NSE|NASDAQ|nse|nasdaq)$")
     symbol: str = Field(min_length=1, max_length=64)
+    instrument_key: str | None = Field(default=None, max_length=64)
     stop_loss: float | None = Field(default=None, gt=0)
     take_profit: float | None = Field(default=None, gt=0)
 
@@ -472,6 +475,76 @@ def markets_readiness(request: Request):
     return _build_readiness_matrix(request)
 
 
+def _build_paper_modes_catalog(request: Request) -> list[dict[str, Any]]:
+    """Explicit runtime attribution across all 3 supported PAPER modes."""
+    eng = _paper_engine(request)
+    nse_snap = eng.market_snapshot("NSE")
+    us_snap = eng.market_snapshot("NASDAQ")
+
+    sim = getattr(request.app.state, "simulator", None)
+    sim_status = sim.status() if sim is not None and hasattr(sim, "status") else {}
+    sim_state = str(sim_status.get("state") or "STOPPED")
+    sim_auto = bool(sim_status.get("automation_enabled", True))
+    sim_cur_run = sim_status.get("current_run") or {}
+
+    broker_rt = getattr(request.app.state, "alpaca_broker_runtime", None)
+    broker_creds = broker_rt.credential_status() if broker_rt is not None else None
+    alpaca_svc = getattr(request.app.state, "alpaca_broker", None) or (broker_rt.service if broker_rt else None)
+    alpaca_b_stat = alpaca_svc.status() if alpaca_svc is not None else {}
+    alpaca_paper_active = bool(alpaca_b_stat.get("enabled") and alpaca_b_stat.get("environment") == "paper")
+
+    return [
+        {
+            "mode_id": "LOCAL_REPLAY_PAPER",
+            "engine_id": "AXIOM_PAPER",
+            "label": "1 · Local Replay Paper (Labeled Sample CSV Data)",
+            "market_data_source": "BUNDLED_SAMPLE_CSV_REPLAY (data/sample*.csv — NOT live market data)",
+            "execution_destination": "LOCAL_SQLITE_PAPER_BROKER (zero external network or broker calls)",
+            "automation_state": "ENABLED_ON_REPLAY_BARS" if sim_auto else "MANUAL_ONLY",
+            "session_lifecycle": sim_state,
+            "fill_type": "SIMULATED",
+            "real_money": False,
+            "current_run_pnl_isolated": True,
+            "current_run": sim_cur_run if sim_cur_run else None,
+        },
+        {
+            "mode_id": "LIVE_MARKET_LOCAL_PAPER",
+            "engine_id": "LIVE_MARKET_PAPER",
+            "label": "2 · Live-Market Local PAPER (Real Read-Only Upstox/Alpaca Data + Local Simulated Fills)",
+            "market_data_source": "READ_ONLY_LIVE_FEEDS (Upstox NSE v2/v3 + Alpaca NASDAQ IEX/SIP; zero sample fallback)",
+            "execution_destination": "LOCAL_SQLITE_SIMULATOR (live_market_paper.sqlite3 — zero broker order calls)",
+            "automation_state": {
+                "NSE": nse_snap["automation_state"],
+                "NASDAQ": us_snap["automation_state"],
+            },
+            "session_lifecycle": {
+                "NSE": nse_snap["session_state"],
+                "NASDAQ": us_snap["session_state"],
+            },
+            "fill_type": "SIMULATED",
+            "real_money": False,
+            "current_run_pnl_isolated": True,
+            "pnl_attribution": {
+                "NSE": nse_snap["pnl_attribution"],
+                "NASDAQ": us_snap["pnl_attribution"],
+            },
+        },
+        {
+            "mode_id": "ALPACA_BROKER_PAPER",
+            "engine_id": "ALPACA_PAPER_SANDBOX",
+            "label": "3 · Broker Paper (Alpaca Paper-API Sandbox Endpoint)",
+            "market_data_source": "READ_ONLY_ALPACA_MARKET_DATA (isolated ALPACA_MARKET_DATA credential slot)",
+            "execution_destination": "ALPACA_BROKER_PAPER_SANDBOX_ENDPOINT (isolated ALPACA_BROKER_PAPER credential slot)",
+            "automation_state": "MANUAL_AND_EXPLICIT_OPERATOR_SUBMIT_ONLY",
+            "session_lifecycle": "ENABLED_PAPER_SANDBOX" if alpaca_paper_active else "DISABLED",
+            "credential_present": bool(broker_creds and broker_creds["paper"]["present"]),
+            "fill_type": "BROKER_PAPER_SANDBOX_CONFIRMED",
+            "real_money": False,
+            "current_run_pnl_isolated": True,
+        },
+    ]
+
+
 @router.get("/overview")
 def markets_overview(request: Request):
     eng = _paper_engine(request)
@@ -497,6 +570,7 @@ def markets_overview(request: Request):
                 "description": "Separate broker execution behind distinct credentials, bounded risk limits, fresh preflight, Arm, and Activate.",
             },
         ],
+        "paper_modes": _build_paper_modes_catalog(request),
         "paper": {
             "NSE": eng.market_snapshot("NSE"),
             "NASDAQ": eng.market_snapshot("NASDAQ"),
@@ -531,6 +605,7 @@ def search_instruments(
         nse_cat = _nse_search_catalog(request)
         out_nse = nse_cat.search(
             query,
+            segment="NSE_EQ",
             subclass=subclass,
             include_indices=include_indices,
             limit=limit,
@@ -607,8 +682,9 @@ def get_watchlists(request: Request):
 
 @router.post("/watchlists")
 def add_watchlist(body: WatchlistItemBody, request: Request):
+    target = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     try:
-        return _paper_engine(request).add_watchlist_symbol(body.market, body.symbol)
+        return _paper_engine(request).add_watchlist_symbol(body.market, target)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -621,36 +697,60 @@ def remove_watchlist(market: str, symbol: str, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
+def _resolve_nse_for_route(cat: InstrumentCatalog, target: str, *, allow_index: bool = True) -> dict[str, Any]:
+    try:
+        return resolve_nse_instrument_strict(cat, target, allow_index=allow_index)
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith("Rejected "):
+            raise HTTPException(422, msg) from exc
+        raise HTTPException(404, msg) from exc
+
+
 @router.get("/quote")
 def live_readonly_quote(
     request: Request,
     market: str = Query(pattern="^(NSE|NASDAQ|nse|nasdaq)$"),
     symbol: str = Query(min_length=1, max_length=64),
+    instrument_key: str = Query(default="", max_length=64),
 ):
     mkt = market.upper()
+    now = datetime.now(timezone.utc)
+    ikey_str = instrument_key.strip() if isinstance(instrument_key, str) else ""
     if mkt == "NSE":
         cat = _nse_search_catalog(request)
-        searched = cat.search(symbol, include_indices=True, limit=1)
-        if not searched["items"]:
-            raise HTTPException(404, f"Unknown NSE symbol or key: {symbol}")
-        inst = searched["items"][0]
+        inst = _resolve_nse_for_route(cat, ikey_str or symbol, allow_index=True)
         tok, src = _upstox_readonly_token(request)
-        ver = verify_upstox_market_data(tok, credential_source=src, instrument_key=inst["instrument_key"])
+        ver = verify_upstox_market_data(tok, credential_source=src, instrument_key=inst["instrument_key"], now=now)
+        q_obj = ver.get("quote") or {}
         return {
             "market": "NSE",
             "currency": "INR",
             "instrument": inst,
+            "instrument_key": inst["instrument_key"],
+            "exchange": inst.get("exchange", "NSE"),
             "connection_state": ver["connection_state"],
             "authenticated": ver["authenticated"],
+            "provider": "upstox_market_data",
+            "feed": ver.get("feed") or "upstox_nse_v2",
+            "feed_entitlement_label": ver.get("feed_entitlement_label") or "Upstox NSE Cash Read-Only Feed",
+            "source_timestamp": q_obj.get("timestamp"),
+            "local_received_at": ver.get("checked_at") or now.isoformat(),
+            "quote_age_seconds": q_obj.get("age_seconds"),
+            "market_session_status": ver["session"]["state"],
             "session": ver["session"],
             "quote": ver.get("quote"),
             "guidance": ver.get("guidance"),
+            "simulated_fallback_used": False,
             "real_order_api_used": False,
         }
 
     cat = _nasdaq_catalog(request)
     inst_obj = cat.get(symbol)
-    sym_clean = inst_obj.symbol if inst_obj else validate_us_symbol(symbol.strip().upper())
+    try:
+        sym_clean = inst_obj.symbol if inst_obj else validate_us_symbol(symbol.strip().upper())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     creds, src = _alpaca_readonly_creds(request)
     ver = verify_alpaca_market_data(
         creds["api_key"],
@@ -658,16 +758,36 @@ def live_readonly_quote(
         feed=creds["feed"],
         credential_source=src,
         symbol=sym_clean,
+        now=now,
     )
+    inst_pub = inst_obj.public() if inst_obj else {
+        "symbol": sym_clean,
+        "trading_symbol": sym_clean,
+        "instrument_key": f"NASDAQ|{sym_clean}",
+        "exchange": "NASDAQ",
+        "currency": "USD",
+    }
+    q_obj = ver.get("quote") or {}
     return {
         "market": "NASDAQ",
         "currency": "USD",
-        "instrument": inst_obj.public() if inst_obj else {"symbol": sym_clean, "exchange": "NASDAQ", "currency": "USD"},
+        "instrument": inst_pub,
+        "instrument_key": inst_pub.get("instrument_key") or f"NASDAQ|{sym_clean}",
+        "exchange": inst_pub.get("exchange", "NASDAQ"),
         "connection_state": ver["connection_state"],
         "authenticated": ver["authenticated"],
+        "provider": "alpaca_market_data",
+        "feed": creds["feed"],
+        "feed_entitlement_label": feed_label(creds["feed"]),
+        "feed_is_consolidated": creds["feed"] == "sip",
+        "source_timestamp": q_obj.get("timestamp"),
+        "local_received_at": ver.get("checked_at") or now.isoformat(),
+        "quote_age_seconds": q_obj.get("age_seconds"),
+        "market_session_status": ver["session"]["status"],
         "session": ver["session"],
         "quote": ver.get("quote"),
         "guidance": ver.get("guidance"),
+        "simulated_fallback_used": False,
         "real_order_api_used": False,
     }
 
@@ -677,6 +797,7 @@ def live_readonly_chart(
     request: Request,
     market: str = Query(pattern="^(NSE|NASDAQ|nse|nasdaq)$"),
     symbol: str = Query(min_length=1, max_length=64),
+    instrument_key: str = Query(default="", max_length=64),
     timeframe: str = Query(default="5m"),
 ):
     """Fetch real read-only OHLCV bars for NSE (Upstox) or NASDAQ (Alpaca).
@@ -689,24 +810,32 @@ def live_readonly_chart(
         raise HTTPException(422, f"Unsupported timeframe {timeframe!r}")
     mkt = market.upper()
     now = datetime.now(timezone.utc)
+    ikey_str = instrument_key.strip() if isinstance(instrument_key, str) else ""
 
     if mkt == "NSE":
         cat = _nse_search_catalog(request)
-        searched = cat.search(symbol, include_indices=True, limit=1)
-        if not searched["items"]:
-            raise HTTPException(404, f"Unknown NSE symbol: {symbol}")
-        inst = searched["items"][0]
+        inst = _resolve_nse_for_route(cat, ikey_str or symbol, allow_index=True)
         sess = nse_session_status(now)
         tok, src = _upstox_readonly_token(request)
+        ent_lbl = "Upstox NSE Cash Read-Only Feed (NSE_EQ)"
         if not tok:
             return {
                 "ok": False,
                 "market": "NSE",
                 "currency": "INR",
                 "symbol": inst["trading_symbol"],
+                "instrument_key": inst["instrument_key"],
+                "exchange": inst.get("exchange", "NSE"),
                 "instrument": inst,
                 "timeframe": timeframe,
                 "connection_state": "DISCONNECTED",
+                "provider": "upstox_market_data",
+                "feed": "upstox_nse_v3",
+                "feed_entitlement_label": ent_lbl,
+                "source_timestamp": None,
+                "local_received_at": now.isoformat(),
+                "bar_age_seconds": None,
+                "market_session_status": sess["state"],
                 "session": sess,
                 "data_source": "upstox-market-data-v3 (DISCONNECTED)",
                 "data_feed_label": "UPSTOX DISCONNECTED · SAVE DAILY ACCESS TOKEN FOR REAL NSE BARS (NO SAMPLE FALLBACK)",
@@ -728,18 +857,31 @@ def live_readonly_chart(
             error_detail = str(exc)[:220]
         quote_ver = verify_upstox_market_data(tok, credential_source=src, instrument_key=inst["instrument_key"], now=now)
         conn_state = quote_ver["connection_state"] if bars or quote_ver.get("quote") else ("REJECTED" if "rejected" in (error_detail or "").lower() else "UNAVAILABLE")
+        last_bar_ts = bars[-1].timestamp if bars else None
+        bar_age = round(max(0.0, (now - last_bar_ts).total_seconds()), 2) if last_bar_ts else None
+        q_obj = quote_ver.get("quote") or {}
         return {
             "ok": bool(bars),
             "market": "NSE",
             "currency": "INR",
             "symbol": inst["trading_symbol"],
+            "instrument_key": inst["instrument_key"],
+            "exchange": inst.get("exchange", "NSE"),
             "instrument": inst,
             "timeframe": timeframe,
             "connection_state": conn_state,
+            "provider": "upstox_market_data",
+            "feed": "upstox_nse_v3",
+            "feed_entitlement_label": ent_lbl,
+            "source_timestamp": q_obj.get("timestamp") or (last_bar_ts.isoformat() if last_bar_ts else None),
+            "local_received_at": now.isoformat(),
+            "quote_age_seconds": q_obj.get("age_seconds"),
+            "bar_age_seconds": bar_age,
+            "market_session_status": sess["state"],
             "session": sess,
             "data_source": "upstox-historical-v3",
             "data_feed_label": (
-                f"UPSTOX NSE V3 · {'LIVE SESSION' if sess['is_open'] else sess['state']} · READ-ONLY MARKET DATA"
+                f"UPSTOX NSE V3 · {inst['instrument_key']} · {'LIVE SESSION' if sess['is_open'] else sess['state']} · READ-ONLY MARKET DATA"
             ),
             "bars": [b.to_dict() for b in bars[-300:]],
             "quote": quote_ver.get("quote"),
@@ -764,15 +906,32 @@ def live_readonly_chart(
     us_cal = USEquitiesCalendar()
     sess = us_cal.market_state(now)
     creds, src = _alpaca_readonly_creds(request)
+    inst_pub_us = inst_obj.public() if inst_obj else {
+        "symbol": sym_clean,
+        "trading_symbol": sym_clean,
+        "instrument_key": f"NASDAQ|{sym_clean}",
+        "exchange": "NASDAQ",
+        "currency": "USD",
+    }
     if not creds["api_key"] or not creds["api_secret"]:
         return {
             "ok": False,
             "market": "NASDAQ",
             "currency": "USD",
             "symbol": sym_clean,
-            "instrument": inst_obj.public() if inst_obj else {"symbol": sym_clean, "exchange": "NASDAQ", "currency": "USD"},
+            "instrument_key": inst_pub_us.get("instrument_key") or f"NASDAQ|{sym_clean}",
+            "exchange": inst_pub_us.get("exchange", "NASDAQ"),
+            "instrument": inst_pub_us,
             "timeframe": timeframe,
             "connection_state": "DISCONNECTED",
+            "provider": "alpaca_market_data",
+            "feed": creds["feed"],
+            "feed_entitlement_label": feed_label(creds["feed"]),
+            "feed_is_consolidated": creds["feed"] == "sip",
+            "source_timestamp": None,
+            "local_received_at": now.isoformat(),
+            "bar_age_seconds": None,
+            "market_session_status": sess["status"],
             "session": sess,
             "data_source": "alpaca-market-data (DISCONNECTED)",
             "data_feed_label": "ALPACA MARKET DATA DISCONNECTED · SAVE API KEY & SECRET FOR REAL NASDAQ BARS (NO SAMPLE FALLBACK)",
@@ -804,16 +963,29 @@ def live_readonly_chart(
         now=now,
     )
     conn_state = quote_ver["connection_state"] if (bars or quote_ver.get("quote")) else "UNAVAILABLE"
+    last_bar_ts_us = bars[-1].timestamp if bars else None
+    bar_age_us = round(max(0.0, (now - last_bar_ts_us).total_seconds()), 2) if last_bar_ts_us else None
+    q_us = quote_ver.get("quote") or {}
     return {
         "ok": bool(bars),
         "market": "NASDAQ",
         "currency": "USD",
         "symbol": sym_clean,
-        "instrument": inst_obj.public() if inst_obj else {"symbol": sym_clean, "exchange": "NASDAQ", "currency": "USD"},
+        "instrument_key": inst_pub_us.get("instrument_key") or f"NASDAQ|{sym_clean}",
+        "exchange": inst_pub_us.get("exchange", "NASDAQ"),
+        "instrument": inst_pub_us,
         "timeframe": timeframe,
         "connection_state": conn_state,
-        "session": sess,
+        "provider": "alpaca_market_data",
         "feed": creds["feed"],
+        "feed_entitlement_label": feed_label(creds["feed"]),
+        "feed_is_consolidated": creds["feed"] == "sip",
+        "source_timestamp": q_us.get("timestamp") or (last_bar_ts_us.isoformat() if last_bar_ts_us else None),
+        "local_received_at": now.isoformat(),
+        "quote_age_seconds": q_us.get("age_seconds"),
+        "bar_age_seconds": bar_age_us,
+        "market_session_status": sess["status"],
+        "session": sess,
         "data_source": f"alpaca-market-data:{creds['feed']}",
         "data_feed_label": f"ALPACA {creds['feed'].upper()} · {feed_label(creds['feed'])} · {sess['status']}",
         "bars": [b.to_dict() for b in bars[-300:]],
@@ -876,9 +1048,10 @@ def paper_config_update(body: PaperConfigBody, request: Request):
 
 @router.post("/paper/preview")
 def paper_preview(body: PaperOrderBody, request: Request):
+    target_sym = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     return _paper_engine(request).preview_order(
         market=body.market,
-        symbol=body.symbol,
+        symbol=target_sym,
         side=body.side,
         qty=body.qty,
         order_type=body.order_type,
@@ -894,10 +1067,11 @@ def paper_preview(body: PaperOrderBody, request: Request):
 
 @router.post("/paper/orders")
 def paper_submit_order(body: PaperOrderBody, request: Request):
+    target_sym = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     return _paper_engine(request).submit_order(
         client_order_id=body.client_order_id,
         market=body.market,
-        symbol=body.symbol,
+        symbol=target_sym,
         side=body.side,
         qty=body.qty,
         order_type=body.order_type,
@@ -934,10 +1108,11 @@ def paper_replace_order(client_order_id: str, body: PaperReplaceBody, request: R
 
 @router.post("/paper/positions/protection")
 def paper_modify_protection(body: PaperProtectionBody, request: Request):
+    target_sym = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     try:
         return _paper_engine(request).modify_position_protection(
             body.market,
-            body.symbol,
+            target_sym,
             stop_loss=body.stop_loss,
             take_profit=body.take_profit,
         )
@@ -969,9 +1144,25 @@ def paper_reconcile(market: str, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
+@router.get("/paper-modes")
+def paper_modes_summary(request: Request):
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "modes": _build_paper_modes_catalog(request),
+    }
+
+
 @router.get("/paper/audit/events")
 def paper_audit(request: Request, market: str = "", limit: int = Query(default=150, ge=1, le=500)):
     return {"events": _paper_engine(request).audit_log(market=market, limit=limit)}
+
+
+@router.get("/paper/audit/export")
+def paper_audit_export(request: Request, market: str = "", limit: int = Query(default=500, ge=1, le=2000)):
+    try:
+        return _paper_engine(request).export_audit_bundle(market=market, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 # -- Live Status & Atomic Global Emergency Stop --------------------------------
@@ -984,7 +1175,7 @@ def live_status(request: Request):
 
 @router.post("/emergency-stop")
 def global_emergency_stop(body: GlobalEmergencyBody, request: Request):
-    """Atomic Emergency Stop across Local Paper, Upstox Autonomy, Alpaca Broker, and Vantage."""
+    """Atomic Emergency Stop across Local Paper, Upstox Autonomy, Alpaca Broker, and legacy state."""
     reason = body.reason or "operator global emergency stop"
     results: dict[str, Any] = {}
 
@@ -1078,6 +1269,7 @@ def get_trade_monitor_chart(
     request: Request,
     market: str = Query(pattern="^(NSE|NASDAQ|nse|nasdaq)$"),
     symbol: str = Query(min_length=1, max_length=64),
+    instrument_key: str = Query(default="", max_length=64),
     timeframe: str = Query(default="5m"),
     execution_mode: str = Query(default="LIVE_MARKET_PAPER"),
 ):
@@ -1092,6 +1284,7 @@ def get_trade_monitor_chart(
         request=request,
         market=market,
         symbol=symbol,
+        instrument_key=instrument_key,
         timeframe=timeframe,
     )
     bars_list = chart_payload.get("bars") or []
