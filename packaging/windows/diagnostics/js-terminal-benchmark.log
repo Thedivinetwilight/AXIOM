@@ -1,0 +1,2 @@
+terminal UI benchmark: D:\a\AXIOM\AXIOM\src\packaging\windows\TERMINAL_UI_BENCHMARK.json
+terminal harness: OK (92 authenticated fake API calls, 6005 candle/background draw calls)

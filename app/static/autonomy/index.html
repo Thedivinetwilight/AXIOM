@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AXIOM · Daily Autonomy</title>
+<style>
+:root{color-scheme:dark;--bg:#081018;--panel:#101c29;--line:#294055;--text:#edf4fb;--muted:#9cafc1;--good:#66d9c2;--warn:#ffd166;--bad:#ff8d8d;--blue:#77b9ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:1440px;margin:auto;padding:24px}h1{font-size:28px;margin:0 0 6px}h2{font-size:18px;margin:0 0 12px}h3{font-size:15px;margin:18px 0 8px}a{color:var(--blue)}.muted,small{color:var(--muted)}.banner{padding:12px 16px;border:1px solid #3b735e;background:#0d2527;border-radius:8px;margin:16px 0}.banner.live{border-color:#9b5d45;background:#2b1b19}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.spread{justify-content:space-between}label{display:block;color:var(--muted);font-size:12px;margin-top:8px}input,select,textarea{width:100%;background:#081018;border:1px solid var(--line);border-radius:5px;color:var(--text);padding:8px;font:inherit}textarea{min-height:82px;font-family:ui-monospace,monospace;font-size:12px}button,.button{border:1px solid var(--line);border-radius:5px;background:#1a2c3d;color:var(--text);padding:8px 12px;cursor:pointer;font:inherit}button:hover{border-color:var(--blue)}button:disabled{opacity:.4;cursor:not-allowed}.primary{background:#176b60;border-color:#3b9d8d}.danger{background:#592d35;border-color:#a95761}.warn{background:#56451e;border-color:#9d813b}.pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:2px 9px;font-size:12px}.pill.good{color:var(--good);border-color:#3b735e}.pill.warn{color:var(--warn);border-color:#806b35}.pill.bad{color:var(--bad);border-color:#88454e}.notice{white-space:pre-wrap;color:var(--warn);min-height:22px;margin:8px 0}.error{color:var(--bad)}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:6px;vertical-align:top}th{color:var(--muted)}code{font-family:ui-monospace,monospace;color:var(--good);font-size:11px}.scroll{max-height:330px;overflow:auto}.catalog-item{cursor:pointer}.catalog-item:hover{background:#1a2c3d}.metric{display:inline-block;margin:4px 14px 4px 0}.metric b{display:block;font-size:18px}.wide{grid-column:1/-1}#chart{height:280px;width:100%;margin-top:8px}.foot{margin:20px 0;color:var(--muted);font-size:12px}.hidden{display:none}.check{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body><main>
+<div class="row spread"><div><h1>AXIOM · Daily Autonomy</h1><div class="muted">Upstox authoritative data · separately gated local paper / real-money execution</div></div><div><a href="/terminal">Terminal</a> · <a href="/manual">Manual</a> · <a href="/health">Health</a></div></div>
+<div id="modeBanner" class="banner">No autonomy session selected. Startup is disconnected and disarmed.</div>
+<div id="notice" class="notice" role="status" aria-live="polite"></div>
+<section class="panel"><div class="row"><div style="flex:1;min-width:280px"><label for="existingSessions">Loaded / recovered sessions (read-only until fresh setup)</label><select id="existingSessions"><option value="">Select a session</option></select></div><button id="loadSession">Load read-only / revoke approval</button></div></section>
+<section class="panel" id="kronosSetupPanel">
+<div class="row spread"><h2>Optional Kronos setup & offline verification</h2><span id="kronosSetupPill" class="pill">NOT CHECKED</span></div>
+<p class="muted">Kronos is optional. Setup changes no trading session or execution state. Downloads use only the pinned official artifacts and exact CPU runtime lock; weights/runtime stay in the per-user AXIOM data directory. No mock forecast is produced on failure.</p>
+<div id="kronosInstallPlan" class="scroll"></div>
+<label for="kronosPythonExecutable">Optional Python executable fallback (full path to python.exe, no arguments)</label>
+<div class="row"><input id="kronosPythonExecutable" autocomplete="off" spellcheck="false" placeholder="C:\Users\you\AppData\Local\Programs\Python\Python311\python.exe"><button id="selectKronosPython">Validate & use Python</button><button id="autoKronosPython">Auto-detect Python</button></div>
+<p class="muted">Automatic discovery includes the Windows py launcher’s explicit 64-bit selectors and registered-interpreter catalog. Selection accepts only CPython 3.11/3.12 x64 with pip, affects Kronos inference only, and never changes trading or execution state.</p>
+<div class="row"><button id="installKronos" class="primary">Download & install pinned Kronos</button><button id="testKronos">Offline verify + real inference self-test</button><button id="cancelKronos" class="warn">Cancel setup</button></div>
+<div id="kronosOperation" class="notice" role="status" aria-live="polite"></div>
+<div id="kronosSetupStatus"></div>
+</section>
+<div class="grid">
+<section class="panel"><h2>1 · Exact instruments & mode</h2>
+<p class="muted">Only exact BOD instrument keys are accepted. Currency rows are exchange-listed futures/options, <b>not spot forex</b>. A quote or chart never changes execution mode.</p>
+<div class="row"><input id="catalogQuery" placeholder="Search exact key, symbol or underlying" aria-label="Search instrument catalog"><button id="searchCatalog">Search</button><button id="refreshCatalog" title="Download public BOD metadata only">Refresh BOD</button></div>
+<div id="catalogMeta" class="muted"></div><div class="scroll"><table><thead><tr><th>Instrument</th><th>Route</th><th></th></tr></thead><tbody id="catalogRows"></tbody></table></div>
+<label for="selectedKeys">Selected exact instrument keys (one per line)</label><textarea id="selectedKeys" spellcheck="false"></textarea>
+<label for="mode">Execution boundary</label><select id="mode"><option value="PAPER">PAPER · local simulated fills</option><option value="UPSTOX_LIVE">UPSTOX_LIVE · real money (disabled unless configured)</option></select>
+<p class="check">Live requires the separate environment master switch, fresh account/profile and margin checks, registered static-IP verification, exact strategy evidence, and operator Arm + Activate.</p>
+<button id="createSession" class="primary">Create unconfigured session</button>
+</section>
+<section class="panel"><h2>Upstox access token · manual entry (market data · read-only)</h2>
+<p class="muted">Paste an Upstox access token (daily OAuth login token or Analytics Token) for <b>live market data and read-only account checks only</b>. It is stored encrypted for the current Windows user (DPAPI) and is never shown again, logged, or placed in a URL. Paper fills remain local. Saving, replacing, deleting or testing never creates a session, changes execution mode, Arms or Activates.</p>
+<div class="row"><input id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Upstox access token" aria-label="Upstox access token"><button id="saveToken" class="primary">Save</button><button id="replaceToken">Replace</button><button id="deleteToken" class="warn">Delete</button></div>
+<div id="tokenStatus" class="muted"></div>
+<div class="row"><input id="tokenTestKey" placeholder="Exact BOD key, e.g. NSE_EQ|INE002A01018" aria-label="Exact instrument key for the read-only quote test"><button id="testToken">Test read-only quote</button></div>
+<div id="tokenTestResult" class="notice" role="status" aria-live="polite"></div>
+</section>
+<section class="panel"><h2>Upstox LIVE trading credential · real money · separate slot</h2>
+<p class="check">This credential is stored in its OWN encrypted slot and is used ONLY for live order writes and trading-account checks. It is never silently reused from the read-only market-data token above, and that token is never used for orders. Saving it changes nothing else: no session, no mode, no Arm/Activate.</p>
+<div class="row"><input id="liveTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Upstox LIVE access token" aria-label="Upstox LIVE trading access token"><button id="saveLiveToken" class="warn">Save LIVE credential</button><button id="replaceLiveToken">Replace</button><button id="deleteLiveToken" class="danger">Delete</button></div>
+<div id="liveTokenStatus" class="muted"></div>
+</section>
+<section class="panel"><h2>2 · Fresh daily authorization & risk</h2>
+<p class="muted">Generate the daily Upstox token with the existing local OAuth command. Do not paste broker credentials into this page or API.</p>
+<div class="row"><button id="authorize">Authorize read-only today</button><span id="authState" class="pill">Not authorized</span></div>
+<label for="maxLoss">New daily maximum loss (account currency)</label><input id="maxLoss" type="number" min="0" step="any" required>
+<label for="riskFraction">Per-trade equity risk fraction (0.0001–0.01)</label><input id="riskFraction" type="number" min="0.0001" max="0.01" step="0.0001" value="0.0025" required>
+<label for="equity">Paper starting equity (required for PAPER; LIVE reads Upstox)</label><input id="equity" type="number" min="0" step="any">
+<button id="saveRisk">Enter new daily risk</button>
+<p class="muted">No previous-day risk is silently reused. At the loss cap, entries stop but confirmed exits remain protected; there is no forced close solely for reaching the cap.</p>
+<h3>3 · Explicit operator gates</h3><div class="row"><button id="arm" class="warn">Arm</button><button id="activate" class="primary">Activate</button><button id="pause">Pause</button><button id="emergency" class="danger">Emergency stop</button></div>
+<p class="muted">Arm and Activate are separate actions. Activation permits unattended strategy orders within this daily session; it is not a per-order confirmation. Restart, recovery, faults, and background jobs cannot Arm or Activate.</p>
+<div class="row"><button id="scan">Scan once · read-only, no orders</button><button id="reconcile">Reconcile read-only</button><button id="cancelUnfilled" class="warn">Cancel selected unfilled entry</button></div><p class="muted">Only the background worker can execute eligible candidates in an already ACTIVE session. Read-only Scan never submits, fills, modifies or cancels. Emergency preempts entries and attempts managed unfilled-entry cancellation; unresolved orders remain prominent.</p>
+</section>
+</div>
+<section id="sessionPanel" class="panel hidden"><div class="row spread"><h2>Session status</h2><code id="sessionId"></code></div><div id="statusMetrics"></div><div id="fault" class="notice"></div><div id="emergencyStatus" class="notice" role="alert"></div><div id="readiness"></div><div id="account"></div></section>
+<div class="grid">
+<section class="panel"><h2>Positions & confirmed protection</h2><div class="scroll"><table><thead><tr><th>Exact key</th><th>Qty</th><th>Average / last</th><th>Stop / target</th><th>Protection</th></tr></thead><tbody id="positions"></tbody></table></div><p class="muted">A position without confirmed broker protection is a halt condition, not a reason to guess that the account is flat.</p></section>
+<section class="panel"><h2>Recovered orders & intents</h2><div class="scroll"><table><thead><tr><th>Intent</th><th>Instrument</th><th>State</th><th>Broker IDs</th></tr></thead><tbody id="intents"></tbody></table><table><thead><tr><th>Last-known GTT</th><th>Instrument</th><th>Rules</th></tr></thead><tbody id="orders"></tbody></table></div><h3>Audit events</h3><div class="row"><button id="loadAudit">Reload audit</button><span id="chain" class="muted"></span></div><div class="scroll"><table><thead><tr><th>Event</th><th>Time</th><th>Safe detail</th></tr></thead><tbody id="audit"></tbody></table></div></section>
+</div>
+<section class="panel"><div class="row spread"><h2>Upstox completed bars · display only</h2><select id="chartInstrument" aria-label="Chart instrument"></select></div><div id="chart"></div><small>Rendered locally with the pinned Lightweight Charts library. TradingView supplies no market data here; no TradingView alerts or data drive automation.</small></section>
+<div class="grid">
+<section class="panel"><h2>Strategy evidence & fallback</h2><div id="kronos"></div><div class="scroll"><table><thead><tr><th>Family / side</th><th>Instrument</th><th>OOS evidence</th><th>Provenance / execution effect</th></tr></thead><tbody id="evidence"></tbody></table></div></section>
+<section class="panel"><h2>Latest explainable diagnostics</h2><div class="scroll"><table><thead><tr><th>Instrument</th><th>Family / side</th><th>Explanation</th></tr></thead><tbody id="diagnostics"></tbody></table></div></section>
+</div>
+<p class="foot">Research, paper fills, sandbox availability, and tests do not establish profitability, account eligibility, compliance, external DEMO verification, or live readiness. Real-money behavior requires owner-run account verification and operational acceptance. <a href="/autonomy/manual">Operator manual</a></p>
+</main>
+<script src="/static/vendor/lightweight-charts/lightweight-charts.standalone.production.js"></script>
+<script src="/static/autonomy/autonomy.js"></script></body></html>

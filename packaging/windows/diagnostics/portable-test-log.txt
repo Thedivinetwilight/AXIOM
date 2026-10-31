@@ -1,0 +1,20 @@
+AXIOM onedir portable test  2026-10-25T08:33:21.0449442+00:00
+PASS  portable ZIP contains AXIOM-Chart.exe in its application folder
+PASS  portable ZIP contains the onedir _internal dependencies
+PASS  portable ZIP contains extraction and policy instructions
+PASS  portable ZIP contains the App Control guide
+PASS  portable ZIP contains its exact source record
+PASS  portable source record matches the requested commit
+PASS  extracted onedir portable answered /health on loopback
+PASS  onedir runtime created no new PyInstaller _MEI TEMP extraction directory
+PASS  portable serves all explicit execution modes
+PASS  portable serves the redesigned terminal controls
+PASS  portable serves the bundled operator manual
+PASS  portable trading API refuses anonymous access (401)
+PASS  portable created its private per-user configuration
+PASS  portable generated a local API token (value not logged)
+PASS  portable starts LOCAL PAPER, disconnected and disarmed
+PASS  portable includes Windows DPAPI and the official MT5 module
+PASS  portable process stopped cleanly after the test
+PASS  portable launcher output does not expose the local API token
+PASS - extracted onedir portable package completed all acceptance checks without broker access

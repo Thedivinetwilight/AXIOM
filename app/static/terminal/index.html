@@ -1,0 +1,1543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AXIOM Operator · Multi-Market Terminal (NSE &amp; NASDAQ)</title>
+  <link rel="stylesheet" href="/static/terminal/terminal.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
+<div class="auth-gate" id="auth-gate" role="dialog" aria-labelledby="auth-title" aria-modal="true">
+  <form class="auth-card" id="auth-form">
+    <div class="brand-mark" aria-hidden="true">A</div>
+    <p class="eyebrow">LOCAL OPERATOR ACCESS · MULTI-MARKET DESKTOP</p>
+    <h1 id="auth-title">Unlock AXIOM Terminal</h1>
+    <p>Enter AXIOM’s local <strong>API_TOKEN</strong>. This is kept only in this browser tab’s session storage and is completely separate from Upstox (NSE) and Alpaca (NASDAQ) credentials.</p>
+    <label for="auth-token">AXIOM API token</label>
+    <input id="auth-token" type="password" autocomplete="current-password" required>
+    <button class="button primary" type="submit">Unlock operator console</button>
+    <p class="form-error" id="auth-error" role="alert"></p>
+    <p class="muted small">Real-money execution is OFF by default on startup, restart, and recovery. Provider keys are protected via Windows DPAPI on Connections.</p>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
+  <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+    <div class="brand"><span class="brand-mark">A</span><span>AXIOM<small>NSE · NASDAQ · TERMINAL</small></span></div>
+    <div class="mode-card">
+      <span class="mode-badge paper" id="global-mode">PAPER</span>
+      <span class="connection-dot" id="global-connection-dot"></span>
+      <span id="global-connection">Local only</span>
+      <span id="broker-destination" class="broker-destination">ALPACA BROKER · disabled</span>
+    </div>
+    <nav class="nav-list" aria-label="Workspace pages">
+      <button type="button" class="nav-item active" data-page="overview"><span>01</span>Overview</button>
+      <button type="button" class="nav-item" data-page="instruments"><span>02</span>Watchlists &amp; search</button>
+      <button type="button" class="nav-item" data-page="charts"><span>03</span>Supercharts &amp; ticket</button>
+      <button type="button" class="nav-item" data-page="orders"><span>04</span>Orders &amp; positions</button>
+      <button type="button" class="nav-item" data-page="strategies"><span>05</span>Strategies &amp; modes</button>
+      <button type="button" class="nav-item" data-page="risk"><span>06</span>Risk &amp; live gates</button>
+      <button type="button" class="nav-item" data-page="connections"><span>07</span>Connections</button>
+      <button type="button" class="nav-item" data-page="activity"><span>08</span>Activity &amp; audit</button>
+      <button type="button" class="nav-item" data-page="settings"><span>09</span>Settings &amp; manuals</button>
+      <button type="button" class="nav-item" data-page="modellab"><span>10</span>AI &amp; Model Lab</button>
+      <button type="button" class="nav-item" data-page="monitor"><span>11</span>Live Trade Monitor</button>
+      <button type="button" class="nav-item" data-page="ensemble"><span>12</span>Ensemble &amp; Allocation</button>
+    </nav>
+    <div class="sidebar-foot">
+      <span class="status-pill" id="global-lifecycle">DISARMED</span>
+      <p id="global-lock-note">No broker session is active.</p>
+      <p class="small muted" id="sidebar-automation">No paper strategy active. Live execution OFF by default. No profitability claim.</p>
+    </div>
+  </aside>
+
+  <div class="workspace-shell">
+    <header class="topbar">
+      <button type="button" class="icon-button mobile-menu" id="mobile-menu" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+      <div class="page-heading"><p class="eyebrow" id="page-eyebrow">WORKSPACE</p><h1 id="page-title">Overview</h1></div>
+
+      <div class="tv-venue-strip" role="group" aria-label="Active multi-market desk">
+        <button type="button" class="venue-chip active" id="mm-venue-nse" data-mm-venue="NSE" aria-pressed="true">NSE · INR ₹</button>
+        <button type="button" class="venue-chip" id="mm-venue-nasdaq" data-mm-venue="NASDAQ" aria-pressed="false">NASDAQ · USD $</button>
+      </div>
+
+      <form class="tv-quick-search" id="mm-quick-search-form" role="search">
+        <input id="mm-quick-search-input" type="search" placeholder="Jump symbol (RELIANCE, AAPL, QQQ)…" aria-label="Quick symbol jump">
+        <button type="submit" class="button secondary xs" id="mm-quick-search-btn">Chart</button>
+      </form>
+
+      <div class="tv-session-clocks" id="mm-session-clocks">
+        <span class="status-pill" id="mm-clock-nse">NSE IST · —</span>
+        <span class="status-pill" id="mm-clock-nasdaq">NASDAQ ET · —</span>
+      </div>
+
+      <div class="topbar-identity">
+        <span id="global-server">NSE (Upstox) · NASDAQ (Alpaca)</span>
+        <strong id="global-account">Local paper</strong>
+      </div>
+      <button type="button" class="button secondary" id="refresh-all">Refresh</button>
+      <button type="button" class="button danger" id="emergency-stop">Emergency stop</button>
+    </header>
+
+    <div class="environment-bar">
+      <div class="environment-select">
+        <span class="eyebrow">EXECUTION MODES</span>
+        <span class="status-pill info" id="session-mode-summary">LOCAL PAPER · NSE (UPSTOX) · NASDAQ (ALPACA)</span>
+      </div>
+      <div class="provider-pill-strip" id="mm-provider-strip" aria-label="Market data, Kronos and live gate summary">
+        <span class="status-pill" id="mm-pill-upstox-data">UPSTOX DATA · DISCONNECTED</span>
+        <span class="status-pill" id="mm-pill-alpaca-data">ALPACA DATA · DISCONNECTED</span>
+        <span class="status-pill" id="mm-pill-kronos-state">KRONOS · NOT_INSTALLED</span>
+        <span class="status-pill info" id="mm-pill-live-default">LIVE EXECUTION · OFF BY DEFAULT</span>
+      </div>
+      <div class="freshness" id="global-freshness"><span class="status-pill">NO BROKER DATA</span></div>
+    </div>
+
+    <nav class="quick-nav-strip" id="mm-quick-nav-bar" aria-label="Direct workspace shortcuts">
+      <span class="quick-nav-label">DIRECT ACCESS:</span>
+      <button type="button" class="button secondary xs" data-go="connections">Connections</button>
+      <button type="button" class="button secondary xs" data-go="charts">Charts &amp; Ticket</button>
+      <button type="button" class="button secondary xs" data-go="orders">Orders &amp; Positions</button>
+      <button type="button" class="button secondary xs" data-go="strategies">Strategies &amp; Modes</button>
+      <button type="button" class="button secondary xs" data-go="risk">Risk &amp; Live Gates</button>
+      <button type="button" class="button secondary xs" data-go="activity">Activity &amp; Audit</button>
+      <button type="button" class="button primary xs" data-go="monitor">Live Trade Monitor</button>
+      <button type="button" class="button primary xs" data-go="ensemble">Ensemble &amp; Risk</button>
+      <button type="button" class="button secondary xs" data-go="modellab">AI &amp; Model Lab</button>
+    </nav>
+
+    <main id="main-content" tabindex="-1">
+      <section class="execution-boundary" id="execution-boundary" aria-label="Execution, market-data and authorization boundaries">
+        <div><span>EXECUTION SESSION</span><strong id="boundary-execution">LOCAL PAPER</strong><small id="boundary-execution-note">Simulated fills only</small></div>
+        <div><span>MARKET DATA</span><strong id="boundary-data">LOCAL / DISCONNECTED</strong><small id="boundary-data-note">Connectivity does not grant trading permission</small></div>
+        <div><span>ORDER AUTHORIZATION</span><strong id="boundary-auth">DISARMED</strong><small id="boundary-auth-note">Review and explicit lifecycle required</small></div>
+        <div><span>MULTI-MARKET LIVE GATE</span><strong id="mm-boundary-live">NSE OFF · NASDAQ OFF</strong><small id="mm-boundary-live-note">Separate DPAPI keys + Arm + Activate required</small></div>
+      </section>
+
+      <!-- 01 OVERVIEW -->
+      <section class="page active" id="page-overview" aria-labelledby="overview-title">
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">MULTI-MARKET COMMAND DESK</p>
+            <h2 id="overview-title">NSE (INR) &amp; NASDAQ (USD) — Live-Data Paper &amp; Gated Execution.</h2>
+            <p>Isolated INR and USD paper ledgers powered by read-only Upstox and Alpaca feeds (zero broker orders), alongside separately gated real-money execution.</p>
+          </div>
+          <span class="mode-badge paper" id="overview-mode">PAPER</span>
+        </div>
+
+        <div class="content-grid two" id="mm-overview-ledgers">
+          <article class="panel accent-nse">
+            <div class="panel-head">
+              <div><p class="eyebrow">INDIA · NSE CASH &amp; ETF · INR (₹)</p><h3>LIVE-MARKET PAPER · NSE</h3></div>
+              <div class="button-row">
+                <span class="status-pill info" id="mm-nse-paper-state">STOPPED</span>
+                <button type="button" class="button secondary xs" id="mm-nse-sync-btn">Sync quotes</button>
+                <button type="button" class="button primary xs" data-mm-jump-chart="NSE:RELIANCE">Chart RELIANCE</button>
+              </div>
+            </div>
+            <dl class="detail-list" id="mm-nse-overview-list">
+              <dt>Mode</dt><dd>LIVE-MARKET PAPER (Simulated · 0 Broker Orders)</dd>
+              <dt>Equity (INR)</dt><dd>₹1,000,000.00</dd>
+            </dl>
+          </article>
+
+          <article class="panel accent-nasdaq">
+            <div class="panel-head">
+              <div><p class="eyebrow">UNITED STATES · NASDAQ · USD ($)</p><h3>LIVE-MARKET PAPER · NASDAQ</h3></div>
+              <div class="button-row">
+                <span class="status-pill info" id="mm-nasdaq-paper-state">STOPPED</span>
+                <button type="button" class="button secondary xs" id="mm-nasdaq-sync-btn">Sync quotes</button>
+                <button type="button" class="button bull xs" data-mm-jump-chart="NASDAQ:AAPL">Chart AAPL</button>
+              </div>
+            </div>
+            <dl class="detail-list" id="mm-nasdaq-overview-list">
+              <dt>Mode</dt><dd>LIVE-MARKET PAPER (Simulated · 0 Broker Orders)</dd>
+              <dt>Equity (USD)</dt><dd>$100,000.00</dd>
+            </dl>
+          </article>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card"><span>Selected session equity</span><strong id="metric-equity">—</strong><small id="metric-currency">account currency</small></article>
+          <article class="metric-card bull"><span>Unrealized P&amp;L</span><strong id="metric-unrealized">—</strong><small id="metric-unrealized-note">broker/local confirmed view</small></article>
+          <article class="metric-card"><span>Realized P&amp;L</span><strong id="metric-realized">—</strong><small id="realized-window">visible history</small></article>
+          <article class="metric-card warn"><span>Available cash</span><strong id="metric-margin">—</strong><small id="metric-margin-note">local simulated cash</small></article>
+        </div>
+
+        <article class="panel" id="paper-run-panel" hidden>
+          <div class="panel-head"><div><p class="eyebrow">RUN-SCOPED SIMULATION</p><h3 id="paper-run-title">Paper run</h3></div><span class="status-pill" id="paper-run-state">STOPPED</span></div>
+          <div class="inline-status" id="paper-run-summary">No paper run has started in this process.</div>
+          <dl class="detail-list" id="paper-run-details"></dl>
+          <p class="muted small" id="paper-run-pnl-note">Current-run results are separate from persisted account totals. All values are simulated.</p>
+        </article>
+
+        <article class="panel" id="mm-readiness-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">PRIORITY 1 · LIVE-MARKET PAPER &amp; LIVE READINESS</p>
+              <h3>Per-Market &amp; Per-Mode Readiness Checklists (Owner Verification Required)</h3>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button secondary xs" id="mm-ready-verify-nse">Verify NSE Quote (Read-Only)</button>
+              <button type="button" class="button secondary xs" id="mm-ready-verify-nasdaq">Verify AAPL Quote (Read-Only)</button>
+              <button type="button" class="text-button" data-go="connections">Open Connections →</button>
+            </div>
+          </div>
+          <p class="muted small" id="mm-readiness-note">CI and mocked tests never prove owner connectivity. Anything not tested with your credentials in AXIOM’s local UI remains NOT VERIFIED.</p>
+          <div class="content-grid two top-space" id="mm-readiness-grid">
+            <p class="empty-state">Loading NSE &amp; NASDAQ readiness checklists…</p>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">PROVIDER HEALTH &amp; LIVE EXECUTION READINESS</p><h3>5-Role Provider Matrix (Upstox · Alpaca · Gates)</h3></div>
+            <button type="button" class="text-button" data-go="connections">Configure keys →</button>
+          </div>
+          <div class="provider-grid" id="mm-overview-providers">
+            <p class="empty-state">Unlock console to inspect Upstox &amp; Alpaca provider verification states.</p>
+          </div>
+        </article>
+
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">SESSION</p><h3>Connection &amp; identity</h3></div><button type="button" class="text-button" data-go="connections">Manage</button></div>
+            <dl class="detail-list" id="overview-connection"></dl>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">RISK</p><h3>Current guard state</h3></div><button type="button" class="text-button" data-go="risk">Open risk</button></div>
+            <div id="overview-risk"></div>
+          </article>
+        </div>
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">MARKET DATA</p><h3>Selected instruments &amp; watchlists</h3></div><button type="button" class="text-button" data-go="charts">Open Supercharts</button></div>
+            <div id="overview-quotes" class="quote-list"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">NEXT STEPS</p><h3>Operator checklist</h3></div></div>
+            <ol class="checklist" id="overview-checklist"></ol>
+          </article>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">RECENT ACTIVITY</p><h3>Latest audit events</h3></div><button type="button" class="text-button" data-go="activity">View full audit</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody id="overview-activity"></tbody></table></div>
+        </article>
+      </section>
+
+      <!-- 02 WATCHLISTS & INSTRUMENT SEARCH -->
+      <section class="page" id="page-instruments" aria-labelledby="instruments-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">MULTI-MARKET DISCOVERY &amp; RECONCILIATION</p>
+            <h2 id="instruments-title">NSE &amp; NASDAQ Watchlists, Search &amp; Coverage Audit.</h2>
+            <p>Search NSE equities/ETFs/indices (by symbol, ISIN, or <code>NSE_EQ|INE...</code>) and NASDAQ stocks/ETFs with full source reconciliation.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary" id="mm-refresh-nse-bod">Refresh NSE BOD master</button>
+            <button type="button" class="button secondary" id="mm-sync-nasdaq-assets">Sync NASDAQ universe</button>
+          </div>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">UNIFIED MULTI-MARKET CATALOG</p><h3>Search NSE (INR) &amp; NASDAQ (USD)</h3></div>
+            <span class="status-pill info" id="mm-reconcile-badge">SEED / CACHE</span>
+          </div>
+          <div class="toolbar">
+            <div class="field grow">
+              <label for="mm-catalog-query">Symbol, Company Name, ISIN, or Upstox Key</label>
+              <input id="mm-catalog-query" type="search" placeholder="Try RELIANCE, NSE_EQ|INE002A01018, NIFTYBEES, AAPL, NVDA, QQQ…">
+            </div>
+            <div class="field">
+              <label for="mm-catalog-market">Market</label>
+              <select id="mm-catalog-market">
+                <option value="ALL">All markets (NSE + NASDAQ)</option>
+                <option value="NSE">NSE · India (INR)</option>
+                <option value="NASDAQ">NASDAQ · US (USD)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="mm-catalog-subclass">Subclass</label>
+              <select id="mm-catalog-subclass">
+                <option value="">All subclasses</option>
+                <option value="EQUITY">NSE Equity (EQ)</option>
+                <option value="COMMON_STOCK">NASDAQ Common Stock</option>
+                <option value="ETF">Exchange-Traded Fund (ETF)</option>
+                <option value="TRADE_FOR_TRADE">NSE Trade-for-Trade (BE/BZ)</option>
+                <option value="SME_EQUITY">NSE SME Emerge (SM/ST)</option>
+                <option value="INDEX">Benchmark Index (Watch-only)</option>
+              </select>
+            </div>
+            <button type="button" class="button primary" id="mm-catalog-search-btn">Search catalog</button>
+          </div>
+          <div class="inline-status" id="mm-catalog-reconciliation-note">Reconciliation summary loads from /api/markets/reconciliation. Seed catalogs never claim complete exchange coverage.</div>
+          <div class="table-wrap tall">
+            <table>
+              <thead>
+                <tr><th>Watch</th><th>Market</th><th>Symbol / Key</th><th>Company / Name</th><th>Subclass / Series</th><th>Lot / Tick</th><th>Intraday / Product</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="mm-catalog-rows"><tr><td colspan="8" class="empty-state">Search NSE &amp; NASDAQ instruments above.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">PERSISTENT MULTI-MARKET WATCHLISTS</p><h3>Pinned NSE &amp; NASDAQ Watchlist</h3></div>
+          </div>
+          <div id="mm-watchlist-grid" class="provider-grid"></div>
+        </article>
+      </section>
+
+      <!-- 03 SUPERCHARTS & ORDER TICKET -->
+      <section class="page" id="page-charts" aria-labelledby="charts-title" hidden>
+        <div class="page-intro compact">
+          <div><p class="eyebrow">SUPERCHARTS &amp; EXECUTION DESK</p><h2 id="charts-title">Chart terminal</h2></div>
+          <div class="button-row">
+            <span class="status-pill info" id="mm-chart-feed-badge">DATASET / SESSION</span>
+            <span class="status-pill" id="chart-source">NO DATA</span>
+          </div>
+        </div>
+
+        <div class="watchlist-pill-bar" id="mm-chart-watchlist-bar" aria-label="Pinned multi-market watchlist quick switch"></div>
+
+        <div class="chart-layout">
+          <article class="panel chart-panel">
+            <div class="toolbar chart-controls">
+              <div class="field">
+                <label for="mm-chart-source-mode">Data feed</label>
+                <select id="mm-chart-source-mode">
+                  <option value="SESSION">Local Paper / Replay Session</option>
+                  <option value="NSE">NSE Live Read-Only (Upstox)</option>
+                  <option value="NASDAQ">NASDAQ Live Read-Only (Alpaca)</option>
+                </select>
+              </div>
+              <div class="field" id="session-chart-symbol-wrap"><label for="chart-symbol">Instrument</label><select id="chart-symbol"></select></div>
+              <div class="field" id="mm-chart-symbol-wrap" hidden>
+                <label for="mm-chart-symbol-input">NSE / NASDAQ symbol</label>
+                <input id="mm-chart-symbol-input" value="RELIANCE" placeholder="RELIANCE or AAPL">
+              </div>
+              <div class="field"><label for="chart-timeframe">Timeframe</label><select id="chart-timeframe"><option>1m</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>4h</option><option>1D</option></select></div>
+              <button type="button" class="button primary" id="mm-load-live-chart-btn" hidden>Load live feed</button>
+              <button type="button" class="button secondary" id="reload-chart">Reload chart</button>
+              <button type="button" class="button secondary" id="start-paper">Start paper session</button>
+            </div>
+            <div class="chart-tool-row" aria-label="Chart view and analysis tools">
+              <div class="timeframe-shortcuts" aria-label="Quick timeframe">
+                <button type="button" data-chart-timeframe="1m">1m</button><button type="button" data-chart-timeframe="5m">5m</button><button type="button" data-chart-timeframe="15m">15m</button><button type="button" data-chart-timeframe="1h">1h</button><button type="button" data-chart-timeframe="1D">1D</button>
+              </div>
+              <div class="field compact-field"><label for="chart-indicator">Indicator</label><select id="chart-indicator"><option value="NONE">None</option><option value="EMA20" selected>EMA 20</option><option value="SMA50">SMA 50</option><option value="BOTH">EMA 20 + SMA 50</option></select></div>
+              <div class="field compact-field"><label for="drawing-tool">Drawing</label><select id="drawing-tool"><option value="NONE">Pan / crosshair</option><option value="HORIZONTAL">Horizontal line</option><option value="TREND">Trend line · 2 clicks</option></select></div>
+              <button type="button" class="icon-button" id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+              <button type="button" class="icon-button" id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+              <button type="button" class="button secondary" id="reset-chart-view">Reset view</button>
+              <button type="button" class="button secondary" id="crosshair-toggle" aria-pressed="true">Crosshair on</button>
+              <button type="button" class="button secondary" id="clear-drawings">Clear drawings</button>
+            </div>
+            <div class="inline-status" id="chart-feed-context">Replay is sample data. Switch Data feed above to NSE (Upstox) or NASDAQ (Alpaca) for live read-only market bars (never faked when disconnected).</div>
+            <div class="chart-quote" id="chart-quote"></div>
+            <div class="canvas-wrap"><canvas id="terminal-chart" role="img" tabindex="0" aria-label="No chart data loaded" aria-describedby="chart-keyboard"></canvas><div class="chart-empty" id="chart-empty">Choose an instrument and load its real session data.</div><div class="chart-cursor" id="chart-cursor" aria-live="off"></div></div>
+            <p class="muted small" id="chart-keyboard">Mouse/touch: drag to pan; wheel or +/− to zoom. Keyboard on focused chart: Left/Right pan, +/− zoom, Home resets. Drawing tools never create orders. TradingView-inspired local canvas; no TradingView feed/brokerage is implied.</p>
+            <div class="chart-legend" id="chart-legend">No bars loaded. AXIOM does not invent chart data.</div>
+            <div class="contract-grid" id="chart-contract"><p class="empty-state">Instrument &amp; exchange contract metadata appears here when loaded.</p></div>
+          </article>
+
+          <aside class="panel order-panel">
+            <div class="ticket-tabs" role="tablist" aria-label="Order ticket target">
+              <button type="button" class="ticket-tab active" id="ticket-tab-session" data-ticket-tab="SESSION">Local Paper Ticket</button>
+              <button type="button" class="ticket-tab" id="ticket-tab-mm" data-ticket-tab="MULTIMARKET">NSE / NASDAQ Paper</button>
+            </div>
+
+            <!-- Local Paper Ticket -->
+            <div id="session-ticket-pane">
+              <div class="panel-head"><div><p class="eyebrow">MANUAL ORDER</p><h3 id="ticket-title">Paper ticket · simulated</h3></div><span class="status-pill" id="ticket-mode">PAPER</span></div>
+              <form id="order-form">
+                <div class="segmented" aria-label="Order side"><button type="button" class="buy active" id="order-buy">BUY</button><button type="button" class="sell" id="order-sell">SELL</button></div>
+                <div class="field"><label for="order-symbol">Instrument symbol</label><input id="order-symbol" readonly></div>
+                <div class="form-grid">
+                  <div class="field"><label for="order-volume" id="volume-label">Quantity</label><input id="order-volume" type="number" min="0" step="any" required></div>
+                  <div class="field"><label for="order-type">Order type</label><select id="order-type"><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select></div>
+                </div>
+                <div class="field" id="limit-field" hidden><label for="order-limit">Limit price</label><input id="order-limit" type="number" min="0" step="any"></div>
+                <div class="form-grid" id="protection-fields">
+                  <div class="field"><label for="order-sl">Stop-loss (optional)</label><input id="order-sl" type="number" min="0" step="any"></div>
+                  <div class="field"><label for="order-tp">Take-profit (optional)</label><input id="order-tp" type="number" min="0" step="any"></div>
+                </div>
+                <div class="inline-status" id="order-context">Review uses the selected session’s current data and guards.</div>
+                <div class="ticket-estimate" id="ticket-estimate" aria-label="Indicative order ticket values"><p class="empty-state">Select an instrument and enter a quantity for indicative values. Server review remains authoritative.</p></div>
+                <button type="submit" class="button primary full" id="review-order">Review order — no submission</button>
+              </form>
+              <p class="muted small" id="order-disclaimer">Paper fills are simulated locally. Short selling is not modelled in paper.</p>
+            </div>
+
+            <!-- Multi-Market NSE (INR) + NASDAQ (USD) Live-Data Paper Ticket -->
+            <div id="mm-ticket-pane" hidden>
+              <div class="panel-head">
+                <div><p class="eyebrow">LIVE-MARKET PAPER · 0 BROKER ORDERS</p><h3 id="mm-ticket-heading">NSE / NASDAQ Simulated Ticket</h3></div>
+                <span class="status-pill ok" id="mm-ticket-currency-badge">INR ₹</span>
+              </div>
+              <form id="mm-order-form">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="mm-order-market">Venue</label>
+                    <select id="mm-order-market">
+                      <option value="NSE">NSE · India (INR)</option>
+                      <option value="NASDAQ">NASDAQ · US (USD)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="mm-order-symbol">Symbol</label>
+                    <input id="mm-order-symbol" value="RELIANCE" required>
+                  </div>
+                </div>
+                <div class="segmented" aria-label="Multi-market side">
+                  <button type="button" class="buy active" id="mm-side-buy">BUY</button>
+                  <button type="button" class="sell" id="mm-side-sell">SELL</button>
+                </div>
+                <div class="form-grid">
+                  <div class="field"><label for="mm-order-qty">Quantity (shares)</label><input id="mm-order-qty" type="number" min="0.0001" step="any" value="1" required></div>
+                  <div class="field">
+                    <label for="mm-order-type">Order type</label>
+                    <select id="mm-order-type">
+                      <option value="MARKET">MARKET</option>
+                      <option value="LIMIT">LIMIT</option>
+                      <option value="STOP">STOP</option>
+                      <option value="STOP_LIMIT">STOP_LIMIT</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="mm-order-product">Product</label>
+                    <select id="mm-order-product">
+                      <option value="D">Delivery / Cash (CNC / USD)</option>
+                      <option value="I">NSE Intraday (MIS)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="mm-order-tif">Time in force</label>
+                    <select id="mm-order-tif">
+                      <option value="DAY">DAY</option>
+                      <option value="GTC">GTC</option>
+                      <option value="IOC">IOC</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-grid">
+                  <div class="field"><label for="mm-order-limit">Limit price (optional)</label><input id="mm-order-limit" type="number" min="0" step="any"></div>
+                  <div class="field"><label for="mm-order-stop">Stop trigger (optional)</label><input id="mm-order-stop" type="number" min="0" step="any"></div>
+                </div>
+                <div class="form-grid">
+                  <div class="field"><label for="mm-order-sl">Protective SL</label><input id="mm-order-sl" type="number" min="0" step="any"></div>
+                  <div class="field"><label for="mm-order-tp">Protective TP</label><input id="mm-order-tp" type="number" min="0" step="any"></div>
+                </div>
+                <label class="check-label"><input type="checkbox" id="mm-order-offhours"> Stage working LIMIT order when market closed</label>
+                <div class="ticket-estimate" id="mm-ticket-preview-box">
+                  <p class="empty-state">Click <strong>Preview fees &amp; checks</strong> to run live quote freshness, lot/tick, risk, and STT/SEC fee checks.</p>
+                </div>
+                <div class="button-row">
+                  <button type="button" class="button secondary grow" id="mm-preview-order-btn">Preview fees &amp; checks</button>
+                  <button type="submit" class="button bull grow" id="mm-submit-order-btn">Submit simulated order</button>
+                </div>
+              </form>
+              <p class="muted small">100% local SQLite paper simulation using live read-only quotes. Zero broker order calls are ever made here.</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 04 ORDERS, FILLS, POSITIONS & RECONCILIATION -->
+      <section class="page" id="page-orders" aria-labelledby="orders-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">CONFIRMED LEDGER &amp; BROKER STATE</p>
+            <h2 id="orders-title">Orders, fills, positions &amp; reconciliation</h2>
+            <p>Inspect NSE (INR) &amp; NASDAQ (USD) Live-Market Paper positions, working orders, regulatory fee fills, and broker-reconciled ledgers.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary" id="mm-reconcile-paper-btn">Reconcile NSE &amp; NASDAQ SQLite</button>
+          </div>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">MULTI-MARKET LIVE-DATA PAPER (NSE INR + NASDAQ USD)</p><h3>Simulated Open Positions &amp; Protection</h3></div>
+            <span class="status-pill info" id="mm-paper-pos-count">0 OPEN</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Market</th><th>Symbol</th><th>Qty</th><th>Avg Entry</th><th>Last Price</th><th>Market Value</th><th>Unrealized P&amp;L</th><th>SL / TP</th><th>Actions</th></tr></thead>
+              <tbody id="mm-paper-position-rows"><tr><td colspan="9" class="empty-state">No open NSE or NASDAQ Live-Market Paper positions.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">MULTI-MARKET WORKING &amp; RECENT ORDERS</p><h3>NSE &amp; NASDAQ Paper Orders</h3></div></div>
+            <div class="table-wrap tall">
+              <table>
+                <thead><tr><th>Market</th><th>Symbol</th><th>Side / Type</th><th>Qty</th><th>Price</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody id="mm-paper-order-rows"><tr><td colspan="7" class="empty-state">No NSE/NASDAQ paper orders yet.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">MULTI-MARKET FILLS &amp; REGULATORY FEES</p><h3>Simulated Fills (STT / GST / SEC / TAF)</h3></div></div>
+            <div class="table-wrap tall">
+              <table>
+                <thead><tr><th>Time</th><th>Market / Symbol</th><th>Side</th><th>Qty @ Price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead>
+                <tbody id="mm-paper-fill-rows"><tr><td colspan="6" class="empty-state">No NSE/NASDAQ paper fills yet.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL PAPER POSITIONS</p><h3>Local paper positions</h3></div><span id="position-count" class="status-pill">0</span></div><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Side</th><th>Quantity</th><th>Open / current</th><th>Unrealized</th><th>SL / TP</th><th>Ownership</th><th>Action</th></tr></thead><tbody id="position-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL PAPER WORKING &amp; RECORDED ORDERS</p><h3>Local paper order state</h3></div></div><div class="table-wrap tall"><table><thead><tr><th>Created</th><th>Instrument</th><th>Side / type</th><th>Quantity</th><th>Status</th><th>Order ID</th><th>Detail</th><th>Action</th></tr></thead><tbody id="order-rows"></tbody></table></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">LOCAL SIMULATED FILLS</p><h3>Local paper execution history</h3></div><span class="status-pill" id="deals-label">SIMULATED</span></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Instrument</th><th>Side / entry</th><th>Quantity</th><th>Price</th><th>P&amp;L</th><th>Fee</th></tr></thead><tbody id="deal-rows"></tbody></table></div></article>
+      </section>
+
+      <!-- 05 STRATEGIES & EXECUTION MODES -->
+      <section class="page" id="page-strategies" aria-labelledby="strategies-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">TWO EXPLICIT PRODUCT MODES · ZERO AMBIGUITY</p>
+            <h2 id="strategies-title">Strategies, Live-Market Paper &amp; Gated Real-Money Mode</h2>
+            <p>Run deterministic completed-bar strategies in <strong>LIVE-MARKET PAPER</strong> (zero broker calls), or inspect exact readiness gates for <strong>LIVE-MARKET LIVE</strong> (OFF by default).</p>
+          </div>
+        </div>
+
+        <div class="content-grid two">
+          <article class="panel accent-nse">
+            <div class="panel-head">
+              <div><p class="eyebrow">MODE 1A · NSE LOCAL SIMULATION (INR)</p><h3>NSE Paper Session &amp; Strategy</h3></div>
+              <span class="status-pill info" id="mm-strat-nse-state">STOPPED</span>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="mm-strat-nse-select">Completed-bar strategy</label>
+                <select id="mm-strat-nse-select">
+                  <option value="manual_only">manual_only (Operator orders only)</option>
+                  <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
+                  <option value="rsi">rsi (14-bar RSI 30/70)</option>
+                  <option value="breakout">breakout (20-bar channel)</option>
+                  <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
+                  <option value="momentum">momentum (10-bar ROC cross)</option>
+                  <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
+                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-strat-nse-tf">Bar timeframe</label>
+                <select id="mm-strat-nse-tf"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>1D</option></select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="button" class="button primary" id="mm-nse-start-btn">Start NSE paper</button>
+              <button type="button" class="button secondary" id="mm-nse-pause-btn">Pause</button>
+              <button type="button" class="button secondary" id="mm-nse-resume-btn">Resume</button>
+              <button type="button" class="button secondary" id="mm-nse-stop-btn">Stop</button>
+              <button type="button" class="button danger-outline" id="mm-nse-reset-btn">Reset INR ledger</button>
+            </div>
+            <p class="muted small top-space">Evaluates only on completed Upstox bars during open NSE IST hours; transitions to <code>MARKET_CLOSED_WAITING</code> off-hours. No profitability claim.</p>
+          </article>
+
+          <article class="panel accent-nasdaq">
+            <div class="panel-head">
+              <div><p class="eyebrow">MODE 1B · NASDAQ LOCAL SIMULATION (USD)</p><h3>NASDAQ Paper Session &amp; Strategy</h3></div>
+              <span class="status-pill info" id="mm-strat-nasdaq-state">STOPPED</span>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="mm-strat-nasdaq-select">Completed-bar strategy</label>
+                <select id="mm-strat-nasdaq-select">
+                  <option value="manual_only">manual_only (Operator orders only)</option>
+                  <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
+                  <option value="rsi">rsi (14-bar RSI 30/70)</option>
+                  <option value="breakout">breakout (20-bar channel)</option>
+                  <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
+                  <option value="momentum">momentum (10-bar ROC cross)</option>
+                  <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
+                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-strat-nasdaq-tf">Bar timeframe</label>
+                <select id="mm-strat-nasdaq-tf"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>1D</option></select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="button" class="button bull" id="mm-nasdaq-start-btn">Start NASDAQ paper</button>
+              <button type="button" class="button secondary" id="mm-nasdaq-pause-btn">Pause</button>
+              <button type="button" class="button secondary" id="mm-nasdaq-resume-btn">Resume</button>
+              <button type="button" class="button secondary" id="mm-nasdaq-stop-btn">Stop</button>
+              <button type="button" class="button danger-outline" id="mm-nasdaq-reset-btn">Reset USD ledger</button>
+            </div>
+            <p class="muted small top-space">Evaluates only on completed Alpaca bars during regular 09:30–16:00 ET sessions. Zero broker order calls.</p>
+          </article>
+        </div>
+
+        <article class="panel accent-live">
+          <div class="panel-head">
+            <div><p class="eyebrow">MODE 2 · LIVE-MARKET LIVE (REAL-MONEY EXECUTION · OFF BY DEFAULT)</p><h3>NSE (Upstox GTT v3) &amp; NASDAQ (Alpaca Trading v2) Live Gate Status</h3></div>
+            <span class="mode-badge live">DEFAULT: OFF</span>
+          </div>
+          <div class="content-grid two" id="mm-live-mode-cards"></div>
+          <div class="button-row top-space">
+            <button type="button" class="button secondary" id="mm-alpaca-enable-paper-btn">Configure Alpaca Broker PAPER</button>
+            <button type="button" class="button warning" id="mm-alpaca-readiness-btn">Run Alpaca Broker Readiness</button>
+            <button type="button" class="button warning" id="mm-alpaca-arm-btn">1. Arm Alpaca Gate</button>
+            <button type="button" class="button danger" id="mm-alpaca-activate-btn">2. Activate Alpaca LIVE (Phrase Required)</button>
+            <button type="button" class="button secondary" id="mm-alpaca-disarm-btn">Disarm Gate</button>
+            <button type="button" class="button secondary" id="mm-alpaca-recover-btn">Recover Unresolved Intents</button>
+            <a class="button secondary" href="/autonomy">Open Upstox NSE Live Gate (/autonomy)</a>
+          </div>
+          <div class="inline-status top-space" id="mm-alpaca-gate-output">Alpaca Broker execution is OFF by default. Readiness checks run via GET-only preflight before any LivePermit can be minted.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">DECISION LOG</p><h3>Recent Completed-Bar Strategy Decisions</h3></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Market</th><th>Symbol</th><th>Strategy / TF</th><th>Signal</th><th>Reason</th><th>Simulated Order</th></tr></thead>
+              <tbody id="mm-strategy-decision-rows"><tr><td colspan="7" class="empty-state">No automated paper strategy decisions recorded yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- 06 RISK & LIVE LIFECYCLE -->
+      <section class="page" id="page-risk" aria-labelledby="risk-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">FAIL-CLOSED CONTROLS</p>
+            <h2 id="risk-title">Risk bounds, kill switches &amp; live lifecycle</h2>
+            <p>Positive server-side risk caps across NSE (INR · Upstox) and NASDAQ (USD · Alpaca). Arm and Activate are always separate operator actions.</p>
+          </div>
+          <span class="status-pill" id="risk-emergency">STOP CLEAR</span>
+        </div>
+
+        <div class="content-grid two">
+          <article class="panel accent-nse">
+            <div class="panel-head"><div><p class="eyebrow">NSE PAPER BOUNDS (INR ₹)</p><h3>NSE Risk &amp; Cost Parameters</h3></div></div>
+            <form id="mm-nse-risk-form">
+              <div class="form-grid">
+                <div class="field"><label for="mm-nse-max-order">Max order value (INR)</label><input id="mm-nse-max-order" type="number" min="1" step="any" value="250000"></div>
+                <div class="field"><label for="mm-nse-max-loss">Max daily loss (INR)</label><input id="mm-nse-max-loss" type="number" min="1" step="any" value="25000"></div>
+                <div class="field"><label for="mm-nse-max-pos">Max open positions</label><input id="mm-nse-max-pos" type="number" min="1" step="1" value="10"></div>
+                <div class="field"><label for="mm-nse-slippage">Simulated slippage (bps)</label><input id="mm-nse-slippage" type="number" min="0" step="any" value="5"></div>
+              </div>
+              <button type="submit" class="button primary" id="mm-save-nse-risk">Save NSE paper bounds</button>
+            </form>
+          </article>
+
+          <article class="panel accent-nasdaq">
+            <div class="panel-head"><div><p class="eyebrow">NASDAQ PAPER &amp; ALPACA BROKER BOUNDS (USD $)</p><h3>NASDAQ Risk Parameters</h3></div></div>
+            <form id="mm-nasdaq-risk-form">
+              <div class="form-grid">
+                <div class="field"><label for="mm-us-max-order">Max order value (USD)</label><input id="mm-us-max-order" type="number" min="1" step="any" value="25000"></div>
+                <div class="field"><label for="mm-us-max-loss">Max daily loss (USD)</label><input id="mm-us-max-loss" type="number" min="1" step="any" value="2500"></div>
+                <div class="field"><label for="mm-us-max-pos">Max open positions</label><input id="mm-us-max-pos" type="number" min="1" step="1" value="10"></div>
+                <div class="field"><label for="mm-us-max-orders">Max daily orders</label><input id="mm-us-max-orders" type="number" min="1" step="1" value="50"></div>
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button bull" id="mm-save-us-paper-risk">Save NASDAQ paper bounds</button>
+                <button type="button" class="button warning" id="mm-save-alpaca-broker-risk">Save Alpaca Broker hard limits</button>
+              </div>
+            </form>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head"><div><p class="eyebrow">LOCAL PAPER &amp; DURABLE EMERGENCY CONTROLS</p><h3 id="lifecycle-current">PAPER · STOPPED</h3></div></div>
+          <div class="lifecycle-actions">
+            <button type="button" class="button secondary" id="pause-session">Pause paper strategy</button>
+            <button type="button" class="button secondary" id="stop-session">Stop paper session</button>
+            <button type="button" class="button danger-outline" id="clear-emergency">Clear emergency stop</button>
+            <button type="button" class="button secondary" data-go="strategies">Open Alpaca NASDAQ Live Gate →</button>
+            <a class="button secondary" href="/autonomy">Open Upstox NSE Live Gate (/autonomy)</a>
+          </div>
+          <p class="muted small" id="lifecycle-help">Local paper uses the independent simulator. NSE (Upstox) and NASDAQ (Alpaca) live execution gates remain OFF by default and require separate readiness, Arm, and Activate confirmation.</p>
+        </article>
+      </section>
+
+      <!-- 07 PROVIDER CONNECTIONS & CREDENTIALS -->
+      <section class="page" id="page-connections" aria-labelledby="connections-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">WINDOWS DPAPI PROTECTED CREDENTIALS · READ-ONLY VERIFICATION</p>
+            <h2 id="connections-title">Upstox (NSE) &amp; Alpaca (NASDAQ) Connections</h2>
+            <p>Market-data credentials and live-execution credentials are stored in separate encrypted DPAPI slots and never echoed back. Test buttons execute harmless read-only GET probes with zero order calls.</p>
+          </div>
+          <span class="status-pill" id="secret-store-status">STORE —</span>
+        </div>
+
+        <div class="content-grid two">
+          <!-- Upstox NSE Read-Only Market Data -->
+          <article class="panel accent-nse">
+            <div class="panel-head">
+              <div><p class="eyebrow">1. INDIA NSE MARKET DATA (READ-ONLY)</p><h3>Upstox Daily Access Token</h3></div>
+              <span class="status-pill" id="mm-upstox-data-pill">DISCONNECTED</span>
+            </div>
+            <form id="mm-upstox-data-form">
+              <div class="field">
+                <label for="mm-upstox-token-input">Upstox read-only access_token (resets daily ~03:30 IST)</label>
+                <input id="mm-upstox-token-input" type="password" autocomplete="off" placeholder="Paste daily Upstox JWT access_token">
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button primary" id="mm-upstox-save-btn">Save Upstox data token</button>
+                <button type="button" class="button secondary" id="mm-upstox-verify-btn">Verify NSE quote (RELIANCE)</button>
+                <button type="button" class="button danger-outline" id="mm-upstox-delete-btn">Delete</button>
+              </div>
+            </form>
+            <div class="inline-status top-space" id="mm-upstox-verify-result">Used for Watchlists, Supercharts, and NSE Live-Market Paper. Cannot place live orders.</div>
+          </article>
+
+          <!-- Alpaca NASDAQ Read-Only Market Data -->
+          <article class="panel accent-nasdaq">
+            <div class="panel-head">
+              <div><p class="eyebrow">2. US NASDAQ MARKET DATA (READ-ONLY)</p><h3>Alpaca Market Data API Keys</h3></div>
+              <span class="status-pill" id="mm-alpaca-data-pill">DISCONNECTED</span>
+            </div>
+            <form id="mm-alpaca-data-form">
+              <div class="form-grid">
+                <div class="field"><label for="mm-alpaca-data-key">Alpaca API Key ID</label><input id="mm-alpaca-data-key" autocomplete="off" placeholder="PK... or AK..."></div>
+                <div class="field"><label for="mm-alpaca-data-secret">Alpaca Secret Key</label><input id="mm-alpaca-data-secret" type="password" autocomplete="off" placeholder="Secret never echoed"></div>
+              </div>
+              <div class="field">
+                <label for="mm-alpaca-data-feed">Market Data Feed Entitlement</label>
+                <select id="mm-alpaca-data-feed">
+                  <option value="iex">iex · Free real-time IEX exchange feed (~2–3% US volume)</option>
+                  <option value="sip">sip · Full consolidated US tape (Algo Trader Plus required)</option>
+                  <option value="delayed_sip">delayed_sip · 15-minute delayed SIP (charts only; paper market orders blocked)</option>
+                </select>
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button bull" id="mm-alpaca-data-save-btn">Save Alpaca data keys</button>
+                <button type="button" class="button secondary" id="mm-alpaca-data-verify-btn">Verify NASDAQ quote (AAPL)</button>
+                <button type="button" class="button danger-outline" id="mm-alpaca-data-delete-btn">Delete</button>
+              </div>
+            </form>
+            <div class="inline-status top-space" id="mm-alpaca-verify-result">Isolated in <code>ALPACA_MARKET_DATA</code> slot; never shared with Alpaca Broker order execution.</div>
+          </article>
+        </div>
+
+        <article class="panel accent-live">
+          <div class="panel-head">
+            <div><p class="eyebrow">3. SEPARATE BROKER EXECUTION CREDENTIALS (ISOLATED FROM MARKET DATA)</p><h3>Alpaca Broker (Paper / Live) &amp; Upstox Live Token</h3></div>
+            <span class="status-pill warn">SAVING KEYS NEVER ARMS OR ACTIVATES</span>
+          </div>
+          <div class="content-grid two">
+            <form id="mm-alpaca-broker-cred-form">
+              <h4>Alpaca Trading API v2 Keys (Separate Slot)</h4>
+              <div class="field">
+                <label for="mm-alpaca-broker-env">Credential slot</label>
+                <select id="mm-alpaca-broker-env">
+                  <option value="paper">ALPACA_BROKER_PAPER (paper-api.alpaca.markets)</option>
+                  <option value="live">ALPACA_BROKER_LIVE (api.alpaca.markets · Real Money)</option>
+                </select>
+              </div>
+              <div class="form-grid">
+                <div class="field"><label for="mm-alpaca-broker-key">Broker API Key</label><input id="mm-alpaca-broker-key" autocomplete="off" required></div>
+                <div class="field"><label for="mm-alpaca-broker-secret">Broker API Secret</label><input id="mm-alpaca-broker-secret" type="password" autocomplete="off" required></div>
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button warning" id="mm-alpaca-broker-save-btn">Save Broker slot</button>
+                <button type="button" class="button secondary" id="mm-alpaca-broker-test-btn">Test /v2/account + /v2/clock (Read-Only)</button>
+                <button type="button" class="button danger-outline" id="mm-alpaca-broker-del-btn">Delete slot</button>
+              </div>
+              <div class="inline-status" id="mm-alpaca-broker-test-result">No order endpoint is ever called during connection tests.</div>
+            </form>
+
+            <form id="mm-upstox-live-cred-form">
+              <h4>Upstox LIVE Execution Token (Separate Slot)</h4>
+              <p class="muted small">Stored in <code>UPSTOX_LIVE_ACCESS_TOKEN</code>, strictly separate from the read-only market-data token. Requires <code>AUTONOMY_LIVE_ENABLED=true</code>, <code>UPSTOX_ALGO_NAME</code>, and SEBI registered static IP.</p>
+              <div class="field">
+                <label for="mm-upstox-live-input">Upstox LIVE order-authorized access_token</label>
+                <input id="mm-upstox-live-input" type="password" autocomplete="off" required>
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button warning" id="mm-upstox-live-save-btn">Save Upstox LIVE token</button>
+                <button type="button" class="button danger-outline" id="mm-upstox-live-del-btn">Delete LIVE token</button>
+              </div>
+              <div class="inline-status" id="mm-upstox-live-result">Live NSE execution remains OFF unless explicitly Armed &amp; Activated.</div>
+            </form>
+          </div>
+        </article>
+      </section>
+
+      <!-- 08 ACTIVITY & AUDIT -->
+      <section class="page" id="page-activity" aria-labelledby="activity-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">TAMPER-EVIDENT SHA-256 &amp; REDACTED LOCAL AUDIT</p>
+            <h2 id="activity-title">Activity, audit chain &amp; diagnostics</h2>
+            <p>Every paper order, fee calculation, risk rejection, session transition, readiness check, and emergency stop—with zero secrets or tokens.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary" id="reload-activity">Refresh</button>
+            <button type="button" class="button secondary" id="export-activity">Export redacted JSON</button>
+          </div>
+        </div>
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">MULTI-MARKET HASH-CHAINED AUDIT</p><h3>NSE &amp; NASDAQ Paper Audit Log</h3></div>
+            <span class="status-pill ok" id="mm-audit-chain-pill">SHA-256 CHAIN</span>
+          </div>
+          <div class="table-wrap tall">
+            <table>
+              <thead><tr><th>Seq</th><th>Time</th><th>Market</th><th>Event</th><th>Detail</th><th>Entry Hash</th></tr></thead>
+              <tbody id="mm-paper-audit-rows"><tr><td colspan="6" class="empty-state">No multi-market paper audit rows yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="toolbar"><div class="field grow"><label for="activity-filter">Filter session event type or detail</label><input id="activity-filter" type="search" placeholder="e.g. ORDER or RECONCILED"></div></div>
+          <div class="table-wrap tall"><table><thead><tr><th>Timestamp</th><th>Environment</th><th>Event</th><th>Redacted detail</th></tr></thead><tbody id="activity-rows"></tbody></table></div>
+        </article>
+      </section>
+
+      <!-- 09 SETTINGS, DIAGNOSTICS & MANUALS -->
+      <section class="page" id="page-settings" aria-labelledby="settings-title" hidden>
+        <div class="page-intro"><div><p class="eyebrow">LOCAL PREFERENCES, DIAGNOSTICS &amp; MANUALS</p><h2 id="settings-title">Settings, verification &amp; owner guides</h2><p>Understand what is verified locally vs what requires your own live broker credentials.</p></div></div>
+        <div class="content-grid two">
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">OPERATOR ACCESS</p><h3>Local API token</h3></div></div><form id="token-form"><div class="field"><label for="settings-token">Replace token for this browser tab</label><input id="settings-token" type="password" autocomplete="off" required></div><button type="submit" class="button primary">Save &amp; test token</button></form><div class="button-row top-space"><button type="button" class="button secondary" id="lock-app">Lock this tab</button></div><p class="muted small">Does not change the server’s configured API_TOKEN or DPAPI broker credentials.</p></article>
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">DISPLAY</p><h3>Refresh &amp; redacted diagnostics</h3></div></div><div class="field"><label for="refresh-interval">Background refresh</label><select id="refresh-interval"><option value="5000">Every 5 seconds</option><option value="10000">Every 10 seconds</option><option value="30000">Every 30 seconds</option><option value="0">Off</option></select></div><div class="button-row top-space"><button type="button" class="button secondary" id="download-diagnostics">Download redacted diagnostics</button></div><p class="muted small">Exports contain no password, API token, ciphertext or full account login.</p></article>
+        </div>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">MEASURED, NOT PROMISED</p><h3>Latency &amp; render diagnostics</h3></div><button type="button" class="button secondary" id="reload-performance">Refresh measurements</button></div><div id="performance-summary" class="performance-grid"><p class="empty-state">Unlock the workspace to load measured samples. Empty means not measured, not zero.</p></div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">PRODUCT SCOPE</p><h3>Listed shares &amp; ETFs</h3></div><span class="status-pill warn" id="listed-scope-badge">SEPARATE PROVIDER REQUIRED</span></div><p>Owned listed equities and ETFs route strictly via Upstox (NSE INR) or Alpaca (NASDAQ USD) using exact exchange, symbol, ISIN, and currency identity—never CFD substitutes.</p><div id="listed-asset-status" class="inline-status">Loading provider boundary…</div></article>
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">OWNER SETUP &amp; LIMITATIONS</p><h3>Read before paper-on-live-data or live-money use</h3></div>
+            <div class="button-row">
+              <a class="button secondary" href="/manual" target="_blank" rel="noopener">User manual</a>
+              <a class="button secondary" href="/docs" target="_blank" rel="noopener">OpenAPI docs</a>
+            </div>
+          </div>
+          <div class="help-grid">
+            <div><strong>Honest Charting Notice</strong><p>AXIOM uses its own local dark HTML5 canvas inspired by TradingView ergonomics. No TradingView data feed, library, or brokerage integration is used or implied.</p></div>
+            <div><strong>NSE via Upstox</strong><p>Paste a daily read-only <code>UPSTOX_ACCESS_TOKEN</code> for live NSE quotes/bars and BOD reconciliation. Live GTT v3 requires a separate token, <code>AUTONOMY_LIVE_ENABLED=true</code>, <code>UPSTOX_ALGO_NAME</code>, and SEBI static IP.</p></div>
+            <div><strong>NASDAQ via Alpaca</strong><p>Save <code>ALPACA_MARKET_DATA</code> keys (<code>iex</code> free real-time or <code>sip</code> paid) for live NASDAQ quotes/bars and local USD paper fills. Real-money <code>ALPACA_LIVE</code> requires separate keys, <code>ALPACA_BROKER_ENABLED=true</code>, Arm, and phrase Activate.</p></div>
+            <div><strong>No Profit Guarantee</strong><p>Simulated fills, backtests, and demo runs do not guarantee live execution quality or profitability.</p></div>
+          </div>
+        </article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">COMPATIBILITY</p><h3>Additional surfaces</h3></div></div><div class="button-row"><a class="button secondary" href="/autonomy">Upstox NSE Autonomy Console</a><a class="button secondary" href="/chart">Legacy paper chart</a><a class="button secondary" href="/dashboard">Legacy research dashboard</a></div></article>
+      </section>
+
+      <!-- 10 AI & MODEL LAB -->
+      <section class="page" id="page-modellab" aria-labelledby="modellab-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">RESEARCH &amp; PAPER-ADVISORY ONLY · ZERO BROKER EXECUTION</p>
+            <h2 id="modellab-title">AI &amp; Model Lab — Frozen Kronos CPU Inference, Leak-Free Walk-Forward &amp; Model Registry.</h2>
+            <p>Inspect pinned <code>NeoQuasar/Kronos-small</code> readiness, run validated NSE &amp; NASDAQ bar forecasts, execute chronological train/validation/untouched-test + 2.0× cost-stress comparisons, and manage SHA-256 model bundles.</p>
+          </div>
+          <div class="button-row">
+            <span class="status-pill info" id="ml-kronos-state-pill">NOT_INSTALLED</span>
+            <button type="button" class="button secondary" id="ml-refresh-btn">Refresh Lab</button>
+          </div>
+        </div>
+
+        <article class="panel accent-live" id="ml-warning-banner" role="note">
+          <div class="panel-head">
+            <div><p class="eyebrow">MANDATORY RISK &amp; SCOPE DISCLOSURE</p><h3>Training &amp; Backtests Never Guarantee Profit and Never Authorize Live Trading</h3></div>
+            <span class="mode-badge paper">PAPER / RESEARCH ONLY</span>
+          </div>
+          <p id="ml-warning-text">Historical walk-forward Sharpe, untouched out-of-sample returns, and Kronos probability bands never guarantee future paper or live returns and never arm, activate, or authorize LIVE-MARKET LIVE real-money execution.</p>
+          <p class="muted small"><strong>Architecture Policy:</strong> (1) <em>Rule Parameter Tuning</em> optimizes window/threshold grids on Train/Validation only; (2) <em>AXIOM Decision Model</em> fits a causal Ridge classifier on Train bars only; (3) <em>Kronos Foundation Weights</em> remain frozen, SHA-256-verified CPU inference artifacts (no foundation weight fine-tuning).</p>
+        </article>
+
+        <!-- 1 & 2 & 4: KRONOS STATUS, CONTROLS & RESOURCE/LATENCY DIAGNOSTICS -->
+        <div class="content-grid two">
+          <article class="panel" id="ml-kronos-identity-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">PINNED FOUNDATION ARTIFACTS · MIT LICENSE</p><h3>1. Kronos Model Status, SHA-256 &amp; Self-Test</h3></div>
+              <span class="status-pill" id="ml-kronos-runtime-badge">NOT_INSTALLED</span>
+            </div>
+            <div class="inline-status" id="ml-kronos-summary">Inspecting pinned NeoQuasar/Kronos-small + Tokenizer status…</div>
+            <dl class="detail-list" id="ml-kronos-details"></dl>
+            <div class="button-row top-space">
+              <button type="button" class="button primary xs" id="ml-kronos-install-btn">Install Pinned Kronos (CPU)</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-verify-btn">Verify SHA-256</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-selftest-btn">Offline CPU Self-Test</button>
+              <button type="button" class="button warning xs" id="ml-kronos-repair-btn">Repair</button>
+              <button type="button" class="button danger-outline xs" id="ml-kronos-cancel-btn">Cancel Op</button>
+            </div>
+          </article>
+
+          <article class="panel" id="ml-kronos-controls-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">FORECASTING ONLY · ZERO TRADING PERMISSION</p><h3>2 &amp; 4. Load/Unload, Cadence &amp; Latency Diagnostics</h3></div>
+              <span class="status-pill info" id="ml-kronos-toggle-pill">FORECASTING DISABLED</span>
+            </div>
+            <div class="button-row">
+              <button type="button" class="button bull xs" id="ml-kronos-enable-btn">Enable Forecasting</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-disable-btn">Disable Forecasting</button>
+              <button type="button" class="button primary xs" id="ml-kronos-load-btn">Load Model</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-unload-btn">Unload Worker</button>
+              <button type="button" class="button secondary xs" id="ml-kronos-clear-err-btn">Clear Error</button>
+            </div>
+            <form id="ml-kronos-config-form" class="top-space">
+              <div class="form-grid">
+                <div class="field"><label for="ml-cfg-cadence">Cadence (sec)</label><input id="ml-cfg-cadence" type="number" min="15" max="86400" value="300"></div>
+                <div class="field"><label for="ml-cfg-timeout">Timeout (sec)</label><input id="ml-cfg-timeout" type="number" min="1" max="300" step="1" value="45"></div>
+                <div class="field"><label for="ml-cfg-horizon">Horizon (bars)</label><input id="ml-cfg-horizon" type="number" min="1" max="60" value="5"></div>
+                <div class="field"><label for="ml-cfg-samples">MC Samples</label><input id="ml-cfg-samples" type="number" min="4" max="32" value="8"></div>
+              </div>
+              <button type="submit" class="button secondary xs">Save Inference Config</button>
+            </form>
+            <dl class="detail-list top-space" id="ml-kronos-diagnostics"></dl>
+          </article>
+        </div>
+
+        <!-- 3: FORECAST INSPECTOR -->
+        <article class="panel" id="ml-forecast-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">ADVISORY PROBABILITY BANDS · NEVER A TRADE INSTRUCTION</p><h3>3. Kronos Bar Forecast Inspector (NSE &amp; NASDAQ)</h3></div>
+            <span class="status-pill info" id="ml-fc-freshness-pill">NO FORECAST RUN</span>
+          </div>
+          <form id="ml-forecast-form" class="toolbar">
+            <div class="field">
+              <label for="ml-fc-market">Market</label>
+              <select id="ml-fc-market"><option value="NSE">NSE (INR)</option><option value="NASDAQ">NASDAQ (USD)</option></select>
+            </div>
+            <div class="field">
+              <label for="ml-fc-symbol">Symbol</label>
+              <input id="ml-fc-symbol" value="RELIANCE" maxlength="40" required>
+            </div>
+            <div class="field">
+              <label for="ml-fc-tf">Timeframe</label>
+              <select id="ml-fc-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1d">1d</option></select>
+            </div>
+            <div class="field grow">
+              <label for="ml-fc-dataset">Input Source (Live Read-Only Feed or Registered Dataset)</label>
+              <select id="ml-fc-dataset"><option value="">Live Read-Only Provider Bars (No Mock Fallback)</option></select>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button type="submit" class="button primary" id="ml-fc-run-btn">Run Validated Forecast</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ml-fc-output">Enable forecasting and verify Kronos CPU readiness to generate a timestamped bar forecast. Missing runtime/weights always report UNAVAILABLE.</div>
+        </article>
+
+        <!-- 5: HISTORICAL DATASET MANAGER -->
+        <article class="panel" id="ml-datasets-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SHA-256 FINGERPRINTS · SURVIVORSHIP &amp; MISSING-BAR AUDIT</p><h3>5. Historical Dataset Manager (NSE &amp; NASDAQ)</h3></div>
+            <span class="status-pill info" id="ml-datasets-count">0 DATASETS</span>
+          </div>
+          <div class="content-grid two">
+            <form id="ml-capture-ds-form">
+              <h4>Capture Read-Only Provider History</h4>
+              <div class="form-grid">
+                <div class="field"><label for="ml-cap-market">Market</label><select id="ml-cap-market"><option value="NSE">NSE (Upstox v3)</option><option value="NASDAQ">NASDAQ (Alpaca v2)</option></select></div>
+                <div class="field"><label for="ml-cap-symbol">Symbol</label><input id="ml-cap-symbol" value="AAPL" required></div>
+                <div class="field"><label for="ml-cap-tf">Timeframe</label><select id="ml-cap-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1d">1d</option></select></div>
+              </div>
+              <button type="submit" class="button secondary xs" id="ml-cap-btn">Capture &amp; Fingerprint Live History</button>
+            </form>
+            <form id="ml-import-ds-form">
+              <h4>Import Local OHLCV CSV</h4>
+              <div class="form-grid">
+                <div class="field"><label for="ml-imp-market">Market</label><select id="ml-imp-market"><option value="NSE">NSE (INR)</option><option value="NASDAQ">NASDAQ (USD)</option></select></div>
+                <div class="field"><label for="ml-imp-symbol">Symbol</label><input id="ml-imp-symbol" value="INFY" required></div>
+                <div class="field"><label for="ml-imp-tf">Timeframe</label><select id="ml-imp-tf"><option value="1h" selected>1h</option><option value="1d">1d</option><option value="5m">5m</option></select></div>
+              </div>
+              <div class="field"><label for="ml-imp-csv">CSV rows (<code>timestamp,open,high,low,close,volume</code>; >= 60 chronological bars)</label><textarea id="ml-imp-csv" rows="2" placeholder="timestamp,open,high,low,close,volume"></textarea></div>
+              <button type="submit" class="button secondary xs" id="ml-imp-btn">Validate &amp; Register CSV Dataset</button>
+            </form>
+          </div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead><tr><th>Dataset ID</th><th>Market / Symbol</th><th>TF</th><th>Bars</th><th>Coverage (UTC)</th><th>Missing</th><th>Data Class</th><th>SHA-256</th></tr></thead>
+              <tbody id="ml-datasets-rows"><tr><td colspan="8" class="empty-state">Loading datasets…</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 6: CHRONOLOGICAL RESEARCH & WALK-FORWARD RUNNER -->
+        <article class="panel" id="ml-research-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">CHRONOLOGICAL TRAIN · EMBARGO · VALIDATION · UNTOUCHED TEST</p><h3>6. Research &amp; Walk-Forward Pipeline Runner</h3></div>
+            <div class="button-row">
+              <span class="status-pill info" id="ml-run-active-pill">IDLE</span>
+              <button type="button" class="button danger-outline xs" id="ml-run-cancel-btn">Cancel Active Run</button>
+            </div>
+          </div>
+          <form id="ml-run-form">
+            <div class="form-grid">
+              <div class="field"><label for="ml-run-dataset">Dataset</label><select id="ml-run-dataset" required></select></div>
+              <div class="field"><label for="ml-run-market">Market Fee Model</label><select id="ml-run-market"><option value="NSE">NSE (STT/NSE/SEBI/Stamp/GST)</option><option value="NASDAQ">NASDAQ (SEC/FINRA/USD)</option></select></div>
+              <div class="field"><label for="ml-run-train">Train Fraction</label><input id="ml-run-train" type="number" step="0.05" min="0.45" max="0.75" value="0.60"></div>
+              <div class="field"><label for="ml-run-val">Validation Fraction</label><input id="ml-run-val" type="number" step="0.05" min="0.10" max="0.30" value="0.20"></div>
+              <div class="field"><label for="ml-run-embargo">Embargo Bars</label><input id="ml-run-embargo" type="number" min="1" max="30" value="5"></div>
+              <div class="field"><label for="ml-run-spread">Spread (bps)</label><input id="ml-run-spread" type="number" step="0.5" min="0" max="100" value="4.0"></div>
+              <div class="field"><label for="ml-run-slippage">Slippage (bps)</label><input id="ml-run-slippage" type="number" step="0.5" min="0" max="100" value="5.0"></div>
+              <div class="field"><label for="ml-run-stress">Cost Stress Multiplier</label><input id="ml-run-stress" type="number" step="0.25" min="1.25" max="5.0" value="2.0"></div>
+              <div class="field"><label for="ml-run-mintrades">Min Trades Gate</label><input id="ml-run-mintrades" type="number" min="1" max="50" value="5"></div>
+              <div class="field"><label for="ml-run-kronos">Kronos Ablation</label><select id="ml-run-kronos"><option value="false">Baselines + AXIOM Ridge Only</option><option value="true">Include Paired Kronos Ablation</option></select></div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ml-run-start-btn">Run Research (Explicit Start)</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ml-run-progress">No research job running. Jobs never auto-start on launch or restart.</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead><tr><th>Run ID</th><th>Market</th><th>Dataset</th><th>Status</th><th>Progress</th><th>Manifest SHA-256</th><th>Action</th></tr></thead>
+              <tbody id="ml-runs-rows"><tr><td colspan="7" class="empty-state">No research runs recorded yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 7: BASELINE, WALK-FORWARD, UNTOUCHED TEST & COST-STRESS COMPARISON -->
+        <article class="panel" id="ml-comparison-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SEPARATED TRAIN · VALIDATION · UNTOUCHED TEST · 2.0× COST STRESS</p><h3>7. Baseline &amp; Strategy Comparison Matrix</h3></div>
+            <span class="status-pill info" id="ml-comp-run-label">SELECT A COMPLETED RUN</span>
+          </div>
+          <div class="inline-status" id="ml-split-summary">Run or select a research job above to inspect leak-free split boundaries, 90% block-bootstrap CIs, regime breakdowns, and 2.0× stressed-cost verdicts.</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Candidate / Family</th>
+                  <th>Train Sharpe</th>
+                  <th>Val Sharpe</th>
+                  <th>Untouched Test Net % (90% CI)</th>
+                  <th>Test Sharpe / Sortino</th>
+                  <th>Max DD %</th>
+                  <th>PF / Win%</th>
+                  <th>Trades / Turn</th>
+                  <th>Stressed (2×) Net %</th>
+                  <th>Regimes (T/R/V)</th>
+                  <th>Gate Verdict</th>
+                </tr>
+              </thead>
+              <tbody id="ml-candidates-rows"><tr><td colspan="11" class="empty-state">No run selected.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- 8: MODEL REGISTRY & SHA-256 EXPORT / IMPORT -->
+        <article class="panel" id="ml-registry-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">PAPER-REFERENCE PROMOTION ONLY · HASH-VALIDATED BUNDLES</p><h3>8. Model Registry, Manual Promotion &amp; SHA-256 Export/Import</h3></div>
+            <span class="status-pill info" id="ml-models-count">0 MODELS</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Model ID</th><th>Candidate</th><th>Market / TF</th><th>Status</th><th>Test Net %</th><th>2× Stress %</th><th>Artifact SHA-256</th><th>Actions</th></tr></thead>
+              <tbody id="ml-models-rows"><tr><td colspan="8" class="empty-state">Run research to populate evaluated candidates.</td></tr></tbody>
+            </table>
+          </div>
+          <div class="field top-space">
+            <label for="ml-bundle-json">Model Bundle JSON (Exported or Paste to Import — SHA-256 Verified)</label>
+            <textarea id="ml-bundle-json" rows="4" placeholder='{"schema":"axiom.model_lab.bundle.v1", ...}'></textarea>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" id="ml-import-bundle-btn">Verify SHA-256 &amp; Import Model Bundle</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- 11 LIVE TRADE MONITOR (STRICTLY READ-ONLY) -->
+      <section class="page" id="page-monitor" aria-labelledby="monitor-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">STRICTLY READ-ONLY EXECUTION &amp; SIGNAL INSPECTOR · ZERO ORDER MUTATIONS</p>
+            <h2 id="monitor-title">Live Trade Monitor — Monitored &amp; Traded Instruments</h2>
+            <p>Inspect every monitored symbol, open position, working order, partial/completed fill, SL/TP level, exit, and advisory signal on real-time candlesticks. Simulated PAPER fills and broker-confirmed LIVE records are kept unmistakably separate.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" data-go="orders">Order Controls (04)</button>
+            <button type="button" class="button secondary xs" data-go="charts">Order Ticket (03)</button>
+            <button type="button" class="button secondary xs" data-go="ensemble">Ensemble &amp; Risk (12)</button>
+            <button type="button" class="button primary xs" id="tm-refresh-btn">Refresh Monitor</button>
+          </div>
+        </div>
+
+        <article class="panel tm-banner-panel" id="tm-session-banner-card">
+          <div class="tm-session-banner inactive" id="tm-session-banner" role="status">
+            <div>
+              <strong id="tm-banner-status">NOT TRADING</strong>
+              <span id="tm-banner-reason">Session is stopped, paused, disarmed, or scanning-only. Select an instrument below to inspect history.</span>
+            </div>
+            <span class="mode-badge paper" id="tm-selected-mode-badge">READ-ONLY VIEW</span>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="form-grid" id="tm-filters-bar">
+            <div class="field">
+              <label for="tm-filter-market">Market</label>
+              <select id="tm-filter-market">
+                <option value="ALL">ALL (NSE &amp; NASDAQ)</option>
+                <option value="NSE">NSE · INR ₹</option>
+                <option value="NASDAQ">NASDAQ · USD $</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-mode">Execution Mode</label>
+              <select id="tm-filter-mode">
+                <option value="ALL">ALL MODES (Separated)</option>
+                <option value="LIVE_MARKET_PAPER">LIVE-MARKET PAPER (Simulated)</option>
+                <option value="LIVE_MARKET_LIVE">LIVE-MARKET LIVE (Broker Gate)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-state">Instrument State</label>
+              <select id="tm-filter-state">
+                <option value="ALL">ALL MONITORED</option>
+                <option value="OPEN_POSITION">Open Position</option>
+                <option value="WORKING_ORDER">Working Order</option>
+                <option value="RECENT_FILL">Recent Fill</option>
+                <option value="ACTIVE_SIGNAL">Current Strategy Signal</option>
+                <option value="WATCHING">Watchlist Only</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-search">Search Symbol</label>
+              <input id="tm-filter-search" type="search" placeholder="RELIANCE, AAPL, QQQ…">
+            </div>
+          </div>
+          <div class="button-row top-space" id="tm-summary-counts">
+            <span class="status-pill info" id="tm-count-total">0 MONITORED</span>
+            <span class="status-pill" id="tm-count-positions">0 POSITIONS</span>
+            <span class="status-pill" id="tm-count-orders">0 WORKING ORDERS</span>
+            <span class="status-pill" id="tm-count-fills">0 FILLS</span>
+            <span class="status-pill" id="tm-count-signals">0 SIGNALS</span>
+            <div class="tm-pager">
+              <button type="button" class="button secondary xs" id="tm-prev-page">Prev</button>
+              <span class="muted small" id="tm-page-info">Page 1 / 1</span>
+              <button type="button" class="button secondary xs" id="tm-next-page">Next</button>
+            </div>
+          </div>
+        </article>
+
+        <div class="content-grid two tm-master-detail">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">PAGINATED WATCHLIST &amp; ACTIVE SUMMARY (LAZY CHART LOAD)</p><h3>Monitored Instruments</h3></div>
+            </div>
+            <div class="table-wrap tall">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Market / Symbol</th>
+                    <th>Mode (Origin)</th>
+                    <th>Session</th>
+                    <th>State</th>
+                    <th>Pos / P&amp;L</th>
+                    <th>Orders / Signal</th>
+                    <th>Inspect</th>
+                  </tr>
+                </thead>
+                <tbody id="tm-instruments-rows">
+                  <tr><td colspan="7" class="empty-state">No monitored instruments match the current filter.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="tm-chart-eyebrow">SELECTED INSTRUMENT CANDLESTICK &amp; DECISION MAP</p>
+                <h3 id="tm-chart-heading">Select an instrument to load candlesticks &amp; trade markers</h3>
+              </div>
+              <div class="button-row">
+                <label for="tm-chart-tf" class="small muted">TF</label>
+                <select id="tm-chart-tf">
+                  <option value="1m">1m</option>
+                  <option value="5m" selected>5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                  <option value="1D">1D</option>
+                </select>
+              </div>
+            </div>
+            <div class="inline-status" id="tm-chart-meta">Market: — · Currency: — · Source: — · Latest Bar/Quote: —</div>
+            <div class="tm-canvas-wrap top-space">
+              <canvas id="tm-chart-canvas" width="900" height="360" aria-label="Live Trade Monitor candlestick and event marker chart"></canvas>
+              <div class="chart-empty" id="tm-chart-empty">Select an instrument from the monitored list. Disconnected or stale feeds are shown explicitly and never replaced with sample bars.</div>
+            </div>
+            <div class="tm-marker-legend" id="tm-marker-legend" aria-label="Distinct event marker legend">
+              <span><strong>◇</strong> SIGNAL (Advisory — Not an Order)</span>
+              <span><strong>□</strong> ORDER_SUBMITTED</span>
+              <span><strong>◐</strong> PARTIAL_FILL</span>
+              <span><strong>▲/▼</strong> COMPLETED_FILL</span>
+              <span><strong>✕</strong> CANCELED</span>
+              <span><strong>⛨</strong> STOP_LOSS</span>
+              <span><strong>◎</strong> TAKE_PROFIT</span>
+              <span><strong>⇥</strong> EXIT</span>
+            </div>
+            <div class="panel inset-panel top-space" id="tm-marker-detail">
+              <p class="eyebrow">MARKER INSPECTOR (CLICK ANY CHART MARKER OR EVENT ROW BELOW)</p>
+              <div id="tm-marker-detail-body" class="muted small">Click a marker on the candlestick chart or in the event table below to inspect time, side, qty, price, fees, strategy, reason, status, execution mode, and simulated vs broker-confirmed origin.</div>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SYNCHRONIZED INSTRUMENT EVENT LOG · CLICK TO HIGHLIGHT ON CHART</p><h3>Selected Instrument Signals, Orders, Fills, Protections &amp; Exits</h3></div>
+            <span class="status-pill info" id="tm-events-count">0 EVENTS</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event Time</th>
+                  <th>Marker Type</th>
+                  <th>Mode &amp; Origin</th>
+                  <th>Side</th>
+                  <th>Qty</th>
+                  <th>Price</th>
+                  <th>Fees</th>
+                  <th>Strategy</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody id="tm-events-rows">
+                <tr><td colspan="10" class="empty-state">Select an instrument above to inspect its event markers.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- 12 PARALLEL STRATEGY ENSEMBLE & PORTFOLIO ALLOCATION -->
+      <section class="page" id="page-ensemble" aria-labelledby="ensemble-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">BOUNDED PARALLEL EVALUATOR · OOS CALIBRATION · SINGLE PORTFOLIO RISK ALLOCATOR</p>
+            <h2 id="ensemble-title">Parallel Strategy Ensemble, Kronos Advisory &amp; Portfolio Risk</h2>
+            <p>Evaluate 24 to 1,024+ strategy variants concurrently on validated completed bars, combine via walk-forward OOS weights &amp; calibrated confidence, and enforce shared account-level risk limits.</p>
+          </div>
+          <button type="button" class="button secondary" id="ens-refresh-btn">Refresh Ensemble</button>
+        </div>
+
+        <div class="inline-status warn" id="ens-warning-banner" role="note">
+          <strong>PAPER ROLLOUT &amp; MULTIPLE-TESTING DISCLOSURE:</strong> Strategy evaluations, walk-forward ablations, and Kronos forecasts are strictly isolated from live execution authorization (LIVE remains OFF by default). Raw model scores are never treated as probabilities; insufficient OOS sample size or calibrated confidence produces <strong>NO_TRADE</strong>. Synthetic fixtures never establish profitability or Kronos edge.
+        </div>
+
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">BOUNDED WORKER POOL &amp; VARIANT REGISTRY</p><h3>1. Strategy Families, Variant Scale &amp; Concurrency</h3></div>
+              <span class="status-pill info" id="ens-variants-pill">24 VARIANTS</span>
+            </div>
+            <form id="ens-config-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="ens-preset">Variant Library Scale</label>
+                  <select id="ens-preset">
+                    <option value="compact">compact (~24 variants)</option>
+                    <option value="standard">standard (~96 variants)</option>
+                    <option value="large_256">large_256 (256 variants)</option>
+                    <option value="massive_1024">massive_1024 (1,024 variants)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ens-timeframe">Completed-Bar Timeframe</label>
+                  <select id="ens-timeframe"><option value="1m">1m</option><option value="5m" selected>5m</option><option value="15m">15m</option><option value="1h">1h</option><option value="1D">1D</option></select>
+                </div>
+                <div class="field">
+                  <label for="ens-workers">Max Worker Threads (1–32)</label>
+                  <input id="ens-workers" type="number" min="1" max="32" value="4">
+                </div>
+                <div class="field">
+                  <label for="ens-timeout">Batch Timeout (s)</label>
+                  <input id="ens-timeout" type="number" min="2" max="120" value="30">
+                </div>
+              </div>
+              <fieldset class="ens-family-box top-space">
+                <legend class="small muted">Enabled Strategy Families</legend>
+                <div class="ens-family-checks" id="ens-family-checks">
+                  <label><input type="checkbox" value="sma_crossover" checked> sma_crossover</label>
+                  <label><input type="checkbox" value="ema_crossover" checked> ema_crossover</label>
+                  <label><input type="checkbox" value="rsi_reversion" checked> rsi_reversion</label>
+                  <label><input type="checkbox" value="bollinger_reversion" checked> bollinger_reversion</label>
+                  <label><input type="checkbox" value="donchian_breakout" checked> donchian_breakout</label>
+                  <label><input type="checkbox" value="macd_momentum" checked> macd_momentum</label>
+                  <label><input type="checkbox" value="vwap_zscore_reversion" checked> vwap_zscore_reversion</label>
+                  <label><input type="checkbox" value="volatility_regime_trend" checked> volatility_regime_trend</label>
+                </div>
+              </fieldset>
+              <div class="button-row top-space">
+                <button type="submit" class="button primary xs" id="ens-save-config-btn">Apply Library &amp; Concurrency</button>
+              </div>
+            </form>
+            <div class="contract-grid top-space" id="ens-resource-summary"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">SINGLE ALLOCATOR PER MARKET · SHARED PRE-TRADE RISK</p><h3>2. Kronos Advisory, Calibration &amp; Risk Budgets</h3></div>
+              <select id="ens-alloc-market" aria-label="Allocator market">
+                <option value="NSE">NSE · INR ₹</option>
+                <option value="NASDAQ">NASDAQ · USD $</option>
+              </select>
+            </div>
+            <form id="ens-risk-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="ens-kronos-enabled">Kronos Advisory Input</label>
+                  <select id="ens-kronos-enabled"><option value="false">OFF (Non-Kronos Ensemble)</option><option value="true">ON (Advisory Blend)</option></select>
+                </div>
+                <div class="field">
+                  <label for="ens-kronos-policy">Kronos Unavailable Policy</label>
+                  <select id="ens-kronos-policy">
+                    <option value="REQUIRE_KRONOS">REQUIRE_KRONOS (Fail-Closed NO_TRADE)</option>
+                    <option value="DEGRADE_TO_NON_KRONOS">DEGRADE_TO_NON_KRONOS (Labeled Fallback)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ens-kronos-weight">Max Kronos Weight (&le;0.25)</label>
+                  <input id="ens-kronos-weight" type="number" step="0.01" min="0" max="0.25" value="0.18">
+                </div>
+                <div class="field">
+                  <label for="ens-min-conf">Min Calibrated Confidence</label>
+                  <input id="ens-min-conf" type="number" step="0.01" min="0.50" max="0.95" value="0.53">
+                </div>
+                <div class="field">
+                  <label for="ens-min-oos">Min OOS Samples</label>
+                  <input id="ens-min-oos" type="number" min="1" max="5000" value="20">
+                </div>
+                <div class="field">
+                  <label for="ens-risk-pct">Per-Trade Risk Budget (%)</label>
+                  <input id="ens-risk-pct" type="number" step="0.05" min="0.05" max="5.0" value="0.50">
+                </div>
+                <div class="field">
+                  <label for="ens-max-sym-exp">Max Symbol Exposure (%)</label>
+                  <input id="ens-max-sym-exp" type="number" step="1" min="2" max="100" value="25">
+                </div>
+                <div class="field">
+                  <label for="ens-max-tot-exp">Max Total Exposure (%)</label>
+                  <input id="ens-max-tot-exp" type="number" step="1" min="5" max="100" value="80">
+                </div>
+                <div class="field">
+                  <label for="ens-max-dd">Max Drawdown Cap (%)</label>
+                  <input id="ens-max-dd" type="number" step="0.5" min="1" max="50" value="10.0">
+                </div>
+                <div class="field">
+                  <label for="ens-max-corr">Max Position Correlation</label>
+                  <input id="ens-max-corr" type="number" step="0.05" min="0.20" max="0.99" value="0.80">
+                </div>
+                <div class="field">
+                  <label for="ens-max-spread">Max Spread (bps)</label>
+                  <input id="ens-max-spread" type="number" step="1" min="1" max="500" value="35">
+                </div>
+                <div class="field">
+                  <label for="ens-max-pos">Max Open Positions</label>
+                  <input id="ens-max-pos" type="number" min="1" max="50" value="8">
+                </div>
+              </div>
+              <div class="button-row top-space">
+                <button type="submit" class="button primary xs" id="ens-save-risk-btn">Save Allocator &amp; Risk Budgets</button>
+              </div>
+            </form>
+          </article>
+        </div>
+
+        <!-- PANEL 3: EVALUATE WATCHLIST & INSPECT AGGREGATED DECISION / RISK / SIGNALS -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">IDEMPOTENT SINGLE DECISION PER INSTRUMENT / TIMEFRAME / BAR</p><h3>3. Watchlist Ensemble Evaluation, Risk Gate &amp; NO-TRADE Inspector</h3></div>
+            <span class="status-pill info" id="ens-eval-status-pill">IDLE</span>
+          </div>
+          <form id="ens-eval-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-eval-market">Market</label>
+                <select id="ens-eval-market"><option value="NSE">NSE · INR ₹</option><option value="NASDAQ">NASDAQ · USD $</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-eval-symbols">Watchlist Symbols (blank = saved watchlist)</label>
+                <input id="ens-eval-symbols" placeholder="RELIANCE, TCS or AAPL, MSFT">
+              </div>
+              <div class="field">
+                <label for="ens-eval-paper-mode">Execution Target</label>
+                <select id="ens-eval-paper-mode">
+                  <option value="false">Read-Only Evaluation Only (0 Orders)</option>
+                  <option value="true">LIVE-MARKET PAPER (Simulate Orders if Paper RUNNING · 0 Broker Calls)</option>
+                </select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ens-eval-btn">Evaluate Watchlist Concurrently</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ens-eval-summary">Configure OOS weights via Walk-Forward Ablation below (or manual JSON weights) and evaluate your watchlist.</div>
+
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bar Time</th>
+                  <th>Market / Symbol</th>
+                  <th>Final Decision</th>
+                  <th>Selected Qty</th>
+                  <th>Pre / Post Kronos</th>
+                  <th>Calibrated Conf (90% CI)</th>
+                  <th>Kronos Status</th>
+                  <th>NO_TRADE / Risk Summary</th>
+                  <th>Inspect</th>
+                </tr>
+              </thead>
+              <tbody id="ens-decisions-rows">
+                <tr><td colspan="9" class="empty-state">No ensemble bar decisions recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="content-grid two top-space">
+            <div class="panel inset-panel">
+              <p class="eyebrow">12 SHARED ACCOUNT-LEVEL RISK CHECKS (SELECTED DECISION)</p>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Risk Check</th><th>Pass</th><th>Actual</th><th>Limit</th><th>Detail</th></tr></thead>
+                  <tbody id="ens-risk-checks-rows"><tr><td colspan="5" class="empty-state">Select a decision row above.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="panel inset-panel">
+              <p class="eyebrow">PER-STRATEGY SIGNALS, WEIGHTS &amp; RATIONALES</p>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Variant / Family</th><th>Action</th><th>Raw Score</th><th>OOS Weight</th><th>Status</th><th>Rationale</th></tr></thead>
+                  <tbody id="ens-strategy-signals-rows"><tr><td colspan="6" class="empty-state">Select a decision row above.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="field top-space">
+            <label for="ens-weights-json">Active Strategy Weights JSON (Learned OOS Walk-Forward or Manual Override)</label>
+            <textarea id="ens-weights-json" rows="2" placeholder='{"sma_crossover_v0001_...": 0.25}'></textarea>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" id="ens-save-weights-btn">Apply Manual Weight Override</button>
+          </div>
+        </article>
+
+        <!-- PANEL 4: PROFITABILITY EVIDENCE, WALK-FORWARD CALIBRATION & KRONOS ON/OFF ABLATION -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">WALK-FORWARD OOS WEIGHTING · MULTIPLE-TESTING HAIRCUT · UNTOUCHED TEST · 2.0× COST STRESS</p><h3>4. Profitability Evidence &amp; Kronos On/Off Ablation Matrix</h3></div>
+          </div>
+          <form id="ens-ablation-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-abl-market">Market Fee Model</label>
+                <select id="ens-abl-market"><option value="NSE">NSE (INR STT/SEBI/GST)</option><option value="NASDAQ">NASDAQ (USD SEC/FINRA)</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-dataset">Historical Dataset</label>
+                <select id="ens-abl-dataset"></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-tf">Timeframe</label>
+                <select id="ens-abl-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1D">1D</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-persist">Persist OOS Weights &amp; Calibrator</label>
+                <select id="ens-abl-persist"><option value="true" selected>Yes (Update Market Allocator)</option><option value="false">No (Dry-Run Evidence Only)</option></select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ens-run-ablation-btn">Run Walk-Forward Calibration &amp; Untouched OOS Ablation</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ens-ablation-summary">Run an ablation to calibrate OOS probabilities, apply multiple-testing Sharpe haircuts, and compare No-Trade, Buy-and-Hold, Baselines, Ensemble (Kronos OFF), and Ensemble (Kronos ON).</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Strategy / Allocator</th>
+                  <th>Status</th>
+                  <th>Untouched 1× Net %</th>
+                  <th>Untouched Sharpe / Sortino</th>
+                  <th>Max DD %</th>
+                  <th>Trades / NO_TRADE</th>
+                  <th>Win % (90% CI)</th>
+                  <th>Stressed 2× Net %</th>
+                  <th>Stressed 2× Sharpe</th>
+                </tr>
+              </thead>
+              <tbody id="ens-ablation-rows">
+                <tr><td colspan="9" class="empty-state">No ablation run selected yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- PANEL 5: SCALING BENCHMARK -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">CONCURRENCY, LATENCY, MEMORY &amp; ZERO-MISSED-BAR VERIFICATION</p><h3>5. Parallel Evaluation Scaling Benchmark</h3></div>
+          </div>
+          <form id="ens-bench-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-bench-variants">Variant Counts (comma-separated)</label>
+                <input id="ens-bench-variants" value="24,96,256,1024">
+              </div>
+              <div class="field">
+                <label for="ens-bench-instruments">Instrument Counts (comma-separated)</label>
+                <input id="ens-bench-instruments" value="1,5,16">
+              </div>
+              <div class="field">
+                <label for="ens-bench-workers">Worker Threads</label>
+                <input id="ens-bench-workers" type="number" min="1" max="32" value="4">
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button secondary" id="ens-run-bench-btn">Run Scaling Benchmark</button>
+            </div>
+          </form>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Variants &times; Instruments</th>
+                  <th>Total Evaluations</th>
+                  <th>Workers</th>
+                  <th>Wall Latency (ms)</th>
+                  <th>Inst p50 / p95 (ms)</th>
+                  <th>Throughput (evals/s)</th>
+                  <th>Peak Heap / RSS (MB)</th>
+                  <th>Missed / Dup Bars</th>
+                </tr>
+              </thead>
+              <tbody id="ens-bench-rows">
+                <tr><td colspan="8" class="empty-state">Click Run Scaling Benchmark to measure bounded parallel throughput up to 1,024+ variants.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-body">
+    <div class="panel-head"><h2 id="modal-title">Confirm action</h2><button type="button" class="icon-button" id="modal-close" aria-label="Close confirmation">×</button></div>
+    <div id="modal-body" class="modal-body"></div>
+    <div class="field" id="modal-phrase-field" hidden><label for="modal-phrase" id="modal-phrase-label">Confirmation phrase</label><input id="modal-phrase" autocomplete="off"></div>
+    <p class="form-error" id="modal-error" role="alert"></p>
+    <div class="button-row end"><button type="button" class="button secondary" id="modal-cancel">Cancel</button><button type="button" class="button danger" id="modal-confirm">Confirm</button></div>
+  </section>
+</div>
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<script src="/static/terminal/terminal.js"></script>
+</body>
+</html>

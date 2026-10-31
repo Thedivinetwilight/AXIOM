@@ -100,13 +100,15 @@ class TestEvaluator:
             cur = decision["current"]
             assert cand["oos_expectancy"] > cur["oos_expectancy"]
             assert cand["oos_trades"] >= 3
-        # Baseline recording path (no candidate): stays active, no auto-deploy.
+        # Baseline recording is comparison evidence only, never a promotion.
         decision2 = evaluate_and_maybe_promote(
             repo, series, "momentum", {"period": 2, "threshold": 0.0}, engine, "1m")
-        # Honest contract: the baseline run records the current parameters as
-        # the reference model version; deployment remains lifecycle-gated.
-        assert decision2["promoted"] is True
-        assert decision2["promoted_version"] == "momentum-baseline"
+        assert decision2["promoted"] is False
+        assert decision2["promoted_version"] is None
+        assert decision2["baseline_reference_only"] is True
+        baseline = next(v for v in repo.list_model_versions()
+                        if v["version"] == "momentum-baseline")
+        assert baseline["promoted"] is False
 
     def test_propose_candidate_is_deterministic(self):
         params = {"period": 2}

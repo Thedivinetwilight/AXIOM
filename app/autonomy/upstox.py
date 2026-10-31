@@ -1,0 +1,1183 @@
+"""Current Upstox read-only, instrument and explicitly permitted LIVE adapters.
+
+Documentation checked 2026-10-25:
+- profile: GET /v2/user/profile
+- funds: GET /v3/user/get-funds-and-margin
+- positions: GET /v2/portfolio/short-term-positions
+- margin calculation: POST /v2/charges/margin (not an order)
+- protected entries: multi-leg GTT /v3/order/gtt/place
+- protection modification/cancel: /v3/order/gtt/modify|cancel
+- registered static IPs: GET /v2/user/ip
+
+No write is retried.  Every write requires an in-memory ExecutionPermit issued
+by the activated daily session.  A response is only an acknowledgement until
+broker reconciliation confirms the actual GTT rules/positions/orders.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timedelta, timezone
+import gzip
+import hashlib
+import ipaddress
+import json
+import math
+from pathlib import Path
+import re
+import threading
+import time
+from typing import Any, Callable
+from urllib.parse import quote as url_quote, urlencode, urlsplit
+
+import httpx
+
+from app.autonomy.models import (
+    AccountProfile, AccountSnapshot, ExecutionPermit, Instrument, Position,
+    ProtectedOrder, Submission, validate_order_route,
+)
+from app.autonomy.risk import floor_tick, ceil_tick
+
+OFFICIAL_API_BASE = "https://api.upstox.com"
+API_BASE = OFFICIAL_API_BASE
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+_ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
+
+
+def _clean_identity(value: str) -> str:
+    """Normalize Unicode NFKC, strip BOM/zero-width/soft-hyphen characters,
+    and collapse internal whitespace from identity fields."""
+    from app.markets.nse_reconciliation import clean_nse_identity
+
+    return clean_nse_identity(value)
+
+
+def _query_suffix(params: dict | None) -> str:
+    """Token-free, percent-encoded query display (params never hold secrets)."""
+    if not params:
+        return ""
+    return "?" + urlencode(sorted(params.items()))
+
+
+def _sanitized_error_body(response) -> str:
+    """Whitelisted digest of an Upstox error body: error codes and messages
+    only. Constructed from named fields, so credentials can never appear."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return "non-JSON error body"
+    if not isinstance(payload, dict):
+        return "unreadable error body"
+    parts = []
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        parts.append(f"message={message[:160]}")
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        for item in errors[:3]:
+            if isinstance(item, dict):
+                code = str(item.get("errorCode") or item.get("error_code") or "").strip()
+                text = str(item.get("message") or "")[:160]
+                parts.append(f"{code} {text}".strip())
+            elif isinstance(item, str):
+                parts.append(item[:160])
+    return "; ".join(part for part in parts if part)[:400] or "error body without details"
+
+
+def validate_official_upstox_request(path: str) -> None:
+    """Reject forged bases/absolute URLs before credentials or network are used."""
+    try:
+        base = urlsplit(API_BASE)
+        relative = urlsplit(str(path))
+        base_port = base.port
+    except (TypeError, ValueError):
+        raise ValueError("Official Upstox API endpoint and relative path are required") from None
+    if (API_BASE != OFFICIAL_API_BASE or base.scheme != "https"
+            or base.hostname != "api.upstox.com" or base_port not in {None, 443}
+            or base.username or base.password or base.path or base.query or base.fragment):
+        raise ValueError("Upstox order/history requests require the official https://api.upstox.com base")
+    if (relative.scheme or relative.netloc or relative.query or relative.fragment
+            or not relative.path.startswith("/") or not relative.path.startswith("/v")):
+        raise ValueError("Upstox order/history requests require a relative API path beginning /v")
+
+
+class UpstoxError(RuntimeError):
+    pass
+
+
+class UpstoxAuthError(UpstoxError):
+    pass
+
+
+class UpstoxRejected(UpstoxError):
+    pass
+
+
+class AmbiguousSubmission(UpstoxError):
+    pass
+
+
+class ReconciliationFailure(UpstoxError):
+    pass
+
+
+class NoTradedQuote(ReconciliationFailure):
+    """The provider returned a snapshot for the key but no traded price.
+
+    Fail-closed: an illiquid/untraded/closed-market instrument is never
+    reported as a valid quote. The observed timestamp is carried so the
+    caller can still report freshness honestly.
+    """
+
+    def __init__(self, message: str, *, timestamp: datetime | None = None):
+        super().__init__(message)
+        self.timestamp = timestamp
+
+
+class InvalidQuote(ReconciliationFailure):
+    """The quote response shape/fields are invalid or missing."""
+
+    def __init__(self, message: str, *, timestamp: datetime | None = None):
+        super().__init__(message)
+        self.timestamp = timestamp
+
+
+@dataclass(frozen=True)
+class Quote:
+    instrument_key: str
+    bid: float
+    ask: float
+    last: float
+    volume: float
+    timestamp: datetime
+
+
+class UpstoxReadOnly:
+    """Token-scoped GET client.  This class has no order mutation methods."""
+
+    def __init__(self, token_provider: Callable[[], str], *,
+                 transport: httpx.BaseTransport | None = None,
+                 timeout: float = 20.0, clock: Callable[[], datetime] | None = None):
+        self._token_provider = token_provider
+        self._transport = transport
+        self._timeout = timeout
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _headers(self) -> dict[str, str]:
+        token = self._token_provider().strip()
+        if not token:
+            raise UpstoxAuthError("Daily Upstox authorization is missing or expired")
+        return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    def _request(self, method: str, path: str, *, params: dict | None = None,
+                 json_body: dict | None = None, write: bool = False,
+                 not_found_ok: bool = False, extra_headers: dict | None = None) -> dict:
+        validate_official_upstox_request(path)
+        try:
+            with httpx.Client(base_url=API_BASE, transport=self._transport,
+                              timeout=self._timeout) as client:
+                response = client.request(method, path, params=params, json=json_body,
+                                          headers=self._headers() | (extra_headers or {}))
+        except httpx.HTTPError as exc:
+            if write:
+                raise AmbiguousSubmission(
+                    "Upstox write outcome is unknown; reconcile before any further action"
+                ) from None
+            raise ReconciliationFailure("Upstox read/reconciliation endpoint is unreachable") from None
+        if response.status_code in {401, 403}:
+            raise UpstoxAuthError("Upstox rejected or expired the daily credential")
+        if not_found_ok and response.status_code == 404:
+            return {"status": "not_found", "data": None}
+        if response.status_code == 429:
+            if write:
+                raise UpstoxRejected("Upstox rate limit rejected the write; reconcile and stop")
+            raise ReconciliationFailure("Upstox read rate limit reached")
+        if response.status_code >= 400:
+            if write:
+                raise UpstoxRejected(f"Upstox rejected the write with HTTP {response.status_code}")
+            raise ReconciliationFailure(
+                f"Upstox read failed with HTTP {response.status_code} "
+                f"({method} {path}{_query_suffix(params)}): "
+                f"{_sanitized_error_body(response)}"
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            if write:
+                raise AmbiguousSubmission("Upstox write returned an unreadable outcome") from None
+            raise ReconciliationFailure("Upstox returned a non-JSON response") from None
+        if not isinstance(payload, dict) or payload.get("status") != "success":
+            if write:
+                raise UpstoxRejected("Upstox did not acknowledge a successful write")
+            raise ReconciliationFailure("Upstox response did not report success")
+        return payload
+
+    def server_time(self) -> datetime:
+        """Read the provider's Date header for clock synchronization.
+
+        A lightweight GET on the read-only profile route; only response
+        headers are inspected and the token is never logged or returned.
+        """
+        try:
+            with httpx.Client(base_url=API_BASE, transport=self._transport,
+                              timeout=self._timeout) as client:
+                response = client.get("/v2/user/profile", headers=self._headers())
+        except httpx.HTTPError:
+            raise ReconciliationFailure("Upstox is unreachable; clock sync unverified") from None
+        from email.utils import parsedate_to_datetime
+
+        raw_date = response.headers.get("Date") or ""
+        try:
+            parsed = parsedate_to_datetime(raw_date)
+        except (TypeError, ValueError):
+            raise ReconciliationFailure("Upstox response carried no usable Date header") from None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+    def profile(self, *, include_static_ips: bool = False) -> AccountProfile:
+        data = self._request("GET", "/v2/user/profile")["data"]
+        if not isinstance(data, dict):
+            raise ReconciliationFailure("Upstox profile shape is invalid")
+        user = str(data.get("user_id") or "")
+        fingerprint = hashlib.sha256(user.encode()).hexdigest()[:16] if user else ""
+        static_ips: frozenset[str] = frozenset()
+        if include_static_ips:
+            ip_data = self._request("GET", "/v2/user/ip")["data"]
+            values = [ip_data.get("primary_ip"), ip_data.get("secondary_ip")]
+            parsed = set()
+            for value in values:
+                if value:
+                    try:
+                        parsed.add(str(ipaddress.ip_address(str(value))))
+                    except ValueError:
+                        raise ReconciliationFailure("Upstox returned an invalid registered IP") from None
+            static_ips = frozenset(parsed)
+        return AccountProfile(
+            active=data.get("is_active") is True,
+            exchanges=frozenset(map(str, data.get("exchanges") or [])),
+            products=frozenset(map(str, data.get("products") or [])),
+            order_types=frozenset(map(str, data.get("order_types") or [])),
+            user_fingerprint=fingerprint,
+            static_ips=static_ips,
+        )
+
+    @staticmethod
+    def _timestamp(value: Any) -> datetime:
+        if isinstance(value, (int, float)) and value > 0:
+            seconds = value / 1000 if value > 1e11 else value
+            # Upstox timestamps can be milliseconds or microseconds.
+            if seconds > 1e11:
+                seconds /= 1000
+            return datetime.fromtimestamp(seconds, timezone.utc)
+        if isinstance(value, str) and value:
+            if value.isdigit():
+                # Documented last_trade_time: epoch milliseconds as a string.
+                return UpstoxReadOnly._timestamp(int(value))
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=IST)
+            return parsed.astimezone(timezone.utc)
+        raise ReconciliationFailure("Fresh execution quote timestamp is missing")
+
+    @staticmethod
+    def _quote_entry(payload: dict, instrument_key: str) -> dict:
+        """Locate the exact key's quote in a Full Market Quotes response.
+
+        The official GET /v2/market-quote/quotes response keys ``data`` by
+        "EXCHANGE:SYMBOL" and carries the exact key in ``instrument_token``;
+        older/test shapes key by the instrument key itself.
+        """
+        data = payload.get("data")
+        if not isinstance(data, dict) or not data:
+            raise ReconciliationFailure("Upstox full-quote shape is invalid")
+        for value in data.values():
+            if isinstance(value, dict) and value.get("instrument_token") == instrument_key:
+                return value
+        raw = data.get(instrument_key)
+        if isinstance(raw, dict):
+            return raw
+        if len(data) == 1:
+            only = next(iter(data.values()))
+            if isinstance(only, dict):
+                return only
+        raise ReconciliationFailure("Exact instrument quote was not returned")
+
+    def quote(self, instrument_key: str) -> Quote:
+        # Official Full Market Quotes endpoint (upstox.com/developer/
+        # api-documentation/get-full-market-quote/): GET /v2/market-quote/quotes
+        # with an instrument_key query parameter. The previously used
+        # /v2/market-quote/full path is not a documented endpoint and returns
+        # HTTP 400 against the live API.
+        payload = self._request("GET", "/v2/market-quote/quotes",
+                                params={"instrument_key": instrument_key})
+        raw = self._quote_entry(payload, instrument_key)
+        depth = raw.get("depth") or {}
+        buy, sell = depth.get("buy") or [], depth.get("sell") or []
+        if not buy or not sell:
+            raise ReconciliationFailure("Executable bid/ask depth is unavailable")
+        try:
+            bid = float(buy[0]["price"])
+            ask = float(sell[0]["price"])
+            last = float(raw["last_price"])
+            volume = float(raw.get("volume") or 0)
+            stamp = self._timestamp(raw.get("timestamp") or raw.get("last_trade_time"))
+        except (KeyError, TypeError, ValueError):
+            raise ReconciliationFailure("Full quote has invalid price/depth fields") from None
+        if not all(math.isfinite(v) and v > 0 for v in (bid, ask, last)) or ask < bid \
+                or volume < 0:
+            raise ReconciliationFailure("Full quote failed validation")
+        return Quote(instrument_key, bid, ask, last, volume, stamp)
+
+    def quote_snapshot(self, instrument_key: str) -> Quote:
+        """Read-only connectivity snapshot: last price + quote timestamp.
+
+        Executable bid/ask depth is NOT required here — an illiquid or
+        closed-market book is legitimate — so the connection test judges
+        freshness from the quote timestamp instead. Execution flows keep the
+        strict :meth:`quote` (depth and full validation required).
+
+        Fail-closed states are explicit (never fabricated or substituted):
+        - :class:`NoTradedQuote` — snapshot present but ``last_price`` is
+          missing/zero/non-positive (untraded or illiquid);
+        - :class:`InvalidQuote` — required fields missing or unparseable.
+        """
+        payload = self._request("GET", "/v2/market-quote/quotes",
+                                params={"instrument_key": instrument_key})
+        raw = self._quote_entry(payload, instrument_key)
+        stamp: datetime | None = None
+        try:
+            stamp = self._timestamp(raw.get("timestamp") or raw.get("last_trade_time"))
+        except ReconciliationFailure:
+            stamp = None
+        volume_raw = raw.get("volume")
+        try:
+            volume = float(volume_raw) if volume_raw is not None else None
+        except (TypeError, ValueError):
+            volume = None
+        if "last_price" not in raw:
+            raise InvalidQuote(
+                f"Upstox quote snapshot for {instrument_key} is missing the "
+                "documented last_price field; fail-closed, nothing substituted",
+                timestamp=stamp,
+            )
+        try:
+            last = float(raw["last_price"])
+        except (TypeError, ValueError):
+            raise InvalidQuote(
+                f"Upstox quote snapshot last_price={raw.get('last_price')!r} "
+                "is not numeric; fail-closed, nothing substituted",
+                timestamp=stamp,
+            ) from None
+        if not (math.isfinite(last) and last > 0):
+            reference = raw.get("ohlc") or {}
+            previous_close = reference.get("close") if isinstance(reference, dict) else None
+            detail = (
+                f"Upstox returned the snapshot for {instrument_key} but "
+                f"last_price={last!r} (volume={volume!r}) — no traded price "
+                "(untraded/illiquid or market closed); fail-closed, not a "
+                "valid quote"
+            )
+            if previous_close is not None:
+                detail += f"; previous close {previous_close!r} is reference only"
+            raise NoTradedQuote(detail, timestamp=stamp)
+        if stamp is None:
+            raise InvalidQuote(
+                f"Upstox quote snapshot for {instrument_key} has no usable "
+                "timestamp/last_trade_time; fail-closed, freshness unknown",
+                timestamp=None,
+            )
+        depth = raw.get("depth") or {}
+        buy, sell = depth.get("buy") or [], depth.get("sell") or []
+        bid = ask = 0.0
+        try:
+            if buy and sell and float(buy[0]["price"]) > 0 and float(sell[0]["price"]) > 0:
+                bid, ask = float(buy[0]["price"]), float(sell[0]["price"])
+        except (KeyError, TypeError, ValueError):
+            bid = ask = 0.0
+        return Quote(instrument_key, bid, ask, last, volume or 0.0, stamp)
+
+    def market_timings(self, trading_day: str) -> dict[str, tuple[datetime, datetime]]:
+        payload = self._request("GET", f"/v2/market/timings/{trading_day}")
+        data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            raise ReconciliationFailure("Exchange session timings are unavailable")
+        result = {}
+        for raw in data:
+            try:
+                exchange = str(raw["exchange"])
+                start = self._timestamp(raw["start_time"])
+                end = self._timestamp(raw["end_time"])
+            except (KeyError, TypeError, ValueError):
+                raise ReconciliationFailure("Exchange session timing is incomplete") from None
+            if end <= start:
+                raise ReconciliationFailure("Exchange session timing is invalid")
+            result[exchange] = (start, end)
+        return result
+
+    def intraday_candles(self, instrument_key: str, display_symbol: str,
+                         timeframe: str) -> list:
+        from app.data.models import Candle, TIMEFRAMES, parse_timestamp
+        if timeframe not in TIMEFRAMES or timeframe == "1D":
+            raise ValueError("Unsupported intraday timeframe")
+        minutes = TIMEFRAMES[timeframe] // 60
+        path = (f"/v3/historical-candle/intraday/{url_quote(instrument_key, safe='')}"
+                f"/minutes/{minutes}")
+        payload = self._request("GET", path)
+        rows = (payload.get("data") or {}).get("candles")
+        if not isinstance(rows, list):
+            raise ReconciliationFailure("Intraday candle response is incomplete")
+        now = self._clock().astimezone(timezone.utc)
+        parsed_bars = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise ReconciliationFailure("Intraday candle row is malformed")
+            try:
+                timestamp = row[0]
+                if timestamp is None or timestamp == "":
+                    raise ValueError("missing candle timestamp")
+                parsed_timestamp = parse_timestamp(timestamp)
+            except (KeyError, TypeError, ValueError):
+                raise ReconciliationFailure(
+                    "Intraday candle timestamp is missing or invalid"
+                ) from None
+            try:
+                bar = Candle.from_dict({
+                    "timestamp": parsed_timestamp, "open": row[1], "high": row[2], "low": row[3],
+                    "close": row[4], "volume": row[5], "symbol": display_symbol,
+                })
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ReconciliationFailure("Intraday candle values are invalid") from exc
+            if bar.timestamp > now + timedelta(seconds=5):
+                raise ReconciliationFailure("Future candle received")
+            parsed_bars.append(bar)
+
+        # V3 examples may return newest-first rows while the engine requires
+        # ascending OPEN timestamps.  Normalize only after every timestamp has
+        # parsed; never deduplicate or repair provider data at this boundary.
+        parsed_bars.sort(key=lambda bar: bar.timestamp)
+        for previous, current in zip(parsed_bars, parsed_bars[1:]):
+            if current.timestamp == previous.timestamp:
+                raise ReconciliationFailure("Duplicate candle timestamp received")
+
+        # Any provider row may still be forming, regardless of whether it was
+        # first or last on the wire.  Forming rows never reach strategy,
+        # forecast, stops, execution, or downstream chronological validation.
+        return [
+            bar for bar in parsed_bars
+            if bar.available_at(timeframe) <= now
+        ]
+
+    def historical_candles(self, instrument_key: str, display_symbol: str,
+                           timeframe: str, *, days: int | None = None) -> list:
+        """Read-only historical candles via Upstox V3 (`/v3/historical-candle/...`).
+
+        Supports `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, and `1D` both during and
+        outside regular NSE trading hours without substituting sample data.
+        """
+        from app.data.models import Candle, TIMEFRAMES, parse_timestamp
+
+        if timeframe not in TIMEFRAMES:
+            raise ValueError(f"Unsupported historical timeframe: {timeframe}")
+        now = self._clock().astimezone(timezone.utc)
+        to_day = now.astimezone(IST).date()
+        if timeframe == "1D":
+            unit, interval = "days", 1
+            lookback_days = max(5, min(int(days or 180), 3650))
+        elif timeframe in {"1h", "4h"}:
+            unit, interval = "hours", TIMEFRAMES[timeframe] // 3600
+            lookback_days = max(2, min(int(days or 30), 180))
+        else:
+            unit, interval = "minutes", TIMEFRAMES[timeframe] // 60
+            lookback_days = max(1, min(int(days or 5), 30))
+        from_day = to_day - timedelta(days=lookback_days)
+        encoded_key = url_quote(instrument_key, safe="")
+        path = (
+            f"/v3/historical-candle/{encoded_key}/{unit}/{interval}"
+            f"/{to_day.isoformat()}/{from_day.isoformat()}"
+        )
+        payload = self._request("GET", path)
+        rows = (payload.get("data") or {}).get("candles")
+        if not isinstance(rows, list):
+            raise ReconciliationFailure("Historical candle response is incomplete")
+        parsed_bars = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise ReconciliationFailure("Historical candle row is malformed")
+            try:
+                timestamp = row[0]
+                if timestamp is None or timestamp == "":
+                    raise ValueError("missing candle timestamp")
+                parsed_timestamp = parse_timestamp(timestamp)
+                bar = Candle.from_dict({
+                    "timestamp": parsed_timestamp,
+                    "open": row[1],
+                    "high": row[2],
+                    "low": row[3],
+                    "close": row[4],
+                    "volume": row[5],
+                    "symbol": display_symbol,
+                })
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ReconciliationFailure("Historical candle values are invalid") from exc
+            if bar.timestamp > now + timedelta(days=1 if timeframe == "1D" else 0, seconds=5):
+                raise ReconciliationFailure("Future candle received")
+            parsed_bars.append(bar)
+        parsed_bars.sort(key=lambda item: item.timestamp)
+        for previous, current in zip(parsed_bars, parsed_bars[1:]):
+            if current.timestamp == previous.timestamp:
+                raise ReconciliationFailure("Duplicate candle timestamp received")
+        if timeframe == "1D":
+            return parsed_bars
+        return [bar for bar in parsed_bars if bar.available_at(timeframe) <= now]
+
+    def daily_candles(self, instrument_key: str, display_symbol: str, *, days: int = 180) -> list:
+        return self.historical_candles(instrument_key, display_symbol, "1D", days=days)
+
+
+class UpstoxLiveBroker(UpstoxReadOnly):
+    broker_mutations_reachable = True
+    authoritative = True
+    # Process-wide guard: separate sessions/adapters cannot each spend the
+    # account's full order-write rate allowance independently.
+    _shared_write_lock = threading.Lock()
+    _shared_last_write = 0.0
+
+    def __init__(self, token_provider: Callable[[], str], *, algo_name: str,
+                 write_rate_per_second: float = 5.0, max_write_attempts: int = 3,
+                 transport: httpx.BaseTransport | None = None,
+                 timeout: float = 20.0, clock: Callable[[], datetime] | None = None):
+        super().__init__(token_provider, transport=transport, timeout=timeout, clock=clock)
+        if not algo_name.strip() or any(c in algo_name for c in "\r\n"):
+            raise ValueError("A configured Upstox Algo Name is required for live order writes")
+        self.algo_name = algo_name.strip()
+        self._minimum_write_interval = 1.0 / write_rate_per_second
+        if not 1 <= max_write_attempts <= 5:
+            raise ValueError("max_write_attempts must be between 1 and 5")
+        self._max_write_attempts = max_write_attempts
+        self._write_attempts: dict[str, int] = {}
+
+    def _write(self, method: str, path: str, body: dict, permit: ExecutionPermit,
+               session_id: str, *, attempt_key: str = "") -> dict:
+        permit.validate(session_id, self._clock())
+        if attempt_key:
+            used = self._write_attempts.get(attempt_key, 0) + 1
+            if used > self._max_write_attempts:
+                raise UpstoxRejected(
+                    "hard limit: write attempts exceeded for this order; "
+                    "reconcile before any further action"
+                )
+            self._write_attempts[attempt_key] = used
+        with UpstoxLiveBroker._shared_write_lock:
+            elapsed = time.monotonic() - UpstoxLiveBroker._shared_last_write
+            if elapsed < self._minimum_write_interval:
+                time.sleep(self._minimum_write_interval - elapsed)
+            UpstoxLiveBroker._shared_last_write = time.monotonic()
+            return self._request(method, path, json_body=body, write=True,
+                                 extra_headers={"X-Algo-Name": self.algo_name,
+                                                "Content-Type": "application/json"})
+
+    @staticmethod
+    def _order_payload(order: ProtectedOrder) -> dict:
+        return {
+            "type": "MULTIPLE", "quantity": order.quantity, "product": order.product,
+            "instrument_token": order.instrument_key, "transaction_type": order.side,
+            "rules": [
+                {"strategy": "ENTRY", "trigger_type": "IMMEDIATE",
+                 "trigger_price": order.limit_price},
+                {"strategy": "STOPLOSS", "trigger_type": "IMMEDIATE",
+                 "trigger_price": order.stop_price},
+                {"strategy": "TARGET", "trigger_type": "IMMEDIATE",
+                 "trigger_price": order.target_price},
+            ],
+        }
+
+    @staticmethod
+    def _ids(payload: dict, field: str) -> tuple[str, ...]:
+        data = payload.get("data") or {}
+        values = data.get(field) or []
+        if isinstance(values, str):
+            values = [values]
+        if not values or not all(isinstance(value, str) and value.startswith("GTT-") for value in values):
+            raise AmbiguousSubmission("Upstox acknowledgement lacks a valid GTT id")
+        return tuple(values)
+
+    def place_protected_entry(self, order: ProtectedOrder,
+                              permit: ExecutionPermit, *, session_id: str,
+                              instrument: Instrument) -> Submission:
+        validate_order_route(order, instrument)
+        payload = self._write("POST", "/v3/order/gtt/place", self._order_payload(order),
+                              permit, session_id, attempt_key=f"entry:{order.intent_id}")
+        ids = self._ids(payload, "gtt_order_ids")
+        return Submission(ids, "ACKNOWLEDGED_UNRECONCILED")
+
+    def get_gtt(self, identifier: str) -> dict | None:
+        payload = self._request("GET", "/v3/order/gtt",
+                                params={"gtt_order_id": identifier}, not_found_ok=True)
+        data = payload.get("data")
+        if data is None:
+            return None
+        records = data if isinstance(data, list) else [data]
+        exact = [record for record in records if record.get("gtt_order_id") == identifier]
+        if len(exact) != 1:
+            raise ReconciliationFailure("GTT reconciliation did not return one exact record")
+        return exact[0]
+
+    def list_gtt(self) -> list[dict]:
+        data = self._request("GET", "/v3/order/gtt").get("data")
+        if not isinstance(data, list):
+            raise ReconciliationFailure("GTT list shape is invalid")
+        return data
+
+    def find_matching_gtt(self, order: ProtectedOrder) -> tuple[str, ...]:
+        """Locate a possibly acknowledged order after ambiguity; never submit again."""
+        expected = self._order_payload(order)
+        matches = []
+        for record in self.list_gtt():
+            if record.get("instrument_token") != order.instrument_key \
+                    or record.get("quantity") != order.quantity \
+                    or record.get("product") != order.product:
+                continue
+            rules = {rule.get("strategy"): rule for rule in record.get("rules") or []}
+            if set(rules) != {"ENTRY", "STOPLOSS", "TARGET"}:
+                continue
+            if all(math.isclose(float(rules[name]["trigger_price"]), float(expected_rule["trigger_price"]),
+                                rel_tol=0, abs_tol=1e-9)
+                   for name, expected_rule in zip(("ENTRY", "STOPLOSS", "TARGET"), expected["rules"])):
+                matches.append(str(record.get("gtt_order_id") or ""))
+        return tuple(matches)
+
+    def modify_stop(self, identifier: str, new_stop: float,
+                    permit: ExecutionPermit, *, session_id: str,
+                    instrument: Instrument) -> Submission:
+        # Confirm the old record first.  Never cancel/recreate protection and
+        # never send a loosening modification.  The target is rebuilt from the
+        # current broker record; a derived value could silently change payoff.
+        record = self.get_gtt(identifier)
+        if record is None:
+            raise ReconciliationFailure("Existing protection cannot be confirmed")
+        by_strategy = {rule.get("strategy"): rule for rule in record.get("rules") or []}
+        if set(by_strategy) != {"ENTRY", "STOPLOSS", "TARGET"}:
+            raise ReconciliationFailure("Existing GTT protection rules are incomplete")
+        entry = by_strategy["ENTRY"]
+        target = by_strategy["TARGET"]
+        stop = by_strategy["STOPLOSS"]
+        entry_side = entry.get("transaction_type")
+        if entry_side not in {"BUY", "SELL"}:
+            raise ReconciliationFailure("GTT entry side is missing")
+        old = float(stop["trigger_price"])
+        if not math.isfinite(new_stop) or new_stop <= 0:
+            raise UpstoxRejected("Protective stop is not a finite positive price")
+        if (entry_side == "BUY" and new_stop <= old) or (entry_side == "SELL" and new_stop >= old):
+            raise UpstoxRejected("Refusing to loosen or repeat a protective stop")
+        # Tick validation is deliberately performed before any write.
+        aligned = floor_tick(new_stop, instrument.tick_size) if entry_side == "BUY" \
+            else ceil_tick(new_stop, instrument.tick_size)
+        if not math.isclose(aligned, new_stop, rel_tol=0, abs_tol=instrument.tick_size * 1e-7):
+            raise UpstoxRejected("Protective stop is not aligned to the contract tick")
+        rules = [
+            {"strategy": "ENTRY", "trigger_type": entry.get("trigger_type"),
+             "trigger_price": entry.get("trigger_price")},
+            {"strategy": "STOPLOSS", "trigger_type": stop.get("trigger_type") or "IMMEDIATE",
+             "trigger_price": new_stop},
+            {"strategy": "TARGET", "trigger_type": target.get("trigger_type"),
+             "trigger_price": target.get("trigger_price")},
+        ]
+        if any(rule["trigger_price"] is None or rule["trigger_type"] is None for rule in rules):
+            raise ReconciliationFailure("GTT rules have incomplete trigger metadata")
+        if rules[1]["trigger_type"] != "IMMEDIATE" or rules[2]["trigger_type"] != "IMMEDIATE":
+            raise ReconciliationFailure("GTT protection legs are not IMMEDIATE as required")
+        body = {"type": "MULTIPLE", "quantity": record["quantity"],
+                "gtt_order_id": identifier, "rules": rules}
+        payload = self._write("PUT", "/v3/order/gtt/modify", body, permit, session_id,
+                              attempt_key=f"modify:{identifier}")
+        return Submission(self._ids(payload, "gtt_order_ids"), "MODIFIED_UNRECONCILED")
+
+    def cancel_gtt(self, identifier: str, permit: ExecutionPermit, *,
+                   session_id: str) -> Submission:
+        record = self.get_gtt(identifier)
+        if record is None:
+            raise ReconciliationFailure("Cannot confirm that the GTT is safe to cancel")
+        entry = next((rule for rule in record.get("rules") or []
+                      if rule.get("strategy") == "ENTRY"), None)
+        if entry is None or entry.get("status") not in {"SCHEDULED", "PENDING", "OPEN"}:
+            raise UpstoxRejected("Refusing to cancel triggered/filled protection")
+        positions = self._positions()
+        if any(p.instrument_key == record.get("instrument_token") and p.quantity
+               for p in positions):
+            raise UpstoxRejected("Refusing to remove protection from an open position")
+        payload = self._write("DELETE", "/v3/order/gtt/cancel",
+                              {"gtt_order_id": identifier}, permit, session_id,
+                              attempt_key=f"cancel:{identifier}")
+        return Submission(self._ids(payload, "gtt_order_ids"), "CANCELLED_UNRECONCILED")
+
+    def margin_for(self, order: ProtectedOrder) -> float:
+        payload = self._request("POST", "/v2/charges/margin", json_body={"instruments": [{
+            "instrument_key": order.instrument_key, "quantity": order.quantity,
+            "transaction_type": order.side, "product": order.product,
+            "price": order.margin_price if order.margin_price is not None else order.limit_price,
+        }]})
+        try:
+            margin = float(payload["data"]["final_margin"])
+        except (KeyError, TypeError, ValueError):
+            raise ReconciliationFailure("Upstox margin response is incomplete") from None
+        if not math.isfinite(margin) or margin <= 0:
+            raise ReconciliationFailure("Upstox margin is invalid for this exact route")
+        return margin
+
+    def _positions(self) -> tuple[Position, ...]:
+        data = self._request("GET", "/v2/portfolio/short-term-positions")["data"]
+        return self._positions_from_raw(data)
+
+    def account(self) -> AccountSnapshot:
+        funds_payload, positions_payload = (
+            self._request("GET", "/v3/user/get-funds-and-margin",
+                          extra_headers={"Api-Version": "3.0"}),
+            self._request("GET", "/v2/portfolio/short-term-positions"),
+        )
+        try:
+            funds = funds_payload["data"]["available_to_trade"]
+            available = float(funds["total"])
+            cash_used = float(funds["cash_available_to_trade"]["margin_used"]["total"])
+            pledge_used = float(funds["pledge_available_to_trade"]["margin_used"]["total"])
+            raw_positions = positions_payload["data"]
+            day_pnl = sum(float(raw.get("pnl") or 0) for raw in raw_positions)
+        except (KeyError, TypeError, ValueError):
+            raise ReconciliationFailure("Funds/position account response is incomplete") from None
+        positions = self._positions_from_raw(raw_positions)
+        used = cash_used + pledge_used
+        equity = available + used
+        snapshot = AccountSnapshot(equity, available, used, day_pnl, positions,
+                                   self._clock(), True)
+        snapshot.validate()
+        return snapshot
+
+    @staticmethod
+    def _positions_from_raw(data: Any) -> tuple[Position, ...]:
+        if not isinstance(data, list):
+            raise ReconciliationFailure("Position response is invalid")
+        result = []
+        for raw in data:
+            try:
+                quantity = float(raw.get("quantity") or 0)
+                if not quantity:
+                    continue
+                average_raw = raw.get("average_price")
+                if average_raw is None:
+                    average_raw = ((raw.get("buy_value") if quantity > 0 else raw.get("sell_value"))
+                                   / abs(quantity))
+                position = Position(
+                    instrument_key=str(raw["instrument_token"]), quantity=quantity,
+                    average_price=float(average_raw), last_price=float(raw["last_price"]),
+                    multiplier=float(raw.get("multiplier") or 1.0),
+                    realised=float(raw.get("realised") or 0),
+                    unrealised=float(raw.get("unrealised") or 0),
+                )
+                if position.average_price <= 0 or position.last_price <= 0 \
+                        or position.multiplier <= 0 or not all(math.isfinite(v) for v in (
+                            position.average_price, position.last_price, position.multiplier,
+                            position.realised, position.unrealised)):
+                    raise ValueError("Invalid position economics")
+            except (KeyError, TypeError, ValueError):
+                raise ReconciliationFailure("Position fields are invalid") from None
+            result.append(position)
+        return tuple(result)
+
+    def orders(self) -> list[dict]:
+        data = self._request("GET", "/v2/order/retrieve-all")["data"]
+        if not isinstance(data, list):
+            raise ReconciliationFailure("Order book response is invalid")
+        return data
+
+    def order_history(self, order_id: str) -> list[dict]:
+        data = self._request("GET", "/v2/order/history", params={"order_id": order_id})["data"]
+        if not isinstance(data, list) or not data:
+            raise ReconciliationFailure("Order history is missing")
+        return data
+
+
+class UpstoxRecoveryReadOnly(UpstoxReadOnly):
+    """Account/GTT reads for recovered sessions; no order-write methods exist."""
+    broker_mutations_reachable = False
+    authoritative = True
+    _order_payload = staticmethod(UpstoxLiveBroker._order_payload)
+    _positions_from_raw = staticmethod(UpstoxLiveBroker._positions_from_raw)
+    get_gtt = UpstoxLiveBroker.get_gtt
+    list_gtt = UpstoxLiveBroker.list_gtt
+    find_matching_gtt = UpstoxLiveBroker.find_matching_gtt
+    _positions = UpstoxLiveBroker._positions
+    account = UpstoxLiveBroker.account
+    orders = UpstoxLiveBroker.orders
+    order_history = UpstoxLiveBroker.order_history
+
+
+class InstrumentCatalog:
+    """Daily BOD catalog restricted to equities and exchange currency F&O."""
+
+    def __init__(self, settings, cache_path: Path, *,
+                 transport: httpx.BaseTransport | None = None,
+                 clock: Callable[[], datetime] | None = None):
+        self.settings = settings
+        self.cache_path = cache_path
+        self.transport = transport
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.instruments: dict[str, Instrument] = {}
+        self.indices: dict[str, dict[str, Any]] = {}
+        self.source_kind: str = "empty"
+        self.refreshed_at: datetime | None = None
+        self.source_sha256 = ""
+        self.warnings: list[str] = []
+        self.stats: dict[str, Any] = {}
+
+    def _download(self, url: str) -> tuple[list[dict], str]:
+        try:
+            with httpx.Client(transport=self.transport, timeout=45.0,
+                              follow_redirects=False) as client:
+                response = client.get(url, headers={"Accept": "application/json"})
+        except httpx.HTTPError:
+            raise UpstoxError("Instrument catalog download failed") from None
+        if response.status_code != 200:
+            raise UpstoxError(f"Instrument catalog returned HTTP {response.status_code}")
+        digest = hashlib.sha256(response.content).hexdigest()
+        try:
+            raw = gzip.decompress(response.content) if response.content[:2] == b"\x1f\x8b" else response.content
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            raise UpstoxError("Instrument catalog is not valid JSON/gzip") from None
+        if not isinstance(data, list):
+            raise UpstoxError("Instrument catalog root must be a list")
+        return data, digest
+
+    @staticmethod
+    def _expiry(value: Any) -> datetime | None:
+        if value in (None, "", 0):
+            return None
+        if isinstance(value, (int, float)):
+            seconds = value / 1000 if value > 1e11 else value
+            return datetime.fromtimestamp(seconds, timezone.utc)
+        text = str(value)
+        if len(text) == 10:
+            day = datetime.fromisoformat(text).date()
+            return datetime.combine(day, dt_time(23, 59, 59), IST).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return (parsed.replace(tzinfo=IST) if parsed.tzinfo is None else parsed).astimezone(timezone.utc)
+
+    def refresh(self) -> dict:
+        complete, digest = self._download(self.settings.catalog_url)
+        suspended, _ = self._download(self.settings.suspended_url)
+        mis_nse, _ = self._download(self.settings.mis_nse_url)
+        mis_bse, _ = self._download(self.settings.mis_bse_url)
+        suspended_keys = {_clean_identity(str(raw.get("instrument_key") or "")) for raw in suspended}
+        mis_keys = {_clean_identity(str(raw.get("instrument_key") or "")) for raw in mis_nse + mis_bse}
+        self._ingest_records(
+            complete,
+            digest=digest,
+            suspended_keys=suspended_keys,
+            mis_keys=mis_keys,
+            source_kind="authoritative_upstox_bod",
+        )
+        self._write_cache()
+        return self.public()
+
+    def _ingest_records(
+        self,
+        complete: list[dict],
+        *,
+        digest: str,
+        suspended_keys: set[str],
+        mis_keys: set[str],
+        source_kind: str,
+    ) -> None:
+        from app.markets.nse_reconciliation import (
+            default_product_for_series,
+            is_valid_indian_isin,
+        )
+
+        parsed: dict[str, Instrument] = {}
+        indices: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        stats: dict[str, Any] = {
+            "source_rows": len(complete),
+            "suspended_keys": len([k for k in suspended_keys if k]),
+            "kept_by_segment": {},
+            "kept_by_segment_and_type": {},
+            "kept_by_subclass": {},
+            "dropped_suspended": 0,
+            "dropped_unsupported": 0,
+            "dropped_unsupported_by": {},
+            "dropped_invalid": 0,
+            "dropped_invalid_reasons": {},
+            "dropped_invalid_samples": [],
+            "duplicate_keys": [],
+            "missing_isin_count": 0,
+            "watch_only_indices": 0,
+            "segment_field_mismatch": 0,
+        }
+        for raw in complete:
+            try:
+                if not isinstance(raw, dict):
+                    raise TypeError("record must be a JSON object")
+                key = _clean_identity(str(raw["instrument_key"]))
+                if not key:
+                    raise ValueError("blank instrument_key")
+                segment_field = _clean_identity(str(raw.get("segment") or "")).upper()
+                # The official instrument_key format is SEGMENT|IDENTIFIER
+                # (upstox skills instruments reference), so the key prefix is
+                # authoritative for the segment; a drifted `segment` field is
+                # counted, never trusted over the key.
+                segment = key.split("|", 1)[0].strip().upper() if "|" in key else segment_field
+                if segment_field and segment_field != segment:
+                    stats["segment_field_mismatch"] += 1
+                kind = _clean_identity(str(raw.get("instrument_type") or "")).upper()
+                if key in suspended_keys:
+                    stats["dropped_suspended"] += 1
+                    continue
+                is_duplicate_key = key in parsed or key in indices
+                if is_duplicate_key:
+                    stats["duplicate_keys"].append(key)
+                    warnings.append(f"{key}: duplicate instrument_key encountered in BOD source")
+                # The official field description states instrument_type on
+                # equity segments carries the NSE/BSE share-series code (EQ,
+                # BE, BZ, SM, ST, SG, GS, N1, XT, MT, ...) — a real BOD also
+                # carries blank series rows. Every cash-market series is an
+                # equity-segment cash instrument; only real derivative
+                # contract types (FUT/CE/PE) are handled by the F&O branches.
+                if segment in {"NSE_EQ", "BSE_EQ"}:
+                    if kind == "":
+                        kind = "EQ"
+                    supported = kind not in {"FUT", "CE", "PE", "INDEX"}
+                else:
+                    supported = segment in {"NCD_FO", "BCD_FO"} and kind in {"FUT", "CE", "PE"}
+                if not supported:
+                    stats["dropped_unsupported"] += 1
+                    bucket = f"{segment}|{kind or '(blank)'}"
+                    by = stats["dropped_unsupported_by"]
+                    by[bucket] = by.get(bucket, 0) + 1
+                    if segment in {"NSE_INDEX", "BSE_INDEX"} or kind == "INDEX":
+                        idx_name = _clean_identity(str(raw.get("name") or raw.get("trading_symbol") or key.split("|", 1)[-1]))
+                        idx_sym = _clean_identity(str(raw.get("trading_symbol") or idx_name))
+                        safe_disp = re.sub(r"[^A-Za-z0-9._:-]+", "_", key.replace("|", "-")).strip("_")[:40]
+                        indices[key] = {
+                            "instrument_key": key,
+                            "display_symbol": safe_disp,
+                            "segment": segment,
+                            "exchange": _clean_identity(str(raw.get("exchange") or segment.split("_", 1)[0])),
+                            "trading_symbol": idx_sym,
+                            "name": idx_name,
+                            "instrument_type": "INDEX",
+                            "market_kind": "INDEX",
+                            "asset_subclass": "INDEX",
+                            "currency": "INR",
+                            "tradable": False,
+                            "mis_intraday_allowed": False,
+                            "delivery_allowed": False,
+                            "product_label": "Watch-only exchange benchmark index (not directly tradable)",
+                        }
+                        stats["watch_only_indices"] = len(indices)
+                    continue
+                # Upstox BOD tick values are paise (5.0 => ₹0.05).
+                tick = float(raw["tick_size"]) / 100.0
+                step = int(raw.get("minimum_lot") or raw.get("lot_size") or 0)
+                freeze = int(float(raw.get("freeze_quantity") or 0))
+                multiplier_raw = raw.get("qty_multiplier", raw.get("multiplier", raw.get("contract_size")))
+                if segment in {"NSE_EQ", "BSE_EQ"}:
+                    multiplier = float(multiplier_raw or 1.0)
+                else:
+                    multiplier = float(multiplier_raw) if multiplier_raw is not None else None
+                if segment in {"NSE_EQ", "BSE_EQ"}:
+                    expiry = None
+                else:
+                    expiry = self._expiry(raw.get("expiry"))
+                name = _clean_identity(str(raw.get("name") or ""))
+                isin = _clean_identity(str(raw.get("isin") or "")).upper()
+                security_type = _clean_identity(str(raw.get("security_type") or ""))
+                trading_symbol = _clean_identity(
+                    str(raw.get("trading_symbol") or raw.get("short_name") or name or "")
+                )
+                product = default_product_for_series(segment, kind)
+                instrument = Instrument(
+                    instrument_key=key,
+                    display_symbol=key.replace("|", "-"),
+                    segment=segment,
+                    exchange=_clean_identity(str(raw["exchange"])),
+                    trading_symbol=trading_symbol,
+                    instrument_type=kind,
+                    tick_size=tick,
+                    quantity_step=step,
+                    freeze_quantity=freeze,
+                    contract_multiplier=multiplier,
+                    expiry=expiry,
+                    underlying_key=_clean_identity(str(raw.get("underlying_key") or "")),
+                    underlying_symbol=_clean_identity(str(raw.get("underlying_symbol") or "")),
+                    correlation_group=_clean_identity(
+                        str(raw.get("underlying_key") or raw.get("underlying_symbol") or "")
+                    ),
+                    short_route_metadata=(key in mis_keys) if segment.endswith("_EQ") else True,
+                    product=product,
+                    isin=isin,
+                    name=name,
+                    security_type=security_type,
+                )
+                if multiplier is not None:
+                    instrument.validate(now=self.clock())
+                elif instrument.currency_derivative:
+                    warnings.append(f"{key}: exact qty_multiplier/contract multiplier missing")
+                else:
+                    raise ValueError("Equity multiplier missing")
+                if segment in {"NSE_EQ", "BSE_EQ"} and not is_valid_indian_isin(isin):
+                    stats["missing_isin_count"] += 1
+                if key not in parsed or (parsed[key].instrument_type != "EQ" and kind == "EQ"):
+                    parsed[key] = instrument
+                stats["kept_by_segment"][segment] = stats["kept_by_segment"].get(segment, 0) + 1
+                kept_kind = f"{segment}|{kind or '(blank)'}"
+                stats["kept_by_segment_and_type"][kept_kind] = \
+                    stats["kept_by_segment_and_type"].get(kept_kind, 0) + 1
+                sub = instrument.asset_subclass
+                stats["kept_by_subclass"][sub] = stats["kept_by_subclass"].get(sub, 0) + 1
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                stats["dropped_invalid"] += 1
+                reason_key = type(error).__name__
+                reasons = stats["dropped_invalid_reasons"]
+                reasons[reason_key] = reasons.get(reason_key, 0) + 1
+                if len(stats["dropped_invalid_samples"]) < 5:
+                    sample = raw.get("instrument_key") if isinstance(raw, dict) else "?"
+                    stats["dropped_invalid_samples"].append(f"{sample}: {type(error).__name__}: {error}")
+                continue
+        if not parsed:
+            raise UpstoxError("No valid supported instruments in the daily catalog")
+        stats["unique_instruments"] = len(parsed)
+        self.instruments = parsed
+        self.indices = indices
+        self.source_kind = source_kind
+        self.refreshed_at = self.clock() if source_kind == "authoritative_upstox_bod" else None
+        self.source_sha256 = digest
+        self.warnings = warnings
+        self.stats = stats
+
+    def load_seed_fallback(self) -> bool:
+        """Load the non-authoritative bundled NSE reference seed for cold-start/offline search.
+
+        Never marks ``refreshed_at`` or ``authoritative_reconciled`` true, so
+        execution gates that require a fresh daily BOD download stay fail-closed.
+        """
+        from app.markets.nse_reconciliation import load_nse_seed_records
+
+        if self.instruments:
+            return True
+        records = load_nse_seed_records()
+        if not records:
+            return False
+        digest = hashlib.sha256(json.dumps(records, sort_keys=True).encode("utf-8")).hexdigest()
+        mis_keys = {str(r.get("instrument_key") or "") for r in records if r.get("segment") == "NSE_EQ"}
+        self._ingest_records(
+            records,
+            digest=digest,
+            suspended_keys=set(),
+            mis_keys=mis_keys,
+            source_kind="bundled_seed_reference",
+        )
+        return True
+
+    def _write_cache(self) -> None:
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        body = {
+            "refreshed_at": self.refreshed_at.isoformat() if self.refreshed_at else None,
+            "source_sha256": self.source_sha256,
+            "source_kind": self.source_kind,
+            "warnings": self.warnings,
+            "stats": self.stats,
+            "indices": list(self.indices.values()),
+            "instruments": [item.public() for item in self.instruments.values()],
+        }
+        temporary = self.cache_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+        temporary.replace(self.cache_path)
+
+    def load_cache(self, *, require_current_day: bool = True) -> bool:
+        """Load public BOD metadata only; credentials are never cached here."""
+        try:
+            body = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            refreshed = datetime.fromisoformat(body["refreshed_at"])
+            instruments = {}
+            for raw in body["instruments"]:
+                expiry = datetime.fromisoformat(raw["expiry"]) if raw.get("expiry") else None
+                item = Instrument(
+                    instrument_key=raw["instrument_key"], display_symbol=raw["display_symbol"],
+                    segment=raw["segment"], exchange=raw["exchange"],
+                    trading_symbol=raw["trading_symbol"], instrument_type=raw["instrument_type"],
+                    tick_size=float(raw["tick_size"]), quantity_step=int(raw["quantity_step"]),
+                    freeze_quantity=int(raw["freeze_quantity"]),
+                    contract_multiplier=(float(raw["contract_multiplier"])
+                                         if raw.get("contract_multiplier") is not None else None),
+                    expiry=expiry, underlying_key=raw.get("underlying_key", ""),
+                    underlying_symbol=raw.get("underlying_symbol", ""),
+                    correlation_group=raw.get("correlation_group", ""),
+                    short_route_metadata=bool(raw.get("short_route_metadata")),
+                    product=raw.get("product", "I"),
+                    isin=str(raw.get("isin") or ""),
+                    name=str(raw.get("name") or ""),
+                    security_type=str(raw.get("security_type") or ""),
+                )
+                instruments[item.instrument_key] = item
+            if not instruments:
+                return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+        self.instruments = instruments
+        self.indices = {
+            str(idx["instrument_key"]): dict(idx)
+            for idx in (body.get("indices") or [])
+            if isinstance(idx, dict) and idx.get("instrument_key")
+        }
+        self.source_kind = str(body.get("source_kind") or "authoritative_upstox_bod")
+        self.refreshed_at = refreshed
+        self.source_sha256 = str(body.get("source_sha256") or "")
+        self.warnings = list(body.get("warnings") or [])
+        self.stats = dict(body.get("stats") or {})
+        if require_current_day and not self.fresh_for_day(self.clock().astimezone(IST).date().isoformat()):
+            self.instruments = {}
+            self.indices = {}
+            self.source_kind = "stale_cache_evicted"
+            self.refreshed_at = None
+            return False
+        return True
+
+    def fresh_for_day(self, trading_day: str) -> bool:
+        return bool(
+            self.source_kind != "bundled_seed_reference"
+            and self.refreshed_at
+            and self.refreshed_at.astimezone(IST).date().isoformat() == trading_day
+        )
+
+    def search(self, query: str = "", *, segment: str = "", subclass: str = "",
+               include_indices: bool = False, limit: int = 50) -> dict[str, Any]:
+        from app.markets.nse_reconciliation import search_nse_catalog
+
+        return search_nse_catalog(
+            self.instruments.values(),
+            indices=self.indices.values(),
+            query=query,
+            segment=segment,
+            subclass=subclass,
+            include_indices=include_indices,
+            limit=limit,
+        )
+
+    def reconciliation_report(self, *, now: datetime | None = None) -> dict[str, Any]:
+        from app.markets.nse_reconciliation import build_nse_reconciliation_report
+
+        return build_nse_reconciliation_report(self, now=now or self.clock())
+
+    def public(self) -> dict:
+        return {
+            "refreshed_at": self.refreshed_at.isoformat() if self.refreshed_at else None,
+            "source_sha256": self.source_sha256,
+            "source_kind": self.source_kind,
+            "count": len(self.instruments),
+            "watch_only_indices_count": len(self.indices),
+            "warnings": list(self.warnings),
+            "stats": dict(self.stats),
+            "instruments": [item.public() for item in self.instruments.values()],
+            "indices": list(self.indices.values()),
+            "scope": "NSE/BSE equities and NCD/BCD exchange-listed currency futures/options; no spot forex",
+        }

@@ -53,8 +53,11 @@ class TestDashboardPageOpenLocally:
     def test_dashboard_loads_without_bearer_header(self, client):
         response = client.get("/dashboard")
         assert response.status_code == 200
-        assert "Arena" in response.text
-        assert "NOT ENABLED" in response.text
+        assert "AXIOM" in response.text
+        assert "LEGACY PAPER/SANDBOX ONLY" in response.text
+        assert "OPERATOR TERMINAL" in response.text
+        assert "VANTAGE OPERATOR" not in response.text
+        assert 'href="/terminal"' in response.text
 
     def test_dashboard_still_loads_with_bearer(self, client):
         assert client.get("/dashboard", headers=H).status_code == 200

@@ -1,11 +1,81 @@
-# Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
+# AXIOM — Quantitative Research & Operator Trading Platform
 
-**Arena is a working, modular Python research and paper-trading platform,
-identified as `arena` version `3.0.5`. Real-money order routing does not exist
-in this project.** Sections below keep the full release history (V0.1 → V0.6 →
-V1 → V2.1 → FINAL 3.0.0); each historical section describes its own release.
+**Current source version: `3.7.0a9`.** AXIOM provides a dark multi-market
+Operator console (`/terminal`, workspaces `01`–`12`) for **Indian NSE (`INR ₹` via Upstox)**
+and **US NASDAQ (`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation.
+All Vantage MT5 operator UI surfaces and MT5 configuration guides have been removed
+from the desktop console and documentation while preserving Upstox (NSE) and
+Alpaca (NASDAQ) credentials, order routing, risk gates, and execution behavior.
 
-**Current release (FINAL 3.0.5) highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
+- **NSE (`INR ₹` via Upstox)**: Read-only daily `UPSTOX_ACCESS_TOKEN` for NSE quotes,
+  intraday/daily candles, Beginning-of-Day (`complete.json.gz`) instrument master
+  reconciliation, and `LIVE-MARKET PAPER` simulation (with Indian STT, NSE txn,
+  SEBI, stamp duty, and 18% GST modeling). Separate default-OFF `UPSTOX_LIVE`
+  execution via `/autonomy` requires `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`,
+  SEBI static IP registration, bounded INR risk limits, and separate **Arm** and
+  **Activate** confirmations.
+- **NASDAQ (`USD $` via Alpaca)**: Read-only `ALPACA_MARKET_DATA` (`IEX` free real-time
+  or paid `SIP` consolidated tape) for US snapshots, historical bars, active NASDAQ
+  equity/ETF synchronization, and `LIVE-MARKET PAPER` simulation (with US SEC Section 31
+  and FINRA TAF fee modeling). Separate `ALPACA_BROKER_PAPER` and default-OFF
+  `ALPACA_BROKER_LIVE` execution slots require `ALPACA_BROKER_ENABLED=true`, bounded USD
+  risk limits, passing readiness checks, and separate **Arm** and phrase-confirmed
+  **Activate** steps.
+- **Independent Local Paper (`AXIOM_PAPER`)**: The default local replay runs
+  `moving_average` with **local strategy automation ON** on labeled sample CSV data
+  and records durable allowlisted audit events (`PAPER_SESSION_STARTED`,
+  `PAPER_STRATEGY_SIGNAL`, `PAPER_ORDER_SIMULATED`, `PAPER_FILL_SIMULATED`,
+  `PAPER_SESSION_STOPPED` including `END_OF_DATA`). Current-run P&L deltas remain
+  strictly separated from persisted local history and open-position unrealized P&L.
+- **AI & Model Lab (`10`), Live Trade Monitor (`11`), and Ensemble & Allocation (`12`)**:
+  Manifest-pinned optional CPU `NeoQuasar/Kronos-small` setup and offline inference
+  self-test, leak-free chronological walk-forward + `2.0x` cost-stress evaluation,
+  strictly read-only `11 Live Trade Monitor` (with explicit `PAPER` vs `LIVE` badges
+  and `"not trading"` inactive states), and `12 Ensemble & Allocation` (`1,024+`
+  bounded parallel strategy variants, out-of-sample empirical calibration, and a
+  single per-market `PortfolioRiskAllocator`). All research, Kronos, and ensemble
+  surfaces are **PAPER / RESEARCH ONLY** and never arm or activate live execution.
+
+Version 3.6.0a2's research candidate repairs and Version 3.5.0a2's Windows Error
+4551 packaging workaround (loaderless Inno installer ZIP with required `-0.bin` /
+`-1.bin` sidecars and complete onedir portable ZIP) are retained. Release packages
+remain unsigned unless release metadata explicitly proves signing, and do not
+disable or bypass Windows Application Control.
+
+> **No profitability or live-readiness claim.** Automated tests, simulated paper
+> fills, and read-only connection checks establish neither profitability nor
+> real-money readiness. No live login or real broker order is permitted in CI.
+> Read the exact release's `BUILD_METADATA.json` for real-Windows, skipped, and
+> unverified checks.
+
+- **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
+- **Owner setup & architecture guide:** [`docs/OWNER_SETUP_GUIDE.md`](docs/OWNER_SETUP_GUIDE.md)
+- **Daily Upstox autonomy:** [`docs/AUTONOMY.md`](docs/AUTONOMY.md)
+- **AI & Model Lab manual:** [`docs/AI_MODEL_LAB_MANUAL.md`](docs/AI_MODEL_LAB_MANUAL.md)
+- **Ensemble & Live Trade Monitor evidence:** [`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`](docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md)
+- **Research candidates and evidence limits:** [`docs/RESEARCH_CANDIDATES.md`](docs/RESEARCH_CANDIDATES.md)
+- **Windows install/upgrade:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
+- **Error 4551 / App Control boundary:** [`docs/WINDOWS_APP_CONTROL.md`](docs/WINDOWS_APP_CONTROL.md)
+- **Redesign audit/acceptance:** [`docs/TERMINAL_REDESIGN_PLAN.md`](docs/TERMINAL_REDESIGN_PLAN.md)
+- **Performance definitions and benchmark conditions:** [`docs/TERMINAL_PERFORMANCE.md`](docs/TERMINAL_PERFORMANCE.md)
+- **Listed-share/ETF provider boundary:** [`docs/LISTED_ASSETS.md`](docs/LISTED_ASSETS.md)
+- **US-paper feed/risk evidence:** [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md)
+
+Launch the frozen Windows app and open `/terminal`. From source, use the existing
+virtual environment and run `python -m uvicorn app.main:create_app --factory
+--host 127.0.0.1 --port 8000`; read `API_TOKEN` from your private local config.
+Do not paste local tokens, Upstox/Alpaca credentials, or DPAPI files into issues or chat.
+
+---
+
+# Historical Arena 3.0.5 documentation
+
+The remainder preserves earlier release history (V0.1 → V0.6 → V1 → V2.1 →
+FINAL 3.0.5). Statements such as “real-money order routing does not exist” describe
+those historical paper/sandbox releases, not the current gated Upstox/Alpaca Operator.
+The read-only Alpaca US-equities feed with local simulated fills remains paper-only.
+
+**Historical Arena 3.0.5 highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
 
 **FINAL 3.0.5 (additive — Market Event Listener):** internet news ingestion (public sources, wars/escalations/ceasefires, sanctions/relief, tariffs/trade incl. US-China, policy/central-bank, oil/gas, shipping, regulatory, geopolitical) with relevance detection, source validation, normalization/dedup (fingerprint, multi-source merge, conflict reduces confidence, preserves conflict), impact assessment via transmission paths, decision IGNORE/MONITOR/EVALUATE/NO_TRADE with context to Strategy Router + hard-risk gate; never directly trades, never bypasses Router/lifecycle/portfolio-risk/hard-risk/STOP/broker/auth/LIVE; persisted event_id/timestamp/source/headline/summary/type/countries/markets/assets/sectors/confidence/relevance/effect/response/action/strategy/instruments/result; reputable→primary sources, dedup, unavailable→Arena continues; timeout/retry/backoff/rate-limit/cache/dedup/isolation; no eval/exec/shell; learning memory records price/vol/volume/sector response per 5m/30m/1h/1d/3d/5d via existing market-data infra (observational); dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, escaped, no secrets) — additive, no external live dependency; 20 deterministic tests.
 
@@ -227,6 +297,15 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
+- **Chart terminal + manual paper ticket** (`/chart`, linked from the
+  dashboard): a self-contained canvas chart — candles, volume, SMA 20/50,
+  EMA 200, RSI, zoom/pan, trade markers from real paper fills, working-limit
+  lines and entry/stop/target levels — plus a ticket that places **simulated**
+  market or limit orders in the local paper broker. Aggregation is honest:
+  intraday timeframes are built only from complete, contiguous source bars and
+  daily bars are never synthesised. Shorting is refused (no borrow model);
+  every configured hard limit applies; the page cannot reach a broker.
+  Documented in USER_MANUAL §5.1.
 - **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
   (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth
