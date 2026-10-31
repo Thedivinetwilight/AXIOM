@@ -1,10 +1,10 @@
 # AXIOM Operator — User Manual
 
-**Current source version: 3.7.0a7**
+**Current source version: 3.7.0a8**
 
 **Audience:** the account owner operating AXIOM on Windows x64.
 
-> **Version 3.7.0a7 Multi-Market Desktop & AI Model Lab:** The dark `/terminal` console (`01`–`10`) now includes a persistent Direct Access Quick-Nav bar, explicit 4-mode Readiness Checklists (`NSE LIVE-MARKET PAPER`, `NASDAQ LIVE-MARKET PAPER`, `NSE LIVE-MARKET LIVE`, `NASDAQ LIVE-MARKET LIVE`), and Workspace **`10 AI & Model Lab`** (`docs/AI_MODEL_LAB_MANUAL.md`, `docs/OWNER_SETUP_GUIDE.md`). Model Lab and Kronos forecasting are strictly PAPER/RESEARCH ONLY and never authorize or alter live execution.
+> **Version 3.7.0a8 Parallel Strategy Ensemble, Portfolio Risk Allocator & Live Trade Monitor:** The dark `/terminal` console (`01`–`12`) now adds Workspace **`11 Live Trade Monitor`** (strictly read-only real-time candlestick & 8-shape signal/order/fill/SL/TP/exit inspector with unmistakable `PAPER` vs `LIVE` separation and `"NOT TRADING"` inactive banners) and Workspace **`12 Ensemble & Allocation`** (`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`, `docs/AI_MODEL_LAB_MANUAL.md`, `docs/OWNER_SETUP_GUIDE.md`) supporting up to `1,024+` bounded parallel strategy variants, OOS walk-forward calibration, optional advisory Kronos, and a single per-market Portfolio Risk Allocator. All research, calibration, and monitor surfaces are strictly PAPER/RESEARCH/READ-ONLY and never authorize or alter live execution.
 
 AXIOM now has three mutually exclusive execution modes:
 

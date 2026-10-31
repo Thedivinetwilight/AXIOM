@@ -43,6 +43,8 @@
       <button type="button" class="nav-item" data-page="activity"><span>08</span>Activity &amp; audit</button>
       <button type="button" class="nav-item" data-page="settings"><span>09</span>Settings &amp; manuals</button>
       <button type="button" class="nav-item" data-page="modellab"><span>10</span>AI &amp; Model Lab</button>
+      <button type="button" class="nav-item" data-page="monitor"><span>11</span>Live Trade Monitor</button>
+      <button type="button" class="nav-item" data-page="ensemble"><span>12</span>Ensemble &amp; Allocation</button>
     </nav>
     <div class="sidebar-foot">
       <span class="status-pill" id="global-lifecycle">DISARMED</span>
@@ -106,7 +108,9 @@
       <button type="button" class="button secondary xs" data-go="strategies">Strategies &amp; Modes</button>
       <button type="button" class="button secondary xs" data-go="risk">Risk &amp; Live Gates</button>
       <button type="button" class="button secondary xs" data-go="activity">Activity &amp; Audit</button>
-      <button type="button" class="button primary xs" data-go="modellab">AI &amp; Model Lab</button>
+      <button type="button" class="button primary xs" data-go="monitor">Live Trade Monitor</button>
+      <button type="button" class="button primary xs" data-go="ensemble">Ensemble &amp; Risk</button>
+      <button type="button" class="button secondary xs" data-go="modellab">AI &amp; Model Lab</button>
     </nav>
 
     <main id="main-content" tabindex="-1">
@@ -551,6 +555,7 @@
                   <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
                   <option value="momentum">momentum (10-bar ROC cross)</option>
                   <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
+                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
                 </select>
               </div>
               <div class="field">
@@ -584,6 +589,7 @@
                   <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
                   <option value="momentum">momentum (10-bar ROC cross)</option>
                   <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
+                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
                 </select>
               </div>
               <div class="field">
@@ -1128,6 +1134,485 @@
           </div>
           <div class="button-row">
             <button type="button" class="button secondary xs" id="ml-import-bundle-btn">Verify SHA-256 &amp; Import Model Bundle</button>
+          </div>
+        </article>
+      </section>
+
+      <!-- 11 LIVE TRADE MONITOR (STRICTLY READ-ONLY) -->
+      <section class="page" id="page-monitor" aria-labelledby="monitor-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">STRICTLY READ-ONLY EXECUTION &amp; SIGNAL INSPECTOR · ZERO ORDER MUTATIONS</p>
+            <h2 id="monitor-title">Live Trade Monitor — Monitored &amp; Traded Instruments</h2>
+            <p>Inspect every monitored symbol, open position, working order, partial/completed fill, SL/TP level, exit, and advisory signal on real-time candlesticks. Simulated PAPER fills and broker-confirmed LIVE records are kept unmistakably separate.</p>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" data-go="orders">Order Controls (04)</button>
+            <button type="button" class="button secondary xs" data-go="charts">Order Ticket (03)</button>
+            <button type="button" class="button secondary xs" data-go="ensemble">Ensemble &amp; Risk (12)</button>
+            <button type="button" class="button primary xs" id="tm-refresh-btn">Refresh Monitor</button>
+          </div>
+        </div>
+
+        <article class="panel tm-banner-panel" id="tm-session-banner-card">
+          <div class="tm-session-banner inactive" id="tm-session-banner" role="status">
+            <div>
+              <strong id="tm-banner-status">NOT TRADING</strong>
+              <span id="tm-banner-reason">Session is stopped, paused, disarmed, or scanning-only. Select an instrument below to inspect history.</span>
+            </div>
+            <span class="mode-badge paper" id="tm-selected-mode-badge">READ-ONLY VIEW</span>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="form-grid" id="tm-filters-bar">
+            <div class="field">
+              <label for="tm-filter-market">Market</label>
+              <select id="tm-filter-market">
+                <option value="ALL">ALL (NSE &amp; NASDAQ)</option>
+                <option value="NSE">NSE · INR ₹</option>
+                <option value="NASDAQ">NASDAQ · USD $</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-mode">Execution Mode</label>
+              <select id="tm-filter-mode">
+                <option value="ALL">ALL MODES (Separated)</option>
+                <option value="LIVE_MARKET_PAPER">LIVE-MARKET PAPER (Simulated)</option>
+                <option value="LIVE_MARKET_LIVE">LIVE-MARKET LIVE (Broker Gate)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-state">Instrument State</label>
+              <select id="tm-filter-state">
+                <option value="ALL">ALL MONITORED</option>
+                <option value="OPEN_POSITION">Open Position</option>
+                <option value="WORKING_ORDER">Working Order</option>
+                <option value="RECENT_FILL">Recent Fill</option>
+                <option value="ACTIVE_SIGNAL">Current Strategy Signal</option>
+                <option value="WATCHING">Watchlist Only</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tm-filter-search">Search Symbol</label>
+              <input id="tm-filter-search" type="search" placeholder="RELIANCE, AAPL, QQQ…">
+            </div>
+          </div>
+          <div class="button-row top-space" id="tm-summary-counts">
+            <span class="status-pill info" id="tm-count-total">0 MONITORED</span>
+            <span class="status-pill" id="tm-count-positions">0 POSITIONS</span>
+            <span class="status-pill" id="tm-count-orders">0 WORKING ORDERS</span>
+            <span class="status-pill" id="tm-count-fills">0 FILLS</span>
+            <span class="status-pill" id="tm-count-signals">0 SIGNALS</span>
+            <div class="tm-pager">
+              <button type="button" class="button secondary xs" id="tm-prev-page">Prev</button>
+              <span class="muted small" id="tm-page-info">Page 1 / 1</span>
+              <button type="button" class="button secondary xs" id="tm-next-page">Next</button>
+            </div>
+          </div>
+        </article>
+
+        <div class="content-grid two tm-master-detail">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">PAGINATED WATCHLIST &amp; ACTIVE SUMMARY (LAZY CHART LOAD)</p><h3>Monitored Instruments</h3></div>
+            </div>
+            <div class="table-wrap tall">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Market / Symbol</th>
+                    <th>Mode (Origin)</th>
+                    <th>Session</th>
+                    <th>State</th>
+                    <th>Pos / P&amp;L</th>
+                    <th>Orders / Signal</th>
+                    <th>Inspect</th>
+                  </tr>
+                </thead>
+                <tbody id="tm-instruments-rows">
+                  <tr><td colspan="7" class="empty-state">No monitored instruments match the current filter.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow" id="tm-chart-eyebrow">SELECTED INSTRUMENT CANDLESTICK &amp; DECISION MAP</p>
+                <h3 id="tm-chart-heading">Select an instrument to load candlesticks &amp; trade markers</h3>
+              </div>
+              <div class="button-row">
+                <label for="tm-chart-tf" class="small muted">TF</label>
+                <select id="tm-chart-tf">
+                  <option value="1m">1m</option>
+                  <option value="5m" selected>5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                  <option value="1D">1D</option>
+                </select>
+              </div>
+            </div>
+            <div class="inline-status" id="tm-chart-meta">Market: — · Currency: — · Source: — · Latest Bar/Quote: —</div>
+            <div class="tm-canvas-wrap top-space">
+              <canvas id="tm-chart-canvas" width="900" height="360" aria-label="Live Trade Monitor candlestick and event marker chart"></canvas>
+              <div class="chart-empty" id="tm-chart-empty">Select an instrument from the monitored list. Disconnected or stale feeds are shown explicitly and never replaced with sample bars.</div>
+            </div>
+            <div class="tm-marker-legend" id="tm-marker-legend" aria-label="Distinct event marker legend">
+              <span><strong>◇</strong> SIGNAL (Advisory — Not an Order)</span>
+              <span><strong>□</strong> ORDER_SUBMITTED</span>
+              <span><strong>◐</strong> PARTIAL_FILL</span>
+              <span><strong>▲/▼</strong> COMPLETED_FILL</span>
+              <span><strong>✕</strong> CANCELED</span>
+              <span><strong>⛨</strong> STOP_LOSS</span>
+              <span><strong>◎</strong> TAKE_PROFIT</span>
+              <span><strong>⇥</strong> EXIT</span>
+            </div>
+            <div class="panel inset-panel top-space" id="tm-marker-detail">
+              <p class="eyebrow">MARKER INSPECTOR (CLICK ANY CHART MARKER OR EVENT ROW BELOW)</p>
+              <div id="tm-marker-detail-body" class="muted small">Click a marker on the candlestick chart or in the event table below to inspect time, side, qty, price, fees, strategy, reason, status, execution mode, and simulated vs broker-confirmed origin.</div>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SYNCHRONIZED INSTRUMENT EVENT LOG · CLICK TO HIGHLIGHT ON CHART</p><h3>Selected Instrument Signals, Orders, Fills, Protections &amp; Exits</h3></div>
+            <span class="status-pill info" id="tm-events-count">0 EVENTS</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event Time</th>
+                  <th>Marker Type</th>
+                  <th>Mode &amp; Origin</th>
+                  <th>Side</th>
+                  <th>Qty</th>
+                  <th>Price</th>
+                  <th>Fees</th>
+                  <th>Strategy</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody id="tm-events-rows">
+                <tr><td colspan="10" class="empty-state">Select an instrument above to inspect its event markers.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- 12 PARALLEL STRATEGY ENSEMBLE & PORTFOLIO ALLOCATION -->
+      <section class="page" id="page-ensemble" aria-labelledby="ensemble-title" hidden>
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">BOUNDED PARALLEL EVALUATOR · OOS CALIBRATION · SINGLE PORTFOLIO RISK ALLOCATOR</p>
+            <h2 id="ensemble-title">Parallel Strategy Ensemble, Kronos Advisory &amp; Portfolio Risk</h2>
+            <p>Evaluate 24 to 1,024+ strategy variants concurrently on validated completed bars, combine via walk-forward OOS weights &amp; calibrated confidence, and enforce shared account-level risk limits.</p>
+          </div>
+          <button type="button" class="button secondary" id="ens-refresh-btn">Refresh Ensemble</button>
+        </div>
+
+        <div class="inline-status warn" id="ens-warning-banner" role="note">
+          <strong>PAPER ROLLOUT &amp; MULTIPLE-TESTING DISCLOSURE:</strong> Strategy evaluations, walk-forward ablations, and Kronos forecasts are strictly isolated from live execution authorization (LIVE remains OFF by default). Raw model scores are never treated as probabilities; insufficient OOS sample size or calibrated confidence produces <strong>NO_TRADE</strong>. Synthetic fixtures never establish profitability or Kronos edge.
+        </div>
+
+        <div class="content-grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">BOUNDED WORKER POOL &amp; VARIANT REGISTRY</p><h3>1. Strategy Families, Variant Scale &amp; Concurrency</h3></div>
+              <span class="status-pill info" id="ens-variants-pill">24 VARIANTS</span>
+            </div>
+            <form id="ens-config-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="ens-preset">Variant Library Scale</label>
+                  <select id="ens-preset">
+                    <option value="compact">compact (~24 variants)</option>
+                    <option value="standard">standard (~96 variants)</option>
+                    <option value="large_256">large_256 (256 variants)</option>
+                    <option value="massive_1024">massive_1024 (1,024 variants)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ens-timeframe">Completed-Bar Timeframe</label>
+                  <select id="ens-timeframe"><option value="1m">1m</option><option value="5m" selected>5m</option><option value="15m">15m</option><option value="1h">1h</option><option value="1D">1D</option></select>
+                </div>
+                <div class="field">
+                  <label for="ens-workers">Max Worker Threads (1–32)</label>
+                  <input id="ens-workers" type="number" min="1" max="32" value="4">
+                </div>
+                <div class="field">
+                  <label for="ens-timeout">Batch Timeout (s)</label>
+                  <input id="ens-timeout" type="number" min="2" max="120" value="30">
+                </div>
+              </div>
+              <fieldset class="ens-family-box top-space">
+                <legend class="small muted">Enabled Strategy Families</legend>
+                <div class="ens-family-checks" id="ens-family-checks">
+                  <label><input type="checkbox" value="sma_crossover" checked> sma_crossover</label>
+                  <label><input type="checkbox" value="ema_crossover" checked> ema_crossover</label>
+                  <label><input type="checkbox" value="rsi_reversion" checked> rsi_reversion</label>
+                  <label><input type="checkbox" value="bollinger_reversion" checked> bollinger_reversion</label>
+                  <label><input type="checkbox" value="donchian_breakout" checked> donchian_breakout</label>
+                  <label><input type="checkbox" value="macd_momentum" checked> macd_momentum</label>
+                  <label><input type="checkbox" value="vwap_zscore_reversion" checked> vwap_zscore_reversion</label>
+                  <label><input type="checkbox" value="volatility_regime_trend" checked> volatility_regime_trend</label>
+                </div>
+              </fieldset>
+              <div class="button-row top-space">
+                <button type="submit" class="button primary xs" id="ens-save-config-btn">Apply Library &amp; Concurrency</button>
+              </div>
+            </form>
+            <div class="contract-grid top-space" id="ens-resource-summary"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">SINGLE ALLOCATOR PER MARKET · SHARED PRE-TRADE RISK</p><h3>2. Kronos Advisory, Calibration &amp; Risk Budgets</h3></div>
+              <select id="ens-alloc-market" aria-label="Allocator market">
+                <option value="NSE">NSE · INR ₹</option>
+                <option value="NASDAQ">NASDAQ · USD $</option>
+              </select>
+            </div>
+            <form id="ens-risk-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="ens-kronos-enabled">Kronos Advisory Input</label>
+                  <select id="ens-kronos-enabled"><option value="false">OFF (Non-Kronos Ensemble)</option><option value="true">ON (Advisory Blend)</option></select>
+                </div>
+                <div class="field">
+                  <label for="ens-kronos-policy">Kronos Unavailable Policy</label>
+                  <select id="ens-kronos-policy">
+                    <option value="REQUIRE_KRONOS">REQUIRE_KRONOS (Fail-Closed NO_TRADE)</option>
+                    <option value="DEGRADE_TO_NON_KRONOS">DEGRADE_TO_NON_KRONOS (Labeled Fallback)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ens-kronos-weight">Max Kronos Weight (&le;0.25)</label>
+                  <input id="ens-kronos-weight" type="number" step="0.01" min="0" max="0.25" value="0.18">
+                </div>
+                <div class="field">
+                  <label for="ens-min-conf">Min Calibrated Confidence</label>
+                  <input id="ens-min-conf" type="number" step="0.01" min="0.50" max="0.95" value="0.53">
+                </div>
+                <div class="field">
+                  <label for="ens-min-oos">Min OOS Samples</label>
+                  <input id="ens-min-oos" type="number" min="1" max="5000" value="20">
+                </div>
+                <div class="field">
+                  <label for="ens-risk-pct">Per-Trade Risk Budget (%)</label>
+                  <input id="ens-risk-pct" type="number" step="0.05" min="0.05" max="5.0" value="0.50">
+                </div>
+                <div class="field">
+                  <label for="ens-max-sym-exp">Max Symbol Exposure (%)</label>
+                  <input id="ens-max-sym-exp" type="number" step="1" min="2" max="100" value="25">
+                </div>
+                <div class="field">
+                  <label for="ens-max-tot-exp">Max Total Exposure (%)</label>
+                  <input id="ens-max-tot-exp" type="number" step="1" min="5" max="100" value="80">
+                </div>
+                <div class="field">
+                  <label for="ens-max-dd">Max Drawdown Cap (%)</label>
+                  <input id="ens-max-dd" type="number" step="0.5" min="1" max="50" value="10.0">
+                </div>
+                <div class="field">
+                  <label for="ens-max-corr">Max Position Correlation</label>
+                  <input id="ens-max-corr" type="number" step="0.05" min="0.20" max="0.99" value="0.80">
+                </div>
+                <div class="field">
+                  <label for="ens-max-spread">Max Spread (bps)</label>
+                  <input id="ens-max-spread" type="number" step="1" min="1" max="500" value="35">
+                </div>
+                <div class="field">
+                  <label for="ens-max-pos">Max Open Positions</label>
+                  <input id="ens-max-pos" type="number" min="1" max="50" value="8">
+                </div>
+              </div>
+              <div class="button-row top-space">
+                <button type="submit" class="button primary xs" id="ens-save-risk-btn">Save Allocator &amp; Risk Budgets</button>
+              </div>
+            </form>
+          </article>
+        </div>
+
+        <!-- PANEL 3: EVALUATE WATCHLIST & INSPECT AGGREGATED DECISION / RISK / SIGNALS -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">IDEMPOTENT SINGLE DECISION PER INSTRUMENT / TIMEFRAME / BAR</p><h3>3. Watchlist Ensemble Evaluation, Risk Gate &amp; NO-TRADE Inspector</h3></div>
+            <span class="status-pill info" id="ens-eval-status-pill">IDLE</span>
+          </div>
+          <form id="ens-eval-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-eval-market">Market</label>
+                <select id="ens-eval-market"><option value="NSE">NSE · INR ₹</option><option value="NASDAQ">NASDAQ · USD $</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-eval-symbols">Watchlist Symbols (blank = saved watchlist)</label>
+                <input id="ens-eval-symbols" placeholder="RELIANCE, TCS or AAPL, MSFT">
+              </div>
+              <div class="field">
+                <label for="ens-eval-paper-mode">Execution Target</label>
+                <select id="ens-eval-paper-mode">
+                  <option value="false">Read-Only Evaluation Only (0 Orders)</option>
+                  <option value="true">LIVE-MARKET PAPER (Simulate Orders if Paper RUNNING · 0 Broker Calls)</option>
+                </select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ens-eval-btn">Evaluate Watchlist Concurrently</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ens-eval-summary">Configure OOS weights via Walk-Forward Ablation below (or manual JSON weights) and evaluate your watchlist.</div>
+
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Bar Time</th>
+                  <th>Market / Symbol</th>
+                  <th>Final Decision</th>
+                  <th>Selected Qty</th>
+                  <th>Pre / Post Kronos</th>
+                  <th>Calibrated Conf (90% CI)</th>
+                  <th>Kronos Status</th>
+                  <th>NO_TRADE / Risk Summary</th>
+                  <th>Inspect</th>
+                </tr>
+              </thead>
+              <tbody id="ens-decisions-rows">
+                <tr><td colspan="9" class="empty-state">No ensemble bar decisions recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="content-grid two top-space">
+            <div class="panel inset-panel">
+              <p class="eyebrow">12 SHARED ACCOUNT-LEVEL RISK CHECKS (SELECTED DECISION)</p>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Risk Check</th><th>Pass</th><th>Actual</th><th>Limit</th><th>Detail</th></tr></thead>
+                  <tbody id="ens-risk-checks-rows"><tr><td colspan="5" class="empty-state">Select a decision row above.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="panel inset-panel">
+              <p class="eyebrow">PER-STRATEGY SIGNALS, WEIGHTS &amp; RATIONALES</p>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Variant / Family</th><th>Action</th><th>Raw Score</th><th>OOS Weight</th><th>Status</th><th>Rationale</th></tr></thead>
+                  <tbody id="ens-strategy-signals-rows"><tr><td colspan="6" class="empty-state">Select a decision row above.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="field top-space">
+            <label for="ens-weights-json">Active Strategy Weights JSON (Learned OOS Walk-Forward or Manual Override)</label>
+            <textarea id="ens-weights-json" rows="2" placeholder='{"sma_crossover_v0001_...": 0.25}'></textarea>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" id="ens-save-weights-btn">Apply Manual Weight Override</button>
+          </div>
+        </article>
+
+        <!-- PANEL 4: PROFITABILITY EVIDENCE, WALK-FORWARD CALIBRATION & KRONOS ON/OFF ABLATION -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">WALK-FORWARD OOS WEIGHTING · MULTIPLE-TESTING HAIRCUT · UNTOUCHED TEST · 2.0× COST STRESS</p><h3>4. Profitability Evidence &amp; Kronos On/Off Ablation Matrix</h3></div>
+          </div>
+          <form id="ens-ablation-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-abl-market">Market Fee Model</label>
+                <select id="ens-abl-market"><option value="NSE">NSE (INR STT/SEBI/GST)</option><option value="NASDAQ">NASDAQ (USD SEC/FINRA)</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-dataset">Historical Dataset</label>
+                <select id="ens-abl-dataset"></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-tf">Timeframe</label>
+                <select id="ens-abl-tf"><option value="5m">5m</option><option value="15m">15m</option><option value="1h" selected>1h</option><option value="1D">1D</option></select>
+              </div>
+              <div class="field">
+                <label for="ens-abl-persist">Persist OOS Weights &amp; Calibrator</label>
+                <select id="ens-abl-persist"><option value="true" selected>Yes (Update Market Allocator)</option><option value="false">No (Dry-Run Evidence Only)</option></select>
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary" id="ens-run-ablation-btn">Run Walk-Forward Calibration &amp; Untouched OOS Ablation</button>
+            </div>
+          </form>
+          <div class="inline-status top-space" id="ens-ablation-summary">Run an ablation to calibrate OOS probabilities, apply multiple-testing Sharpe haircuts, and compare No-Trade, Buy-and-Hold, Baselines, Ensemble (Kronos OFF), and Ensemble (Kronos ON).</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Strategy / Allocator</th>
+                  <th>Status</th>
+                  <th>Untouched 1× Net %</th>
+                  <th>Untouched Sharpe / Sortino</th>
+                  <th>Max DD %</th>
+                  <th>Trades / NO_TRADE</th>
+                  <th>Win % (90% CI)</th>
+                  <th>Stressed 2× Net %</th>
+                  <th>Stressed 2× Sharpe</th>
+                </tr>
+              </thead>
+              <tbody id="ens-ablation-rows">
+                <tr><td colspan="9" class="empty-state">No ablation run selected yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- PANEL 5: SCALING BENCHMARK -->
+        <article class="panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">CONCURRENCY, LATENCY, MEMORY &amp; ZERO-MISSED-BAR VERIFICATION</p><h3>5. Parallel Evaluation Scaling Benchmark</h3></div>
+          </div>
+          <form id="ens-bench-form">
+            <div class="form-grid">
+              <div class="field">
+                <label for="ens-bench-variants">Variant Counts (comma-separated)</label>
+                <input id="ens-bench-variants" value="24,96,256,1024">
+              </div>
+              <div class="field">
+                <label for="ens-bench-instruments">Instrument Counts (comma-separated)</label>
+                <input id="ens-bench-instruments" value="1,5,16">
+              </div>
+              <div class="field">
+                <label for="ens-bench-workers">Worker Threads</label>
+                <input id="ens-bench-workers" type="number" min="1" max="32" value="4">
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button secondary" id="ens-run-bench-btn">Run Scaling Benchmark</button>
+            </div>
+          </form>
+          <div class="table-wrap top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>Variants &times; Instruments</th>
+                  <th>Total Evaluations</th>
+                  <th>Workers</th>
+                  <th>Wall Latency (ms)</th>
+                  <th>Inst p50 / p95 (ms)</th>
+                  <th>Throughput (evals/s)</th>
+                  <th>Peak Heap / RSS (MB)</th>
+                  <th>Missed / Dup Bars</th>
+                </tr>
+              </thead>
+              <tbody id="ens-bench-rows">
+                <tr><td colspan="8" class="empty-state">Click Run Scaling Benchmark to measure bounded parallel throughput up to 1,024+ variants.</td></tr>
+              </tbody>
+            </table>
           </div>
         </article>
       </section>

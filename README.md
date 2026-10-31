@@ -1,6 +1,6 @@
 # AXIOM — Quantitative Research & Operator Trading Platform
 
-**Current source version: `3.7.0a7`.** AXIOM provides an Operator
+**Current source version: `3.7.0a8`.** AXIOM provides an Operator
 console with mutually exclusive **LOCAL PAPER**, **VANTAGE DEMO**, and
 **VANTAGE LIVE** execution modes. Vantage connectivity and execution use the official
 `MetaTrader5` Python package through a local MT5 terminal—never website scraping

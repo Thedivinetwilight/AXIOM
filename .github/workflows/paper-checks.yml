@@ -50,7 +50,7 @@ jobs:
       - name: US market data, New York calendar and paper limits
         run: python -m pytest -q tests/test_us_equities_paper.py tests/test_us_chart_integration.py
       - name: chart terminal contract tests
-        run: python -m pytest -q tests/test_chart_terminal.py
+        run: python -m pytest -q tests/test_chart_terminal.py tests/test_parallel_ensemble_and_allocator.py tests/test_live_trade_monitor.py
       - name: chart, terminal and autonomy scripts execute headlessly
         run: |
           node --check app/static/chart/chart.js
@@ -60,6 +60,7 @@ jobs:
           node tests/js/terminal_smoke.mjs
           node tests/js/multimarket_terminal_smoke.mjs
           node tests/js/model_lab_smoke.mjs
+          node tests/js/live_trade_monitor_and_ensemble_smoke.mjs
           node tests/js/autonomy_smoke.mjs
 
   full:

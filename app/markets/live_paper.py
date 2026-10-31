@@ -325,6 +325,7 @@ class LiveMarketPaperEngine:
         nse_bars_provider: Callable[[str, str], list[Candle]] | None = None,
         nasdaq_bars_provider: Callable[[str, str], list[Candle]] | None = None,
         kronos_provider: Any | None = None,
+        ensemble_service: Any | None = None,
         nse_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         nasdaq_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -344,6 +345,7 @@ class LiveMarketPaperEngine:
         self.nse_bars_provider = nse_bars_provider
         self.nasdaq_bars_provider = nasdaq_bars_provider
         self.kronos_provider = kronos_provider
+        self.ensemble_service = ensemble_service
         self.nse_instrument_resolver = nse_instrument_resolver
         self.nasdaq_instrument_resolver = nasdaq_instrument_resolver
         self.us_calendar = USEquitiesCalendar()
@@ -1710,6 +1712,50 @@ class LiveMarketPaperEngine:
                 resolved_bars_map = auto_bars
 
         if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map:
+            if strategy.strip().lower() == "parallel_ensemble" and self.ensemble_service is not None:
+                ens_cycle = self.ensemble_service.evaluate_watchlist_cycle(
+                    mkt,
+                    symbols=sorted(resolved_bars_map.keys()),
+                    timeframe=timeframe,
+                    bars_override=resolved_bars_map,
+                    quotes_override=fetched_quotes,
+                    session_open_override=bool(sess["is_open"]),
+                    execute_in_paper=True,
+                    now_utc=now,
+                )
+                for dec_item in ens_cycle.get("decisions") or []:
+                    if dec_item.get("idempotent_duplicate_skipped"):
+                        continue
+                    act_lbl = str(dec_item.get("final_action") or "NO_TRADE")
+                    reasons_list = dec_item.get("no_trade_reasons") or []
+                    reason_lbl = (
+                        f"Ensemble {act_lbl} {dec_item.get('selected_qty', 0)}u (conf={(dec_item.get('calibration') or {}).get('calibrated_confidence')})"
+                        if act_lbl in {"BUY", "SELL"}
+                        else f"NO_TRADE: {'; '.join(reasons_list[:2]) or 'Thresholds not met'}"
+                    )
+                    with self._lock, self._connect() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO live_paper_decisions
+                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp, order_client_id, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(dec_item.get("decision_id") or f"dec-{uuid.uuid4().hex[:12]}"),
+                                mkt,
+                                str(dec_item["symbol"]),
+                                "parallel_ensemble",
+                                timeframe,
+                                act_lbl,
+                                reason_lbl,
+                                str(dec_item["bar_timestamp"]),
+                                dec_item.get("paper_order_id"),
+                                now.isoformat(),
+                            ),
+                        )
+                snap = self.market_snapshot(mkt)
+                return {**snap, "triggered_orders": triggered_orders, "ensemble_cycle": ens_cycle}
+
             for sym, bars in resolved_bars_map.items():
                 if not bars:
                     continue

@@ -4,7 +4,7 @@
 ; credential is bundled. Configuration, SQLite journals, logs and DPAPI blobs
 ; live in %LOCALAPPDATA%\AXIOM, preserved on upgrade and silent uninstall.
 ;
-; Build with:  ISCC.exe /DMyAppVersion=3.7.0a7 axiom.iss
+; Build with:  ISCC.exe /DMyAppVersion=3.7.0a8 axiom.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
@@ -72,6 +72,7 @@ Source: "..\..\docs\OWNER_SETUP_GUIDE.md"; DestDir: "{app}\docs"; Flags: ignorev
 Source: "..\..\docs\MODEL_LAB_AND_KRONOS_AUDIT.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\AI_MODEL_LAB_MANUAL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\docs\RESEARCH_COMPARISON_REPORT.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\docs\ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "TERMINAL_UI_BENCHMARK.json"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\..\LICENSE*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

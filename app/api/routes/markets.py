@@ -1041,3 +1041,78 @@ def global_emergency_stop_reset(body: GlobalResetBody, request: Request):
         except Exception as exc:
             results["vantage"] = {"ok": False, "detail": str(exc)[:180]}
     return {"ok": True, "live_execution_remains_off": True, "subsystems": results}
+
+
+# ---------------------------------------------------------------------------
+# Read-Only Live Trade Monitor (`11 · Live Trade Monitor`, 0 order endpoints)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/trade-monitor")
+def get_trade_monitor(
+    request: Request,
+    market: str = Query(default="ALL"),
+    execution_mode: str = Query(default="ALL"),
+    state: str = Query(default="ALL"),
+    search: str = Query(default="", max_length=64),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+):
+    from app.markets.trade_monitor import build_trade_monitor_summary
+
+    return build_trade_monitor_summary(
+        paper_engine=_paper_engine(request),
+        ensemble_service=getattr(request.app.state, "ensemble_service", None),
+        alpaca_service=getattr(request.app.state, "alpaca_broker", None),
+        market_filter=market,
+        mode_filter=execution_mode,
+        state_filter=state,
+        search=search,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/trade-monitor/chart")
+def get_trade_monitor_chart(
+    request: Request,
+    market: str = Query(pattern="^(NSE|NASDAQ|nse|nasdaq)$"),
+    symbol: str = Query(min_length=1, max_length=64),
+    timeframe: str = Query(default="5m"),
+    execution_mode: str = Query(default="LIVE_MARKET_PAPER"),
+):
+    """Read-only candlestick + 8-shape event marker payload for Live Trade Monitor.
+
+    Never substitutes sample/demo bars when market data is missing, stale, or
+    disconnected, and never invokes any broker order creation/cancel endpoint.
+    """
+    from app.markets.trade_monitor import build_instrument_event_markers
+
+    chart_payload = live_readonly_chart(
+        request=request,
+        market=market,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+    bars_list = chart_payload.get("bars") or []
+    latest_bar_ts = str(bars_list[-1]["timestamp"]) if bars_list else None
+    marker_payload = build_instrument_event_markers(
+        market=chart_payload.get("market") or market,
+        symbol=chart_payload.get("symbol") or symbol,
+        execution_mode=execution_mode,
+        paper_engine=_paper_engine(request),
+        ensemble_service=getattr(request.app.state, "ensemble_service", None),
+        alpaca_service=getattr(request.app.state, "alpaca_broker", None),
+        latest_bar_ts=latest_bar_ts,
+    )
+    return {
+        "read_only": True,
+        "broker_order_api_calls": 0,
+        **chart_payload,
+        "execution_mode": marker_payload["execution_mode"],
+        "simulated_execution": marker_payload["simulated"],
+        "session_banner": marker_payload["session_banner"],
+        "reference_lines": marker_payload["reference_lines"],
+        "markers": marker_payload["markers"],
+    }
+

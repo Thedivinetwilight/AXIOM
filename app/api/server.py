@@ -17,7 +17,7 @@ from app.paper_trading.execution import make_calendar
 from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, vantage, terminal,
-    market_data, listed_assets, connections, alpaca_broker, markets, model_lab,
+    market_data, listed_assets, connections, alpaca_broker, markets, model_lab, ensemble,
 )
 from app.vantage.models import SessionMode
 from app.vantage.connector import BrokerError
@@ -290,6 +290,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     prov.close()
 
             import tempfile
+            from app.ensemble.service import StrategyEnsembleService
             from app.model_lab.kronos_provider import KronosForecastProvider
             from app.model_lab.registry import ModelLabService
 
@@ -324,8 +325,23 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 nse_instrument_resolver=_resolve_nse_instrument,
                 nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
             )
+            app.state.ensemble_service = StrategyEnsembleService(
+                ":memory:" if runtime_base is None else (runtime_base / "ensemble.sqlite3"),
+                dataset_manager=app.state.model_lab.datasets,
+                kronos_provider=app.state.kronos_provider,
+                paper_engine=app.state.live_paper_engine,
+                nse_quote_provider=_nse_live_quote_lookup,
+                nasdaq_quote_provider=_nasdaq_live_quote_lookup,
+                nse_bars_provider=_nse_live_bars_lookup,
+                nasdaq_bars_provider=_nasdaq_live_bars_lookup,
+                nse_instrument_resolver=_resolve_nse_instrument,
+                nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
+            )
+            app.state.live_paper_engine.ensemble_service = app.state.ensemble_service
 
             yield
+            if getattr(app.state, "ensemble_service", None) is not None:
+                app.state.ensemble_service.close()
             if getattr(app.state, "live_paper_engine", None) is not None:
                 app.state.live_paper_engine.close()
             if ephemeral_model_lab_tmp is not None:
@@ -456,7 +472,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     app.include_router(chart.router)
     for module in (
         market, strategies, backtests, paper, v2, market_events, vantage,
-        market_data, listed_assets, connections, alpaca_broker, markets, model_lab,
+        market_data, listed_assets, connections, alpaca_broker, markets, model_lab, ensemble,
     ):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no

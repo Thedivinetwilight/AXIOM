@@ -15,6 +15,8 @@ const PAGE_TITLES = {
   risk: ["FAIL-CLOSED CONTROLS", "Risk & live gates"], connections: ["PROVIDER CONNECTIONS", "Connections"],
   activity: ["SHA-256 & LOCAL AUDIT", "Activity & audit"], settings: ["PREFERENCES & HELP", "Settings & manuals"],
   modellab: ["RESEARCH & KRONOS LAB", "AI & Model Lab"],
+  monitor: ["READ-ONLY MONITOR", "Live Trade Monitor"],
+  ensemble: ["PORTFOLIO ENSEMBLE", "Ensemble & Allocation"],
 };
 const UNRESOLVED = new Set([
   "INTENT_RECORDED", "SUBMISSION_ATTEMPTED", "MODIFICATION_ATTEMPTED", "UNKNOWN",
@@ -31,6 +33,8 @@ const state = {
   performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
   mm: { available: false, activeVenue: "NSE", overview: null, catalogItems: [], side: "BUY", chartFeed: "SESSION", lastPreview: null },
   ml: { available: false, overview: null, selectedRunId: "" },
+  tm: { page: 1, pageSize: 50, summary: null, selected: null, chartPayload: null, hitBoxes: [], selectedMarkerId: "" },
+  ens: { overview: null, selectedDecisionIdx: 0, latestAblation: null, latestBenchmark: null },
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -315,6 +319,11 @@ async function refreshAll() {
     if (state.mm.chartFeed !== "SESSION" && state.mm.available) await loadMultiMarketChart();
     else await loadChartSymbols();
   }
+  if (state.page === "monitor") {
+    await loadTradeMonitor();
+    if (state.tm.selected) await loadTradeMonitorChart(state.tm.selected);
+  }
+  if (state.page === "ensemble") await loadEnsembleOverview();
 }
 function resetModeLocalState() {
   state.readiness = null; state.activation = null; state.riskDirty = false; state.ticketReview = null;
@@ -1729,6 +1738,8 @@ async function goPage(page) {
   if (page === "charts") await loadChartSymbols();
   if (page === "activity") await loadActivity();
   if (page === "modellab") await loadModelLabOverview();
+  if (page === "monitor") await loadTradeMonitor();
+  if (page === "ensemble") await loadEnsembleOverview();
   renderAll();
 }
 
@@ -3192,8 +3203,790 @@ function bindModelLabEvents() {
   });
 }
 
+/* =========================================================================
+ * 11 LIVE TRADE MONITOR (STRICTLY READ-ONLY — ZERO ORDER MUTATION CALLS)
+ * ========================================================================= */
+async function loadTradeMonitor() {
+  const mkt = $("tm-filter-market")?.value || "ALL";
+  const mode = $("tm-filter-mode")?.value || "ALL";
+  const st = $("tm-filter-state")?.value || "ALL";
+  const q = $("tm-filter-search")?.value.trim() || "";
+  const params = new URLSearchParams({
+    market: mkt,
+    execution_mode: mode,
+    state: st,
+    search: q,
+    page: String(state.tm.page),
+    page_size: String(state.tm.pageSize),
+  });
+  try {
+    state.tm.summary = await api(`/api/markets/trade-monitor?${params.toString()}`);
+    renderTradeMonitor();
+    // Auto-load chart only for currently selected row (or first row if none selected yet)
+    const items = state.tm.summary?.items || [];
+    if (!state.tm.selected && items.length > 0 && state.page === "monitor") {
+      state.tm.selected = {
+        market: items[0].market,
+        symbol: items[0].symbol,
+        execution_mode: items[0].execution_mode,
+      };
+      await loadTradeMonitorChart(state.tm.selected);
+    }
+  } catch (err) {
+    if ($("tm-banner-reason")) $("tm-banner-reason").textContent = `Monitor refresh failed: ${err.message}`;
+  }
+}
+
+async function loadTradeMonitorChart(sel) {
+  if (!sel || !sel.market || !sel.symbol) return;
+  const tf = $("tm-chart-tf")?.value || "5m";
+  const params = new URLSearchParams({
+    market: sel.market,
+    symbol: sel.symbol,
+    timeframe: tf,
+    execution_mode: sel.execution_mode || "LIVE_MARKET_PAPER",
+  });
+  try {
+    const payload = await api(`/api/markets/trade-monitor/chart?${params.toString()}`);
+    state.tm.chartPayload = payload;
+    state.tm.selectedMarkerId = "";
+    renderTradeMonitorChartSection();
+  } catch (err) {
+    state.tm.chartPayload = {
+      ok: false,
+      market: sel.market,
+      symbol: sel.symbol,
+      currency: sel.market === "NSE" ? "INR" : "USD",
+      timeframe: tf,
+      connection_state: "ERROR",
+      data_source: "unavailable",
+      bars: [],
+      markers: [],
+      reference_lines: [],
+      error: err.message,
+      session_banner: { actively_trading: false, banner_status: "NOT TRADING", banner_tone: "inactive", reason: err.message },
+    };
+    renderTradeMonitorChartSection();
+  }
+}
+
+function renderTradeMonitor() {
+  const sum = state.tm.summary;
+  if (!sum) return;
+  const counts = sum.counts || {};
+  const pag = sum.pagination || { page: 1, total_pages: 1, total_items: 0 };
+  if ($("tm-count-total")) $("tm-count-total").textContent = `${counts.total_unfiltered || 0} MONITORED`;
+  if ($("tm-count-positions")) $("tm-count-positions").textContent = `${counts.open_positions || 0} POSITIONS`;
+  if ($("tm-count-orders")) $("tm-count-orders").textContent = `${counts.working_orders || 0} WORKING ORDERS`;
+  if ($("tm-count-fills")) $("tm-count-fills").textContent = `${counts.recent_fills || 0} FILLS`;
+  if ($("tm-count-signals")) $("tm-count-signals").textContent = `${counts.active_signals || 0} SIGNALS`;
+  if ($("tm-page-info")) $("tm-page-info").textContent = `Page ${pag.page} / ${pag.total_pages} (${pag.total_items} matching)`;
+  if ($("tm-prev-page")) $("tm-prev-page").disabled = !pag.has_prev;
+  if ($("tm-next-page")) $("tm-next-page").disabled = !pag.has_next;
+
+  // Global/default banner before or alongside selected instrument
+  if (!state.tm.chartPayload && sum.banners) {
+    const nseB = sum.banners.NSE_PAPER || {};
+    const usB = sum.banners.NASDAQ_PAPER || {};
+    const anyActive = Boolean(nseB.actively_trading || usB.actively_trading);
+    const bannerEl = $("tm-session-banner");
+    if (bannerEl) {
+      bannerEl.className = `tm-session-banner ${anyActive ? "paper" : "inactive"}`;
+      $("tm-banner-status").textContent = anyActive ? "TRADING ACTIVE · PAPER (SIMULATED)" : "NOT TRADING";
+      $("tm-banner-reason").textContent = `NSE Paper: ${nseB.banner_status || "NOT TRADING"} · NASDAQ Paper: ${usB.banner_status || "NOT TRADING"} · Live Gate: OFF`;
+    }
+  }
+
+  const tbody = $("tm-instruments-rows");
+  if (!tbody) return;
+  const items = sum.items || [];
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No monitored instruments match the current filter.</td></tr>';
+    return;
+  }
+  const ccySym = (c) => (c === "INR" ? "₹" : "$");
+  tbody.innerHTML = items.map((row) => {
+    const isSel = state.tm.selected
+      && state.tm.selected.market === row.market
+      && state.tm.selected.symbol === row.symbol
+      && state.tm.selected.execution_mode === row.execution_mode;
+    const modeCls = row.simulated ? "info" : "err";
+    const sessTxt = row.actively_trading ? `${row.session_state} (ACTIVE)` : `NOT TRADING (${row.session_state})`;
+    const posTxt = row.position_qty > 0
+      ? `${row.position_qty} @ ${ccySym(row.currency)}${Number(row.avg_entry_price || 0).toFixed(2)} (${row.unrealized_pnl >= 0 ? "+" : ""}${ccySym(row.currency)}${Number(row.unrealized_pnl || 0).toFixed(2)})`
+      : "Flat";
+    const ordSigTxt = `Ord: ${row.working_orders_count} · Fills: ${row.recent_fills_count} · Sig: ${row.latest_signal}`;
+    return `<tr class="${isSel ? "selected-row" : ""}">
+      <td><strong>${escapeHtml(row.market)}:${escapeHtml(row.symbol)}</strong><div class="small muted">${escapeHtml(row.currency)} · ${escapeHtml(row.timeframe)}</div></td>
+      <td><span class="status-pill ${modeCls}">${escapeHtml(row.mode_badge)}</span><div class="small muted">${escapeHtml(row.verification_origin)}</div></td>
+      <td>${escapeHtml(sessTxt)}</td>
+      <td><span class="status-pill">${escapeHtml(row.primary_state)}</span></td>
+      <td>${escapeHtml(posTxt)}</td>
+      <td>${escapeHtml(ordSigTxt)}</td>
+      <td><button type="button" class="button secondary xs" data-tm-select-mkt="${escapeHtml(row.market)}" data-tm-select-sym="${escapeHtml(row.symbol)}" data-tm-select-mode="${escapeHtml(row.execution_mode)}">Chart &amp; Events</button></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderTradeMonitorChartSection() {
+  const p = state.tm.chartPayload;
+  if (!p) return;
+  const banner = p.session_banner || { actively_trading: false, banner_status: "NOT TRADING", banner_tone: "inactive", reason: "Session inactive" };
+  const bannerEl = $("tm-session-banner");
+  if (bannerEl) {
+    bannerEl.className = `tm-session-banner ${banner.banner_tone || "inactive"}`;
+    $("tm-banner-status").textContent = banner.banner_status || "NOT TRADING";
+    $("tm-banner-reason").textContent = banner.reason || "";
+  }
+  const modeBadge = $("tm-selected-mode-badge");
+  if (modeBadge) {
+    const isLive = p.execution_mode === "LIVE_MARKET_LIVE" && !p.simulated_execution;
+    modeBadge.className = `mode-badge ${isLive ? "live" : "paper"}`;
+    modeBadge.textContent = isLive ? "LIVE · BROKER GATE" : "PAPER · SIMULATED FILLS";
+  }
+
+  if ($("tm-chart-heading")) {
+    $("tm-chart-heading").textContent = `${p.market}:${p.symbol} (${p.currency}) · ${p.execution_mode === "LIVE_MARKET_LIVE" ? "LIVE BROKER JOURNAL" : "LIVE-MARKET PAPER (SIMULATED)"}`;
+  }
+  const bars = Array.isArray(p.bars) ? p.bars : [];
+  const latestBarTs = bars.length ? bars[bars.length - 1].timestamp : "NONE";
+  const latestQuoteTs = p.quote?.timestamp || "NONE";
+  if ($("tm-chart-meta")) {
+    $("tm-chart-meta").textContent = `Market: ${p.market} · Currency: ${p.currency} · TF: ${p.timeframe} · Source: ${p.data_source || "unavailable"} (${p.connection_state || "DISCONNECTED"}) · Latest Bar: ${latestBarTs} · Latest Quote: ${latestQuoteTs}`;
+  }
+
+  const markers = Array.isArray(p.markers) ? p.markers : [];
+  if ($("tm-events-count")) $("tm-events-count").textContent = `${markers.length} EVENTS`;
+
+  const evRows = $("tm-events-rows");
+  if (evRows) {
+    if (!markers.length) {
+      evRows.innerHTML = '<tr><td colspan="10" class="empty-state">No signals, orders, fills, or exits recorded for this instrument yet.</td></tr>';
+    } else {
+      const symCcy = p.currency === "INR" ? "₹" : "$";
+      evRows.innerHTML = markers.map((m) => {
+        const originBadge = m.simulated
+          ? '<span class="status-pill info">SIMULATED (PAPER)</span>'
+          : '<span class="status-pill err">BROKER-CONFIRMED (LIVE)</span>';
+        return `<tr data-tm-marker-row="${escapeHtml(m.marker_id)}" style="cursor:pointer">
+          <td>${escapeHtml(m.event_time)}</td>
+          <td><strong>${escapeHtml(m.marker_type)}</strong> <span class="small muted">(${escapeHtml(m.shape)})</span></td>
+          <td>${originBadge}</td>
+          <td>${escapeHtml(m.side)}</td>
+          <td>${Number(m.quantity || 0)}</td>
+          <td>${m.price > 0 ? `${symCcy}${Number(m.price).toFixed(2)}` : "—"}</td>
+          <td>${symCcy}${Number(m.fees || 0).toFixed(2)}</td>
+          <td>${escapeHtml(m.strategy)}</td>
+          <td>${escapeHtml(m.order_or_fill_status)}</td>
+          <td>${escapeHtml(m.reason)}</td>
+        </tr>`;
+      }).join("");
+    }
+  }
+
+  drawTradeMonitorCanvas();
+}
+
+function drawTradeMonitorCanvas() {
+  const canvas = $("tm-chart-canvas");
+  const emptyEl = $("tm-chart-empty");
+  const p = state.tm.chartPayload;
+  state.tm.hitBoxes = [];
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const W = canvas.width || 900;
+  const H = canvas.height || 360;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#10141f";
+  ctx.fillRect(0, 0, W, H);
+
+  const bars = Array.isArray(p?.bars) ? p.bars : [];
+  const markers = Array.isArray(p?.markers) ? p.markers : [];
+  if (!bars.length) {
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      const st = p?.connection_state || "DISCONNECTED";
+      emptyEl.textContent = p
+        ? `${p.market}:${p.symbol} market-data feed is ${st} (${p.data_source || "no credentials"}). Zero sample/mock candles substituted. ${markers.length ? `(${markers.length} ledger event(s) remain inspectable in the table below.)` : ""}`
+        : "Select an instrument to load real provider candlesticks.";
+    }
+    return;
+  }
+  if (emptyEl) emptyEl.hidden = true;
+
+  const padL = 16; const padR = 76; const padT = 20; const padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const visible = bars.slice(-120);
+
+  let minP = Infinity; let maxP = -Infinity;
+  for (const b of visible) {
+    if (b.low < minP) minP = Number(b.low);
+    if (b.high > maxP) maxP = Number(b.high);
+  }
+  for (const ref of (p.reference_lines || [])) {
+    if (ref.price > 0) {
+      minP = Math.min(minP, Number(ref.price));
+      maxP = Math.max(maxP, Number(ref.price));
+    }
+  }
+  for (const m of markers) {
+    if (m.price > 0) {
+      minP = Math.min(minP, Number(m.price));
+      maxP = Math.max(maxP, Number(m.price));
+    }
+  }
+  if (!Number.isFinite(minP) || !Number.isFinite(maxP) || maxP <= minP) {
+    minP = 95; maxP = 105;
+  }
+  const margin = (maxP - minP) * 0.08 || 1;
+  minP -= margin; maxP += margin;
+
+  const yOf = (price) => padT + ((maxP - price) / (maxP - minP)) * plotH;
+  const stepX = plotW / Math.max(1, visible.length);
+  const xOfIdx = (i) => padL + (i + 0.5) * stepX;
+
+  // Price grid & right axis
+  ctx.strokeStyle = "rgba(148,163,184,0.12)";
+  ctx.fillStyle = "#94a3b8";
+  for (let g = 0; g <= 4; g += 1) {
+    const gy = padT + (plotH * g) / 4;
+    const gPrice = maxP - ((maxP - minP) * g) / 4;
+    ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(W - padR, gy); ctx.stroke();
+    ctx.fillText(gPrice.toFixed(2), W - padR + 6, gy + 4);
+  }
+
+  // Time axis labels
+  const timeTicks = [0, Math.floor(visible.length / 2), visible.length - 1];
+  for (const ti of new Set(timeTicks)) {
+    if (visible[ti]) {
+      const tx = xOfIdx(ti);
+      const lbl = String(visible[ti].timestamp || "").slice(5, 16).replace("T", " ");
+      ctx.fillText(lbl, Math.max(padL, tx - 28), H - 8);
+    }
+  }
+
+  // Candlesticks
+  const bodyW = Math.max(2, Math.min(12, stepX * 0.66));
+  visible.forEach((b, idx) => {
+    const x = xOfIdx(idx);
+    const yo = yOf(Number(b.open));
+    const yc = yOf(Number(b.close));
+    const yh = yOf(Number(b.high));
+    const yl = yOf(Number(b.low));
+    const bull = Number(b.close) >= Number(b.open);
+    ctx.strokeStyle = bull ? "#22c55e" : "#ef4444";
+    ctx.fillStyle = bull ? "#22c55e" : "#ef4444";
+    ctx.beginPath(); ctx.moveTo(x, yh); ctx.lineTo(x, yl); ctx.stroke();
+    const top = Math.min(yo, yc);
+    const bh = Math.max(1.5, Math.abs(yc - yo));
+    ctx.fillRect(x - bodyW / 2, top, bodyW, bh);
+  });
+
+  // Reference lines (AVG_ENTRY, STOP_LOSS, TAKE_PROFIT)
+  if (typeof ctx.setLineDash === "function") ctx.setLineDash([4, 4]);
+  for (const ref of (p.reference_lines || [])) {
+    const ry = yOf(Number(ref.price));
+    ctx.strokeStyle = ref.kind === "STOP_LOSS" ? "#f87171" : (ref.kind === "TAKE_PROFIT" ? "#4ade80" : "#38bdf8");
+    ctx.beginPath(); ctx.moveTo(padL, ry); ctx.lineTo(W - padR, ry); ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fillText(String(ref.label || ref.kind), padL + 6, Math.max(padT + 10, ry - 4));
+  }
+  if (typeof ctx.setLineDash === "function") ctx.setLineDash([]);
+
+  // Map each marker to nearest bar index & draw its distinct shape
+  const barTimes = visible.map((b) => Date.parse(b.timestamp) || 0);
+  markers.forEach((m, mIdx) => {
+    const mts = Date.parse(m.event_time) || barTimes[barTimes.length - 1] || 0;
+    let bestIdx = visible.length - 1;
+    let bestDiff = Infinity;
+    for (let i = 0; i < barTimes.length; i += 1) {
+      const d = Math.abs(barTimes[i] - mts);
+      if (d <= bestDiff) { bestDiff = d; bestIdx = i; }
+    }
+    const bar = visible[bestIdx];
+    const mx = xOfIdx(bestIdx);
+    const refPx = m.price > 0 ? Number(m.price) : Number(bar.close);
+    // Offset signals slightly above/below bar high/low so they never collide with fill triangles
+    const my = m.marker_type === "SIGNAL"
+      ? (m.side === "BUY" ? yOf(Number(bar.low)) + 12 : yOf(Number(bar.high)) - 12)
+      : yOf(refPx);
+    const clampedY = Math.max(padT + 8, Math.min(padT + plotH - 8, my));
+    const isSelected = state.tm.selectedMarkerId === m.marker_id;
+
+    drawDistinctEventGlyph(ctx, m.marker_type, m.side, mx, clampedY, isSelected);
+    state.tm.hitBoxes.push({
+      marker_id: m.marker_id,
+      x: mx,
+      y: clampedY,
+      r: 11,
+      marker: m,
+      order: mIdx,
+    });
+  });
+}
+
+function drawDistinctEventGlyph(ctx, markerType, side, x, y, highlighted) {
+  ctx.save();
+  if (highlighted) {
+    ctx.strokeStyle = "#fde047";
+    ctx.strokeRect(x - 10, y - 10, 20, 20);
+  }
+  if (markerType === "SIGNAL") {
+    // Hollow diamond — unmistakably advisory signal, NOT an order or fill
+    ctx.strokeStyle = "#38bdf8";
+    ctx.beginPath();
+    ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y); ctx.lineTo(x, y - 7);
+    ctx.stroke();
+  } else if (markerType === "ORDER_SUBMITTED") {
+    // Hollow square
+    ctx.strokeStyle = "#eab308";
+    ctx.strokeRect(x - 6, y - 6, 12, 12);
+  } else if (markerType === "PARTIAL_FILL") {
+    // Half-filled box/circle
+    ctx.strokeStyle = "#fb923c";
+    ctx.fillStyle = "#fb923c";
+    ctx.strokeRect(x - 6, y - 6, 12, 12);
+    ctx.fillRect(x - 6, y - 6, 6, 12);
+  } else if (markerType === "COMPLETED_FILL") {
+    // Solid filled directional triangle
+    ctx.fillStyle = side === "SELL" ? "#f43f5e" : "#10b981";
+    ctx.beginPath();
+    if (side === "SELL") {
+      ctx.moveTo(x, y + 7); ctx.lineTo(x - 7, y - 6); ctx.lineTo(x + 7, y - 6);
+    } else {
+      ctx.moveTo(x, y - 7); ctx.lineTo(x - 7, y + 6); ctx.lineTo(x + 7, y + 6);
+    }
+    ctx.fill();
+  } else if (markerType === "CANCELED") {
+    // Diagonal X cross
+    ctx.strokeStyle = "#94a3b8";
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y + 6);
+    ctx.moveTo(x + 6, y - 6); ctx.lineTo(x - 6, y + 6);
+    ctx.stroke();
+  } else if (markerType === "STOP_LOSS") {
+    // Red SL shield
+    ctx.strokeStyle = "#ef4444";
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y - 6); ctx.lineTo(x + 6, y + 1); ctx.lineTo(x, y + 7); ctx.lineTo(x - 6, y + 1); ctx.lineTo(x - 6, y - 6);
+    ctx.stroke();
+  } else if (markerType === "TAKE_PROFIT") {
+    // Green concentric target
+    ctx.strokeStyle = "#22c55e";
+    ctx.strokeRect(x - 6, y - 6, 12, 12);
+    ctx.fillStyle = "#22c55e";
+    ctx.fillRect(x - 2, y - 2, 4, 4);
+  } else if (markerType === "EXIT") {
+    // Double chevron exit glyph
+    ctx.strokeStyle = "#c084fc";
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y - 5); ctx.lineTo(x, y); ctx.lineTo(x - 6, y + 5);
+    ctx.moveTo(x, y - 5); ctx.lineTo(x + 6, y); ctx.lineTo(x, y + 5);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function selectTradeMonitorMarker(marker) {
+  if (!marker) return;
+  state.tm.selectedMarkerId = marker.marker_id;
+  drawTradeMonitorCanvas();
+  const detailEl = $("tm-marker-detail-body");
+  if (!detailEl) return;
+  const symCcy = marker.currency === "INR" ? "₹" : "$";
+  const originClass = marker.simulated ? "ok" : "err";
+  detailEl.innerHTML = `<div class="contract-grid">
+    <div><span>Event Time</span><strong>${escapeHtml(marker.event_time)}</strong></div>
+    <div><span>Marker / Glyph</span><strong>${escapeHtml(marker.marker_type)} (${escapeHtml(marker.shape)})</strong></div>
+    <div><span>Side</span><strong>${escapeHtml(marker.side)}</strong></div>
+    <div><span>Quantity</span><strong>${Number(marker.quantity || 0)}</strong></div>
+    <div><span>Price</span><strong>${marker.price > 0 ? `${symCcy}${Number(marker.price).toFixed(4)}` : "N/A (Signal)"}</strong></div>
+    <div><span>Fees</span><strong>${symCcy}${Number(marker.fees || 0).toFixed(4)}</strong></div>
+    <div><span>Strategy</span><strong>${escapeHtml(marker.strategy)}</strong></div>
+    <div><span>Order / Fill Status</span><strong>${escapeHtml(marker.order_or_fill_status)}</strong></div>
+    <div><span>Execution Mode</span><strong>${escapeHtml(marker.execution_mode)}</strong></div>
+    <div><span>Simulated vs Confirmed</span><strong class="${originClass}">${escapeHtml(marker.verification_origin)}</strong></div>
+  </div>
+  <p class="small top-space"><strong>Reason / Rationale:</strong> ${escapeHtml(marker.reason)}</p>`;
+}
+
+function bindTradeMonitorEvents() {
+  $("tm-refresh-btn")?.addEventListener("click", async () => {
+    await loadTradeMonitor();
+    if (state.tm.selected) await loadTradeMonitorChart(state.tm.selected);
+  });
+  for (const id of ["tm-filter-market", "tm-filter-mode", "tm-filter-state"]) {
+    $(id)?.addEventListener("change", () => { state.tm.page = 1; loadTradeMonitor(); });
+  }
+  $("tm-filter-search")?.addEventListener("input", () => { state.tm.page = 1; loadTradeMonitor(); });
+  $("tm-prev-page")?.addEventListener("click", () => {
+    if (state.tm.page > 1) { state.tm.page -= 1; loadTradeMonitor(); }
+  });
+  $("tm-next-page")?.addEventListener("click", () => {
+    const maxP = state.tm.summary?.pagination?.total_pages || 1;
+    if (state.tm.page < maxP) { state.tm.page += 1; loadTradeMonitor(); }
+  });
+  $("tm-chart-tf")?.addEventListener("change", () => {
+    if (state.tm.selected) loadTradeMonitorChart(state.tm.selected);
+  });
+  $("tm-instruments-rows")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-tm-select-sym]");
+    if (!btn) return;
+    state.tm.selected = {
+      market: btn.dataset.tmSelectMkt,
+      symbol: btn.dataset.tmSelectSym,
+      execution_mode: btn.dataset.tmSelectMode || "LIVE_MARKET_PAPER",
+    };
+    renderTradeMonitor();
+    await loadTradeMonitorChart(state.tm.selected);
+  });
+  $("tm-chart-canvas")?.addEventListener("click", (e) => {
+    const canvas = $("tm-chart-canvas");
+    if (!canvas || !state.tm.hitBoxes.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(1, rect.width || canvas.width);
+    const scaleY = canvas.height / Math.max(1, rect.height || canvas.height);
+    const cx = (e.clientX - (rect.left || 0)) * scaleX;
+    const cy = (e.clientY - (rect.top || 0)) * scaleY;
+    let best = null; let bestDist = Infinity;
+    for (const hb of state.tm.hitBoxes) {
+      const dist = Math.hypot(cx - hb.x, cy - hb.y);
+      if (dist <= hb.r + 4 && dist < bestDist) { best = hb; bestDist = dist; }
+    }
+    if (best) selectTradeMonitorMarker(best.marker);
+  });
+  $("tm-events-rows")?.addEventListener("click", (e) => {
+    const tr = e.target.closest("[data-tm-marker-row]");
+    if (!tr) return;
+    const id = tr.dataset.tmMarkerRow;
+    const found = (state.tm.chartPayload?.markers || []).find((m) => m.marker_id === id);
+    if (found) selectTradeMonitorMarker(found);
+  });
+}
+
+/* =========================================================================
+ * 12 PARALLEL STRATEGY ENSEMBLE & PORTFOLIO RISK ALLOCATOR
+ * ========================================================================= */
+async function loadEnsembleOverview() {
+  try {
+    state.ens.overview = await api("/api/ensemble/overview");
+    renderEnsemble();
+  } catch (err) {
+    if ($("ens-eval-summary")) $("ens-eval-summary").textContent = `Ensemble overview unavailable: ${err.message}`;
+  }
+}
+
+function renderEnsemble() {
+  const ov = state.ens.overview;
+  if (!ov) return;
+  const reg = ov.registry || {};
+  if ($("ens-variants-pill")) {
+    $("ens-variants-pill").textContent = `${reg.enabled_variants || 0} VARIANTS (${reg.unique_canonical_variants || 0} UNIQUE)`;
+  }
+  if ($("ens-preset") && ["compact", "standard", "large_256", "massive_1024"].includes(ov.preset)) {
+    $("ens-preset").value = ov.preset;
+  }
+  if ($("ens-timeframe") && ov.default_timeframe) $("ens-timeframe").value = ov.default_timeframe;
+  if ($("ens-workers") && ov.concurrency_limit) $("ens-workers").value = ov.concurrency_limit;
+  if ($("ens-timeout") && ov.batch_timeout_seconds) $("ens-timeout").value = ov.batch_timeout_seconds;
+
+  const enabledSet = new Set(ov.enabled_families || []);
+  document.querySelectorAll("#ens-family-checks input[type='checkbox']").forEach((cb) => {
+    cb.checked = enabledSet.has(cb.value);
+  });
+
+  const activeMkt = $("ens-alloc-market")?.value || "NSE";
+  const acfg = (ov.allocators || {})[activeMkt] || {};
+  if ($("ens-kronos-enabled")) $("ens-kronos-enabled").value = acfg.kronos_enabled ? "true" : "false";
+  if ($("ens-kronos-policy") && acfg.kronos_fail_closed_policy) $("ens-kronos-policy").value = acfg.kronos_fail_closed_policy;
+  if ($("ens-kronos-weight") && acfg.kronos_advisory_weight !== undefined) $("ens-kronos-weight").value = acfg.kronos_advisory_weight;
+  if ($("ens-min-conf") && acfg.min_calibrated_confidence !== undefined) $("ens-min-conf").value = acfg.min_calibrated_confidence;
+  if ($("ens-min-oos") && acfg.min_oos_samples !== undefined) $("ens-min-oos").value = acfg.min_oos_samples;
+  if ($("ens-risk-pct") && acfg.per_trade_risk_pct !== undefined) $("ens-risk-pct").value = (Number(acfg.per_trade_risk_pct) * 100).toFixed(2);
+  if ($("ens-max-sym-exp") && acfg.max_symbol_exposure_pct !== undefined) $("ens-max-sym-exp").value = Math.round(Number(acfg.max_symbol_exposure_pct) * 100);
+  if ($("ens-max-tot-exp") && acfg.max_total_exposure_pct !== undefined) $("ens-max-tot-exp").value = Math.round(Number(acfg.max_total_exposure_pct) * 100);
+  if ($("ens-max-dd") && acfg.max_drawdown_pct !== undefined) $("ens-max-dd").value = (Number(acfg.max_drawdown_pct) * 100).toFixed(1);
+  if ($("ens-max-corr") && acfg.max_position_correlation !== undefined) $("ens-max-corr").value = acfg.max_position_correlation;
+  if ($("ens-max-spread") && acfg.max_spread_bps !== undefined) $("ens-max-spread").value = acfg.max_spread_bps;
+  if ($("ens-max-pos") && acfg.max_open_positions !== undefined) $("ens-max-pos").value = acfg.max_open_positions;
+
+  const calMkt = (ov.calibration || {})[activeMkt] || {};
+  const wMkt = (ov.weights || {})[activeMkt] || {};
+  if ($("ens-resource-summary")) {
+    $("ens-resource-summary").innerHTML = `
+      <div><span>Enabled / Unique</span><strong>${reg.enabled_variants || 0} / ${reg.unique_canonical_variants || 0}</strong></div>
+      <div><span>Duplicates Deduped</span><strong>${reg.duplicate_variants_detected || 0}</strong></div>
+      <div><span>Worker Pool Cap</span><strong>${ov.concurrency_limit} threads</strong></div>
+      <div><span>Process RSS</span><strong>${ov.process_rss_mb != null ? `${ov.process_rss_mb} MB` : "N/A"}</strong></div>
+      <div><span>${escapeHtml(activeMkt)} OOS Weights &gt; 0</span><strong>${wMkt.positive_weight_count || 0}</strong></div>
+      <div><span>${escapeHtml(activeMkt)} Calibrator N / ECE</span><strong>${calMkt.total_oos_samples || 0} / ${calMkt.ece ?? "—"}</strong></div>
+    `;
+  }
+  if ($("ens-weights-json") && !$("ens-weights-json").value.trim() && wMkt.weights && Object.keys(wMkt.weights).length) {
+    $("ens-weights-json").value = JSON.stringify(wMkt.weights);
+  }
+
+  // Populate Ablation dataset dropdown from Model Lab overview if available
+  const dsSel = $("ens-abl-dataset");
+  const dsList = state.ml.overview?.datasets || [];
+  if (dsSel && dsList.length) {
+    const prev = dsSel.value;
+    dsSel.innerHTML = dsList.map((d) => `<option value="${escapeHtml(d.dataset_id)}">${escapeHtml(d.dataset_id)} (${escapeHtml(d.market)} · ${d.bar_count} bars)</option>`).join("");
+    if (prev && dsList.some((d) => d.dataset_id === prev)) dsSel.value = prev;
+  }
+
+  // Render recent decisions
+  const decs = ov.recent_decisions || [];
+  const dRows = $("ens-decisions-rows");
+  if (dRows) {
+    if (!decs.length) {
+      dRows.innerHTML = '<tr><td colspan="9" class="empty-state">No ensemble bar decisions recorded yet.</td></tr>';
+    } else {
+      dRows.innerHTML = decs.map((d, idx) => {
+        const agg = d.aggregation || {};
+        const cal = d.calibration || {};
+        const kc = d.kronos_contribution || {};
+        const confTxt = cal.calibrated_confidence != null
+          ? `${(Number(cal.calibrated_confidence) * 100).toFixed(1)}% [${(Number(cal.ci90_low || 0) * 100).toFixed(0)}–${(Number(cal.ci90_high || 1) * 100).toFixed(0)}%] (N=${cal.oos_sample_size})`
+          : `UNCALIBRATED (N=${cal.oos_sample_size || 0})`;
+        const reasons = (d.no_trade_reasons || []).slice(0, 2).join("; ") || "All 12 risk checks passed";
+        const actCls = d.final_action === "BUY" ? "ok" : (d.final_action === "SELL" ? "warn" : "");
+        return `<tr>
+          <td>${escapeHtml(String(d.bar_timestamp || "").slice(0, 19))}</td>
+          <td><strong>${escapeHtml(d.market)}:${escapeHtml(d.symbol)}</strong> (${escapeHtml(d.timeframe)})</td>
+          <td><span class="status-pill ${actCls}">${escapeHtml(d.final_action)}</span></td>
+          <td>${Number(d.selected_qty || 0)}</td>
+          <td>${Number(agg.pre_kronos_consensus || 0).toFixed(3)} / ${Number(agg.post_kronos_consensus || 0).toFixed(3)}</td>
+          <td>${escapeHtml(confTxt)}</td>
+          <td>${escapeHtml(kc.status || "DISABLED")}</td>
+          <td>${escapeHtml(reasons)}</td>
+          <td><button type="button" class="button secondary xs" data-ens-inspect-idx="${idx}">Inspect</button></td>
+        </tr>`;
+      }).join("");
+      const selIdx = Math.min(state.ens.selectedDecisionIdx, decs.length - 1);
+      renderSelectedEnsembleDecision(decs[selIdx]);
+    }
+  }
+
+  const abl = state.ens.latestAblation || (ov.ablation_runs || [])[0];
+  if (abl) renderEnsembleAblation(abl);
+  const bench = state.ens.latestBenchmark || (ov.benchmarks || [])[0];
+  if (bench) renderEnsembleBenchmark(bench);
+}
+
+function renderSelectedEnsembleDecision(dec) {
+  if (!dec) return;
+  const rRows = $("ens-risk-checks-rows");
+  if (rRows) {
+    const checks = dec.risk_checks || [];
+    rRows.innerHTML = checks.map((c) => `<tr>
+      <td><code>${escapeHtml(c.check_id)}</code></td>
+      <td><span class="status-pill ${c.passed ? "ok" : "err"}">${c.passed ? "PASS" : "BLOCK"}</span></td>
+      <td>${escapeHtml(typeof c.actual === "object" ? JSON.stringify(c.actual) : String(c.actual))}</td>
+      <td>${escapeHtml(typeof c.limit === "object" ? JSON.stringify(c.limit) : String(c.limit))}</td>
+      <td>${escapeHtml(c.detail)}</td>
+    </tr>`).join("");
+  }
+  const sRows = $("ens-strategy-signals-rows");
+  if (sRows) {
+    const sigs = (dec.strategy_signals || []).slice(0, 40);
+    sRows.innerHTML = sigs.length
+      ? sigs.map((s) => `<tr>
+          <td><strong>${escapeHtml(s.strategy_id)}</strong><div class="small muted">${escapeHtml(s.family)}</div></td>
+          <td>${escapeHtml(s.action)}</td>
+          <td>${Number(s.raw_score || 0).toFixed(3)}</td>
+          <td>${Number(s.weight || 0).toFixed(4)}</td>
+          <td>${escapeHtml(s.status)}</td>
+          <td>${escapeHtml(s.rationale)}</td>
+        </tr>`).join("")
+      : '<tr><td colspan="6" class="empty-state">No per-strategy signals recorded.</td></tr>';
+  }
+}
+
+function renderEnsembleAblation(abl) {
+  if (!abl) return;
+  const mt = abl.multiple_testing || {};
+  const ks = abl.kronos_ablation_summary || {};
+  const cal = abl.calibration || {};
+  if ($("ens-ablation-summary")) {
+    $("ens-ablation-summary").textContent =
+      `Run ${abl.ablation_id} (${abl.market} · ${abl.dataset?.dataset_id} · real_market_data=${abl.dataset?.real_market_data}): ` +
+      `Tested ${mt.variants_tested || 0} variants (Multiple-Testing Sharpe Haircut=${mt.sharpe_haircut_threshold || 0}; Accepted OOS=${mt.accepted_count || 0}) · ` +
+      `Calibrator OOS N=${cal.total_oos_samples || 0}, Brier=${cal.brier_score ?? "—"}, ECE=${cal.ece ?? "—"} · ` +
+      `Kronos Verdict: ${ks.verdict || "N/A"}`;
+  }
+  const tbody = $("ens-ablation-rows");
+  if (!tbody) return;
+  tbody.innerHTML = (abl.comparisons || []).map((c) => {
+    const u1 = c.untouched_test_1x;
+    const s2 = c.stressed_test_2x;
+    if (!u1) {
+      return `<tr>
+        <td><strong>${escapeHtml(c.label)}</strong></td>
+        <td><span class="status-pill warn">${escapeHtml(c.status)}</span></td>
+        <td colspan="7" class="muted small">${escapeHtml(c.reason || "Skipped")}</td>
+      </tr>`;
+    }
+    return `<tr>
+      <td><strong>${escapeHtml(c.label)}</strong></td>
+      <td><span class="status-pill ok">${escapeHtml(c.status)}</span></td>
+      <td>${Number(u1.net_return_pct).toFixed(2)}%</td>
+      <td>${Number(u1.sharpe).toFixed(2)} / ${Number(u1.sortino).toFixed(2)}</td>
+      <td>${Number(u1.max_drawdown_pct).toFixed(2)}%</td>
+      <td>${u1.trade_count} / ${u1.no_trade_bars}</td>
+      <td>${Number(u1.win_rate_pct).toFixed(1)}% [${u1.win_rate_ci90_pct ? u1.win_rate_ci90_pct.join("–") : "—"}%]</td>
+      <td>${Number(s2.net_return_pct).toFixed(2)}%</td>
+      <td>${Number(s2.sharpe).toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderEnsembleBenchmark(bench) {
+  const tbody = $("ens-bench-rows");
+  if (!tbody || !bench) return;
+  tbody.innerHTML = (bench.results || []).map((r) => `<tr>
+    <td><strong>${r.variants} &times; ${r.instruments}</strong></td>
+    <td>${r.total_evaluations}</td>
+    <td>${r.workers_used}</td>
+    <td>${Number(r.wall_ms).toFixed(2)} ms</td>
+    <td>${Number(r.per_instrument_p50_ms).toFixed(2)} / ${Number(r.per_instrument_p95_ms).toFixed(2)} ms</td>
+    <td>${Number(r.throughput_evals_per_sec).toFixed(0)} /s</td>
+    <td>${Number(r.peak_tracemalloc_mb).toFixed(2)} / ${r.process_rss_mb ?? "—"} MB</td>
+    <td>${r.missed_instruments} / ${r.duplicate_bars_processed}</td>
+  </tr>`).join("");
+}
+
+function bindEnsembleEvents() {
+  $("ens-refresh-btn")?.addEventListener("click", loadEnsembleOverview);
+  $("ens-alloc-market")?.addEventListener("change", renderEnsemble);
+
+  $("ens-config-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fams = Array.from(document.querySelectorAll("#ens-family-checks input[type='checkbox']:checked")).map((el) => el.value);
+    try {
+      state.ens.overview = await api("/api/ensemble/config", {
+        body: {
+          preset: $("ens-preset").value,
+          enabled_families: fams,
+          default_timeframe: $("ens-timeframe").value,
+          concurrency_limit: Number($("ens-workers").value),
+          batch_timeout_seconds: Number($("ens-timeout").value),
+        },
+      });
+      renderEnsemble();
+      toast("Ensemble registry updated", `${state.ens.overview.registry.enabled_variants} variants across ${fams.length} families.`, "ok");
+    } catch (err) { toast("Ensemble config rejected", err.message, "err"); }
+  });
+
+  $("ens-risk-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const mkt = $("ens-alloc-market").value;
+    try {
+      state.ens.overview = await api("/api/ensemble/config", {
+        body: {
+          market: mkt,
+          allocator_updates: {
+            kronos_enabled: $("ens-kronos-enabled").value === "true",
+            kronos_fail_closed_policy: $("ens-kronos-policy").value,
+            kronos_advisory_weight: Number($("ens-kronos-weight").value),
+            min_calibrated_confidence: Number($("ens-min-conf").value),
+            min_oos_samples: Number($("ens-min-oos").value),
+            per_trade_risk_pct: Number($("ens-risk-pct").value) / 100.0,
+            max_symbol_exposure_pct: Number($("ens-max-sym-exp").value) / 100.0,
+            max_total_exposure_pct: Number($("ens-max-tot-exp").value) / 100.0,
+            max_drawdown_pct: Number($("ens-max-dd").value) / 100.0,
+            max_position_correlation: Number($("ens-max-corr").value),
+            max_spread_bps: Number($("ens-max-spread").value),
+            max_open_positions: Number($("ens-max-pos").value),
+          },
+        },
+      });
+      renderEnsemble();
+      toast(`${mkt} Portfolio Risk Allocator saved`, "Confidence, Kronos policy, and exposure caps updated.", "ok");
+    } catch (err) { toast("Risk config rejected", err.message, "err"); }
+  });
+
+  $("ens-save-weights-btn")?.addEventListener("click", async () => {
+    const mkt = $("ens-alloc-market").value;
+    const raw = $("ens-weights-json")?.value.trim();
+    if (!raw) { toast("Weights JSON empty", "Provide a JSON map of variant_id -> non-negative weight.", "warn"); return; }
+    try {
+      const parsed = JSON.parse(raw);
+      state.ens.overview = await api("/api/ensemble/config", { body: { market: mkt, manual_weights: parsed } });
+      renderEnsemble();
+      toast(`${mkt} weights updated`, "Manual strategy weight override stored.", "ok");
+    } catch (err) { toast("Weights rejected", err.message, "err"); }
+  });
+
+  $("ens-eval-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const mkt = $("ens-eval-market").value;
+    const rawSyms = $("ens-eval-symbols").value.trim();
+    const syms = rawSyms ? rawSyms.split(",").map((s) => s.trim()).filter(Boolean) : null;
+    const execPaper = $("ens-eval-paper-mode").value === "true";
+    try {
+      $("ens-eval-status-pill").textContent = "RUNNING";
+      const res = await api("/api/ensemble/evaluate", {
+        body: { market: mkt, symbols: syms, execute_in_paper: execPaper },
+      });
+      $("ens-eval-status-pill").textContent = "COMPLETED";
+      const rejCnt = Object.keys(res.rejected_instruments || {}).length;
+      $("ens-eval-summary").textContent =
+        `Evaluated ${res.total_strategy_evaluations} strategy-bar pairs across ${(res.decisions || []).length} valid symbol(s) in ${res.wall_ms} ms ` +
+        `(${res.workers_used} worker(s); ${rejCnt} rejected symbol(s); ${res.orders_submitted_simulated} simulated paper order(s); 0 broker order calls).`;
+      await loadEnsembleOverview();
+    } catch (err) {
+      $("ens-eval-status-pill").textContent = "ERROR";
+      $("ens-eval-summary").textContent = `Evaluation failed: ${err.message}`;
+      toast("Evaluation failed", err.message, "err");
+    }
+  });
+
+  $("ens-decisions-rows")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-ens-inspect-idx]");
+    if (!btn) return;
+    state.ens.selectedDecisionIdx = Number(btn.dataset.ensInspectIdx);
+    const dec = (state.ens.overview?.recent_decisions || [])[state.ens.selectedDecisionIdx];
+    if (dec) renderSelectedEnsembleDecision(dec);
+  });
+
+  $("ens-ablation-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const mkt = $("ens-abl-market").value;
+    const dsId = $("ens-abl-dataset").value || "bundled_nse_synthetic_1h";
+    const tf = $("ens-abl-tf").value;
+    const persist = $("ens-abl-persist").value === "true";
+    try {
+      const abl = await api("/api/ensemble/ablation", {
+        body: { market: mkt, dataset_id: dsId, timeframe: tf, persist_learned_weights: persist },
+      });
+      state.ens.latestAblation = abl;
+      await loadEnsembleOverview();
+      toast("Walk-Forward & Untouched OOS Ablation Complete", `${abl.ablation_id} (${mkt})`, "ok");
+    } catch (err) { toast("Ablation failed", err.message, "err"); }
+  });
+
+  $("ens-bench-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const vCounts = $("ens-bench-variants").value.split(",").map((x) => Number(x.trim())).filter((n) => n > 0);
+    const iCounts = $("ens-bench-instruments").value.split(",").map((x) => Number(x.trim())).filter((n) => n > 0);
+    const workers = Number($("ens-bench-workers").value);
+    try {
+      const bench = await api("/api/ensemble/benchmark", {
+        body: { variant_counts: vCounts, instrument_counts: iCounts, concurrency_limit: workers },
+      });
+      state.ens.latestBenchmark = bench;
+      renderEnsembleBenchmark(bench);
+      toast("Scaling benchmark complete", `${(bench.results || []).length} configurations measured.`, "ok");
+    } catch (err) { toast("Benchmark failed", err.message, "err"); }
+  });
+}
+
 function init() {
-  bindEvents(); bindModelLabEvents(); $("refresh-interval").value = "10000"; renderActivity();
+  bindEvents(); bindModelLabEvents(); bindTradeMonitorEvents(); bindEnsembleEvents();
+  $("refresh-interval").value = "10000"; renderActivity();
   const saved = storageGet("axiom-api-token");
   if (saved) unlock(saved); else showAuth();
 }

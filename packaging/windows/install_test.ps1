@@ -439,6 +439,16 @@ try {
     Check ($mlForecast.advisory_only -eq $true -and $mlForecast.trade_instruction -eq $false -and $mlForecast.execution_authorized -eq $false -and $mlForecast.mock_outputs_used -eq $false -and [double]$mlForecast.mean_close -gt 0 -and [double]$mlForecast.latency_ms.inference_ms -gt 0 -and $mlForecast.model_identity.manifest_sha256 -eq $kronos.install_plan.manifest_sha256) 'Model Lab executed genuine CPU Kronos bar forecast with verified manifest digest and positive latency'
     $null = Invoke-RestMethod -Method Post -Headers $headers ('{0}/api/model-lab/kronos/unload' -f $base) -TimeoutSec 15
     $null = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ enabled = $false } | ConvertTo-Json) ('{0}/api/model-lab/kronos/toggle' -f $base) -TimeoutSec 15
+
+    # Verify read-only Live Trade Monitor (11) & Parallel Strategy Ensemble (12) on the installed Windows package
+    $tmMon = Invoke-RestMethod -Headers $headers ('{0}/api/markets/trade-monitor?page=1&page_size=25' -f $base) -TimeoutSec 20
+    Check ($tmMon.read_only -eq $true -and $tmMon.broker_order_api_calls -eq 0) 'installed Live Trade Monitor endpoint is strictly read-only with 0 broker order calls'
+    $ensOv = Invoke-RestMethod -Headers $headers ('{0}/api/ensemble/overview' -f $base) -TimeoutSec 20
+    Check ($ensOv.paper_and_research_only -eq $true -and $ensOv.live_execution_authorized -eq $false -and [int]$ensOv.registry.enabled_variants -ge 24) 'installed Parallel Strategy Ensemble reports paper/research-only and disarmed live gate'
+    $ensBenchBody = @{ variant_counts = @(24, 1024); instrument_counts = @(1, 4); concurrency_limit = 4 } | ConvertTo-Json
+    $ensBench = Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' -Body $ensBenchBody ('{0}/api/ensemble/benchmark' -f $base) -TimeoutSec 60
+    Check ($ensBench.broker_order_api_calls -eq 0 -and @($ensBench.results).Count -eq 4) 'installed Parallel Strategy Ensemble evaluated 1,024 variants across 4 instruments with 0 broker calls'
+
     $tradingAfterKronos = Invoke-RestMethod -Headers $headers ('{0}/api/trading/status' -f $base) -TimeoutSec 15
     Check ($tradingAfterKronos.mode -eq 'AXIOM_PAPER' -and -not $tradingAfterKronos.armed -and -not $tradingAfterKronos.active) 'Kronos setup preserved disarmed PAPER execution'
     $installedWeights = @(Get-ChildItem -Path $installDir -Recurse -Filter '*.safetensors' -ErrorAction SilentlyContinue)

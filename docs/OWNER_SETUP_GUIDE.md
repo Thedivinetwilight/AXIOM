@@ -1,7 +1,7 @@
 # AXIOM Desktop Terminal — Owner Setup Guide & Architecture Reference
 
-**Version:** `3.7.0a7`  
-**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a7-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
+**Version:** `3.7.0a8`  
+**Target Platform:** Windows 10 / 11 x64 (`AXIOM-Operator-3.7.0a8-windows-x64-no-temp-install.zip` or `*-portable.zip`, or Python 3.11+ x64 source checkout)
 
 > **Safety & Non-Claim Notice**  
 > - Real-money execution (`LIVE-MARKET LIVE`) is **OFF by default** and is never enabled by startup, restart, crash recovery, config import, Kronos inference, or paper trading.  
@@ -15,10 +15,10 @@
 ### Option A — Packaged Windows Installer or Portable Archive (Recommended)
 1. Verify your downloaded installer or portable archive against `SHA256SUMS.txt`:
    ```powershell
-   Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-no-temp-install.zip -Algorithm SHA256
-   Get-FileHash .\AXIOM-Operator-3.7.0a7-windows-x64-portable.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a8-windows-x64-no-temp-install.zip -Algorithm SHA256
+   Get-FileHash .\AXIOM-Operator-3.7.0a8-windows-x64-portable.zip -Algorithm SHA256
    ```
-2. Extract and run either `AXIOM-Operator-3.7.0a7-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
+2. Extract and run either `AXIOM-Operator-3.7.0a8-windows-x64-no-temp-setup.exe` (keep `-0.bin`/`-1.bin` beside it) or `AXIOM-Operator\AXIOM-Chart.exe` from the portable ZIP. AXIOM binds only to `127.0.0.1` with a per-session bearer token and opens `/terminal`. All user databases, Kronos CPU weights/runtime, and Windows DPAPI-encrypted credentials live under `%LOCALAPPDATA%\AXIOM` (preserved across upgrades).
 
 ### Option B — Windows 10/11 x64 Source Checkout Setup
 ```powershell

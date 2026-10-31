@@ -141,6 +141,8 @@ if ($LASTEXITCODE -ne 0) { Fail 'operator JavaScript interaction harness failed'
 if ($LASTEXITCODE -ne 0) { Fail 'multi-market desktop JavaScript interaction harness failed' }
 & node tests/js/model_lab_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-modellab.log')
 if ($LASTEXITCODE -ne 0) { Fail 'Model Lab & readiness JavaScript interaction harness failed' }
+& node tests/js/live_trade_monitor_and_ensemble_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-monitor-ensemble.log')
+if ($LASTEXITCODE -ne 0) { Fail 'Live Trade Monitor & Ensemble JavaScript interaction harness failed' }
 
 Step '3b. Full Python test suite (hard gate)'
 & python -m pytest -q 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'pytest-full.log')
