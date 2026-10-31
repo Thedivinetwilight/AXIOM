@@ -78,7 +78,7 @@ class DpapiSecretStore:
             ctypes.POINTER(DATA_BLOB),
             ctypes.c_void_p,
             ctypes.c_void_p,
-            ctypes.DWORD,
+            wintypes.DWORD,
             ctypes.POINTER(DATA_BLOB),
         ]
         crypt32.CryptProtectData.restype = wintypes.BOOL
@@ -131,7 +131,7 @@ class DpapiSecretStore:
             ctypes.POINTER(DATA_BLOB),
             ctypes.c_void_p,
             ctypes.c_void_p,
-            ctypes.DWORD,
+            wintypes.DWORD,
             ctypes.POINTER(DATA_BLOB),
         ]
         crypt32.CryptUnprotectData.restype = wintypes.BOOL

@@ -815,3 +815,100 @@ def test_active_multimarket_packages_have_zero_vantage_or_mt5_imports():
                     offenders.append(f"{py.relative_to(REPO_ROOT)}:{term}")
     assert offenders == []
     assert (REPO_ROOT / "docs" / "VANTAGE_MT5_ISOLATION_AUDIT.md").is_file()
+
+
+def test_dpapi_stores_round_trip_with_win32_argtypes_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import ctypes
+    import app.alpaca_broker.credentials as abc
+    import app.autonomy.upstox_token as ut
+    import app.markets.alpaca_credentials as amc
+    import app.security.dpapi_secrets as ds
+    from app.vantage.secrets import DpapiSecretStore as LegacyVantageDpapi
+
+    buffers: dict[int, Any] = {}
+
+    class _FakeLocalFree:
+        argtypes = None
+        restype = None
+
+        def __call__(self, _ptr: Any) -> int:
+            return 0
+
+    class _FakeCryptProtect:
+        argtypes = None
+        restype = None
+
+        def __call__(
+            self, src_ptr: Any, _desc: Any, _ent: Any, _res: Any, _prompt: Any, _flags: Any, out_ptr: Any
+        ) -> int:
+            src = ctypes.cast(src_ptr, ctypes.POINTER(ds.DATA_BLOB)).contents
+            raw = ctypes.string_at(src.pbData, src.cbData)
+            enc = b"DPAPI_FAKE_V1:" + bytes(b ^ 0x5A for b in raw)
+            buf = ctypes.create_string_buffer(enc, len(enc))
+            buffers[id(buf)] = buf
+            out = ctypes.cast(out_ptr, ctypes.POINTER(ds.DATA_BLOB)).contents
+            out.cbData = len(enc)
+            out.pbData = ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte))
+            return 1
+
+    class _FakeCryptUnprotect:
+        argtypes = None
+        restype = None
+
+        def __call__(
+            self, src_ptr: Any, _desc: Any, _ent: Any, _res: Any, _prompt: Any, _flags: Any, out_ptr: Any
+        ) -> int:
+            src = ctypes.cast(src_ptr, ctypes.POINTER(ds.DATA_BLOB)).contents
+            enc = ctypes.string_at(src.pbData, src.cbData)
+            if not enc.startswith(b"DPAPI_FAKE_V1:"):
+                return 0
+            raw = bytes(b ^ 0x5A for b in enc[len(b"DPAPI_FAKE_V1:") :])
+            buf = ctypes.create_string_buffer(raw, len(raw))
+            buffers[id(buf)] = buf
+            out = ctypes.cast(out_ptr, ctypes.POINTER(ds.DATA_BLOB)).contents
+            out.cbData = len(raw)
+            out.pbData = ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte))
+            return 1
+
+    class _FakeCrypt32:
+        CryptProtectData = _FakeCryptProtect()
+        CryptUnprotectData = _FakeCryptUnprotect()
+
+    class _FakeKernel32:
+        LocalFree = _FakeLocalFree()
+
+    class _FakeWinDLL:
+        crypt32 = _FakeCrypt32()
+        kernel32 = _FakeKernel32()
+
+    class _FakeOS:
+        def __init__(self, real_os: Any):
+            self._real = real_os
+            self.name = "nt"
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(self._real, attr)
+
+    fake_os = _FakeOS(os)
+    monkeypatch.setattr(ctypes, "windll", _FakeWinDLL(), raising=False)
+    for mod in (ds, abc, ut, amc):
+        monkeypatch.setattr(mod, "os", fake_os)
+
+    leg = LegacyVantageDpapi(tmp_path / "leg")
+    leg.put("VANTAGE_DEMO", {"login": "123456", "password": "dummy-password", "server": "Demo", "terminal_path": ""})
+    assert leg.get("VANTAGE_DEMO")["login"] == "123456"
+
+    u_store = ut.DpapiUpstoxTokenStore(tmp_path / "upstox")
+    u_store.save("dummy-upstox-readonly-token-1234567890")
+    assert u_store.token() == "dummy-upstox-readonly-token-1234567890"
+
+    a_store = amc.DpapiAlpacaDataStore(tmp_path / "alpaca_data")
+    a_store.save("PKDUMMY123456", "SECDUMMY123456", feed="iex")
+    assert a_store.load()["feed"] == "iex"
+
+    b_store = abc.DpapiBrokerSecretStore(tmp_path / "alpaca_broker")
+    b_store.put("ALPACA_BROKER_PAPER", {"api_key": "PKPAPER", "api_secret": "SECPAPER"})
+    assert b_store.get("ALPACA_BROKER_PAPER")["api_key"] == "PKPAPER"
+

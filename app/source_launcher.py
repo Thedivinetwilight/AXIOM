@@ -172,7 +172,9 @@ def run_source_smoke_check(
 
     saved_env = dict(os.environ)
     try:
-        with tempfile.TemporaryDirectory(prefix="axiom_source_smoke_") as tmp_dir_str:
+        with tempfile.TemporaryDirectory(
+            prefix="axiom_source_smoke_", ignore_cleanup_errors=True
+        ) as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             smoke_token = "axiom-local-source-smoke-token-0123456789"
             os.environ["AXIOM_DATA_DIR"] = str(tmp_dir)
