@@ -299,7 +299,9 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 now_utc = datetime.now(UTC)
                 prov = AlpacaHistoricalProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
                 try:
-                    return prov.get_candles(
+                    # AlpacaHistoricalProvider's public API is MarketDataProvider.historical();
+                    # there is no get_candles() on the adapter.
+                    return prov.historical(
                         symbol_or_key.strip().upper(),
                         tf_fetch,
                         now_utc - timedelta(days=lookback_days),

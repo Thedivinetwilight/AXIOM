@@ -15,7 +15,7 @@ All notable verified changes on the AXIOM multi-market NSE (Upstox) & NASDAQ (Al
 - Preserved exact Upstox `instrument_key` (e.g., `NSE_EQ|INE002A01018`) and exchange (`NSE`) from catalog search through watchlists, quotes, candles, charts, ensemble paper routing, and `LIVE-MARKET PAPER` orders/positions/fills without symbol-normalization loss.
 
 ### 3. Read-Only Upstox & Alpaca Live-Market PAPER Hardening (`0` Broker Orders)
-- Hardened `AlpacaQuoteReader.latest_quote`, `verify_upstox_market_data`, `verify_alpaca_market_data`, `_nasdaq_live_bars_lookup` (`AlpacaHistoricalProvider.get_candles` `"1D"` fix), and `LiveMarketPaperEngine._validate_quote_for_paper` to fail closed on missing, stale, future-skewed, out-of-order (monotonic watermark), non-finite/negative, inverted (`0 < ask < bid`), closed-session, `delayed_sip`, rate-limited (`HTTP 429`), and disconnected feeds with zero silent sample/replay fallback, plus automatic reconnect recovery (`PAPER_SESSION_RECONNECTED`).
+- Hardened `AlpacaQuoteReader.latest_quote`, `verify_upstox_market_data`, `verify_alpaca_market_data`, `_nasdaq_live_bars_lookup` (`AlpacaHistoricalProvider.historical` with the `1d` → `1D` mapping), and `LiveMarketPaperEngine._validate_quote_for_paper` to fail closed on missing, stale, future-skewed, out-of-order (monotonic watermark), non-finite/negative, inverted (`0 < ask < bid`), closed-session, `delayed_sip`, rate-limited (`HTTP 429`), and disconnected feeds with zero silent sample/replay fallback, plus automatic reconnect recovery (`PAPER_SESSION_RECONNECTED`).
 - Surfaced market, exact `instrument_key`, provider, feed entitlement (`IEX` single-venue vs `SIP` consolidated US tape vs `delayed_sip`), source timestamp, local receive timestamp, quote/bar age, and market-session status across API and UI.
 
 ### 4. Unambiguous PAPER Modes, Session Lifecycle & P&L Attribution
@@ -25,6 +25,12 @@ All notable verified changes on the AXIOM multi-market NSE (Upstox) & NASDAQ (Al
 ### 5. Strategy Ensemble & Kronos Audit, Neutral DPAPI Store & Legacy Isolation
 - Added `evidence_classification` (`SYNTHETIC_ENGINEERING_EVIDENCE` when `real_market_data=false`), causal `RANGE`/`TREND` regime-sliced OOS breakdowns across `no_trade`, `buy_and_hold`, `baseline_moving_average`, `baseline_rsi`, `ensemble_no_kronos`, and `ensemble_with_kronos` at `1.0x` and `2.0x` worse-cost stress, and `methodology_audit_disclosures` in `app/ensemble/service.py`.
 - Extracted neutral `app/security/dpapi_secrets.py` so active Upstox/Alpaca credential stores have zero imports from `app.vantage`, and documented every remaining legacy reference in `docs/VANTAGE_MT5_ISOLATION_AUDIT.md`.
+
+### 6. NASDAQ Kronos Forecast Read-Only Bar Retrieval Fix
+- Corrected the read-only NASDAQ bar call sites (`_nasdaq_live_bars_lookup` in `app/api/server.py` and the `/api/markets/chart` NASDAQ branch in `app/api/routes/markets.py`) from the non-existent `AlpacaHistoricalProvider.get_candles(...)` to the adapter's public `MarketDataProvider.historical(symbol, timeframe, start, end)`. The bug surfaced as `AttributeError: 'AlpacaHistoricalProvider' object has no attribute 'get_candles'`, which the forecast route reported as "read-only bars unavailable".
+- Preserved the existing UTC `[start, end)` window, the `1d→1D` / `4h→1h` timeframe mapping and lookbacks (240/30/7 days), and the fail-closed `409` when historical data is unavailable (no mock/sample fallback, no forecast fabricated, no order capability touched).
+- Added regression coverage in `tests/test_kronos_forecast_runtime_regression.py` that keeps the real `AlpacaHistoricalProvider` and mocks only `httpx.Client`, exercising `POST /api/model-lab/kronos/forecast` and `/api/markets/chart` end to end, so a wrong-method regression can no longer hide behind a hand-written fake.
+
 
 ---
 

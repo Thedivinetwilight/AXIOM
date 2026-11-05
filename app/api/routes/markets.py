@@ -1056,7 +1056,9 @@ def live_readonly_chart(
 
     hist = AlpacaHistoricalProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
     try:
-        bars = hist.get_candles(sym_clean, timeframe_fetch, start, now)
+        # AlpacaHistoricalProvider's public API is MarketDataProvider.historical();
+        # there is no get_candles() on the adapter.
+        bars = hist.historical(sym_clean, timeframe_fetch, start, now)
     except Exception as exc:
         error_detail = str(redact_sensitive_data(str(exc)))[:220]
     finally:
