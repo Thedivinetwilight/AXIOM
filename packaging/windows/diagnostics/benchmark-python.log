@@ -1,0 +1,46 @@
+{
+  "output": "D:\\a\\AXIOM\\AXIOM\\src\\packaging\\windows\\TERMINAL_BENCHMARK.json",
+  "http": {
+    "http.chart.update": {
+      "samples": 120,
+      "p50_ms": 24.64,
+      "p95_ms": 34.334,
+      "p99_ms": 53.215,
+      "max_ms": 57.974,
+      "mean_ms": 26.029
+    },
+    "http.feed.quotes": {
+      "samples": 120,
+      "p50_ms": 23.554,
+      "p95_ms": 34.012,
+      "p99_ms": 44.668,
+      "max_ms": 66.539,
+      "mean_ms": 23.585
+    },
+    "http.order.review": {
+      "samples": 12,
+      "p50_ms": 2.809,
+      "p95_ms": 3.315,
+      "p99_ms": 3.369,
+      "max_ms": 3.382,
+      "mean_ms": 2.909
+    },
+    "http.order.submit": {
+      "samples": 12,
+      "p50_ms": 3.773,
+      "p95_ms": 4.659,
+      "p99_ms": 4.744,
+      "max_ms": 4.765,
+      "mean_ms": 3.905
+    },
+    "http.reconcile": {
+      "samples": 6,
+      "p50_ms": 2.877,
+      "p95_ms": 3.134,
+      "p99_ms": 3.195,
+      "max_ms": 3.21,
+      "mean_ms": 2.929
+    }
+  },
+  "order_send_calls": 12
+}

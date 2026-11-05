@@ -11,6 +11,8 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import os
+import re
 import time
 
 import httpx
@@ -311,7 +313,47 @@ def test_store_token_writes_gitignored_env_atomically(tmp_path):
     assert "written" in outcome and "issued-token" not in outcome
     content = env_path.read_text()
     assert "API_TOKEN=local" in content and "UPSTOX_ACCESS_TOKEN=issued-token" in content
-    assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
+    if os.name == "nt":
+        import subprocess
+
+        # Validate the ACL of the temporary .env this test just wrote. Every value
+        # is derived from ``env_path`` / ``whoami`` at run time: no user name, host
+        # name, or "C:\...\Temp" spelling is hard-coded, and Windows' case- and
+        # separator-insensitive path handling is mirrored on both sides.
+        def canonical(text: str) -> str:
+            """Case- and separator-insensitive form of a Windows path."""
+            return os.path.normcase(os.path.normpath(text.strip())).replace("/", "\\")
+
+        resolved = env_path.resolve()
+        assert resolved.name == ".env", resolved
+        # The file under inspection must be the temporary .env created by this
+        # test's ``tmp_path`` — never a path copied from another machine.
+        assert canonical(str(resolved.parent)) == canonical(str(tmp_path)), resolved
+
+        expected_path = canonical(str(resolved))
+        acl = subprocess.run(
+            ["icacls", str(resolved)], capture_output=True, text=True, check=True, timeout=10,
+        ).stdout
+        # icacls echoes the path it inspected: prove the ACL belongs to this file.
+        assert any(expected_path in canonical(line)
+                   for line in acl.splitlines() if line.strip()), acl
+
+        principal = subprocess.run(
+            ["whoami"], capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+        # Compare the ACCOUNT NAME only: a host\user vs DOMAIN\user spelling, or a
+        # machine that renders it in different letter case, must not fail the test.
+        account = principal.split("\\")[-1].strip()
+        assert account, f"whoami returned no account name: {principal!r}"
+        acl_folded = acl.casefold()
+        assert account.casefold() in acl_folded, acl
+        assert re.search(rf"{re.escape(account)}\s*:\(F\)", acl, re.IGNORECASE), acl
+        # No broad builtin group may retain access to the token file.
+        for broad in ("BUILTIN\\Users", "Everyone",
+                      "NT AUTHORITY\\Authenticated Users"):
+            assert broad.casefold() not in acl_folded, acl
+    else:
+        assert not (env_path.stat().st_mode & (stat_module.S_IRGRP | stat_module.S_IROTH))
 
 
 # ---------------------------------------------------------------- pipeline

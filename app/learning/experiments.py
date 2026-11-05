@@ -1,14 +1,15 @@
 """ExperimentEngine: run parameter experiments → versioned, scored candidates.
 
 Per candidate parameter set:
-- chronological train/validation split (never shuffled),
-- walk-forward folds when data allows (disjoint locked test windows),
+- chronological train/validation split (never shuffled) with prior-only warmup,
 - selection on VALIDATION expectancy only; robustness on the validation leg,
 - LOCKED TEST run once for the winner's FINAL REPORT (never for selection),
-- promotion ONLY when validation expectancy beats the baseline's.
+- promotion requires positive validation expectancy, strict baseline improvement,
+  minimum trades, robustness and drawdown gates.
 
 Every run persists an experiments row + candidates rows. Turnover and
-parameter stability are recorded with each candidate.
+parameter stability are recorded with each candidate. Promotion remains research
+evidence only; the separate complete lifecycle is required at execution.
 """
 
 from __future__ import annotations
@@ -21,6 +22,11 @@ from app.backtesting.engine import BacktestEngine
 from app.strategies import create_strategy
 from app.validation.robustness import robustness
 from app.validation.train_test import SplitConfig, split_data
+
+
+MIN_VALIDATION_TRADES = 3
+MIN_ROBUSTNESS = 0.25
+MAX_VALIDATION_DRAWDOWN = 0.5
 
 
 def _turnover(trades: list[dict], capital: float) -> float:
@@ -59,7 +65,7 @@ class ExperimentEngine:
                 train_result = self.engine.run(
                     train, strategy, timeframe, label="TRAINING")
                 validation_result = self.engine.run(
-                    validation, strategy, timeframe, label="VALIDATION")
+                    validation, strategy, timeframe, warmup=train, label="VALIDATION")
             except Exception as exc:
                 results.append({"parameters": parameters, "error": type(exc).__name__})
                 continue
@@ -82,7 +88,7 @@ class ExperimentEngine:
                 "parameter_stability": None,
             }
             try:
-                robust = robustness(validation, timeframe, candidate, self.engine)
+                robust = robustness(validation, timeframe, candidate, self.engine, warmup=train)
                 warnings = robust.get("warnings", []) if isinstance(robust, dict) else []
                 candidate["robustness_score"] = max(0.0, 1.0 - len(warnings) * 0.25)
                 candidate["parameter_stability"] = robust if isinstance(robust, dict) else None
@@ -100,10 +106,23 @@ class ExperimentEngine:
         for candidate in results:
             if "error" in candidate:
                 continue
-            promoted = oos_expectancy(candidate) > baseline_expectancy and \
-                candidate["parameters"] != baseline
-            reason = ("validation expectancy beats baseline" if promoted else
-                      "does not beat baseline on validation expectancy")
+            expectancy = oos_expectancy(candidate)
+            gates = {
+                "different_parameters": candidate["parameters"] != baseline,
+                "positive_validation_expectancy": expectancy > 0,
+                "strictly_beats_baseline": expectancy > baseline_expectancy,
+                "minimum_validation_trades": candidate["oos"]["oos_trades"] >= MIN_VALIDATION_TRADES,
+                "robustness": candidate["robustness_score"] >= MIN_ROBUSTNESS,
+                "drawdown": float(candidate["metrics"].get("max_drawdown") or 0.0)
+                <= MAX_VALIDATION_DRAWDOWN,
+            }
+            # Merely being less negative than the baseline is not a qualified
+            # candidate. Every evidence gate must pass; lifecycle approval is
+            # still separately required before any execution route.
+            promoted = all(gates.values())
+            candidate["promotion_gates"] = gates
+            reason = ("all validation research gates passed" if promoted else
+                      "failed: " + ", ".join(k for k, ok in gates.items() if not ok))
             candidate_id_value = uuid4().hex
             self.repository.record_candidate(
                 candidate_id_value, experiment_id=experiment_id,
@@ -126,7 +145,7 @@ class ExperimentEngine:
             try:
                 locked = self.engine.run(
                     test, create_strategy(strategy_name, winner["parameters"]),
-                    timeframe, label="UNSEEN TEST")
+                    timeframe, warmup=train + validation, label="UNSEEN TEST")
                 locked_trades = locked.trades
                 locked_test_report = {
                     "candidate": winner["parameters"],

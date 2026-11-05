@@ -366,3 +366,75 @@ def io_string():
     import io
 
     return io.StringIO()
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://api-hft.upstox.com",
+    "https://api-hft.upstox.com.evil.example",
+    "https://api.upstox.com",
+    "https://example.invalid",
+])
+def test_sandbox_rejects_nonofficial_order_host_without_network(base_url):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500)
+
+    with pytest.raises(ValueError, match="official"):
+        UpstoxSandboxBroker(
+            "not-a-real-token", INSTRUMENT, base_url=base_url,
+            transport=httpx.MockTransport(handler),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("history_url", [
+    "http://api.upstox.com/v2/order/history",
+    "https://api.upstox.com.evil.example/v2/order/history",
+    "https://api-hft.upstox.com/v2/order/history",
+    "https://api.upstox.com/v3/order/history",
+])
+def test_sandbox_rejects_nonofficial_history_url_without_network(history_url):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500)
+
+    with pytest.raises(ValueError, match="official"):
+        UpstoxSandboxBroker(
+            "not-a-real-token", INSTRUMENT, history_url=history_url,
+            transport=httpx.MockTransport(handler),
+        )
+    assert calls == []
+
+
+def test_sandbox_rechecks_endpoints_after_construction_tampering():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"status": "success", "data": []})
+
+    broker = UpstoxSandboxBroker(
+        "not-a-real-token", INSTRUMENT,
+        transport=httpx.MockTransport(handler),
+    )
+    broker._base_url = "https://api-hft.upstox.com.evil.example"
+    with pytest.raises(ValueError, match="official"):
+        broker._request("POST", "/v3/order/place", json={})
+    broker._base_url = "https://api-hft.upstox.com"
+    broker._history_url = "https://api.upstox.com.evil.example/v2/order/history"
+    with pytest.raises(ValueError, match="official"):
+        broker._request("GET", broker._history_url)
+    assert calls == []
+
+
+def test_settings_rejects_forged_sandbox_endpoints():
+    with pytest.raises(ValueError, match="official"):
+        Settings(
+            broker="UPSTOX_SANDBOX",
+            upstox_sandbox_access_token="not-a-real-token",
+            upstox_sandbox_base_url="https://api-hft.upstox.com.evil.example",
+        )

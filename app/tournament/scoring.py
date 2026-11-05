@@ -24,8 +24,11 @@ class ScoringConfig:
     def __post_init__(self):
         if set(self.weights) != set(DEFAULT_WEIGHTS):
             raise ValueError("Provide exactly the documented scoring weight keys")
-        if self.minimum_trades < 1 or any(not isfinite(v) or v < 0 for v in self.weights.values()):
-            raise ValueError("Scoring weights must be finite/nonnegative; minimum_trades >= 1")
+        if (isinstance(self.minimum_trades, bool)
+                or not isinstance(self.minimum_trades, int) or self.minimum_trades < 1):
+            raise ValueError("minimum_trades must be a positive integer")
+        if any(not isfinite(v) or v < 0 for v in self.weights.values()):
+            raise ValueError("Scoring weights must be finite/nonnegative")
         if not any(self.weights[k] for k in self.weights if k != "return"):
             raise ValueError("Return-only scoring is prohibited")
 
@@ -33,12 +36,16 @@ class ScoringConfig:
 def score(metrics: dict, config: ScoringConfig | None = None) -> dict:
     config = config or ScoringConfig()
     count = metrics["number_of_trades"]
+    profit_factor = metrics["profit_factor"]
+    # Zero is real evidence (no gross winning P&L), not the same as an
+    # undefined value. Only None receives the documented neutral treatment.
+    normalized_profit_factor = 1.0 if profit_factor is None else profit_factor
     components = {
         "return": tanh(metrics["total_return"]),
         "sharpe": tanh((metrics["sharpe"] or 0) / 3),
         "sortino": tanh((metrics["sortino"] or 0) / 3),
         # Undefined PF (no losses) is neutral, not infinity/a free high score.
-        "profit_factor": tanh(((metrics["profit_factor"] or 1) - 1) / 2),
+        "profit_factor": tanh((normalized_profit_factor - 1) / 2),
         "drawdown": -metrics["max_drawdown"],
         "low_trades": -max(0, 1 - count / config.minimum_trades),
         "instability": -metrics["instability"],

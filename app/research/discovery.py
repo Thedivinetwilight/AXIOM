@@ -5,7 +5,7 @@ Every candidate is evaluated with chronological splits only:
   score (parameter/cost perturbations on the OOS leg) → walk-forward
   stability proxy. Gates (documented, never bypassed):
     oos_trades >= 3  AND  oos_expectancy > 0  AND  robustness_score >= 0.25
-    AND  oos max_drawdown <= 0.5  AND  wf_expectancy > -0.5
+    AND  oos max_drawdown <= 0.5  AND  present wf_expectancy > 0
 In-sample return is NEVER part of promotion. Candidates with zero trades or
 negative OOS expectancy are recorded honestly as not tradable.
 """
@@ -22,7 +22,7 @@ from app.learning.evaluator import out_of_sample_expectancy
 MIN_OOS_TRADES = 3
 MIN_ROBUSTNESS = 0.25
 MAX_OOS_DRAWDOWN = 0.5
-MIN_WF_EXPECTANCY = -0.5
+MIN_WF_EXPECTANCY = 0.0
 
 # Small, documented grids over the 7 V1 strategy families (controlled search).
 FAMILIES: dict[str, list[dict]] = {
@@ -70,27 +70,30 @@ class Spec:
 
 def generate_specs(max_candidates: int = 12) -> list[Spec]:
     """Deterministic, capped candidate list across all 7 families."""
+    if (isinstance(max_candidates, bool) or not isinstance(max_candidates, int)
+            or max_candidates < 1):
+        raise ValueError("max_candidates must be a positive integer")
     specs: list[Spec] = []
     for strategy, grid in FAMILIES.items():
         for parameters in grid:
             specs.append(Spec(strategy, dict(parameters), "grid"))
-    return specs[: max(1, int(max_candidates))]
+    return specs[:max_candidates]
 
 
-def _robustness_score(engine, candles, timeframe, spec) -> tuple[float, dict]:
-    """Documented score: fraction of parameter/cost perturbations whose OOS-leg
-    total return stays above −10% of the baseline (diagnostic, never tuned)."""
+def _robustness_score(engine, candles, timeframe, spec, *, warmup=None) -> tuple[float, dict]:
+    """Documented score: fraction of perturbations/subperiods whose total
+    return is no more than 10 percentage points below the baseline return."""
     from app.validation.robustness import robustness
 
     candidate = {"strategy": spec.strategy, "parameters": dict(spec.parameters)}
     report = robustness(candles, timeframe, candidate, engine,
                         perturbation=0.1, cost_multiplier=2.0,
-                        sensitivity_threshold=0.15)
+                        sensitivity_threshold=0.15, warmup=warmup)
     trials = report["trials"]
     if not trials:
         return 0.0, report
     baseline_return = float(report["baseline"]["total_return"] or 0.0)
-    floor = min(-0.10, baseline_return - 0.10)
+    floor = baseline_return - 0.10
     passed = sum(1 for trial in trials
                  if float(trial["metrics"]["total_return"] or 0.0) >= floor)
     return round(passed / len(trials), 4), report
@@ -113,8 +116,11 @@ def evaluate_spec(candles, timeframe: str, spec: Spec,
                 "tradable": False, "reason": oos_eval.get("reason", "invalid"),
                 "oos": {"oos_trades": 0, "oos_expectancy": 0.0},
                 "metrics": {}, "robustness_score": 0.0, "wf_expectancy": None}
-    test_leg = candles[int(len(candles) * 0.7):]  # locked OOS leg (chronological)
-    score, report = _robustness_score(engine, test_leg, timeframe, spec)
+    cut = int(len(candles) * 0.7)
+    test_leg = candles[cut:]  # chronological OOS leg
+    score, report = _robustness_score(
+        engine, test_leg, timeframe, spec, warmup=candles[:cut]
+    )
     # walk-forward stability proxy: two disjoint OOS sub-windows, averaged
     half = len(test_leg) // 2
     window_expectancies = []
@@ -131,14 +137,14 @@ def evaluate_spec(candles, timeframe: str, spec: Spec,
 
     oos_run = engine.run(test_leg,
                          create_strategy(spec.strategy, spec.parameters),
-                         timeframe, label="UNSEEN TEST")
+                         timeframe, warmup=candles[:cut], label="UNSEEN TEST")
     oos_drawdown = float(oos_run.metrics.get("max_drawdown") or 0.0)
     gates = {
         "oos_trades>=3": int(oos_eval["oos_trades"]) >= MIN_OOS_TRADES,
         "oos_expectancy>0": float(oos_eval["oos_expectancy"]) > 0,
         "robustness>=0.25": score >= MIN_ROBUSTNESS,
         "drawdown<=0.5": oos_drawdown <= MAX_OOS_DRAWDOWN,
-        "wf>-0.5": wf_expectancy is None or wf_expectancy > MIN_WF_EXPECTANCY,
+        "wf_expectancy>0": wf_expectancy is not None and wf_expectancy > MIN_WF_EXPECTANCY,
     }
     tradable = all(gates.values())
     return {
@@ -163,16 +169,22 @@ def evaluate_spec(candles, timeframe: str, spec: Spec,
 class StrategyDiscoveryEngine:
     """Controlled search over the V1 strategy families; every result recorded."""
 
-    def __init__(self, repository, *, settings=None):
+    def __init__(self, repository, *, settings=None, engine: BacktestEngine | None = None):
         self.repository = repository
         self.settings = settings
+        self.engine = engine or BacktestEngine(ExecutionConfig())
 
-    def discover(self, name: str, candles, timeframe: str) -> dict:
+    def discover(self, name: str, candles, timeframe: str, *, specs=None) -> dict:
         from app.strategies import REGISTRY  # noqa: F401 (family validation)
 
-        max_candidates = int(getattr(self.settings, "discovery_max_candidates", 12)
-                             ) if self.settings is not None else 12
-        specs = generate_specs(max_candidates)
+        if specs is None:
+            max_candidates = int(getattr(self.settings, "discovery_max_candidates", 12)
+                                 ) if self.settings is not None else 12
+            specs = generate_specs(max_candidates)
+        else:
+            specs = list(specs)
+        if not specs:
+            raise ValueError("discovery requires at least one candidate specification")
         experiment_id = uuid.uuid4().hex
         self.repository.record_experiment(
             experiment_id, name,
@@ -184,7 +196,7 @@ class StrategyDiscoveryEngine:
                        "wf_expectancy": MIN_WF_EXPECTANCY}})
         results = []
         for spec in specs:
-            result = evaluate_spec(candles, timeframe, spec)
+            result = evaluate_spec(candles, timeframe, spec, engine=self.engine)
             self.repository.record_candidate(
                 uuid.uuid4().hex, experiment_id=experiment_id,
                 strategy=spec.strategy, parameters=spec.parameters,
@@ -205,5 +217,17 @@ class StrategyDiscoveryEngine:
             experiment_id,
             {"candidates": len(results),
              "promoted": sum(1 for r in results if r.get("tradable"))})
-        return {"experiment_id": experiment_id, "evaluated": len(results),
-                "results": results}
+        qualified = [result for result in results if result.get("tradable")]
+        return {
+            "experiment_id": experiment_id,
+            "symbol": candles[0].symbol if candles else None,
+            "timeframe": timeframe,
+            "evaluated": len(results),
+            "results": results,
+            "qualified": qualified,
+            "research_only": True,
+            "execution_authorized": False,
+            "profitability_claim": "none",
+            "note": ("Qualified candidates have historical research evidence only; "
+                     "they are not profit claims or execution approval."),
+        }

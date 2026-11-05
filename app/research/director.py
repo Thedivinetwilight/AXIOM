@@ -9,6 +9,7 @@ it only records questions and experiments.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 
@@ -94,7 +95,11 @@ class ResearchDirector:
             return {"scheduled": False,
                     "reason": "no local data/experiment engine available; recorded as blocked"}
         rationale = _load(question["rationale"])
-        seed = abs(hash(question["question"])) % (2 ** 31)
+        # Python's built-in hash is randomized between processes. Persist a
+        # stable seed so a scheduled research question is reproducible.
+        seed = int.from_bytes(
+            hashlib.sha256(question["question"].encode("utf-8")).digest()[:4], "big"
+        ) % (2 ** 31)
         experiment_id = uuid.uuid4().hex
         self.repository.record_experiment(experiment_id, f"director:{question_id}", {
             "question": question["question"], "seed": seed,

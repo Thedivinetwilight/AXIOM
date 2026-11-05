@@ -36,11 +36,15 @@ def robustness(
     perturbation=0.1,
     cost_multiplier=2.0,
     sensitivity_threshold=0.15,
+    warmup=None,
 ):
     if not 0 < perturbation < 1 or not 1 <= cost_multiplier <= 5:
         raise ValueError("Invalid robustness settings")
     name, params = candidate["strategy"], candidate["parameters"]
-    baseline = engine.run(candles, create_strategy(name, params), timeframe, label="ROBUSTNESS")
+    baseline = engine.run(
+        candles, create_strategy(name, params), timeframe,
+        warmup=warmup, label="ROBUSTNESS"
+    )
     trials, warnings = [], suspicious_warnings(baseline.metrics)
     variations = []
     for key, value in params.items():
@@ -53,13 +57,16 @@ def robustness(
             )
             if changed[key] == value:
                 changed[key] = value + direction if isinstance(value, int) else value
-            variations.append((f"parameter:{key}:{direction:+d}", changed, engine.config, candles))
+            variations.append(
+                (f"parameter:{key}:{direction:+d}", changed, engine.config, candles, warmup)
+            )
     variations.append(
         (
             "commission_stress",
             params,
             replace(engine.config, commission=engine.config.commission * cost_multiplier),
             candles,
+            warmup,
         )
     )
     variations.append(
@@ -72,14 +79,20 @@ def robustness(
                 spread=engine.config.spread * cost_multiplier,
             ),
             candles,
+            warmup,
         )
     )
     for i in range(3):
-        segment = candles[i * len(candles) // 3 : (i + 1) * len(candles) // 3]
+        start = i * len(candles) // 3
+        segment = candles[start : (i + 1) * len(candles) // 3]
         if len(segment) >= 2:
             direction = "up" if segment[-1].close > segment[0].close else "down_or_flat"
-            variations.append((f"period_{i + 1}:{direction}", params, engine.config, segment))
-    for label, parameters, config, bars in variations:
+            # A subperiod may use only its own prior history, never later bars.
+            prior = list(warmup or []) + list(candles[:start])
+            variations.append(
+                (f"period_{i + 1}:{direction}", params, engine.config, segment, prior)
+            )
+    for label, parameters, config, bars, prior in variations:
         try:
             strategy = create_strategy(name, parameters)
         except ValueError:
@@ -87,7 +100,7 @@ def robustness(
             continue
         result = BacktestEngine(
             config, annualization=engine.annualization, calendar=engine.calendar
-        ).run(bars, strategy, timeframe, label="ROBUSTNESS")
+        ).run(bars, strategy, timeframe, warmup=prior, label="ROBUSTNESS")
         delta = result.metrics["total_return"] - baseline.metrics["total_return"]
         trials.append(
             {

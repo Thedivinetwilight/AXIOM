@@ -21,10 +21,10 @@ CURRENT documentation verified 2026-09-22 (V1 implementation):
   (X-Algo-Name, optional).
 
 SAFETY:
-- This broker talks ONLY to the configured sandbox/order base URL with the
-  dedicated UPSTOX_SANDBOX_ACCESS_TOKEN. It is never constructed for live
-  trading and there is no live order path in this project (BROKER=LIVE is
-  rejected by Settings).
+- This broker talks ONLY to exact official sandbox/order and history URLs with
+  the dedicated UPSTOX_SANDBOX_ACCESS_TOKEN. Non-official endpoints are
+  rejected at construction and again before every request. The separate
+  autonomy LIVE boundary is never implemented by this class.
 - Fails closed on auth errors (token rejected → broker disabled until
   re-created) and records every transition for audit/reconciliation.
 - All requests inject the Bearer token per request; the token is never
@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -170,6 +171,33 @@ def classify_history_probe(response) -> dict:
             "parse_ok": parse_ok}
 
 
+OFFICIAL_SANDBOX_ORDER_HOST = "api-hft.upstox.com"
+OFFICIAL_UPSTOX_HISTORY_HOST = "api.upstox.com"
+OFFICIAL_ORDER_HISTORY_PATH = "/v2/order/history"
+
+
+def validate_official_sandbox_endpoints(base_url: str, history_url: str) -> tuple[str, str]:
+    """Return normalized official endpoints or reject before any network call."""
+    try:
+        base = urlsplit(str(base_url))
+        history = urlsplit(str(history_url))
+        base_port, history_port = base.port, history.port
+    except (TypeError, ValueError):
+        raise ValueError("Sandbox endpoints are invalid") from None
+    if (base.scheme != "https" or base.hostname != OFFICIAL_SANDBOX_ORDER_HOST
+            or base_port not in {None, 443} or base.username or base.password
+            or base.path.rstrip("/") or base.query or base.fragment):
+        raise ValueError("Sandbox orders require the official https://api-hft.upstox.com host")
+    if (history.scheme != "https" or history.hostname != OFFICIAL_UPSTOX_HISTORY_HOST
+            or history_port not in {None, 443} or history.username or history.password
+            or history.path.rstrip("/") != OFFICIAL_ORDER_HISTORY_PATH
+            or history.query or history.fragment):
+        raise ValueError(
+                "Sandbox history requires the official https://api.upstox.com/v2/order/history"
+        )
+    return str(base_url).rstrip("/"), str(history_url).rstrip("/")
+
+
 class UpstoxSandboxBroker:
     """Real Upstox SANDBOX order flow with audited, idempotent reconciliation."""
 
@@ -194,11 +222,7 @@ class UpstoxSandboxBroker:
     ):
         if not isinstance(access_token, str) or not access_token.strip():
             raise ValueError("A sandbox access token is required (UPSTOX_SANDBOX_ACCESS_TOKEN)")
-        if base_url.split(":")[0] not in {"https", "http"}:
-            raise ValueError("Sandbox base URL must be http(s)")
-        if "live" in base_url.lower() and "sandbox" not in base_url.lower():
-            # Guard against ever pointing this class at a live-looking host.
-            logger.warning("SANDBOX_BASE_URL_REVIEW", extra={"base_url": base_url})
+        base_url, history_url = validate_official_sandbox_endpoints(base_url, history_url)
         self._token = access_token
         self.instrument_key = instrument_key
         # 3.0.1: authoritative symbol → instrument_key resolution. The broker
@@ -241,6 +265,15 @@ class UpstoxSandboxBroker:
         """HTTP core. 401/403 fail closed. Reads (GET) retry 429/5xx with
         bounded backoff; writes (POST/PUT/DELETE) NEVER auto-retry — the
         remote outcome could already exist (duplicate-order safety)."""
+        base_url, history_url = validate_official_sandbox_endpoints(self._base_url, self._history_url)
+        allowed = {
+            ("POST", base_url + self.PLACE_PATH),
+            ("PUT", base_url + self.MODIFY_PATH),
+            ("DELETE", base_url + self.CANCEL_PATH),
+            ("GET", history_url),
+        }
+        if (method.upper(), url) not in allowed:
+            raise ValueError("Refusing a non-official or unexpected sandbox order/history endpoint")
         if not self.available:
             raise SandboxAuthError("Sandbox broker disabled after an auth failure")
         import time as _time

@@ -1,0 +1,88 @@
+name: operator checks
+
+# Linux verification uses fake MT5 and local paper fixtures only. It never
+# initializes a Vantage terminal or uses broker/data-provider credentials.
+on:
+  push:
+    branches:
+      - arena/19f4cba3-axiom
+      - arena/ffd46191-axiom
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused:
+    name: focused (Vantage fake + chart + US paper)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-lock.txt
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Vantage connector, service and authenticated API (fake MT5)
+        run: python -m pytest -q tests/test_vantage_connector.py tests/test_vantage_api.py
+      - name: Upstox autonomy boundaries, faults, research and shakedown (fakes only)
+        run: python -m pytest -q tests/test_autonomy_foundation.py tests/test_autonomy_service.py tests/test_autonomy_research.py tests/test_autonomy_api.py tests/test_autonomy_shakedown.py tests/test_autonomy_release_blockers.py
+      - name: Independent read-only MT5 market data and local paper (fake provider)
+        run: python -m pytest -q tests/test_mt5_market_data.py
+      - name: Bounded performance and listed-asset routing boundaries
+        run: python -m pytest -q tests/test_terminal_performance_listed.py
+      - name: US market data, New York calendar and paper limits
+        run: python -m pytest -q tests/test_us_equities_paper.py tests/test_us_chart_integration.py
+      - name: chart terminal contract tests
+        run: python -m pytest -q tests/test_chart_terminal.py tests/test_parallel_ensemble_and_allocator.py tests/test_live_trade_monitor.py
+      - name: chart, terminal and autonomy scripts execute headlessly
+        run: |
+          node --check app/static/chart/chart.js
+          node --check app/static/terminal/terminal.js
+          node --check app/static/autonomy/autonomy.js
+          node tests/js/chart_smoke.mjs
+          node tests/js/terminal_smoke.mjs
+          node tests/js/multimarket_terminal_smoke.mjs
+          node tests/js/model_lab_smoke.mjs
+          node tests/js/live_trade_monitor_and_ensemble_smoke.mjs
+          node tests/js/autonomy_smoke.mjs
+
+  full:
+    name: full suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-lock.txt
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: full Python test suite
+        run: python -m pytest -q
+      - name: all JavaScript harnesses
+        run: npm test

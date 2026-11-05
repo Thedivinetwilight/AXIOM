@@ -1,0 +1,562 @@
+name: windows release
+
+# Builds, tests and install-tests the Windows x64 executable and installer
+# for one exact source commit. Publication requires a separate explicit dispatch.
+#
+# workflow_dispatch may repeat the exact workflow commit. One pinned exception
+# exists so a manual build of PR #9's exact commit can be run from this workflow
+# once it is registered on main: commit 3a8db0a9d7dc2e1ea7a2ff6aeb3fd20db69de190
+# is accepted as an external target, and in that case the packaging kit is
+# re-sourced from that same commit before anything is built, so application
+# source and packaging files still come from one commit. Any other target that
+# differs from the workflow commit is refused exactly as before.
+# BUILD_TARGET is retained only as a historical file, avoiding any
+# self-referential final-commit update.
+#
+# How the two trees are used:
+#   _kit/  the branch this workflow runs on -> packaging files only
+#   src/   the source commit being built    -> application code only
+# The kit is copied into src/packaging and excluded via src/.git/info/exclude,
+# so the build's "is the tree clean" guard still holds and the built code is
+# exactly the requested commit.
+#
+# Smoke tests use generated local tokens, bundled DEMO data, fake MT5 tests and
+# dummy DPAPI values. No Vantage terminal/account is contacted and no broker
+# credential is used. The default target is the exact workflow source commit.
+# Push runs produce Actions evidence only: they never publish a release or push
+# diagnostics back to the branch.
+
+on:
+  push:
+    # Every commit on these branches must produce fresh Windows evidence.
+    # Path filtering could otherwise leave app/test-only commits pointing at
+    # an older commit's binaries. Push runs are artifact-only: the publish
+    # step requires workflow_dispatch with an explicit publish input.
+    branches:
+      - arena/19f4cba3-axiom
+      - arena/d832c9d3-axiom
+      - arena/ffd46191-axiom
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact workflow commit SHA (a different mixed-source target is refused)
+        required: false
+        default: ''
+        type: string
+      version:
+        description: Version label (blank = VERSION file)
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: After all gates pass, create the new tag/prerelease and upload assets (never replaces an existing release)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build + install-test (windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the packaging kit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _kit
+          fetch-depth: 1
+
+      - name: Resolve the target commit and version
+        id: resolve
+        shell: pwsh
+        run: |
+          $target = '${{ inputs.commit }}'.Trim()
+          $version = '${{ inputs.version }}'.Trim()
+          $workflowCommit = (git -C _kit rev-parse HEAD).Trim()
+          if (-not $target) { $target = $workflowCommit }
+          if ($target -notmatch '^[0-9a-f]{40}$') { throw "invalid commit '$target'" }
+          # Pinned exception: PR #9's exact build commit may be built from a
+          # workflow run registered on main. The kit is then re-sourced from
+          # that same commit below, so packaging files and application source
+          # can never be mixed. Every other mismatch is refused.
+          $pinnedExternalTarget = '3a8db0a9d7dc2e1ea7a2ff6aeb3fd20db69de190'
+          $externalKit = $false
+          if ($target -ne $workflowCommit) {
+            if ($target -ne $pinnedExternalTarget) {
+              throw "refusing mixed-source build: target $target differs from workflow commit $workflowCommit and is not the pinned PR build commit $pinnedExternalTarget"
+            }
+            $externalKit = $true
+            Write-Host "pinned external target accepted: $target (kit will be re-sourced from the same commit)"
+          }
+          if ($externalKit) {
+            git -C _kit fetch --depth 1 origin $target
+            if ($LASTEXITCODE -ne 0) { throw "cannot fetch pinned target commit $target" }
+            git -C _kit checkout --force FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw "cannot check out pinned target commit $target" }
+            $kitCommit = (git -C _kit rev-parse HEAD).Trim()
+            if ($kitCommit -ne $target) { throw "kit re-source mismatch: kit commit $kitCommit != target $target" }
+            Write-Host "packaging kit re-sourced from pinned commit: $kitCommit"
+          }
+          if (-not $version) { $version = (Get-Content _kit/packaging/windows/VERSION -Raw).Trim() }
+          "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TARGET_COMMIT=$target" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "target commit: $target"
+          Write-Host "version:       $version"
+
+      - name: Check out the exact source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.TARGET_COMMIT }}
+          path: src
+          fetch-depth: 0
+
+      - name: Stage the kit without dirtying the source tree
+        shell: pwsh
+        run: |
+          if (-not (Test-Path _kit/packaging/windows)) { throw 'the packaging kit is missing from the branch' }
+          Copy-Item -Recurse -Force _kit/packaging src/packaging
+          Add-Content -Path src/.git/info/exclude -Value 'packaging/'
+          Push-Location src
+          $sha = (git rev-parse HEAD).Trim()
+          $dirty = (git status --porcelain | Out-String).Trim()
+          Pop-Location
+          if ($sha -ne $env:TARGET_COMMIT) { throw "checked out $sha, expected $env:TARGET_COMMIT" }
+          if ($dirty) { throw "source tree is dirty after staging the kit:`n$dirty" }
+          Write-Host "source commit verified and clean: $sha"
+
+      - name: Build, test and package
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          # The build script changes its own working directory. Pin the log to
+          # an absolute path so Tee-Object cannot relocate it during the build.
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'src\packaging\windows\build-windows.log'
+          & ./build_windows.ps1 -ExpectedCommit "$env:TARGET_COMMIT" -Version "$env:VERSION" *>&1 |
+            Tee-Object -FilePath $buildLog
+
+      - name: Verify the produced artifacts
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          if ($meta.commit -ne $env:TARGET_COMMIT) { throw "metadata commit $($meta.commit) != $env:TARGET_COMMIT" }
+          foreach ($a in $meta.artifacts) {
+            $path = Join-Path dist $a.name
+            if (-not (Test-Path $path)) { throw "missing artifact $($a.name)" }
+            $item = Get-Item $path
+            if ($item.Length -ne $a.bytes) { throw "byte-length mismatch for $($a.name)" }
+            $hash = (Get-FileHash -Algorithm SHA256 $item.FullName).Hash.ToLower()
+            if ($hash -ne $a.sha256) { throw "hash mismatch for $($a.name)" }
+            Write-Host ("verified {0}  {1}" -f $a.name, $hash)
+          }
+          if ($meta.test_results.smoke_failed -ne 0) { throw "smoke failures: $($meta.test_results.smoke_failed)" }
+          if ($meta.blocker_fix_files.Count -ne 8) { throw 'blocker-fix source manifest is incomplete' }
+          foreach ($file in $meta.blocker_fix_files) {
+            $relative = $file.path -replace '/', '\'
+            $source = Join-Path $env:GITHUB_WORKSPACE "src\$relative"
+            if (-not (Test-Path $source)) { throw "missing blocker-fix source $($file.path)" }
+            $hash = (Get-FileHash -Algorithm SHA256 $source).Hash.ToLower()
+            if ($hash -ne $file.sha256) { throw "blocker-fix source hash mismatch: $($file.path)" }
+          }
+          foreach ($label in @('onefile frozen PAPER blocker fixes', 'onedir frozen PAPER blocker fixes')) {
+            if (-not ($meta.test_results.smoke_checks | Where-Object { $_ -match "^PASS.*$label" })) {
+              throw "missing frozen blocker gate: $label"
+            }
+          }
+          Write-Host "verified all eight blocker-fix source hashes and both frozen PAPER diagnostics"
+          Write-Host "smoke checks passed: $($meta.test_results.smoke_checks.Count)"
+
+      - name: Install the loaderless installer, launch onedir, upgrade, then uninstall
+        shell: pwsh
+        working-directory: src/packaging/windows
+        # The test logs every phase and refuses incomplete EXE/BIN packages.
+        run: |
+          $package = (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName
+          if (-not $package) { throw 'loaderless installer ZIP was not produced' }
+          $extract = Join-Path $env:TEMP ('axiom-installer-' + [guid]::NewGuid().ToString('N'))
+          Expand-Archive -Path $package -DestinationPath $extract
+          $setup = (Get-ChildItem $extract -Filter '*-no-temp-setup.exe' | Select-Object -First 1).FullName
+          if (-not $setup) { throw 'extracted loaderless setup was not found' }
+          ./install_test.ps1 -DistDir dist -SetupPath $setup
+          if ($LASTEXITCODE -ne 0) { throw "loaderless install acceptance failed: $LASTEXITCODE" }
+
+      - name: Extract and test the onedir portable ZIP
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $package = (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName
+          if (-not $package) { throw 'onedir portable ZIP was not produced' }
+          ./portable_test.ps1 -PackagePath $package -ExpectedCommit "$env:TARGET_COMMIT"
+          if ($LASTEXITCODE -ne 0) { throw "onedir portable acceptance failed: $LASTEXITCODE" }
+
+      - name: Finalize install results and checksum every release asset
+        shell: pwsh
+        working-directory: src/packaging/windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installLog = Get-Content dist\installer-test-log.txt -Raw
+          $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          if ($installFailed -ne 0) { throw "installer checks failed: $installFailed" }
+          $portableLog = Get-Content dist\portable-test-log.txt -Raw
+          $portablePassed = @($portableLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $portableFailed = @($portableLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          if ($portableFailed -ne 0) { throw "portable checks failed: $portableFailed" }
+          if ($installLog -notmatch 'PASS.*installed frozen PAPER blocker fixes' -or
+              $installLog -notmatch 'PASS.*upgraded installed frozen PAPER blocker fixes') {
+            throw 'installed/upgraded frozen PAPER blocker diagnostics are missing'
+          }
+          if ($portableLog -notmatch 'PASS.*portable frozen PAPER blocker fixes') {
+            throw 'portable frozen PAPER blocker diagnostics are missing'
+          }
+          $metaPath = 'dist\BUILD_METADATA.json'
+          $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+          $meta.test_results | Add-Member -NotePropertyName installer_checks_passed -NotePropertyValue $installPassed -Force
+          $meta.test_results | Add-Member -NotePropertyName installer_checks_failed -NotePropertyValue $installFailed -Force
+          $meta.test_results | Add-Member -NotePropertyName upgrade_preservation -NotePropertyValue 'passed on this Windows runner with the loaderless onedir package' -Force
+          $meta.test_results | Add-Member -NotePropertyName portable_checks_passed -NotePropertyValue $portablePassed -Force
+          $meta.test_results | Add-Member -NotePropertyName portable_checks_failed -NotePropertyValue $portableFailed -Force
+          $meta.test_results | Add-Member -NotePropertyName app_control_device_verification -NotePropertyValue 'NOT TESTED on the reporting owner device; CI validates packaging and runtime only, with no policy change' -Force
+          $kronos = Get-Content dist\kronos-status.json -Raw | ConvertFrom-Json
+          if ($kronos.operation.state -ne 'COMPLETED' -or -not $kronos.available_for_inference -or $kronos.last_self_test.status -ne 'PASSED') { throw 'real installed-app Kronos evidence is incomplete' }
+          if ($kronos.last_self_test.mock_outputs_used -or $kronos.runtime.cuda_available -or $null -ne $kronos.runtime.torch_cuda_build) { throw 'Kronos CPU/no-mock evidence failed' }
+          $meta.test_results | Add-Member -NotePropertyName kronos_real_inference -NotePropertyValue 'PASSED in the installed Windows app with manifest-pinned artifacts and exact CPU runtime; synthetic inference smoke only, not market/profitability evidence' -Force
+          $meta | Add-Member -NotePropertyName kronos_evidence -NotePropertyValue ([pscustomobject]@{
+            manifest_sha256 = $kronos.last_self_test.manifest_sha256
+            manifest_file_sha256 = $kronos.last_self_test.manifest_file_sha256
+            runtime_lock_sha256 = $kronos.last_self_test.runtime_lock_sha256
+            model_revision = $kronos.last_self_test.model_revision
+            tokenizer_revision = $kronos.last_self_test.tokenizer_revision
+            device = $kronos.last_self_test.device
+            load_ms = $kronos.last_self_test.load_ms
+            inference_ms = $kronos.last_self_test.inference_ms
+            mock_outputs_used = $kronos.last_self_test.mock_outputs_used
+            market_evaluation = $false
+          }) -Force
+          $meta | ConvertTo-Json -Depth 10 | Set-Content $metaPath -Encoding utf8
+          $files = @(
+            'dist\AXIOM-Chart.exe',
+            (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName,
+            (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName,
+            'dist\BUILD_METADATA.json', 'dist\SOURCE_COMMIT.txt',
+            'dist\install-test-log.txt', 'dist\installer-test-log.txt', 'dist\portable-test-log.txt',
+            'dist\kronos-status.json', 'dist\model-lab-kronos-forecast.json',
+            '..\..\config\kronos-small.json', '..\..\config\kronos-runtime-requirements.txt',
+            'pytest-focused.log', 'pytest-full.log', 'js-autonomy.log', 'js-chart.log', 'js-terminal.log', 'js-multimarket.log', 'js-modellab.log', 'js-monitor-ensemble.log',
+            'benchmark-python.log', 'js-terminal-benchmark.log',
+            'TERMINAL_BENCHMARK.json', 'TERMINAL_UI_BENCHMARK.json',
+            'WINDOWS_INSTALL_MANUAL.md', '..\..\USER_MANUAL.md',
+            '..\..\docs\LISTED_ASSETS.md', '..\..\docs\RESEARCH_CANDIDATES.md',
+            '..\..\docs\TERMINAL_PERFORMANCE.md',
+            '..\..\docs\TERMINAL_REDESIGN_PLAN.md', '..\..\docs\WINDOWS_APP_CONTROL.md',
+            '..\..\docs\AUTONOMY.md', '..\..\docs\ARCHITECTURE_AUDIT.md',
+            '..\..\docs\BASELINE_AUDIT_AND_ISSUES.md', '..\..\docs\OWNER_SETUP_GUIDE.md',
+            '..\..\docs\MODEL_LAB_AND_KRONOS_AUDIT.md', '..\..\docs\AI_MODEL_LAB_MANUAL.md', '..\..\docs\RESEARCH_COMPARISON_REPORT.md', '..\..\docs\ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md',
+            '..\..\docs\autonomy-shakedown.template.json'
+          )
+          $sums = @()
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw "missing release file $file" }
+            $sums += ('{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Split-Path $file -Leaf))
+          }
+          $sumNames = @($sums | ForEach-Object { ($_ -split '  ', 2)[1] })
+          $expectedNames = @($files | ForEach-Object { Split-Path $_ -Leaf })
+          if ($sumNames.Count -ne $files.Count -or @($sumNames | Sort-Object -Unique).Count -ne $files.Count) {
+            throw 'checksum manifest has missing or duplicate release filenames'
+          }
+          foreach ($name in $expectedNames) {
+            if ($sumNames -notcontains $name) { throw "checksum manifest does not cover $name" }
+          }
+          $sums | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+          foreach ($line in $sums) { Write-Host $line }
+
+      - name: Report sanitized failure-log locations without pushing to the branch
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host 'The always-run artifact upload retains available sanitized build/installer logs.'
+          Write-Host 'No CI commit, branch push, tag, release or asset mutation is performed on failure.'
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axiom-vantage-operator-windows-x64-${{ steps.resolve.outputs.VERSION }}
+          path: |
+            src/packaging/windows/dist/AXIOM-Chart.exe
+            src/packaging/windows/dist/*-no-temp-install.zip
+            src/packaging/windows/dist/*-portable.zip
+            src/packaging/windows/dist/BUILD_METADATA.json
+            src/packaging/windows/dist/SHA256SUMS.txt
+            src/packaging/windows/dist/SOURCE_COMMIT.txt
+            src/packaging/windows/dist/install-test-log.txt
+            src/packaging/windows/dist/installer-test-log.txt
+            src/packaging/windows/dist/portable-test-log.txt
+            src/packaging/windows/dist/kronos-status.json
+            src/packaging/windows/dist/model-lab-kronos-forecast.json
+            src/config/kronos-small.json
+            src/config/kronos-runtime-requirements.txt
+            src/packaging/windows/dist/INSTALL_TEST_ERROR.txt
+            src/packaging/windows/dist/PORTABLE_TEST_ERROR.txt
+            src/packaging/windows/WINDOWS_INSTALL_MANUAL.md
+            src/packaging/windows/pytest-full.log
+            src/packaging/windows/pytest-focused.log
+            src/packaging/windows/js-autonomy.log
+            src/packaging/windows/js-chart.log
+            src/packaging/windows/js-terminal.log
+            src/packaging/windows/js-multimarket.log
+            src/packaging/windows/js-modellab.log
+            src/packaging/windows/js-monitor-ensemble.log
+            src/packaging/windows/benchmark-python.log
+            src/packaging/windows/js-terminal-benchmark.log
+            src/packaging/windows/TERMINAL_BENCHMARK.json
+            src/packaging/windows/TERMINAL_UI_BENCHMARK.json
+            src/USER_MANUAL.md
+            src/docs/LISTED_ASSETS.md
+            src/docs/RESEARCH_CANDIDATES.md
+            src/docs/TERMINAL_PERFORMANCE.md
+            src/docs/TERMINAL_REDESIGN_PLAN.md
+            src/docs/WINDOWS_APP_CONTROL.md
+            src/docs/AUTONOMY.md
+            src/docs/ARCHITECTURE_AUDIT.md
+            src/docs/BASELINE_AUDIT_AND_ISSUES.md
+            src/docs/OWNER_SETUP_GUIDE.md
+            src/docs/MODEL_LAB_AND_KRONOS_AUDIT.md
+            src/docs/AI_MODEL_LAB_MANUAL.md
+            src/docs/RESEARCH_COMPARISON_REPORT.md
+            src/docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md
+            src/docs/autonomy-shakedown.template.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish the prerelease
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: pwsh
+        working-directory: src/packaging/windows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $meta = Get-Content dist\BUILD_METADATA.json -Raw | ConvertFrom-Json
+          $tag = "v$($env:VERSION)"
+          $passed = $meta.test_results.smoke_checks.Count - $meta.test_results.smoke_failed
+
+          # The checksums are printed in the release notes as well as shipped in
+          # SHA256SUMS.txt, so a downloader can check what they got without
+          # having to trust the asset listing.
+          $sums = @(Get-Content dist\SHA256SUMS.txt | Where-Object { $_.Trim() })
+          $sumBlock = ($sums | ForEach-Object { '    ' + $_.Trim() }) -join "`n"
+          $fullFailures = @($meta.test_results.full_failures | Where-Object { $_ })
+          if ($fullFailures.Count -eq 0) {
+            $failureBlock = 'none'
+          } else {
+            $failureBlock = ($fullFailures | ForEach-Object { '    ' + $_ }) -join "`n"
+          }
+          $installLog = Get-Content dist\installer-test-log.txt -Raw
+          $installPassed = @($installLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $installFailed = @($installLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+          $portableLog = Get-Content dist\portable-test-log.txt -Raw
+          $portablePassed = @($portableLog -split "`n" | Where-Object { $_ -match '^PASS' }).Count
+          $portableFailed = @($portableLog -split "`n" | Where-Object { $_ -match '^FAIL' }).Count
+
+          $notes = @"
+          Windows x64 AXIOM Operator built from exact source commit ``$($meta.commit)``.
+
+          **Error 4551 / Application Control workaround.** For the reported Inno Setup ``setup.tmp``
+          block, download ``*-no-temp-install.zip``, extract the ENTIRE ZIP, keep the setup EXE and
+          matching ``-0.bin`` / ``-1.bin`` together, then run the EXE. This uses ``UseSetupLdr=no``
+          and installs an onedir runtime. Alternatively extract ``*-portable.zip`` and run
+          ``AXIOM-Chart.exe`` inside its folder with ``_internal`` beside it. Both avoid the identified
+          setup-loader and onefile runtime TEMP paths. The legacy onefile EXE remains for compatibility.
+          All packages are UNSIGNED: no Windows policy is disabled or bypassed, and acceptance by an
+          enforced on-device Smart App Control/WDAC policy is NOT claimed. See ``WINDOWS_APP_CONTROL.md``.
+
+          **Research candidate repairs.** Discovery evaluates instruments separately, supports
+          integer parameter grids and JSON reports, and uses stable scheduling seeds. Validation and
+          locked-test warmup use only prior candles. Promotion requires positive validation expectancy
+          and strict baseline improvement in addition to trade, robustness and drawdown gates. Missing
+          or nonpositive walk-forward-proxy evidence fails closed; zero-PF scoring, baseline-relative
+          robustness and finite router checks are enforced. Read
+          ``docs/RESEARCH_CANDIDATES.md``. Research tests use local/synthetic fixtures only: historical
+          qualification is NOT a profit guarantee, Vantage contract verification or order authorization.
+
+          **a6 PAPER blocker-fix candidate.** V3 candle timestamps are normalized before strategy use;
+          Kronos status tolerates missing/corrupt optional audit payloads without hiding degradation;
+          critical database failures latch HALTED/PERSISTENCE_FAILED and revoke execution permits;
+          market close cancels unfilled local PAPER intents, reconciles and restarts disarmed while
+          preserving protected open positions. The original external audit's close-time ``ACTIVE``
+          expectation is obsolete; the replacement 375-bar regression expects ``HALTED`` and explicit
+          cleanup/reconciliation. Frozen onefile/onedir, installed/upgraded and portable diagnostics
+          exercise all four repairs with temporary fake PAPER state and zero broker order endpoint calls.
+          The two JavaScript/Python test files are source evidence, not production package payloads.
+
+          **Daily Upstox autonomy.** A separate ``/autonomy`` operator boundary supports exact BOD
+          NSE/BSE equities and NCD/BCD exchange-listed currency futures/options (never spot forex).
+          Live-market PAPER has no broker mutation route. UPSTOX_LIVE is disabled by default and needs
+          fresh daily read-only authorization/risk, account/margin/static-IP/session/evidence preflights,
+          and separate operator Arm + Activate. Intent-before-write journals, three-leg GTT protection,
+          non-loosening stops, reconciliation, daily-loss entry blocking, and fail-closed recovery are
+          included. Kronos weights/runtime are not bundled. The installed app must download the exact
+          manifest-pinned public artifacts and locked CPU runtime into per-user storage and pass a real
+          offline inference self-test before this release can publish; see ``kronos-status.json``.
+          This synthetic-input inference smoke is not a market evaluation or profitability claim.
+          Read ``docs/AUTONOMY.md``. No external Upstox DEMO/LIVE account or complete-session shakedown
+          was available to CI, so account eligibility, compliance, production protection and live readiness
+          remain unverified.
+
+          **Replay truth and audit.** Default replay explicitly runs moving_average with local strategy
+          automation ON and can create simulated orders/fills without per-ticket review. It remains
+          separate from manual-only MT5 paper and Daily Upstox live-market PAPER. Durable redacted events
+          cover run start/running, actionable signals, simulated orders/fills and stop reasons including
+          END_OF_DATA. Current-run P&L deltas are separate from persisted local history/current positions.
+
+          **Modes and safety.** LOCAL PAPER uses simulated fills. Its optional fresh-price workflow
+          uses a separate authenticated VANTAGE DEMO MT5 read-only market-data service; it never
+          selects VANTAGE LIVE, changes execution mode, reaches broker order functions or creates an
+          order on connection/startup. Only exact account-discovered instruments and validated closed
+          bars are used, with explicit freshness and no replay fallback. MT5 paper sizing is in units,
+          not broker lots, and every fill is local. Vantage DEMO/LIVE execution modes retain their
+          separate review, reconciliation, Arm and Activate gates. CFDs are not owned shares.
+
+          **Terminal redesign.** All eight pages use the responsive accessible operator shell with an
+          always-visible execution/data/authorization boundary. Instruments have separate editable
+          watchlists and execution selection. Charts include timeframe shortcuts, bounded zoom/pan,
+          crosshair/OHLC, EMA/SMA and local drawings. The docked ticket distinguishes units from MT5
+          lots and shows indicative values versus actual review margin/risk. Settings separates feed,
+          chart, submission, broker acknowledgement and reconciliation timing. Listed shares/ETFs use
+          a fail-closed separate-provider identity boundary with no MT5/CFD substitution or listed
+          execution claim.
+
+          **Actual test results on this Windows runner**
+
+          * focused Python suites (hard gate): ``$($meta.test_results.focused_windows)``
+          * full Python suite (hard gate): ``$($meta.test_results.full_windows)`` - ``$($meta.test_results.full_summary)``
+          * JavaScript chart + terminal + autonomy interaction suites: ``$($meta.test_results.javascript)``
+          * Autonomy: $($meta.test_results.autonomy)
+          * DPAPI: ``$($meta.test_results.dpapi)``
+          * MT5 behavior: ``$($meta.test_results.fake_mt5)``
+          * Independent read-only market-data tests: ``$($meta.test_results.read_only_mt5)``
+          * Research candidates: ``$($meta.test_results.research_candidates)``
+          * Performance: ``$($meta.test_results.performance)``
+          * Listed assets: ``$($meta.test_results.listed_assets)``
+          * Real demo terminal/feed verification: ``$($meta.test_results.demo_market_data)``
+          * on-machine frozen-app checks: $passed passed, $($meta.test_results.smoke_failed) failed
+          * loaderless installer/onedir upgrade/uninstall: $installPassed passed, $installFailed failed - clean install,
+            launch, ``/terminal`` and legacy ``/chart``, static assets, token gates, safe disconnected
+            Vantage selection, upgrade user-data preservation, and uninstall. See the full logs.
+          * extracted onedir portable ZIP: $portablePassed passed, $portableFailed failed, including no new
+            PyInstaller ``_MEI`` TEMP directory and safe authenticated defaults
+          * Kronos pinned setup + real offline inference: ``$($meta.test_results.kronos_real_inference)``;
+            device ``$($meta.kronos_evidence.device)``, load $([math]::Round([double]$meta.kronos_evidence.load_ms, 2)) ms,
+            inference $([math]::Round([double]$meta.kronos_evidence.inference_ms, 2)) ms, mock outputs ``$($meta.kronos_evidence.mock_outputs_used)``
+          * owner-device Smart App Control: ``$($meta.test_results.app_control_device_verification)``
+
+          **Not tested:** no real Vantage demo account was available, so no actual terminal connection,
+          account discovery, MT5 quote/bar or MT5-driven local paper fill occurred; those tests used fakes.
+          No Vantage demo execution fill, live login or real-money order/cancel/modify was attempted.
+          No Upstox account login, external sandbox/DEMO order, real-money order/cancel/modify, or
+          complete market-session autonomy shakedown was attempted. Kronos used genuine pinned-artifact
+          inference on deterministic synthetic smoke bars only; no suitable licensed chronological
+          intraday dataset or paired ON/OFF profitability result was available.
+          Benchmark reports measure fake in-process provider and fake canvas paths only; no real DEMO/LIVE
+          terminal, network, broker or GPU latency was measured. The owner must follow the local demo
+          market-data and separate DEMO execution procedures in ``USER_MANUAL.md`` before external claims.
+
+          Full-suite failures: $failureBlock
+
+          **Signing:** ``$($meta.signing.status)`` - $($meta.signing.detail)
+
+          **SHA-256 of every released payload file** (identical to ``SHA256SUMS.txt``;
+          the checksum manifest cannot list itself)
+
+          $sumBlock
+
+          The per-user loaderless installer uses ``%LOCALAPPDATA%\Programs\AXIOM-Chart`` and preserves
+          ``%LOCALAPPDATA%\AXIOM`` on upgrade and silent uninstall. It installs the onedir runtime.
+          ``AXIOM-Chart.exe`` remains the executable name for upgrade compatibility; the recommended
+          portable workaround is the complete folder ZIP, not that lone legacy onefile download.
+
+          Tests and demo fills establish neither profitability nor live readiness. Read both manuals
+          and complete account-specific demo verification before considering any live action.
+          "@
+
+          $assets = @(
+            (Get-ChildItem dist -Filter '*-no-temp-install.zip' | Select-Object -First 1).FullName
+            (Get-ChildItem dist -Filter '*-portable.zip' | Select-Object -First 1).FullName
+            (Join-Path (Get-Location) 'dist\AXIOM-Chart.exe')
+            (Join-Path (Get-Location) 'dist\BUILD_METADATA.json')
+            (Join-Path (Get-Location) 'dist\SHA256SUMS.txt')
+            (Join-Path (Get-Location) 'dist\SOURCE_COMMIT.txt')
+            (Join-Path (Get-Location) 'dist\install-test-log.txt')
+            (Join-Path (Get-Location) 'dist\installer-test-log.txt')
+            (Join-Path (Get-Location) 'dist\portable-test-log.txt')
+            (Join-Path (Get-Location) 'dist\kronos-status.json')
+            (Join-Path (Get-Location) '..\..\config\kronos-small.json')
+            (Join-Path (Get-Location) '..\..\config\kronos-runtime-requirements.txt')
+            (Join-Path (Get-Location) 'pytest-focused.log')
+            (Join-Path (Get-Location) 'pytest-full.log')
+            (Join-Path (Get-Location) 'js-autonomy.log')
+            (Join-Path (Get-Location) 'js-chart.log')
+            (Join-Path (Get-Location) 'js-terminal.log')
+            (Join-Path (Get-Location) 'benchmark-python.log')
+            (Join-Path (Get-Location) 'js-terminal-benchmark.log')
+            (Join-Path (Get-Location) 'TERMINAL_BENCHMARK.json')
+            (Join-Path (Get-Location) 'TERMINAL_UI_BENCHMARK.json')
+            (Join-Path (Get-Location) 'WINDOWS_INSTALL_MANUAL.md')
+            (Join-Path (Get-Location) '..\..\USER_MANUAL.md')
+            (Join-Path (Get-Location) '..\..\docs\LISTED_ASSETS.md')
+            (Join-Path (Get-Location) '..\..\docs\RESEARCH_CANDIDATES.md')
+            (Join-Path (Get-Location) '..\..\docs\TERMINAL_PERFORMANCE.md')
+            (Join-Path (Get-Location) '..\..\docs\TERMINAL_REDESIGN_PLAN.md')
+            (Join-Path (Get-Location) '..\..\docs\WINDOWS_APP_CONTROL.md')
+            (Join-Path (Get-Location) '..\..\docs\AUTONOMY.md')
+            (Join-Path (Get-Location) '..\..\docs\ARCHITECTURE_AUDIT.md')
+            (Join-Path (Get-Location) '..\..\docs\autonomy-shakedown.template.json')
+          )
+          # The manifest is uploaded too, but cannot contain its own hash.
+          $assetNames = @($assets | ForEach-Object { Split-Path $_ -Leaf } | Where-Object { $_ -ne 'SHA256SUMS.txt' })
+          $sumNames = @($sums | ForEach-Object { ($_ -split '  ', 2)[1] })
+          if ($assetNames.Count -ne $sumNames.Count -or
+              @($assetNames | Sort-Object -Unique).Count -ne $assetNames.Count -or
+              @($sumNames | Sort-Object -Unique).Count -ne $sumNames.Count) {
+            throw 'release assets and checksum manifest must be unique and one-to-one'
+          }
+          foreach ($name in $assetNames) {
+            if ($sumNames -notcontains $name) { throw "release asset is not checksummed: $name" }
+          }
+          foreach ($name in $sumNames) {
+            if ($assetNames -notcontains $name) { throw "checksummed file is not a release asset: $name" }
+          }
+          foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "missing release asset $a" } }
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            throw "refusing to replace existing release/tag $tag; choose a new prerelease version"
+          }
+          gh release create $tag --prerelease --target $meta.commit `
+            --title "AXIOM Operator $($env:VERSION) (PAPER-only Windows x64 candidate)" `
+            --notes $notes @assets
+          $published = gh release view $tag --json targetCommitish,assets,url | ConvertFrom-Json
+          if ($published.targetCommitish -ne $meta.commit) { throw "release target $($published.targetCommitish) != $($meta.commit)" }
+          $verifyDir = Join-Path $env:TEMP ('axiom-release-verify-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $verifyDir | Out-Null
+          gh release download $tag --dir $verifyDir
+          foreach ($line in $sums) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "invalid checksum line $line" }
+            $expectedHash = $Matches[1]; $name = $Matches[2]
+            $downloaded = Join-Path $verifyDir $name
+            if (-not (Test-Path $downloaded)) { throw "uploaded asset missing after download: $name" }
+            $actualHash = (Get-FileHash -Algorithm SHA256 $downloaded).Hash.ToLower()
+            if ($actualHash -ne $expectedHash) { throw "uploaded asset hash mismatch: $name" }
+          }
+          Write-Host "published and download-verified $tag"
+          Write-Host $published.url

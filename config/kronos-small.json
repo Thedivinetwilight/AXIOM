@@ -1,0 +1,48 @@
+{
+  "schema": "axiom.kronos.artifacts.v1",
+  "source": {
+    "repository": "https://github.com/shiyu-coder/Kronos",
+    "commit": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+    "files": {
+      "model/__init__.py": "f8f856ca3fedadcaac97e196be23d1aeda1c3c9ffe8903d66d43ea3bcac6240c",
+      "model/kronos.py": "0a5f90282e2039c2de0771473419715c845def154896dbd0f5747837e6241032",
+      "model/module.py": "a07edbadc0e96804c8158c021bbc6063bb7cc43b34d7fc470d5c8ff2005a409f"
+    }
+  },
+  "model": {
+    "repository": "NeoQuasar/Kronos-small",
+    "revision": "901c26c1332695a2a8f243eb2f37243a37bea320",
+    "directory": "model",
+    "context": 512,
+    "files": {
+      "config.json": {
+        "sha256": "5e0f6a605d5f81b5c9b559fe5cf716a1acb041c744e6f41bd05b097b7a685396",
+        "size": 228
+      },
+      "model.safetensors": {
+        "sha256": "b082dfcbd8e8c142a725c8bbb99781802f38fec81210e13479effb32b3c3e020",
+        "size": 98980656
+      }
+    }
+  },
+  "tokenizer": {
+    "repository": "NeoQuasar/Kronos-Tokenizer-base",
+    "revision": "0e0117387f39004a9016484a186a908917e22426",
+    "directory": "tokenizer",
+    "files": {
+      "config.json": {
+        "sha256": "2366e7ccfec76cbc19cf3c4c1b9c5d901be336ca1e83f2d2292c9bff381b77a2",
+        "size": 301
+      },
+      "model.safetensors": {
+        "sha256": "59d85f6af76a2c3b8240ea06cb21db4213b4eeca053f246b23e29cf832fc6bee",
+        "size": 15842368
+      }
+    }
+  },
+  "official_metadata": {
+    "model_tree_api": "https://huggingface.co/api/models/NeoQuasar/Kronos-small/tree/901c26c1332695a2a8f243eb2f37243a37bea320?recursive=true&expand=true",
+    "tokenizer_tree_api": "https://huggingface.co/api/models/NeoQuasar/Kronos-Tokenizer-base/tree/0e0117387f39004a9016484a186a908917e22426?recursive=true&expand=true",
+    "checked_at": "2026-10-25"
+  }
+}

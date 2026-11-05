@@ -40,10 +40,13 @@ class TestDashboardAuthAndBadges:
         assert "PAPER" in data["display"]
         assert data["version"] == __version__
 
-    def test_html_page_served_and_warns_live_not_enabled(self, client):
+    def test_html_page_is_legacy_paper_only_and_links_to_operator(self, client):
         response = client.get("/dashboard", headers=H)
         assert response.status_code == 200
-        assert "NOT ENABLED IN V1" in response.text
+        assert "LEGACY PAPER/SANDBOX ONLY" in response.text
+        assert "OPERATOR TERMINAL" in response.text
+        assert "VANTAGE OPERATOR" not in response.text
+        assert 'href="/terminal"' in response.text
         assert "EMERGENCY STOP" in response.text
 
     def test_sandbox_mode_displayed_when_configured(self, client, tmp_path, monkeypatch):

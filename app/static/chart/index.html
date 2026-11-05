@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AXIOM · chart &amp; paper ticket</title>
+<link rel="stylesheet" href="/static/chart/chart.css">
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">AXIOM<span>chart</span></span>
+  <span class="badge paper" id="mode-badge">PAPER · SIMULATED ORDERS</span>
+  <span class="badge" id="source-badge">source —</span>
+  <span class="badge warn" id="feed-badge" title="What the bars are">feed —</span>
+  <select id="symbol" title="Instrument"></select>
+  <span class="seg" id="tf-buttons" title="Timeframe"></span>
+  <span class="seg" id="ind-buttons" title="Indicators"></span>
+  <span class="spacer"></span>
+  <span class="badge" id="conn">connection —</span>
+  <button class="ghost" id="btn-session" title="Start or stop the paper session">SESSION —</button>
+  <button class="ghost" id="btn-reset" title="Reset zoom (double-click the chart)">RESET</button>
+  <button class="ghost" id="btn-follow" title="Follow the newest bar">FOLLOW</button>
+  <button class="ghost" id="btn-dashboard" title="Classic dashboard">DASHBOARD</button>
+  <span class="badge err" id="err" style="display:none"></span>
+</header>
+
+<div class="shell">
+  <section class="chart-col">
+    <div class="canvas-wrap">
+      <canvas id="chart-canvas"></canvas>
+      <div class="legend" id="legend">
+        <b id="legend-symbol">—</b>
+        <span class="ohlc" id="legend-ohlc">O — H — L — C —</span>
+        <span class="ohlc" id="legend-extra">VOL —</span>
+        <span class="ohlc" id="legend-ind"></span>
+      </div>
+      <div class="hint">scroll = zoom · drag = pan · double-click = reset · F = follow · R = reset</div>
+      <div class="empty" id="empty-state">
+        <div>
+          <h3>No bars to draw</h3>
+          <p id="empty-reason">Start a paper session, or choose an instrument that has data.</p>
+          <p>
+            <button type="button" class="ghost" id="btn-start-session">START AUTOMATED REPLAY</button>
+            <a class="ghost" href="/dashboard" style="text-decoration:none">OPEN DASHBOARD</a>
+          </p>
+          <p class="note">Nothing is generated to fill the screen: an empty chart means there is no data.<br>
+            Default replay runs moving_average and can create simulated orders automatically. Manual ticket orders are separate; every fill stays simulated.</p>
+        </div>
+      </div>
+    </div>
+    <div class="fills">
+      <h2><span>Simulated fills</span><span id="fills-count"></span></h2>
+      <table>
+        <thead>
+          <tr>
+            <th>time</th><th>side</th><th class="num">qty</th><th class="num">price</th>
+            <th class="num">fee</th><th>reason</th><th>seen by</th>
+          </tr>
+        </thead>
+        <tbody id="fills-body">
+          <tr><td colspan="7" class="muted">no simulated fills yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="card">
+      <h2>Instrument</h2>
+      <div class="price"><span id="ticket-price-value">—</span><small id="ticket-priced-at"></small></div>
+      <div class="row"><span class="k">position</span><span class="v" id="ticket-position">flat</span></div>
+      <div class="row"><span class="k">cash</span><span class="v" id="ticket-cash">—</span></div>
+      <div class="row"><span class="k">equity</span><span class="v" id="ticket-equity">—</span></div>
+      <div class="row"><span class="k">day P&amp;L</span><span class="v" id="ticket-daypnl">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Paper ticket</h2>
+      <div class="blocked" id="ticket-blocked"></div>
+      <div class="sides">
+        <button type="button" class="buy on" id="side-buy">BUY</button>
+        <button type="button" class="sell" id="side-sell">SELL</button>
+      </div>
+      <div class="field">
+        <label for="qty">quantity</label>
+        <div class="with-max">
+          <input type="text" id="qty" inputmode="decimal" placeholder="0" autocomplete="off">
+          <button type="button" class="ghost" id="btn-max">MAX</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="order-type">order type</label>
+        <select id="order-type">
+          <option value="MARKET">MARKET — fills at last close</option>
+          <option value="LIMIT">LIMIT — rests until traded</option>
+        </select>
+      </div>
+      <div class="field" id="limit-field" style="display:none">
+        <label for="limit-price">limit price <span class="note" style="display:inline">(or click the chart)</span></label>
+        <input type="text" id="limit-price" inputmode="decimal" placeholder="0.00" autocomplete="off">
+      </div>
+      <div class="estimate" id="estimate">notional —</div>
+      <button type="button" class="place buy" id="btn-place">PLACE SIMULATED BUY</button>
+      <p class="note">
+        Every order is filled by the local paper broker inside this process.
+        Nothing is sent to a broker or exchange. Market orders use the last
+        <em>completed</em> bar's close, never the forming bar.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Risk caps</h2>
+      <div class="row"><span class="k">max position value</span><span class="v" id="lim-position">—</span></div>
+      <div class="row"><span class="k">max open positions</span><span class="v" id="lim-open">—</span></div>
+      <div class="row"><span class="k">max daily loss</span><span class="v" id="lim-loss">—</span></div>
+      <div class="row"><span class="k">max entries / day</span><span class="v" id="lim-trades">—</span></div>
+      <div class="row"><span class="k">shorting</span><span class="v">not modelled</span></div>
+      <p class="note">A manual order is subject to the same caps as a strategy order. Caps are never relaxed by this page.</p>
+    </div>
+  </aside>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/static/chart/chart.js"></script>
+</body>
+</html>

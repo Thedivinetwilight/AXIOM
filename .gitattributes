@@ -1,0 +1,8 @@
+# Keep pinned upstream Kronos source byte-for-byte; its original files contain
+# CRLF/trailing whitespace that is intentionally not rewritten by this project.
+app/autonomy/vendor/kronos/model/*.py -text whitespace=-trailing-space
+
+# The raw manifest/lock SHA-256 evidence is cross-platform.  Do not let Windows
+# checkout convert these authoritative bytes to CRLF.
+config/kronos-small.json text eol=lf
+config/kronos-runtime-requirements.txt text eol=lf

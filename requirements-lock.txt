@@ -23,3 +23,4 @@ pluggy==1.6.0
 protobuf==5.29.6
 iniconfig==2.3.0
 Pygments==2.20.0
+tzdata==2026.6 ; platform_system == "Windows"

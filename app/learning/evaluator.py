@@ -67,9 +67,13 @@ def out_of_sample_expectancy(candles: list[Candle], strategy_name: str, paramete
         return {"valid": False, "reason": "not_enough_candles", "oos_expectancy": 0.0}
     train, oos = candles[:cut], candles[cut:]
     train_result = engine.run(
-        train, create_strategy(strategy_name, parameters), timeframe)
+        train, create_strategy(strategy_name, parameters), timeframe,
+        label="TRAINING")
+    # Indicators may use only candles that were already historical at the OOS
+    # boundary. Warmup creates no inherited position or pre-OOS order.
     oos_result = engine.run(
-        oos, create_strategy(strategy_name, parameters), timeframe)
+        oos, create_strategy(strategy_name, parameters), timeframe,
+        warmup=train, label="VALIDATION")
     trades = oos_result.trades
     expectancy = (
         sum(trade["pnl"] for trade in trades) / len(trades)
@@ -128,6 +132,9 @@ def _promotion_gate(repository, strategy_name: str, candidate: dict,
            candidate_result.get("oos_trades", 0) >= min_oos_trades,
            {"oos_trades": candidate_result.get("oos_trades", 0),
             "required": min_oos_trades})
+    _check("positive_validation_expectancy",
+           candidate_result.get("oos_expectancy", 0.0) > 0,
+           {"candidate": candidate_result.get("oos_expectancy"), "required": "> 0"})
     _check("strict_validation_improvement",
            candidate_result.get("oos_expectancy", 0.0)
            > current_result.get("oos_expectancy", 0.0),
@@ -236,10 +243,13 @@ def evaluate_and_maybe_promote(
             version, strategy_name, candidate, promoted, candidate_result, now
         )
     else:
+        # A baseline measurement is a reference, not evidence that a new
+        # candidate passed the full promotion gate. Keep it report-only.
         repository.record_model_version(
-            version, strategy_name, current_parameters, True, current_result, now
+            version, strategy_name, current_parameters, False, current_result, now
         )
-        promoted = True
+        decision["baseline_reference_only"] = True
+        decision["reason"] = "baseline recorded for comparison; no candidate promotion evaluated"
     decision["promoted_version"] = version if promoted else None
     decision["promoted"] = promoted
     return decision
