@@ -352,10 +352,52 @@ const doc = window.document;
 const $ = (id) => doc.getElementById(id);
 const click = async (el) => { assert(el, "Missing clickable element"); el.click(); await flush(8); };
 
+/* Locale-independent ledger value assertion.
+ *
+ * The terminal renders money with Number#toLocaleString(undefined, ...), so the
+ * grouping separators follow the locale of whoever runs this suite: en-US shows
+ * "$100,000" while en-IN (Indian 2,2,3 digit grouping) shows "$1,00,000". Assert
+ * the NUMERIC value of the named ledger row by accepting every form Node produces
+ * for the standard test locales, instead of hard-coding one locale's glyph sequence.
+ * The row is read from its <dt>/<dd> pair so a sibling row (e.g. "Available cash")
+ * can never satisfy the assertion.
+ */
+const localeNumberForms = (amount) => [...new Set(
+  ["en-US", "en-IN", "en-GB", "de-DE"].map((locale) =>
+    Number(amount).toLocaleString(locale, { maximumFractionDigits: 2 })
+  )
+)];
+const ledgerRowValue = (element, rowLabel) => {
+  const term = [...(element?.querySelectorAll("dt") || [])]
+    .find((node) => node.textContent.trim() === rowLabel);
+  const value = term?.nextElementSibling;
+  return value?.tagName === "DD" ? String(value.textContent || "") : "";
+};
+const assertLedgerShows = (element, prefix, amount, label, rowLabel = "Equity") => {
+  const text = ledgerRowValue(element, rowLabel);
+  const forms = localeNumberForms(amount).map((form) => `${prefix}${form}`);
+  // The currency prefix anchors the left edge; a match that would continue into a
+  // longer number (e.g. "$100,000" inside "$100,000,000") is rejected, so the value
+  // must equal the expected amount exactly in whichever locale grouping is active.
+  const isExactMatch = (form) => {
+    for (let from = 0; ;) {
+      const at = text.indexOf(form, from);
+      if (at < 0) return false;
+      const rest = text.slice(at + form.length);
+      if (!/^(?:[0-9]|[.,'\u2019\u00a0\u202f ][0-9])/u.test(rest)) return true;
+      from = at + 1;
+    }
+  };
+  assert(
+    forms.some(isExactMatch),
+    `${label}: expected the "${rowLabel}" row to show ${prefix}${Number(amount).toLocaleString("en-US")} `
+    + `in any locale grouping (${forms.join(" | ")}) but it rendered: ${text || "<missing row>"}`,
+  );
+};
 // 1. Overview rendered with NSE ₹ and NASDAQ $ ledgers + 5 provider cards
 assert.equal($("auth-gate").hidden, true, "Auth gate should unlock with session token");
-assert($("mm-nse-overview-list").textContent.includes("₹1,000,225") || $("mm-nse-overview-list").textContent.includes("₹10,00,225"), "NSE INR equity should render");
-assert($("mm-nasdaq-overview-list").textContent.includes("$100,000"), "NASDAQ USD equity should render");
+assertLedgerShows($("mm-nse-overview-list"), "₹", 1000225, "NSE INR equity should render");
+assertLedgerShows($("mm-nasdaq-overview-list"), "$", 100000, "NASDAQ USD equity should render");
 assert.equal(doc.querySelectorAll("#mm-overview-providers .provider-card").length, 5, "All 5 provider roles rendered");
 
 // 2. Venue switcher + Quick Symbol Jump when Alpaca is DISCONNECTED -> honest empty state (no sample bars!)
