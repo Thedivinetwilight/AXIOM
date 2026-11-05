@@ -67,6 +67,11 @@ class KronosService:
         return self._digest
 
     @property
+    def self_test_verified(self) -> bool:
+        with self._lock:
+            return bool(self._last_self_test and self._last_self_test.get("status") == "PASSED")
+
+    @property
     def manifest(self) -> dict:
         if self._manifest is None:
             self._manifest = load_manifest(self.manifest_path)
@@ -182,16 +187,26 @@ class KronosService:
             }
         return result
 
+    def _session_worker_view(self) -> dict:
+        fn = getattr(self.runtime, "session_worker_status", None)
+        if callable(fn):
+            return fn()
+        return {"alive": False, "pid": None, "load_ms": None, "exit_code": None}
+
     def status(self) -> dict:
         with self._lock:
             manifest = self._manifest or {}
+            sess_worker = self._session_worker_view()
+            worker_loaded = bool(self._worker_active or sess_worker.get("alive"))
             return {
                 "status": self._status,
                 "artifact_verified": self._artifact_verified,
                 "available_for_inference": self._available,
+                "self_test_verified": bool(self._last_self_test and self._last_self_test.get("status") == "PASSED"),
                 "inference_runtime": self._runtime_status.get("status", "NOT_CHECKED"),
                 "issues": list(self._issues),
                 "artifact_digest": self._digest,
+                "manifest_sha256": self._digest,
                 "manifest_file_sha256": self._manifest_file_digest,
                 "model_repository": manifest.get("model", {}).get("repository", ""),
                 "model_revision": manifest.get("model", {}).get("revision", ""),
@@ -204,7 +219,8 @@ class KronosService:
                 "artifact_layout": self._inspection.get("layout", "NOT_CHECKED"),
                 "partial_installs": self._inspection.get("partial_installs", 0),
                 "runtime": self._public_runtime(self._runtime_status),
-                "loaded": self._worker_active,
+                "session_worker": sess_worker,
+                "loaded": worker_loaded,
                 "producing_real_forecasts": self._worker_active,
                 "last_inference": self._last_inference,
                 "last_self_test": self._last_self_test,
@@ -213,6 +229,35 @@ class KronosService:
                 "mock_outputs_used": False,
                 "device": "cpu",
             }
+
+    def start_session_worker(self, *, cpu_threads: int = 2, timeout: float = 60.0) -> dict:
+        """Start an isolated warm Kronos CPU worker only when exact self-test identity PASSED."""
+        st = self.verify()
+        if not st.get("available_for_inference") or self._manifest is None:
+            raise ArtifactError("Kronos is UNAVAILABLE: verified artifacts and runtime are required")
+        if not st.get("self_test_verified"):
+            raise ArtifactError(
+                "Kronos offline self-test has not PASSED for the exact configured manifest, lock, and Python identity"
+            )
+        starter = getattr(self.runtime, "start_session_worker", None)
+        if not callable(starter):
+            return {"status": "VERIFIED_DIRECT", "pid": None, "load_ms": 0.0}
+        init_payload = {
+            "offline": True,
+            "manifest_path": str(self.manifest_path),
+            "artifact_root": str(self.artifact_root),
+            "vendor_root": str(self.vendor_root),
+            "manifest_sha256": self._digest,
+            "manifest_file_sha256": self._manifest_file_digest,
+            "cpu_threads": max(1, min(16, int(cpu_threads))),
+        }
+        return starter(init_payload, timeout=timeout)
+
+    def stop_session_worker(self) -> dict:
+        stopper = getattr(self.runtime, "stop_session_worker", None)
+        if callable(stopper):
+            return stopper()
+        return {"stopped": True, "was_running": False}
 
     def _payload(self, instrument_key: str, bars: list[Candle], timeframe: str,
                  horizon: int, samples: int, input_label: str) -> dict:
@@ -241,7 +286,8 @@ class KronosService:
 
     def forecast(self, instrument_key: str, candles: Iterable[Candle], *, timeframe: str,
                  horizon: int = 5, samples: int = 8, validated: bool = False,
-                 validation_id: str = "", input_label: str = "COMPLETED_BARS") -> Forecast:
+                 validation_id: str = "", input_label: str = "COMPLETED_BARS",
+                 timeout: float = 300.0) -> Forecast:
         bars = list(candles)
         if not bars or horizon <= 0 or samples < 4 or timeframe not in TIMEFRAMES:
             raise ValueError("Completed candles, a valid timeframe/horizon and at least four samples required")
@@ -250,9 +296,15 @@ class KronosService:
                 raise ArtifactError("Kronos is UNAVAILABLE: verified artifacts and runtime are required")
             self._worker_active = True
             try:
-                result = self.runtime.forecast(self._payload(
+                payload = self._payload(
                     instrument_key, bars, timeframe, horizon, samples, input_label,
-                ))
+                )
+                sess_view = self._session_worker_view()
+                sess_fn = getattr(self.runtime, "session_forecast", None)
+                if sess_view.get("alive") and callable(sess_fn):
+                    result = sess_fn(payload, timeout=timeout)
+                else:
+                    result = self.runtime.forecast(payload)
                 if result.get("status") != "FORECAST" or not result.get("real_forecast") \
                         or result.get("mock_outputs_used") is not False:
                     raise ArtifactError(

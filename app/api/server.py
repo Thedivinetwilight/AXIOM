@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import os
 from pathlib import Path
 from threading import Lock
 from fastapi import Depends, FastAPI, Request
@@ -36,7 +37,11 @@ from app.autonomy.store import AutonomyStore
 from app.autonomy.upstox import InstrumentCatalog
 from app.autonomy.upstox_token import default_live_store as upstox_live_default_store
 from app.autonomy.upstox_token import default_store as upstox_token_default_store
-from app.autonomy.upstox_token import resolve_live_token_provider, resolve_token_provider
+from app.autonomy.upstox_token import (
+    resolve_live_token,
+    resolve_live_token_provider,
+    resolve_token_provider,
+)
 from app.autonomy.runner import AutonomyRunner
 from app.api.routes import autonomy
 
@@ -217,7 +222,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 if autonomy_lease is not None:
                     autonomy_lease.release()
 
-            from app.markets.live_paper import LiveMarketPaperEngine
+            from app.markets.live_paper import LiveMarketPaperEngine, MultiMarketPaperRunner
             from app.markets.nse_reconciliation import resolve_nse_instrument_strict
             from app.autonomy.upstox import UpstoxReadOnly
             from app.autonomy.upstox_token import resolve_token
@@ -310,7 +315,9 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
 
             ephemeral_model_lab_tmp = None
             if runtime_base is None:
-                ephemeral_model_lab_tmp = tempfile.TemporaryDirectory(prefix="axiom_model_lab_")
+                ephemeral_model_lab_tmp = tempfile.TemporaryDirectory(
+                    prefix="axiom_model_lab_", ignore_cleanup_errors=True
+                )
                 model_lab_dir = Path(ephemeral_model_lab_tmp.name)
             else:
                 model_lab_dir = runtime_base / "model_lab"
@@ -323,6 +330,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 setup_manager=app.state.autonomy.kronos_setup if app.state.autonomy is not None else None,
                 config_path=(model_lab_dir / "kronos-lab-config.json") if runtime_base is not None else None,
             )
+            app.state.simulator.kronos_provider = app.state.kronos_provider
             app.state.model_lab = ModelLabService(
                 model_lab_dir,
                 kronos_provider=app.state.kronos_provider,
@@ -352,12 +360,99 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
             )
             app.state.live_paper_engine.ensemble_service = app.state.ensemble_service
+            # Live execution is a SEPARATE path from local paper. It starts fully
+            # disarmed: gates are in-memory, per market, and require explicit
+            # mode=LIVE + readiness + Arm + phrase-confirmed Activate.
+            from app.markets.live_execution import (
+                LiveExecutionCoordinator,
+                LiveRiskLimits,
+                MultiMarketLiveRunner,
+                NasdaqLiveAdapter,
+                NseLiveAdapter,
+            )
+            from app.markets.us_calendar import USEquitiesCalendar
+
+            def _nse_live_token_value() -> str:
+                try:
+                    return resolve_live_token(getattr(app.state, "upstox_live_token", None))[0]
+                except (RuntimeError, ValueError):
+                    return ""
+
+            def _nse_live_adapter() -> NseLiveAdapter:
+                catalog = (
+                    app.state.autonomy.catalog
+                    if (app.state.autonomy is not None and app.state.autonomy.catalog.instruments)
+                    else app.state.nse_seed_catalog
+                )
+                return NseLiveAdapter(
+                    catalog,
+                    live_token_provider=_nse_live_token_value,
+                    algo_name=str(getattr(autonomy_settings, "upstox_algo_name", "") or ""),
+                    live_enabled=bool(getattr(autonomy_settings, "live_enabled", False)),
+                    expected_public_ip=str(getattr(autonomy_settings, "expected_public_ip", "") or ""),
+                    quote_provider=_nse_live_quote_lookup,
+                    require_fresh_catalog=True,
+                )
+
+            def _nasdaq_live_adapter() -> NasdaqLiveAdapter:
+                return NasdaqLiveAdapter(
+                    lambda: getattr(getattr(app.state, "alpaca_broker_runtime", None), "service", None),
+                    quote_provider=_us_live_quote_lookup,
+                    calendar=USEquitiesCalendar(),
+                )
+
+            # All live limits start at zero => fail closed until an operator
+            # explicitly stores per-market limits via /api/markets/live/limits.
+            app.state.live_execution = LiveExecutionCoordinator(
+                journal_path=":memory:" if runtime_base is None else (runtime_base / "live_market_execution.sqlite3"),
+                adapters={"NSE": _nse_live_adapter(), "NASDAQ": _nasdaq_live_adapter()},
+                limits={"NSE": LiveRiskLimits(), "NASDAQ": LiveRiskLimits()},
+                paper_engine=app.state.live_paper_engine,
+            )
+            app.state.live_paper_engine.execution_mode_provider = app.state.live_execution.mode
+            live_runner_enabled = os.environ.get("AXIOM_MM_LIVE_RUNNER_ENABLED", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            app.state.mm_live_runner = MultiMarketLiveRunner(
+                app.state.live_execution,
+                app.state.ensemble_service,
+                interval_seconds=float(os.environ.get("AXIOM_MM_LIVE_INTERVAL_SEC", "15.0")),
+                market_timeout_seconds=float(os.environ.get("AXIOM_MM_LIVE_TIMEOUT_SEC", "20.0")),
+                enabled=live_runner_enabled,
+            )
+            app.state.mm_live_runner.start()
+            runner_enabled = os.environ.get("AXIOM_MM_PAPER_RUNNER_ENABLED", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            app.state.mm_paper_runner = MultiMarketPaperRunner(
+                app.state.live_paper_engine,
+                interval_seconds=float(os.environ.get("AXIOM_MM_PAPER_INTERVAL_SEC", "10.0")),
+                market_timeout_seconds=float(os.environ.get("AXIOM_MM_PAPER_TIMEOUT_SEC", "12.0")),
+                enabled=runner_enabled,
+                paper_blocked=lambda mkt: not app.state.live_execution.paper_execution_allowed(mkt),
+            )
+            app.state.mm_paper_runner.start()
 
             yield
+            if getattr(app.state, "mm_paper_runner", None) is not None:
+                await app.state.mm_paper_runner.stop()
+            if getattr(app.state, "mm_live_runner", None) is not None:
+                await app.state.mm_live_runner.stop()
+            if getattr(app.state, "live_execution", None) is not None:
+                app.state.live_execution.close()
+            await app.state.simulator.stop(reason="APPLICATION_SHUTDOWN")
             if getattr(app.state, "ensemble_service", None) is not None:
                 app.state.ensemble_service.close()
             if getattr(app.state, "live_paper_engine", None) is not None:
                 app.state.live_paper_engine.close()
+            if getattr(app.state, "kronos_provider", None) is not None:
+                app.state.kronos_provider.stop_all_sessions(reason="application_shutdown")
             if ephemeral_model_lab_tmp is not None:
                 ephemeral_model_lab_tmp.cleanup()
             if getattr(app.state, "alpaca_broker_runtime", None) is not None and app.state.alpaca_broker_runtime.journal is not None:
@@ -374,7 +469,6 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             autonomy_lease = getattr(app.state, "autonomy_lease", None)
             if autonomy_lease is not None:
                 autonomy_lease.release()
-            await app.state.simulator.stop(reason="APPLICATION_SHUTDOWN")
             app.state.market_data.disconnect("Application shutdown")
             if app.state.vantage.connector:
                 app.state.vantage.connector.disconnect()

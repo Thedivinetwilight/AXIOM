@@ -101,10 +101,7 @@ def _runtime_probe(site: Path, lock_path: Path) -> dict:
     }
 
 
-def _forecast(payload: dict, runtime: dict) -> dict:
-    import numpy as np
-    import pandas as pd
-    import torch
+def _load_verified_predictor(payload: dict) -> tuple[object, str, dict, dict, float]:
     from app.autonomy.kronos_artifacts import ArtifactStore, load_manifest, manifest_digest, sha256_file
 
     manifest_path = Path(payload["manifest_path"])
@@ -120,7 +117,8 @@ def _forecast(payload: dict, runtime: dict) -> dict:
         raise ValueError("Kronos source/artifacts failed offline verification")
 
     vendor_root = str(Path(payload["vendor_root"]))
-    sys.path.insert(0, vendor_root)
+    if vendor_root not in sys.path:
+        sys.path.insert(0, vendor_root)
     import model
 
     model_spec = manifest["model"]
@@ -131,13 +129,29 @@ def _forecast(payload: dict, runtime: dict) -> dict:
     tokenizer = model.KronosTokenizer.from_pretrained(
         str(active_root / tokenizer_spec["directory"]), local_files_only=True,
     )
-    loaded_tokenizer = model.Kronos.from_pretrained(
+    loaded_model = model.Kronos.from_pretrained(
         str(active_root / model_spec["directory"]), local_files_only=True,
     )
     predictor = model.KronosPredictor(
-        loaded_tokenizer, tokenizer, max_context=int(model_spec["context"]), device="cpu",
+        loaded_model, tokenizer, max_context=int(model_spec["context"]), device="cpu",
     )
     load_ms = (time.perf_counter() - load_started) * 1000.0
+    return predictor, digest, model_spec, tokenizer_spec, load_ms
+
+
+def _run_prediction(
+    predictor: object,
+    payload: dict,
+    runtime: dict,
+    *,
+    digest: str,
+    model_spec: dict,
+    tokenizer_spec: dict,
+    load_ms: float,
+) -> dict:
+    import numpy as np
+    import pandas as pd
+    import torch
 
     bars = payload["bars"]
     frame = pd.DataFrame([{
@@ -187,12 +201,124 @@ def _forecast(payload: dict, runtime: dict) -> dict:
     }
 
 
+def _forecast(payload: dict, runtime: dict) -> dict:
+    predictor, digest, model_spec, tokenizer_spec, load_ms = _load_verified_predictor(payload)
+    return _run_prediction(
+        predictor,
+        payload,
+        runtime,
+        digest=digest,
+        model_spec=model_spec,
+        tokenizer_spec=tokenizer_spec,
+        load_ms=load_ms,
+    )
+
+
+def _session_loop(runtime: dict, result_stream) -> int:
+    """Keep verified Kronos weights loaded in isolated CPU process for one PAPER session."""
+    init_line = sys.stdin.readline()
+    if not init_line:
+        print(json.dumps({
+            "status": "ERROR", "stage": "SESSION_INIT",
+            "error_type": "EOFError",
+            "message": "Session init payload missing",
+            "real_forecast": False, "mock_outputs_used": False,
+        }, allow_nan=False), file=result_stream, flush=True)
+        return 0
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            init_payload = json.loads(init_line)
+            if init_payload.get("offline") is not True:
+                raise ValueError("Kronos session worker requires explicit offline mode")
+            cpu_threads = int(init_payload.get("cpu_threads") or 0)
+            if cpu_threads > 0:
+                import torch
+                torch.set_num_threads(max(1, min(16, cpu_threads)))
+            predictor, digest, model_spec, tokenizer_spec, load_ms = _load_verified_predictor(init_payload)
+    except Exception as exc:
+        print(json.dumps({
+            "status": "ERROR", "stage": "SESSION_LOAD",
+            "error_type": type(exc).__name__,
+            "trace": _error_trace(exc),
+            "message": "Kronos session model load failed; no forecast worker started",
+            "real_forecast": False, "mock_outputs_used": False,
+        }, allow_nan=False), file=result_stream, flush=True)
+        return 0
+
+    print(json.dumps({
+        "status": "SESSION_READY",
+        "pid": os.getpid(),
+        "device": "cpu",
+        "manifest_sha256": digest,
+        "model_revision": model_spec["revision"],
+        "tokenizer_revision": tokenizer_spec["revision"],
+        "load_ms": round(load_ms, 2),
+        "runtime": runtime,
+        "mock_outputs_used": False,
+    }, allow_nan=False), file=result_stream, flush=True)
+
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        req_id = ""
+        try:
+            cmd = json.loads(line)
+            req_id = str(cmd.get("request_id") or "")
+            op = str(cmd.get("op") or "")
+            if op == "shutdown":
+                predictor = None
+                print(json.dumps({
+                    "status": "SESSION_STOPPED", "request_id": req_id, "pid": os.getpid(),
+                }, allow_nan=False), file=result_stream, flush=True)
+                return 0
+            if op == "ping":
+                print(json.dumps({
+                    "status": "PONG", "request_id": req_id, "pid": os.getpid(),
+                }, allow_nan=False), file=result_stream, flush=True)
+                continue
+            if op != "forecast":
+                raise ValueError("Unsupported worker op")
+            payload = cmd["payload"]
+            if payload.get("offline") is not True:
+                raise ValueError("Kronos worker requires explicit offline mode")
+            if payload.get("manifest_sha256") != digest:
+                raise ValueError("Kronos manifest digest changed mid-session")
+            with contextlib.redirect_stdout(sys.stderr):
+                out = _run_prediction(
+                    predictor,
+                    payload,
+                    runtime,
+                    digest=digest,
+                    model_spec=model_spec,
+                    tokenizer_spec=tokenizer_spec,
+                    load_ms=0.0,
+                )
+            out["request_id"] = req_id
+            out["warm_session_worker"] = True
+            print(json.dumps(out, allow_nan=False), file=result_stream, flush=True)
+        except Exception as exc:
+            print(json.dumps({
+                "status": "ERROR",
+                "request_id": req_id,
+                "stage": "SESSION_INFERENCE",
+                "error_type": type(exc).__name__,
+                "trace": _error_trace(exc),
+                "message": "Kronos session inference failed; no forecast was produced",
+                "real_forecast": False,
+                "mock_outputs_used": False,
+            }, allow_nan=False), file=result_stream, flush=True)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--lock", type=Path, required=True)
     parser.add_argument("--app-root", type=Path, required=True)
     parser.add_argument("--probe-only", action="store_true")
+    parser.add_argument("--session-loop", action="store_true")
     args = parser.parse_args()
     # Isolated mode ignores PYTHONPATH/user site.  Keep the selected
     # interpreter's stdlib (including DLLs/) ahead of frozen app resources:
@@ -218,6 +344,11 @@ def main() -> int:
         # Keep every library notice away from the single-record JSON IPC channel.
         with contextlib.redirect_stdout(sys.stderr):
             runtime = _runtime_probe(args.runtime, args.lock)
+            if args.session_loop:
+                if runtime["status"] != "READY":
+                    print(json.dumps(runtime, allow_nan=False), file=result_stream, flush=True)
+                    return 0
+                return _session_loop(runtime, result_stream)
             if runtime["status"] != "READY" or args.probe_only:
                 result = runtime
             else:

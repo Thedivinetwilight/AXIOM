@@ -133,6 +133,9 @@ class KronosRuntimeManager:
                 self._manual_python = True
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self._session_process: subprocess.Popen | None = None
+        self._session_io_lock = threading.RLock()
+        self._session_meta: dict | None = None
         self._python: dict | None = None
         self._candidate_sources: dict[tuple[str, ...], str] = {}
         self._python_diagnostics: list[str] = []
@@ -402,6 +405,7 @@ class KronosRuntimeManager:
                 # The subsequent runtime probe, not termination success alone,
                 # determines whether inference remains available.
                 return
+        self.stop_session_worker()
 
     def _run(self, command: list[str], *, input_text: str | None = None,
              timeout: float, cancel: threading.Event | None = None,
@@ -672,3 +676,175 @@ class KronosRuntimeManager:
         return self._worker(
             python, directory / "site", payload=payload, timeout=timeout, cancel=cancel,
         )
+
+    @staticmethod
+    def _readline_bounded(stream, timeout: float) -> str:
+        holder: dict[str, object] = {}
+
+        def _read() -> None:
+            try:
+                holder["line"] = stream.readline()
+            except Exception as exc:
+                holder["error"] = exc
+
+        reader = threading.Thread(target=_read, name="kronos-ipc-read", daemon=True)
+        reader.start()
+        reader.join(timeout=max(0.05, float(timeout)))
+        if reader.is_alive():
+            raise TimeoutError("Kronos worker IPC read timed out")
+        if "error" in holder:
+            raise ArtifactError("Kronos worker IPC stream error")
+        return str(holder.get("line") or "")
+
+    def session_worker_status(self) -> dict:
+        with self._lock:
+            proc = self._session_process
+            meta = dict(self._session_meta or {})
+            alive = proc is not None and proc.poll() is None
+            exit_code = proc.poll() if proc is not None else None
+            if proc is not None and not alive:
+                self._session_process = None
+                self._session_meta = None
+        return {
+            "alive": alive,
+            "pid": meta.get("pid") if alive else None,
+            "load_ms": meta.get("load_ms") if alive else None,
+            "exit_code": exit_code,
+        }
+
+    def stop_session_worker(self, *, reason: str = "", force_kill: bool = False) -> dict:
+        with self._session_io_lock:
+            with self._lock:
+                proc = self._session_process
+                self._session_process = None
+                self._session_meta = None
+            if proc is None:
+                return {"stopped": True, "was_running": False, "reason": reason}
+            was_running = proc.poll() is None
+            if force_kill and was_running:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    proc.wait(timeout=1.0)
+            else:
+                try:
+                    if was_running and proc.stdin is not None:
+                        proc.stdin.write(json.dumps({"op": "shutdown", "request_id": uuid4().hex}) + "\n")
+                        proc.stdin.flush()
+                        proc.stdin.close()
+                except OSError:
+                    was_running = proc.poll() is None
+                if proc.poll() is None:
+                    try:
+                        proc.wait(timeout=1.5)
+                    except subprocess.TimeoutExpired:
+                        with contextlib.suppress(OSError):
+                            proc.terminate()
+                        try:
+                            proc.wait(timeout=1.5)
+                        except subprocess.TimeoutExpired:
+                            with contextlib.suppress(OSError):
+                                proc.kill()
+                            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                                proc.wait(timeout=1.0)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        pipe.close()
+            return {"stopped": True, "was_running": was_running, "exit_code": proc.poll(), "reason": reason}
+
+    def start_session_worker(self, init_payload: dict, *, timeout: float = 60.0) -> dict:
+        with self._session_io_lock:
+            cur = self.session_worker_status()
+            if cur["alive"]:
+                with self._lock:
+                    return dict(self._session_meta or cur)
+            python = self.python()
+            if python is None:
+                raise ArtifactError("Kronos runtime Python is unavailable")
+            if not self.worker_path.is_file():
+                raise ArtifactError("Kronos offline worker is missing from the application resources")
+            site = self.runtime_dir(python) / "site"
+            command = [
+                python["executable"], "-I", str(self.worker_path),
+                "--runtime", str(site),
+                "--lock", str(self.lock_path),
+                "--app-root", str(self.application_root),
+                "--session-loop",
+            ]
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=_environment(),
+                shell=False,
+            )
+            try:
+                assert proc.stdin is not None and proc.stdout is not None
+                proc.stdin.write(json.dumps(init_payload, allow_nan=False) + "\n")
+                proc.stdin.flush()
+                line = self._readline_bounded(proc.stdout, timeout=timeout)
+                if not line:
+                    raise ArtifactError("Kronos session worker exited before reporting readiness")
+                ready = json.loads(line)
+                if not isinstance(ready, dict) or ready.get("status") != "SESSION_READY":
+                    raise ArtifactError(
+                        f"Kronos session worker startup failed: {ready.get('error_type') or ready.get('status') or 'UNKNOWN'}"
+                    )
+                with self._lock:
+                    self._session_process = proc
+                    self._session_meta = dict(ready)
+                return dict(ready)
+            except TimeoutError:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    proc.wait(timeout=1.0)
+                raise ArtifactError("Kronos session worker startup timed out") from None
+            except Exception as exc:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    proc.wait(timeout=1.0)
+                if isinstance(exc, ArtifactError):
+                    raise
+                raise ArtifactError(f"Kronos session worker startup failed: {type(exc).__name__}") from None
+
+    def session_forecast(self, payload: dict, *, timeout: float = 45.0) -> dict:
+        with self._session_io_lock:
+            with self._lock:
+                proc = self._session_process
+            if proc is None or proc.poll() is not None:
+                with self._lock:
+                    self._session_process = None
+                    self._session_meta = None
+                raise ArtifactError("Kronos session worker is not running (crashed or stopped)")
+            req_id = uuid4().hex
+            try:
+                assert proc.stdin is not None and proc.stdout is not None
+                proc.stdin.write(
+                    json.dumps({"op": "forecast", "request_id": req_id, "payload": payload}, allow_nan=False) + "\n"
+                )
+                proc.stdin.flush()
+                line = self._readline_bounded(proc.stdout, timeout=timeout)
+            except TimeoutError:
+                self.stop_session_worker(reason="timeout", force_kill=True)
+                raise ArtifactError("Kronos session worker timed out") from None
+            except OSError:
+                self.stop_session_worker()
+                raise ArtifactError("Kronos session worker pipe broken") from None
+            if not line:
+                self.stop_session_worker()
+                raise ArtifactError("Kronos session worker crashed (EOF)")
+            try:
+                result = json.loads(line)
+            except (ValueError, TypeError):
+                self.stop_session_worker()
+                raise ArtifactError("Kronos session worker returned malformed JSON") from None
+            if not isinstance(result, dict) or result.get("request_id") != req_id:
+                self.stop_session_worker()
+                raise ArtifactError("Kronos session worker IPC correlation mismatch")
+            return result

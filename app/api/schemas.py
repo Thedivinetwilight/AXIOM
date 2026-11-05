@@ -43,6 +43,10 @@ class BacktestRequest(StrategyRequest):
 class PaperStartRequest(StrategyRequest):
     source: Literal["replay", "binance", "generic", "upstox", "alpaca", "vantage_mt5"] = "replay"
     replay_delay: float = Field(default=0.05, ge=0, le=60)
+    kronos_enabled: bool | None = None
+    kronos_failure_policy: Literal[
+        "FAIL_CLOSED_NO_ENTRY", "EXPLICIT_NON_KRONOS_FALLBACK"
+    ] | None = None
 
     @model_validator(mode="after")
     def validate_alpaca_ticker(self):
@@ -51,7 +55,7 @@ class PaperStartRequest(StrategyRequest):
 
             self.symbol = validate_us_symbol(self.symbol)
         if self.source == "vantage_mt5":
-            if self.strategy != "manual_only" or self.parameters:
+            if self.strategy != "manual_only" or self.parameters or self.kronos_enabled:
                 raise ValueError(
                     "Vantage MT5 live-price paper requires strategy=manual_only and no strategy parameters"
                 )

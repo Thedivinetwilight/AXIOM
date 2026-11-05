@@ -90,6 +90,7 @@
         <span class="status-pill" id="mm-pill-upstox-data">UPSTOX DATA · DISCONNECTED</span>
         <span class="status-pill" id="mm-pill-alpaca-data">ALPACA DATA · DISCONNECTED</span>
         <span class="status-pill" id="mm-pill-kronos-state">KRONOS · NOT_INSTALLED</span>
+        <span class="status-pill info" id="mm-pill-kronos-session">KRONOS PAPER · NOT_CONFIGURED</span>
         <span class="status-pill info" id="mm-pill-live-default">LIVE EXECUTION · OFF BY DEFAULT</span>
       </div>
       <div class="freshness" id="global-freshness"><span class="status-pill">NO BROKER DATA</span></div>
@@ -127,6 +128,34 @@
           <span class="mode-badge paper" id="overview-mode">PAPER</span>
         </div>
 
+        <article class="panel" id="mm-concurrent-control-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">CONCURRENT MULTI-MARKET LOCAL PAPER COORDINATOR · 0 BROKER ORDERS</p>
+              <h3>Selected Markets, Immediate Symbol Coverage &amp; Non-Blocking Runner</h3>
+            </div>
+            <span class="status-pill info" id="mm-runner-status-pill">RUNNER · PAPER ONLY</span>
+          </div>
+          <div class="button-row">
+            <label class="checkbox-inline" for="mm-select-nse">
+              <input type="checkbox" id="mm-select-nse" checked>
+              <span><strong>NSE · India</strong> (INR ₹ · IST)</span>
+            </label>
+            <label class="checkbox-inline" for="mm-select-nasdaq">
+              <input type="checkbox" id="mm-select-nasdaq" checked>
+              <span><strong>NASDAQ · US</strong> (USD $ · ET)</span>
+            </label>
+            <button type="button" class="button primary xs" id="mm-start-selected-btn">Start Selected Markets</button>
+            <button type="button" class="button bull xs" id="mm-resume-selected-btn">Resume Selected</button>
+            <button type="button" class="button secondary xs" id="mm-pause-selected-btn">Pause Selected</button>
+            <button type="button" class="button secondary xs" id="mm-analyze-selected-btn">Analyze Symbols Now</button>
+            <button type="button" class="button secondary xs" id="mm-stop-selected-btn">Stop Selected</button>
+          </div>
+          <div class="inline-status top-space" id="mm-concurrent-status-line">
+            Both NSE (INR) and NASDAQ (USD) are selected for isolated local paper simulation. Start or Resume immediately analyzes every selected symbol across all enabled strategy variants; closed markets analyze historical bars without placing simulated trades.
+          </div>
+        </article>
+
         <div class="content-grid two" id="mm-overview-ledgers">
           <article class="panel accent-nse">
             <div class="panel-head">
@@ -141,6 +170,9 @@
               <dt>Mode</dt><dd>LIVE-MARKET PAPER (Simulated · 0 Broker Orders)</dd>
               <dt>Equity (INR)</dt><dd>₹1,000,000.00</dd>
             </dl>
+            <div class="mm-coverage-box top-space" id="mm-ov-nse-coverage">
+              <span class="muted small">NSE symbol coverage appears immediately on Start, Resume, or Analyze.</span>
+            </div>
           </article>
 
           <article class="panel accent-nasdaq">
@@ -156,6 +188,9 @@
               <dt>Mode</dt><dd>LIVE-MARKET PAPER (Simulated · 0 Broker Orders)</dd>
               <dt>Equity (USD)</dt><dd>$100,000.00</dd>
             </dl>
+            <div class="mm-coverage-box top-space" id="mm-ov-nasdaq-coverage">
+              <span class="muted small">NASDAQ symbol coverage appears immediately on Start, Resume, or Analyze.</span>
+            </div>
           </article>
         </div>
 
@@ -509,6 +544,11 @@
             <h2 id="strategies-title">Strategies, Live-Market Paper &amp; Gated Real-Money Mode</h2>
             <p>Run deterministic completed-bar strategies in <strong>LIVE-MARKET PAPER</strong> (zero broker calls), or inspect exact readiness gates for <strong>LIVE-MARKET LIVE</strong> (OFF by default).</p>
           </div>
+          <div class="button-row">
+            <button type="button" class="button primary xs" id="mm-strat-start-both-btn">Start All Selected Markets</button>
+            <button type="button" class="button bull xs" id="mm-strat-resume-both-btn">Resume Selected</button>
+            <button type="button" class="button secondary xs" id="mm-strat-analyze-both-btn">Analyze Selected Symbols</button>
+          </div>
         </div>
 
         <div class="content-grid two">
@@ -521,6 +561,7 @@
               <div class="field">
                 <label for="mm-strat-nse-select">Completed-bar strategy</label>
                 <select id="mm-strat-nse-select">
+                  <option value="parallel_ensemble" selected>parallel_ensemble (All Enabled Variants + Portfolio Risk Allocator)</option>
                   <option value="manual_only">manual_only (Operator orders only)</option>
                   <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
                   <option value="rsi">rsi (14-bar RSI 30/70)</option>
@@ -528,22 +569,41 @@
                   <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
                   <option value="momentum">momentum (10-bar ROC cross)</option>
                   <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
-                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
                 </select>
               </div>
               <div class="field">
                 <label for="mm-strat-nse-tf">Bar timeframe</label>
                 <select id="mm-strat-nse-tf"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>1D</option></select>
               </div>
+              <div class="field">
+                <label for="mm-nse-kronos-mode">Kronos forecast attachment</label>
+                <select id="mm-nse-kronos-mode">
+                  <option value="auto" selected>Auto (follow strategy / global Kronos policy)</option>
+                  <option value="enabled">Enable Kronos for this PAPER session</option>
+                  <option value="disabled">Disable Kronos (rule-only session)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-nse-kronos-policy">Session Kronos failure policy</label>
+                <select id="mm-nse-kronos-policy">
+                  <option value="FAIL_CLOSED_NO_ENTRY" selected>FAIL_CLOSED_NO_ENTRY (Block new entry if Kronos unavailable)</option>
+                  <option value="EXPLICIT_NON_KRONOS_FALLBACK">EXPLICIT_NON_KRONOS_FALLBACK (Rule strategy fallback)</option>
+                </select>
+              </div>
             </div>
             <div class="button-row top-space">
               <button type="button" class="button primary" id="mm-nse-start-btn">Start NSE paper</button>
               <button type="button" class="button secondary" id="mm-nse-pause-btn">Pause</button>
               <button type="button" class="button secondary" id="mm-nse-resume-btn">Resume</button>
+              <button type="button" class="button secondary" id="mm-nse-analyze-btn">Analyze NSE</button>
               <button type="button" class="button secondary" id="mm-nse-stop-btn">Stop</button>
               <button type="button" class="button danger-outline" id="mm-nse-reset-btn">Reset INR ledger</button>
             </div>
-            <p class="muted small top-space">Evaluates only on completed Upstox bars during open NSE IST hours; transitions to <code>MARKET_CLOSED_WAITING</code> off-hours. No profitability claim.</p>
+            <div class="inline-status top-space" id="mm-nse-kronos-session-line">NSE Kronos Session: NOT_CONFIGURED · 0 broker orders.</div>
+            <div class="mm-coverage-box top-space" id="mm-strat-nse-coverage">
+              <span class="muted small">NSE symbol analysis coverage appears immediately on Start, Resume, or Analyze.</span>
+            </div>
+            <p class="muted small top-space">Evaluates all enabled strategy variants on completed Upstox bars during open NSE IST hours; closed sessions analyze historical bars with <code>0</code> simulated trades.</p>
           </article>
 
           <article class="panel accent-nasdaq">
@@ -555,6 +615,7 @@
               <div class="field">
                 <label for="mm-strat-nasdaq-select">Completed-bar strategy</label>
                 <select id="mm-strat-nasdaq-select">
+                  <option value="parallel_ensemble" selected>parallel_ensemble (All Enabled Variants + Portfolio Risk Allocator)</option>
                   <option value="manual_only">manual_only (Operator orders only)</option>
                   <option value="moving_average">moving_average (SMA 5 / 20 cross)</option>
                   <option value="rsi">rsi (14-bar RSI 30/70)</option>
@@ -562,24 +623,98 @@
                   <option value="mean_reversion">mean_reversion (Bollinger 20,2)</option>
                   <option value="momentum">momentum (10-bar ROC cross)</option>
                   <option value="kronos_ensemble">kronos_ensemble (SMA + Frozen Kronos CPU · Fail-Closed)</option>
-                  <option value="parallel_ensemble">parallel_ensemble (Bounded Multi-Variant + Portfolio Risk Allocator)</option>
                 </select>
               </div>
               <div class="field">
                 <label for="mm-strat-nasdaq-tf">Bar timeframe</label>
                 <select id="mm-strat-nasdaq-tf"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>1D</option></select>
               </div>
+              <div class="field">
+                <label for="mm-nasdaq-kronos-mode">Kronos forecast attachment</label>
+                <select id="mm-nasdaq-kronos-mode">
+                  <option value="auto" selected>Auto (follow strategy / global Kronos policy)</option>
+                  <option value="enabled">Enable Kronos for this PAPER session</option>
+                  <option value="disabled">Disable Kronos (rule-only session)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-nasdaq-kronos-policy">Session Kronos failure policy</label>
+                <select id="mm-nasdaq-kronos-policy">
+                  <option value="FAIL_CLOSED_NO_ENTRY" selected>FAIL_CLOSED_NO_ENTRY (Block new entry if Kronos unavailable)</option>
+                  <option value="EXPLICIT_NON_KRONOS_FALLBACK">EXPLICIT_NON_KRONOS_FALLBACK (Rule strategy fallback)</option>
+                </select>
+              </div>
             </div>
             <div class="button-row top-space">
               <button type="button" class="button bull" id="mm-nasdaq-start-btn">Start NASDAQ paper</button>
               <button type="button" class="button secondary" id="mm-nasdaq-pause-btn">Pause</button>
               <button type="button" class="button secondary" id="mm-nasdaq-resume-btn">Resume</button>
+              <button type="button" class="button secondary" id="mm-nasdaq-analyze-btn">Analyze NASDAQ</button>
               <button type="button" class="button secondary" id="mm-nasdaq-stop-btn">Stop</button>
               <button type="button" class="button danger-outline" id="mm-nasdaq-reset-btn">Reset USD ledger</button>
             </div>
-            <p class="muted small top-space">Evaluates only on completed Alpaca bars during regular 09:30–16:00 ET sessions. Zero broker order calls.</p>
+            <div class="inline-status top-space" id="mm-nasdaq-kronos-session-line">NASDAQ Kronos Session: NOT_CONFIGURED · 0 broker orders.</div>
+            <div class="mm-coverage-box top-space" id="mm-strat-nasdaq-coverage">
+              <span class="muted small">NASDAQ symbol analysis coverage appears immediately on Start, Resume, or Analyze.</span>
+            </div>
+            <p class="muted small top-space">Evaluates all enabled strategy variants on completed Alpaca bars during regular 09:30–16:00 ET sessions; closed sessions analyze historical bars with <code>0</code> simulated trades.</p>
           </article>
         </div>
+
+        <article class="panel" id="mm-kronos-paper-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">OPTIONAL FROZEN KRONOS FORECASTING · PAPER SESSION LIFECYCLE &amp; TRUTH MATRIX</p>
+              <h3>Kronos Readiness, Session Lifecycle &amp; Auditable PAPER Contribution Policy</h3>
+            </div>
+            <span class="status-pill info" id="mm-kronos-lifecycle-pill">NOT_CONFIGURED</span>
+          </div>
+          <p class="muted small">Distinguishes artifact installation, SHA-256 + offline CPU self-test verification, loaded worker state, active session attachment, degraded fallback, hard failure, forecast production, and actual consumption by an active PAPER strategy. Kronos never places orders directly, never weakens risk checks, and never touches LIVE authorization.</p>
+          <div class="truth-matrix-grid top-space" id="mm-kronos-truth-grid" aria-label="Kronos 8-state truth matrix"></div>
+          <dl class="detail-list top-space" id="mm-kronos-paper-telemetry"></dl>
+          <form id="mm-kronos-policy-form" class="top-space">
+            <div class="form-grid">
+              <div class="field">
+                <label for="mm-kp-session-enabled">Default PAPER session attachment</label>
+                <select id="mm-kp-session-enabled">
+                  <option value="true">Enabled when ready (attach on PAPER start)</option>
+                  <option value="false">Disabled unless explicitly requested per session</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-kp-failure-policy">Conservative failure policy</label>
+                <select id="mm-kp-failure-policy">
+                  <option value="FAIL_CLOSED_NO_ENTRY">FAIL_CLOSED_NO_ENTRY (Block new entry; allow exits)</option>
+                  <option value="EXPLICIT_NON_KRONOS_FALLBACK">EXPLICIT_NON_KRONOS_FALLBACK (Log degraded + use rule signal)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-kp-conflict-policy">Rule vs Kronos conflict handling</label>
+                <select id="mm-kp-conflict-policy">
+                  <option value="VETO_CONFLICTING_ENTRY">VETO_CONFLICTING_ENTRY (Hold new entry on opposing direction)</option>
+                  <option value="REDUCE_SCORE_ON_CONFLICT">REDUCE_SCORE_ON_CONFLICT (Rule signal with logged caution)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-kp-min-confidence">Min directional confidence (0.50–0.95)</label>
+                <input id="mm-kp-min-confidence" type="number" min="0.50" max="0.95" step="0.01" value="0.55">
+              </div>
+              <div class="field">
+                <label for="mm-kp-max-uncertainty">Max band uncertainty % (0.5–50.0)</label>
+                <input id="mm-kp-max-uncertainty" type="number" min="0.5" max="50.0" step="0.5" value="8.0">
+              </div>
+              <div class="field">
+                <label for="mm-kp-weight-cap">Advisory weight cap (0.00–0.25)</label>
+                <input id="mm-kp-weight-cap" type="number" min="0.00" max="0.25" step="0.01" value="0.20">
+              </div>
+            </div>
+            <div class="button-row top-space">
+              <button type="submit" class="button primary xs" id="mm-kp-save-btn">Save Kronos PAPER Policy</button>
+              <button type="button" class="button secondary xs" data-go="modellab">Open AI &amp; Model Lab Setup</button>
+            </div>
+            <div class="inline-status top-space" id="mm-kp-policy-feedback">Active policy loaded from Kronos provider. No arbitrary profit-claim weights are applied.</div>
+          </form>
+        </article>
 
         <article class="panel accent-live">
           <div class="panel-head">
@@ -599,9 +734,159 @@
           <div class="inline-status top-space" id="mm-alpaca-gate-output">Alpaca Broker execution is OFF by default. Readiness checks run via GET-only preflight before any LivePermit can be minted.</div>
         </article>
 
-        <article class="panel">
-          <div class="panel-head"><div><p class="eyebrow">DECISION LOG</p><h3>Recent Completed-Bar Strategy Decisions</h3></div></div>
-          <div class="table-wrap">
+        <article class="panel accent-live" id="mm-live-execution-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">SEPARATE REAL-MONEY EXECUTION PATH · PER-MARKET GATE · DISARMED AFTER RESTART</p><h3>Per-Market Live Execution Coordinator (NSE INR · NASDAQ USD)</h3></div>
+            <div class="button-row">
+              <span class="status-pill" id="mm-live-exec-nse-pill">NSE · PAPER</span>
+              <span class="status-pill" id="mm-live-exec-nasdaq-pill">NASDAQ · PAPER</span>
+            </div>
+          </div>
+          <div class="inline-status warn top-space" id="mm-live-exec-warning">
+            LIVE is OFF by default and always DISARMED after startup or restart. Nothing here converts a paper session to live:
+            each market requires explicit mode=LIVE, passing readiness, Arm, then the typed phrase, and all eight of its own bounded risk limits (a partial or zero limit set fails closed and cannot be armed).
+          </div>
+
+          <div class="content-grid two top-space">
+            <div class="provider-card">
+              <div class="panel-head" style="margin-bottom:4px">
+                <strong>NSE · Upstox protected GTT v3 (INR)</strong>
+                <span class="status-pill" id="mm-live-gate-nse">DISABLED</span>
+              </div>
+              <div class="field">
+                <label for="mm-live-mode-nse">Execution mode (NSE)</label>
+                <select id="mm-live-mode-nse">
+                  <option value="PAPER">PAPER · local simulated fills</option>
+                  <option value="OFF">OFF · no execution</option>
+                  <option value="LIVE">LIVE · real broker orders (arming required)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-live-limits-nse-order">NSE limits (INR): max order / daily orders / daily loss / open positions</label>
+                <div class="form-grid">
+                  <input id="mm-live-limits-nse-order" type="number" min="1" step="any" placeholder="250000">
+                  <input id="mm-live-limits-nse-orders" type="number" min="1" step="1" placeholder="20">
+                  <input id="mm-live-limits-nse-loss" type="number" min="1" step="any" placeholder="25000">
+                  <input id="mm-live-limits-nse-pos" type="number" min="1" step="1" placeholder="10">
+                </div>
+              </div>
+              <div class="field">
+                <label for="mm-live-limits-nse-symexp">NSE limits (INR): max symbol exposure / max total exposure / max quote age (s) / max price deviation (bps)</label>
+                <div class="form-grid">
+                  <input id="mm-live-limits-nse-symexp" type="number" min="1" step="any" placeholder="250000">
+                  <input id="mm-live-limits-nse-totexp" type="number" min="1" step="any" placeholder="1000000">
+                  <input id="mm-live-limits-nse-age" type="number" min="1" step="any" placeholder="60">
+                  <input id="mm-live-limits-nse-dev" type="number" min="1" step="any" placeholder="150">
+                </div>
+              </div>
+              <div class="button-row">
+                <button type="button" class="button secondary xs" id="mm-live-mode-save-nse">Save NSE mode</button>
+                <button type="button" class="button secondary xs" id="mm-live-limits-save-nse">Save NSE limits</button>
+                <button type="button" class="button secondary xs" id="mm-live-readiness-nse">Readiness</button>
+                <button type="button" class="button warning xs" id="mm-live-arm-nse">1. Arm NSE</button>
+                <button type="button" class="button secondary xs" id="mm-live-disarm-nse">Disarm NSE</button>
+              </div>
+              <div class="field top-space">
+                <label for="mm-live-phrase-nse">Type ACTIVATE LIVE REAL-MONEY TRADING to activate NSE live</label>
+                <input id="mm-live-phrase-nse" type="text" autocomplete="off" placeholder="ACTIVATE LIVE REAL-MONEY TRADING">
+              </div>
+              <div class="button-row">
+                <label class="muted small"><input id="mm-live-ack-nse" type="checkbox"> I acknowledge NSE live orders use real INR</label>
+                <button type="button" class="button danger xs" id="mm-live-activate-nse">2. Activate NSE LIVE</button>
+                <button type="button" class="button danger-outline xs" id="mm-live-estop-nse">NSE Emergency Stop</button>
+                <button type="button" class="button secondary xs" id="mm-live-reset-nse">Reset NSE kill switch</button>
+                <button type="button" class="button secondary xs" id="mm-live-reconcile-nse">Reconcile NSE</button>
+              </div>
+              <div class="inline-status top-space" id="mm-live-readiness-nse-out">Readiness not run. LIVE stays unavailable until every check passes.</div>
+            </div>
+
+            <div class="provider-card">
+              <div class="panel-head" style="margin-bottom:4px">
+                <strong>NASDAQ · Alpaca Trading v2 (USD)</strong>
+                <span class="status-pill" id="mm-live-gate-nasdaq">DISABLED</span>
+              </div>
+              <div class="field">
+                <label for="mm-live-mode-nasdaq">Execution mode (NASDAQ)</label>
+                <select id="mm-live-mode-nasdaq">
+                  <option value="PAPER">PAPER · local simulated fills</option>
+                  <option value="OFF">OFF · no execution</option>
+                  <option value="LIVE">LIVE · real broker orders (arming required)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="mm-live-limits-nasdaq-order">NASDAQ limits (USD): max order / daily orders / daily loss / open positions</label>
+                <div class="form-grid">
+                  <input id="mm-live-limits-nasdaq-order" type="number" min="1" step="any" placeholder="25000">
+                  <input id="mm-live-limits-nasdaq-orders" type="number" min="1" step="1" placeholder="50">
+                  <input id="mm-live-limits-nasdaq-loss" type="number" min="1" step="any" placeholder="2500">
+                  <input id="mm-live-limits-nasdaq-pos" type="number" min="1" step="1" placeholder="10">
+                </div>
+              </div>
+              <div class="field">
+                <label for="mm-live-limits-nasdaq-symexp">NASDAQ limits (USD): max symbol exposure / max total exposure / max quote age (s) / max price deviation (bps)</label>
+                <div class="form-grid">
+                  <input id="mm-live-limits-nasdaq-symexp" type="number" min="1" step="any" placeholder="25000">
+                  <input id="mm-live-limits-nasdaq-totexp" type="number" min="1" step="any" placeholder="100000">
+                  <input id="mm-live-limits-nasdaq-age" type="number" min="1" step="any" placeholder="60">
+                  <input id="mm-live-limits-nasdaq-dev" type="number" min="1" step="any" placeholder="150">
+                </div>
+              </div>
+              <div class="button-row">
+                <button type="button" class="button secondary xs" id="mm-live-mode-save-nasdaq">Save NASDAQ mode</button>
+                <button type="button" class="button secondary xs" id="mm-live-limits-save-nasdaq">Save NASDAQ limits</button>
+                <button type="button" class="button secondary xs" id="mm-live-readiness-nasdaq">Readiness</button>
+                <button type="button" class="button warning xs" id="mm-live-arm-nasdaq">1. Arm NASDAQ</button>
+                <button type="button" class="button secondary xs" id="mm-live-disarm-nasdaq">Disarm NASDAQ</button>
+              </div>
+              <div class="field top-space">
+                <label for="mm-live-phrase-nasdaq">Type ACTIVATE LIVE REAL-MONEY TRADING to activate NASDAQ live</label>
+                <input id="mm-live-phrase-nasdaq" type="text" autocomplete="off" placeholder="ACTIVATE LIVE REAL-MONEY TRADING">
+              </div>
+              <div class="button-row">
+                <label class="muted small"><input id="mm-live-ack-nasdaq" type="checkbox"> I acknowledge NASDAQ live orders use real USD</label>
+                <button type="button" class="button danger xs" id="mm-live-activate-nasdaq">2. Activate NASDAQ LIVE</button>
+                <button type="button" class="button danger-outline xs" id="mm-live-estop-nasdaq">NASDAQ Emergency Stop</button>
+                <button type="button" class="button secondary xs" id="mm-live-reset-nasdaq">Reset NASDAQ kill switch</button>
+                <button type="button" class="button secondary xs" id="mm-live-reconcile-nasdaq">Reconcile NASDAQ</button>
+              </div>
+              <div class="inline-status top-space" id="mm-live-readiness-nasdaq-out">Readiness not run. LIVE stays unavailable until every check passes.</div>
+            </div>
+          </div>
+          <div class="inline-status top-space" id="mm-live-exec-output">Live execution coordinator idle. 0 broker order calls while disarmed.</div>
+          <div class="table-wrap top-space">
+            <table>
+              <thead><tr><th>Seq</th><th>Time</th><th>Market</th><th>Event</th><th>Payload</th><th>Hash</th></tr></thead>
+              <tbody id="mm-live-audit-rows"><tr><td colspan="6" class="empty-state">No live execution audit events recorded. LIVE has never been activated.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel" id="mm-decision-inspector-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">PER-SYMBOL STRATEGY INPUTS &amp; EXPLANATION</p><h3>Completed-Bar PAPER Decision &amp; Kronos Contribution Inspector</h3></div>
+            <div class="button-row">
+              <button type="button" class="button secondary xs" id="mm-refresh-decisions-btn">Refresh Decisions</button>
+            </div>
+          </div>
+          <div class="toolbar">
+            <div class="field">
+              <label for="mm-decision-market-filter">Market</label>
+              <select id="mm-decision-market-filter">
+                <option value="ALL">ALL Markets</option>
+                <option value="NSE">NSE (INR)</option>
+                <option value="NASDAQ">NASDAQ (USD)</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label for="mm-decision-symbol-filter">Filter by symbol or strategy</label>
+              <input id="mm-decision-symbol-filter" type="search" placeholder="e.g. AAPL, RELIANCE, kronos_ensemble">
+            </div>
+          </div>
+          <div class="content-grid two top-space" id="mm-decision-symbol-cards">
+            <div class="empty-state">No per-symbol automated PAPER decisions recorded yet. Start an NSE or NASDAQ PAPER session on completed bars to inspect inputs, Kronos contribution, risk gates, and simulated order actions.</div>
+          </div>
+          <div class="inline-status top-space" id="mm-decision-explanation-view">Click any decision row or per-symbol card to inspect full input window, Kronos forecast metrics, rule signal, conflict/failure policy, risk checks, and final simulated order action.</div>
+          <div class="table-wrap top-space">
             <table>
               <thead><tr><th>Time</th><th>Market</th><th>Symbol</th><th>Strategy / TF</th><th>Signal</th><th>Reason</th><th>Simulated Order</th></tr></thead>
               <tbody id="mm-strategy-decision-rows"><tr><td colspan="7" class="empty-state">No automated paper strategy decisions recorded yet.</td></tr></tbody>
@@ -776,13 +1061,117 @@
           <div>
             <p class="eyebrow">TAMPER-EVIDENT SHA-256 &amp; REDACTED LOCAL AUDIT</p>
             <h2 id="activity-title">Activity, audit chain &amp; diagnostics</h2>
-            <p>Every paper order, fee calculation, risk rejection, session transition, readiness check, and emergency stop—with zero secrets or tokens.</p>
+            <p>Every paper order, simulated fill, rejection, position change, risk-limit event, session start/stop, and Kronos lifecycle transition—correlated by session, decision, and order ID with zero secrets or tokens.</p>
           </div>
           <div class="button-row">
             <button type="button" class="button secondary" id="reload-activity">Refresh</button>
             <button type="button" class="button secondary" id="export-activity">Export redacted JSON</button>
           </div>
         </div>
+
+        <article class="panel" id="mm-structured-log-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">CORRELATED STRUCTURED PAPER &amp; KRONOS EVENT STREAM</p>
+              <h3>Filtered Session, Decision, Order, Risk &amp; Kronos Lifecycle Log</h3>
+            </div>
+            <span class="status-pill info" id="log-count-pill">0 EVENTS</span>
+          </div>
+          <div class="inline-status info" id="log-pnl-separation-banner">
+            <strong>SIMULATED VS BROKER BOUNDARY:</strong> Local simulated PAPER orders, fills, and P&amp;L (<code>LIVE_MARKET_PAPER</code> &amp; <code>LOCAL_SIMULATOR_PAPER</code>) execute <strong>0 real broker orders</strong> and are strictly separated from persisted account P&amp;L and broker-confirmed real-money events. Access tokens, API secrets, passwords, and auth headers are recursively redacted before storage and export.
+          </div>
+          <div class="inline-status err top-space" id="log-error-banner" hidden></div>
+          <form id="log-filter-form" class="top-space">
+            <div class="form-grid">
+              <div class="field">
+                <label for="log-filter-window">Time window</label>
+                <select id="log-filter-window">
+                  <option value="all" selected>All recorded time</option>
+                  <option value="15m">Last 15 minutes</option>
+                  <option value="1h">Last 1 hour</option>
+                  <option value="6h">Last 6 hours</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="7d">Last 7 days</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="log-filter-symbol">Symbol</label>
+                <input id="log-filter-symbol" type="search" placeholder="e.g. AAPL, RELIANCE">
+              </div>
+              <div class="field">
+                <label for="log-filter-event-type">Event type / category</label>
+                <select id="log-filter-event-type">
+                  <option value="">All event types</option>
+                  <option value="CAT:SESSION_LIFECYCLE">Category: SESSION_LIFECYCLE (Start / Stop / Pause)</option>
+                  <option value="CAT:KRONOS_LIFECYCLE">Category: KRONOS_LIFECYCLE (Load / Infer / Degrade / Fail)</option>
+                  <option value="CAT:STRATEGY_DECISION">Category: STRATEGY_DECISION</option>
+                  <option value="CAT:PAPER_ORDER">Category: PAPER_ORDER</option>
+                  <option value="CAT:SIMULATED_FILL">Category: SIMULATED_FILL</option>
+                  <option value="CAT:ORDER_REJECTION">Category: ORDER_REJECTION</option>
+                  <option value="CAT:POSITION_CHANGE">Category: POSITION_CHANGE</option>
+                  <option value="CAT:RISK_LIMIT">Category: RISK_LIMIT</option>
+                  <option value="CAT:EMERGENCY_STOP">Category: EMERGENCY_STOP</option>
+                  <option value="KRONOS_FORECAST_PRODUCED">KRONOS_FORECAST_PRODUCED</option>
+                  <option value="KRONOS_FORECAST_CONSUMED">KRONOS_FORECAST_CONSUMED</option>
+                  <option value="KRONOS_FAILED">KRONOS_FAILED</option>
+                  <option value="KRONOS_INFER_TIMEOUT">KRONOS_INFER_TIMEOUT</option>
+                  <option value="PAPER_STRATEGY_DECISION">PAPER_STRATEGY_DECISION</option>
+                  <option value="PAPER_ORDER_SUBMITTED">PAPER_ORDER_SUBMITTED</option>
+                  <option value="PAPER_ORDER_FILLED">PAPER_ORDER_FILLED</option>
+                  <option value="PAPER_ORDER_REJECTED">PAPER_ORDER_REJECTED</option>
+                  <option value="PAPER_POSITION_CHANGED">PAPER_POSITION_CHANGED</option>
+                  <option value="PAPER_RISK_LIMIT_EVENT">PAPER_RISK_LIMIT_EVENT</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="log-filter-severity">Severity</label>
+                <select id="log-filter-severity">
+                  <option value="">All severities</option>
+                  <option value="INFO">INFO</option>
+                  <option value="WARN">WARN</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="log-filter-strategy">Strategy</label>
+                <input id="log-filter-strategy" type="search" placeholder="e.g. kronos_ensemble, moving_average">
+              </div>
+              <div class="field">
+                <label for="log-filter-session">Session ID</label>
+                <input id="log-filter-session" type="search" placeholder="e.g. nse-a1b2c3 or run_id">
+              </div>
+            </div>
+            <div class="toolbar top-space">
+              <div class="field grow">
+                <label for="log-filter-query">Correlation / detail search (decision_id, order_id, fill_id, reason)</label>
+                <input id="log-filter-query" type="search" placeholder="Search decision_id, client_order_id, fill_id, or failure code…">
+              </div>
+              <div class="button-row">
+                <button type="submit" class="button primary xs" id="log-apply-filters-btn">Apply Filters</button>
+                <button type="button" class="button secondary xs" id="log-reset-filters-btn">Reset Filters</button>
+              </div>
+            </div>
+          </form>
+          <div class="table-wrap tall top-space">
+            <table>
+              <thead>
+                <tr>
+                  <th>UTC Timestamp</th>
+                  <th>Severity</th>
+                  <th>Execution / Money Scope</th>
+                  <th>Market / Symbol</th>
+                  <th>Event &amp; Strategy</th>
+                  <th>Correlated IDs</th>
+                  <th>Redacted Structured Detail</th>
+                </tr>
+              </thead>
+              <tbody id="mm-structured-log-rows">
+                <tr><td colspan="7" class="empty-state">No structured paper or Kronos events match the active filters.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
         <article class="panel">
           <div class="panel-head">
             <div><p class="eyebrow">MULTI-MARKET HASH-CHAINED AUDIT</p><h3>NSE &amp; NASDAQ Paper Audit Log</h3></div>
@@ -859,7 +1248,8 @@
               <span class="status-pill" id="ml-kronos-runtime-badge">NOT_INSTALLED</span>
             </div>
             <div class="inline-status" id="ml-kronos-summary">Inspecting pinned NeoQuasar/Kronos-small + Tokenizer status…</div>
-            <dl class="detail-list" id="ml-kronos-details"></dl>
+            <div class="truth-matrix-grid top-space" id="ml-kronos-truth-grid" aria-label="Model Lab Kronos truth matrix"></div>
+            <dl class="detail-list top-space" id="ml-kronos-details"></dl>
             <div class="button-row top-space">
               <button type="button" class="button primary xs" id="ml-kronos-install-btn">Install Pinned Kronos (CPU)</button>
               <button type="button" class="button secondary xs" id="ml-kronos-verify-btn">Verify SHA-256</button>

@@ -27,7 +27,11 @@ const state = {
   chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
   chartSymbolsLoaded: false, chartRequest: 0,
   performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
-  mm: { available: false, activeVenue: "NSE", overview: null, catalogItems: [], side: "BUY", chartFeed: "SESSION", lastPreview: null },
+  mm: {
+    available: false, activeVenue: "NSE", overview: null, catalogItems: [],
+    side: "BUY", chartFeed: "SESSION", lastPreview: null,
+    structuredLogs: null, structuredLogsError: "", decisionsPayload: null, selectedDecisionId: "",
+  },
   ml: { available: false, overview: null, selectedRunId: "" },
   tm: { page: 1, pageSize: 50, summary: null, selected: null, chartPayload: null, hitBoxes: [], selectedMarkerId: "" },
   ens: { overview: null, selectedDecisionIdx: 0, latestAblation: null, latestBenchmark: null },
@@ -254,6 +258,7 @@ async function loadActivity() {
     state.activity = result.events || [];
     renderActivity(); renderOverviewActivity();
   } catch (error) { toast("Activity refresh failed", error.message, "err"); }
+  await loadStructuredPaperLogs();
 }
 async function loadConnectionInfo() {
   try { state.connectionInfo = await api("/api/trading/connection"); renderConnections(); }
@@ -302,7 +307,10 @@ function configureRefresh() {
   clearInterval(state.refreshTimer);
   const interval = Number($("refresh-interval").value || 0);
   if (interval > 0) state.refreshTimer = setInterval(() => {
-    if (!document.hidden && !state.dialog?.busy) loadWorkspace({ background: true }).catch(() => {});
+    if (!document.hidden && !state.dialog?.busy) {
+      loadWorkspace({ background: true }).catch(() => {});
+      if (state.mm.available) loadMultiMarketOverview().catch(() => {});
+    }
   }, interval);
 }
 
@@ -590,15 +598,16 @@ function renderChartContext() {
   $("start-paper").hidden = false;
   const paperState = state.workspace.paper_session?.state;
   $("start-paper").textContent = paperState === "RUNNING" ? "Stop paper session" : paperState === "PAUSED" ? "Resume paper session" : "Start automated replay (moving_average)";
+  const isLiveMmChart = ($("mm-chart-source-mode")?.value || "SESSION") !== "SESSION";
   const feedContext = $("chart-feed-context");
-  if (feedContext) {
+  if (feedContext && !isLiveMmChart) {
     feedContext.className = "inline-status warn";
     feedContext.textContent = "Replay/CSV is sample data, not market data. Default start enables moving_average automation and simulated strategy orders; Upstox (NSE) and Alpaca (NASDAQ) Live-Market Paper use separate read-only provider feeds.";
   }
   const noSymbol = !$("order-symbol").value;
   const disabledReason = state.submissionUncertain ? "An action outcome is uncertain. Refresh before another order." : noSymbol ? "Load/select an instrument first." : "";
   setDisabled("review-order", Boolean(disabledReason), disabledReason);
-  setDisabled("reload-chart", !$("chart-symbol").value, !$("chart-symbol").value ? "No instrument is available." : "");
+  setDisabled("reload-chart", !isLiveMmChart && !$("chart-symbol").value, (!isLiveMmChart && !$("chart-symbol").value) ? "No instrument is available." : "");
   $("order-context").className = `inline-status ${status.emergency_stop || state.submissionUncertain ? "err" : "warn"}`;
   $("order-context").textContent = state.submissionUncertain
     ? "An order/cancel outcome is uncertain. Refresh and inspect local paper state before another action."
@@ -1148,6 +1157,7 @@ async function goPage(page) {
     if (state.mm.chartFeed !== "SESSION" && state.mm.available) await loadMultiMarketChart();
     else await loadChartSymbols();
   }
+  if (page === "strategies" && state.mm.available) await loadPaperDecisions();
   if (page === "activity") await loadActivity();
   if (page === "modellab") await loadModelLabOverview();
   if (page === "monitor") await loadTradeMonitor();
@@ -1196,12 +1206,28 @@ function bindEvents() {
       else if (!event.shiftKey && document.activeElement === last) { first.focus(); event.preventDefault(); }
     }
   });
+  const reloadActiveChart = () => {
+    const mmFeed = $("mm-chart-source-mode")?.value || "SESSION";
+    return mmFeed !== "SESSION" ? loadMultiMarketChart() : loadChart();
+  };
   $("chart-symbol").addEventListener("change", () => { state.ticketReview = null; $("order-symbol").value = $("chart-symbol").value; loadChart(); });
-  $("chart-timeframe").addEventListener("change", () => { state.ticketReview = null; loadChart(); });
+  $("chart-timeframe").addEventListener("change", () => { state.ticketReview = null; reloadActiveChart(); });
   document.querySelectorAll("[data-chart-timeframe]").forEach((button) => button.addEventListener("click", () => {
     const timeframe = button.dataset.chartTimeframe;
-    if (![...$("chart-timeframe").options].some((option) => option.value === timeframe)) { toast("Timeframe unavailable", "The active data provider does not expose this timeframe for the selected instrument.", "warn"); return; }
-    $("chart-timeframe").value = timeframe; state.ticketReview = null; loadChart();
+    const mmFeed = $("mm-chart-source-mode")?.value || "SESSION";
+    if (mmFeed === "SESSION" && ![...$("chart-timeframe").options].some((option) => option.value === timeframe)) {
+      toast("Timeframe unavailable", "The active data provider does not expose this timeframe for the selected instrument.", "warn");
+      return;
+    }
+    if (![...$("chart-timeframe").options].some((option) => option.value === timeframe)) {
+      const opt = document.createElement("option");
+      opt.value = timeframe;
+      opt.textContent = timeframe;
+      $("chart-timeframe").appendChild(opt);
+    }
+    $("chart-timeframe").value = timeframe;
+    state.ticketReview = null;
+    reloadActiveChart();
   }));
   $("zoom-in").addEventListener("click", () => zoomChart(.8)); $("zoom-out").addEventListener("click", () => zoomChart(1.25));
   $("reset-chart-view").addEventListener("click", resetChartView); $("clear-drawings").addEventListener("click", clearDrawings);
@@ -1215,7 +1241,7 @@ function bindEvents() {
     drawChart();
   });
   bindChartCanvas();
-  $("reload-chart").addEventListener("click", loadChart); $("start-paper").addEventListener("click", paperSessionControl);
+  $("reload-chart").addEventListener("click", reloadActiveChart); $("start-paper").addEventListener("click", paperSessionControl);
   $("order-buy").addEventListener("click", () => { state.side = "BUY"; state.ticketReview = null; $("order-buy").classList.add("active"); $("order-sell").classList.remove("active"); renderChartContext(); });
   $("order-sell").addEventListener("click", () => { state.side = "SELL"; state.ticketReview = null; $("order-sell").classList.add("active"); $("order-buy").classList.remove("active"); renderChartContext(); });
   $("order-type").addEventListener("change", () => { state.ticketReview = null; $("limit-field").hidden = $("order-type").value !== "LIMIT"; renderTicketEstimate(); });
@@ -1231,7 +1257,12 @@ function bindEvents() {
   $("order-rows").addEventListener("click", (event) => { const id = event.target.dataset.cancel; if (id) cancelOrder(id); });
   $("pause-session").addEventListener("click", pauseSession); $("stop-session").addEventListener("click", stopSession); $("clear-emergency").addEventListener("click", clearEmergency);
   $("activity-filter").addEventListener("input", renderActivity); $("reload-activity").addEventListener("click", loadActivity);
-  $("export-activity").addEventListener("click", () => downloadJson(`axiom-redacted-activity-${new Date().toISOString().slice(0, 10)}.json`, { generated_at: new Date().toISOString(), note: "Redacted local audit; no credentials or API token.", events: state.activity }));
+  $("export-activity").addEventListener("click", () => downloadJson(`axiom-redacted-activity-${new Date().toISOString().slice(0, 10)}.json`, {
+    generated_at: new Date().toISOString(),
+    note: "Redacted local audit; no credentials or API token. Simulated PAPER events are explicitly labeled and separated from broker-confirmed events.",
+    events: state.activity,
+    structured_paper_logs: state.mm.structuredLogs?.events || [],
+  }));
   $("token-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const candidate = $("settings-token").value;
     try {
@@ -1253,6 +1284,7 @@ function bindEvents() {
   }));
   if (globalThis.ResizeObserver) new ResizeObserver(() => drawChart()).observe($("terminal-chart"));
   bindMultiMarketEvents();
+  bindLiveExecutionEvents();
 }
 
 /* ============================================================================
@@ -1326,6 +1358,55 @@ function renderMultiMarketDesk() {
     $("mm-boundary-live").textContent = `NSE ${nseGate} · NASDAQ ${usGate}`;
   }
 
+  // Concurrent Multi-Market Selection & Runner Status
+  const selectedMkts = Array.isArray(ov.selected_markets) ? ov.selected_markets : ["NSE", "NASDAQ"];
+  if ($("mm-select-nse")) $("mm-select-nse").checked = selectedMkts.includes("NSE");
+  if ($("mm-select-nasdaq")) $("mm-select-nasdaq").checked = selectedMkts.includes("NASDAQ");
+  if ($("mm-runner-status-pill")) {
+    const r = ov.runner || {};
+    const bgOn = Boolean(r.background_loop_running || r.enabled);
+    $("mm-runner-status-pill").textContent = bgOn
+      ? `RUNNER ACTIVE · ${selectedMkts.join("+")} · PAPER ONLY (0 BROKER CALLS)`
+      : `RUNNER STANDBY · ${selectedMkts.join("+")} · PAPER ONLY`;
+    $("mm-runner-status-pill").className = `status-pill ${bgOn ? "ok" : "info"}`;
+  }
+  if ($("mm-concurrent-status-line")) {
+    const nseSessLbl = `${nse.exchange_session?.state || "CLOSED"} (${nse.session_state || "STOPPED"})`;
+    const usSessLbl = `${nasdaq.exchange_session?.state || "CLOSED"} (${nasdaq.session_state || "STOPPED"})`;
+    $("mm-concurrent-status-line").textContent =
+      `Selected markets: ${selectedMkts.join(" + ") || "NONE"} · NSE (INR): ${nseSessLbl} · NASDAQ (USD): ${usSessLbl} · ` +
+      `Live execution: OFF (0 broker order calls). Closed markets analyze historical bars without placing simulated trades.`;
+  }
+
+  const renderCoverageBox = (boxId, snap, mkt) => {
+    const box = $(boxId);
+    if (!box) return;
+    const la = snap.last_analysis;
+    const effSyms = snap.effective_symbols || snap.watched_symbols || [];
+    if (!la) {
+      box.innerHTML = `<span class="muted small">Selected ${escapeHtml(mkt)} universe (${effSyms.length} symbol${effSyms.length === 1 ? "" : "s"}: ${escapeHtml(effSyms.map((s) => String(s).split("|").pop()).join(", ") || "none")}): click Start, Resume, or Analyze to evaluate all enabled strategies.</span>`;
+      return;
+    }
+    const c = la.counts || {};
+    const exOpen = Boolean(la.exchange_session?.is_open);
+    const gateNote = la.trade_execution_permitted_now
+      ? "Open session: eligible completed-bar paper trades active"
+      : (exOpen ? `Session ${snap.session_state} (${snap.strategy}): no auto trades` : `Exchange ${la.exchange_session?.state || "CLOSED"}: analyzed read-only · 0 simulated trades`);
+    const chips = (la.symbols || []).map((sr) => {
+      const cls = sr.status === "SUCCEEDED" ? "ok" : (sr.status === "FAILED" ? "err" : "warn");
+      const act = sr.ensemble_final_action || sr.rule_signal || "";
+      const detail = sr.status === "SUCCEEDED"
+        ? `${act ? `→ ${act}` : "OK"}${sr.active_weighted_variants != null ? ` (${sr.active_weighted_variants}v)` : ""}`
+        : `${sr.status}: ${sr.code || sr.reason || "skipped"}`;
+      return `<span class="mm-cov-chip ${cls}" title="${escapeHtml(sr.reason || "")}"><strong>${escapeHtml(sr.symbol)}</strong> ${escapeHtml(detail)}</span>`;
+    }).join("");
+    box.innerHTML = `
+      <div><strong>${escapeHtml(mkt)} Analysis (${escapeHtml(la.trigger || "cycle")})</strong> · Selected: <strong>${c.selected_symbols ?? 0}</strong> · Succeeded: <strong class="pnl-pos">${c.succeeded ?? 0}</strong> · Missing: <strong>${c.missing_data ?? 0}</strong> · Stale: <strong>${c.stale_data ?? 0}</strong> · Failed: <strong class="${(c.failed || 0) > 0 ? "pnl-neg" : ""}">${c.failed ?? 0}</strong>${la.enabled_strategy_variants ? ` · Variants: <strong>${la.enabled_strategy_variants}</strong>` : ""}</div>
+      <div class="muted small">${escapeHtml(gateNote)} · Analyzed ${escapeHtml(timeText(la.analyzed_at))}</div>
+      ${chips ? `<div class="mm-cov-chips">${chips}</div>` : ""}
+    `;
+  };
+
   // Overview NSE & NASDAQ Paper Ledger cards
   const renderLedgerList = (elId, badgeId, snap, symPrefix) => {
     const acct = snap.account || {};
@@ -1336,11 +1417,13 @@ function renderMultiMarketDesk() {
     if ($(elId)) {
       const curSessPnl = acct.current_session_total_pnl ?? 0;
       const histRealPnl = acct.persisted_historical_realized_pnl ?? acct.realized_pnl ?? 0;
+      const effSyms = (snap.effective_symbols || snap.watched_symbols || []).map((s) => String(s).split("|").pop());
       const rows = [
         ["Execution destination", `${snap.execution_destination || "LIVE-MARKET PAPER · Simulated · 0 Broker Orders"}`],
         ["Market-data source", `${snap.market_data_source || "Read-only live provider (0 sample fallback)"}`],
         ["Fill type & automation", `${snap.fill_type || "SIMULATED"} · ${snap.automation_state || "MANUAL_ONLY"}`],
         ["Exchange session", `${snap.exchange_session?.state || "—"} (${snap.exchange_session?.timezone || ""})`],
+        ["Selected symbols", `${effSyms.length} (${effSyms.join(", ") || "none"})`],
         ["Equity", `${symPrefix}${fmt(acct.equity, 2)}`],
         ["Available cash", `${symPrefix}${fmt(acct.cash, 2)}`],
         ["Open market value", `${symPrefix}${fmt(acct.market_value, 2)} (${(snap.positions || []).length} pos)`],
@@ -1354,6 +1437,10 @@ function renderMultiMarketDesk() {
   };
   renderLedgerList("mm-nse-overview-list", "mm-nse-paper-state", nse, "₹");
   renderLedgerList("mm-nasdaq-overview-list", "mm-nasdaq-paper-state", nasdaq, "$");
+  renderCoverageBox("mm-ov-nse-coverage", nse, "NSE");
+  renderCoverageBox("mm-ov-nasdaq-coverage", nasdaq, "NASDAQ");
+  renderCoverageBox("mm-strat-nse-coverage", nse, "NSE");
+  renderCoverageBox("mm-strat-nasdaq-coverage", nasdaq, "NASDAQ");
 
   // 4-Mode Readiness Checklists (Priority 1)
   if ($("mm-readiness-grid") && ov.readiness?.modes) {
@@ -1447,7 +1534,7 @@ function renderMultiMarketDesk() {
   if ($("mm-paper-position-rows")) {
     $("mm-paper-position-rows").innerHTML = allPos.length ? allPos.map((p) => `
       <tr>
-        <td>${statusPill(`${p.market} · PAPER`, p.market === "NSE" ? "info" : "ok")}</td>
+        <td>${statusPill(`${p.market} · PAPER`, p.market === "NSE" ? "info" : "ok")}<br><small class="muted">${escapeHtml(mmExecutionModeLabel(p.market, ov))}</small></td>
         <td><strong>${escapeHtml(p.symbol)}</strong><br><small class="muted"><code>${escapeHtml(p.instrument_key || p.symbol)}</code></small></td>
         <td>${fmt(p.qty, 4)}</td>
         <td>${p.curSym}${fmt(p.avg_entry_price, 2)}</td>
@@ -1470,7 +1557,7 @@ function renderMultiMarketDesk() {
     $("mm-paper-order-rows").innerHTML = allOrders.length ? allOrders.map((o) => {
       const open = ["WORKING", "PARTIALLY_FILLED"].includes(o.status);
       return `<tr>
-        <td>${escapeHtml(o.market)}</td>
+        <td>${escapeHtml(o.market)}<br><small class="muted">${escapeHtml(mmExecutionModeLabel(o.market, ov))}</small></td>
         <td><strong>${escapeHtml(o.symbol)}</strong><br><small class="muted"><code>${escapeHtml(o.instrument_key || o.symbol)}</code></small></td>
         <td>${escapeHtml(o.side)} · ${escapeHtml(o.order_type)}</td>
         <td>${fmt(o.filled_qty, 4)} / ${fmt(o.qty, 4)}</td>
@@ -1487,7 +1574,7 @@ function renderMultiMarketDesk() {
       const c = f.currency === "INR" ? "₹" : "$";
       return `<tr>
         <td><small>${escapeHtml(timeText(f.created_at))}</small><br><span class="status-pill info">${escapeHtml(f.fill_type || "SIMULATED")}</span></td>
-        <td><strong>${escapeHtml(f.market)}:${escapeHtml(f.symbol)}</strong><br><small class="muted"><code>${escapeHtml(f.instrument_key || f.symbol)}</code></small></td>
+        <td><strong>${escapeHtml(f.market)}:${escapeHtml(f.symbol)}</strong><br><small class="muted">${escapeHtml(mmExecutionModeLabel(f.market, ov))} · <code>${escapeHtml(f.instrument_key || f.symbol)}</code></small></td>
         <td>${escapeHtml(f.side)}</td>
         <td>${fmt(f.qty, 4)} @ ${c}${fmt(f.fill_price, 2)}</td>
         <td>${c}${fmt(f.fees_total, 2)}</td>
@@ -1499,6 +1586,18 @@ function renderMultiMarketDesk() {
   // Strategies & Modes Page
   if ($("mm-strat-nse-state")) $("mm-strat-nse-state").textContent = nse.session_state || "STOPPED";
   if ($("mm-strat-nasdaq-state")) $("mm-strat-nasdaq-state").textContent = nasdaq.session_state || "STOPPED";
+  if ($("mm-strat-nse-select") && nse.strategy && (nse.session_state !== "STOPPED" || nse.strategy !== "manual_only") && document.activeElement !== $("mm-strat-nse-select")) {
+    $("mm-strat-nse-select").value = nse.strategy;
+  }
+  if ($("mm-strat-nasdaq-select") && nasdaq.strategy && (nasdaq.session_state !== "STOPPED" || nasdaq.strategy !== "manual_only") && document.activeElement !== $("mm-strat-nasdaq-select")) {
+    $("mm-strat-nasdaq-select").value = nasdaq.strategy;
+  }
+  if ($("mm-strat-nse-tf") && nse.timeframe && nse.session_state !== "STOPPED" && document.activeElement !== $("mm-strat-nse-tf")) {
+    $("mm-strat-nse-tf").value = nse.timeframe;
+  }
+  if ($("mm-strat-nasdaq-tf") && nasdaq.timeframe && nasdaq.session_state !== "STOPPED" && document.activeElement !== $("mm-strat-nasdaq-tf")) {
+    $("mm-strat-nasdaq-tf").value = nasdaq.timeframe;
+  }
   if ($("mm-live-mode-cards")) {
     const nseL = live.nse || {};
     const usL = live.nasdaq || {};
@@ -1522,20 +1621,15 @@ function renderMultiMarketDesk() {
     `;
   }
 
-  const allDecisions = [...(nse.decisions || []), ...(nasdaq.decisions || [])].slice(0, 40);
-  if ($("mm-strategy-decision-rows")) {
-    $("mm-strategy-decision-rows").innerHTML = allDecisions.length ? allDecisions.map((d) => `
-      <tr>
-        <td><small>${escapeHtml(timeText(d.created_at))}</small></td>
-        <td>${escapeHtml(d.market)}</td>
-        <td><strong>${escapeHtml(d.symbol)}</strong></td>
-        <td>${escapeHtml(d.strategy)} · ${escapeHtml(d.timeframe)}</td>
-        <td>${statusPill(d.action, d.action === "BUY" ? "ok" : d.action === "SELL" ? "err" : "")}</td>
-        <td>${escapeHtml(d.reason)}</td>
-        <td><code>${escapeHtml(d.order_client_id || "—")}</code></td>
-      </tr>
-    `).join("") : `<tr><td colspan="7" class="empty-state">No automated paper strategy decisions recorded yet.</td></tr>`;
-  }
+  renderLiveExecutionPanel(ov);
+
+  const kStatus = ov.kronos || state.ml.overview?.kronos || {};
+  renderKronosPaperSection(kStatus, nse, nasdaq);
+
+  const allDecisions = (state.mm.decisionsPayload?.decisions?.length)
+    ? state.mm.decisionsPayload.decisions
+    : [...(nse.decisions || []), ...(nasdaq.decisions || [])].slice(0, 40);
+  renderDecisionInspector(allDecisions);
 
   // SHA-256 Audit Table
   const audits = ov.recent_audit || [];
@@ -1551,6 +1645,443 @@ function renderMultiMarketDesk() {
       </tr>
     `).join("") : `<tr><td colspan="6" class="empty-state">No multi-market paper audit rows yet.</td></tr>`;
   }
+  if (!state.mm.structuredLogs && !state.mm.structuredLogsError) {
+    renderStructuredPaperLogsFallback(audits);
+  }
+}
+
+function kronosLifecyclePillClass(lc) {
+  const s = String(lc || "NOT_CONFIGURED").toUpperCase();
+  if (s === "RUNNING" || s === "READY") return "ok";
+  if (s === "DEGRADED") return "warn";
+  if (s === "FAILED") return "err";
+  return "info";
+}
+
+function deriveKronosTruthMatrix(kStatus) {
+  const tm = kStatus?.truth_matrix;
+  const kEng = kStatus?.kronos_engine || {};
+  const diag = kStatus?.diagnostics || {};
+  const lc = String(kStatus?.lifecycle_state || tm?.lifecycle_state || "NOT_CONFIGURED").toUpperCase();
+  const pState = String(kStatus?.provider_state || "NOT_INSTALLED").toUpperCase();
+  const installed = tm ? Boolean(tm.installed) : (pState !== "NOT_INSTALLED" && Boolean(kEng.artifact_verified || kEng.installed));
+  const validated = tm ? Boolean(tm.validated) : Boolean(kEng.artifact_verified && (kEng.self_test_verified || kEng.last_self_test?.status === "PASSED"));
+  const loaded = tm ? Boolean(tm.loaded) : Boolean(kStatus?.model_loaded);
+  const running = tm ? Boolean(tm.running) : (lc === "RUNNING");
+  const degraded = tm ? Boolean(tm.degraded) : (lc === "DEGRADED" || pState === "STALE");
+  const failed = tm ? Boolean(tm.failed) : (lc === "FAILED" || pState === "ERROR");
+  const producedCount = Number(tm?.produced_count ?? diag.forecast_produced_count ?? diag.inference_count ?? 0);
+  const consumedCount = Number(tm?.consumed_count ?? diag.forecast_consumed_count ?? 0);
+  return {
+    installed,
+    validated,
+    loaded,
+    running,
+    degraded,
+    failed,
+    forecast_produced: tm ? Boolean(tm.forecast_produced) : producedCount > 0,
+    forecast_consumed: tm ? Boolean(tm.forecast_consumed) : consumedCount > 0,
+    produced_count: producedCount,
+    consumed_count: consumedCount,
+    lifecycle_state: lc,
+    provider_state: pState,
+  };
+}
+
+function renderKronosTruthMatrix(elId, kStatus) {
+  const el = $(elId);
+  if (!el) return;
+  const tm = deriveKronosTruthMatrix(kStatus || {});
+  const cells = [
+    {
+      key: "installed",
+      label: "1 · Installed",
+      value: tm.installed ? "YES · PINNED FILES" : "NO · MISSING",
+      sub: tm.installed ? "Local weights & tokenizer present" : "Not downloaded locally",
+      cls: tm.installed ? "ok" : "",
+    },
+    {
+      key: "validated",
+      label: "2 · Validated",
+      value: tm.validated ? "YES · SHA-256 + SELF-TEST" : "NO · UNVERIFIED",
+      sub: tm.validated ? "Exact manifest + runtime verified" : "Requires SHA-256 & CPU self-test",
+      cls: tm.validated ? "ok" : (tm.installed ? "warn" : ""),
+    },
+    {
+      key: "loaded",
+      label: "3 · Loaded",
+      value: tm.loaded ? "YES · CPU WORKER WARM" : "NO · UNLOADED",
+      sub: tm.loaded ? "Predictor resident in worker" : "Zero idle RAM held",
+      cls: tm.loaded ? "ok" : "",
+    },
+    {
+      key: "running",
+      label: "4 · Running (Session)",
+      value: tm.running ? "YES · PAPER ATTACHED" : `NO · ${tm.lifecycle_state}`,
+      sub: tm.running ? "Active PAPER session attached" : "Not running in active PAPER session",
+      cls: tm.running ? "ok" : "",
+    },
+    {
+      key: "degraded",
+      label: "5 · Degraded",
+      value: tm.degraded ? "YES · DEGRADED" : "NO · CLEAR",
+      sub: tm.degraded ? "Non-Kronos fallback or stale state" : "No degraded fallback active",
+      cls: tm.degraded ? "warn" : "",
+    },
+    {
+      key: "failed",
+      label: "6 · Failed",
+      value: tm.failed ? "YES · FAILED" : "NO · CLEAR",
+      sub: tm.failed ? (kStatus?.last_error?.code || "Inference / startup failure") : "No active Kronos error",
+      cls: tm.failed ? "err" : "",
+    },
+    {
+      key: "forecast_produced",
+      label: "7 · Forecast Produced",
+      value: tm.forecast_produced ? `YES (${tm.produced_count})` : "NO (0)",
+      sub: kStatus?.diagnostics?.last_produced_at ? `Last: ${timeText(kStatus.diagnostics.last_produced_at)}` : "Validated bars -> output check",
+      cls: tm.forecast_produced ? "ok" : "",
+    },
+    {
+      key: "forecast_consumed",
+      label: "8 · Consumed by PAPER",
+      value: tm.forecast_consumed ? `YES (${tm.consumed_count})` : "NO (0)",
+      sub: kStatus?.diagnostics?.last_consumed_at ? `Last: ${timeText(kStatus.diagnostics.last_consumed_at)}` : "Used in active PAPER strategy decision",
+      cls: tm.forecast_consumed ? "ok" : "",
+    },
+  ];
+  el.innerHTML = cells.map((c) => `
+    <div class="truth-cell ${c.cls}" data-kronos-truth="${escapeHtml(c.key)}" data-truth-active="${escapeHtml(String(Boolean(tm[c.key])))}">
+      <span class="truth-cell-label">${escapeHtml(c.label)}</span>
+      <span class="truth-cell-value">${escapeHtml(c.value)}</span>
+      <span class="truth-cell-sub">${escapeHtml(c.sub)}</span>
+    </div>
+  `).join("");
+}
+
+function renderKronosPaperSection(kStatus, nseSnap, nasdaqSnap) {
+  const tm = deriveKronosTruthMatrix(kStatus || {});
+  const cfg = kStatus?.config || {};
+  const diag = kStatus?.diagnostics || {};
+  const kEng = kStatus?.kronos_engine || {};
+  const lastErr = kStatus?.last_error || null;
+  const latestProd = diag.last_produced_summary || null;
+
+  if ($("mm-pill-kronos-state") && kStatus?.provider_state) {
+    $("mm-pill-kronos-state").textContent = `KRONOS · ${kStatus.provider_state}`;
+    $("mm-pill-kronos-state").className = `status-pill ${kronosPillClass(kStatus.provider_state)}`;
+  }
+  if ($("mm-pill-kronos-session")) {
+    $("mm-pill-kronos-session").textContent = `KRONOS PAPER · ${tm.lifecycle_state} · ${tm.consumed_count} CONSUMED`;
+    $("mm-pill-kronos-session").className = `status-pill ${kronosLifecyclePillClass(tm.lifecycle_state)}`;
+  }
+  if ($("mm-kronos-lifecycle-pill")) {
+    $("mm-kronos-lifecycle-pill").textContent = `${tm.lifecycle_state} · ${cfg.failure_policy || "FAIL_CLOSED_NO_ENTRY"}`;
+    $("mm-kronos-lifecycle-pill").className = `status-pill ${kronosLifecyclePillClass(tm.lifecycle_state)}`;
+  }
+  renderKronosTruthMatrix("mm-kronos-truth-grid", kStatus);
+
+  const renderMktLine = (elId, mktName, snap) => {
+    const el = $(elId);
+    if (!el) return;
+    const ks = snap?.kronos_session || {};
+    const mLc = ks.lifecycle_state || (snap?.kronos_enabled ? tm.lifecycle_state : "NOT_CONFIGURED");
+    const pol = snap?.kronos_failure_policy || ks.failure_policy || cfg.failure_policy || "FAIL_CLOSED_NO_ENTRY";
+    el.className = `inline-status top-space ${kronosLifecyclePillClass(mLc)}`;
+    el.textContent = `${mktName} Kronos Session: ${mLc} · Configured=${Boolean(snap?.kronos_enabled ?? ks.kronos_configured)} · Policy=${pol} · Produced=${ks.produced_count ?? 0} · Consumed=${ks.consumed_count ?? 0} · 0 broker orders.`;
+  };
+  renderMktLine("mm-nse-kronos-session-line", "NSE", nseSnap);
+  renderMktLine("mm-nasdaq-kronos-session-line", "NASDAQ", nasdaqSnap);
+
+  if ($("mm-kronos-paper-telemetry")) {
+    const modelRev = String(kEng.model_revision || kStatus?.install_plan?.model?.revision || "901c26c13326").slice(0, 12);
+    const manSha = String(kEng.manifest_sha256 || kStatus?.install_plan?.manifest_sha256 || "—").slice(0, 16);
+    const stStatus = kEng.last_self_test?.status || (kEng.self_test_verified ? "PASSED" : "NOT_VERIFIED");
+    const lastInfTime = diag.last_inference_at ? timeText(diag.last_inference_at) : "Never in this process";
+    const lastLat = diag.last_latency_ms != null
+      ? `${fmt(diag.last_latency_ms, 1)} ms (p50 ${diag.inference_ms_p50 ?? "—"} ms / p95 ${diag.inference_ms_p95 ?? "—"} ms)`
+      : "Not measured";
+    const latestFcText = latestProd
+      ? `${latestProd.market}:${latestProd.symbol} (${latestProd.timeframe}) · dir=${latestProd.direction || "—"} · conf=${fmt((Number(latestProd.confidence || 0) * 100), 1)}% · band=${fmt(latestProd.uncertainty_pct, 2)}%`
+      : "No forecast produced in current session";
+    const errText = lastErr
+      ? `${lastErr.code || "ERROR"}: ${lastErr.reason || lastErr.detail || "Kronos unavailable"} (${timeText(lastErr.at || lastErr.timestamp)})`
+      : (kStatus?.lifecycle_reason || "None");
+    const rows = [
+      ["PAPER Lifecycle State", `${tm.lifecycle_state} (Provider: ${tm.provider_state})`],
+      ["Model & Manifest Identity", `NeoQuasar/Kronos-small @ ${modelRev} · sha256:${manSha}…`],
+      ["Artifact & Self-Test Identity", `artifact_verified=${Boolean(kEng.artifact_verified)} · self_test=${stStatus}`],
+      ["Last Inference Time & Latency", `${lastInfTime} · ${lastLat}`],
+      ["Produced vs Consumed Count", `${tm.produced_count} produced / ${tm.consumed_count} consumed by active PAPER strategy`],
+      ["Latest Forecast Confidence / Band", latestFcText],
+      ["Active Failure & Conflict Policy", `${cfg.failure_policy || "FAIL_CLOSED_NO_ENTRY"} · ${cfg.conflict_policy || "VETO_CONFLICTING_ENTRY"}`],
+      ["Eligibility & Weight Bounds", `min_conf=${cfg.min_confidence ?? 0.55} · max_band=${cfg.max_uncertainty_pct ?? 8.0}% · weight_cap=${cfg.weight_cap ?? 0.20}`],
+      ["Failure / Lifecycle Reason", errText],
+    ];
+    $("mm-kronos-paper-telemetry").innerHTML = rows.map(([dt, dd]) => `<dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd>`).join("");
+  }
+
+  const activeEl = document.activeElement;
+  if ($("mm-kp-session-enabled") && activeEl !== $("mm-kp-session-enabled") && cfg.paper_session_enabled !== undefined) {
+    $("mm-kp-session-enabled").value = String(Boolean(cfg.paper_session_enabled));
+  }
+  if ($("mm-kp-failure-policy") && activeEl !== $("mm-kp-failure-policy") && cfg.failure_policy) {
+    $("mm-kp-failure-policy").value = String(cfg.failure_policy);
+  }
+  if ($("mm-kp-conflict-policy") && activeEl !== $("mm-kp-conflict-policy") && cfg.conflict_policy) {
+    $("mm-kp-conflict-policy").value = String(cfg.conflict_policy);
+  }
+  if ($("mm-kp-min-confidence") && activeEl !== $("mm-kp-min-confidence") && cfg.min_confidence != null) {
+    $("mm-kp-min-confidence").value = String(cfg.min_confidence);
+  }
+  if ($("mm-kp-max-uncertainty") && activeEl !== $("mm-kp-max-uncertainty") && cfg.max_uncertainty_pct != null) {
+    $("mm-kp-max-uncertainty").value = String(cfg.max_uncertainty_pct);
+  }
+  if ($("mm-kp-weight-cap") && activeEl !== $("mm-kp-weight-cap") && cfg.weight_cap != null) {
+    $("mm-kp-weight-cap").value = String(cfg.weight_cap);
+  }
+}
+
+async function loadPaperDecisions() {
+  if (!state.mm.available) return;
+  try {
+    const mkt = $("mm-decision-market-filter")?.value || "ALL";
+    const sym = ($("mm-decision-symbol-filter")?.value || "").trim();
+    const q = new URLSearchParams({ market: mkt, limit: "80" });
+    if (sym) q.set("symbol", sym);
+    const res = await api(`/api/markets/paper/decisions?${q}`, { keepAuth: true });
+    state.mm.decisionsPayload = res;
+    if (res.kronos && state.mm.overview) state.mm.overview.kronos = res.kronos;
+    renderMultiMarketDesk();
+  } catch (_) {
+    // Fallback to decisions embedded in /api/markets/overview
+  }
+}
+
+function renderSelectedDecisionExplanation(d) {
+  const el = $("mm-decision-explanation-view");
+  if (!el) return;
+  if (!d) {
+    el.className = "inline-status top-space";
+    el.textContent = "Click any decision row or per-symbol card to inspect full input window, Kronos forecast metrics, rule signal, conflict/failure policy, risk checks, and final simulated order action.";
+    return;
+  }
+  const exp = d.explanation || {};
+  const fc = exp.forecast_summary || exp.kronos_contribution || {};
+  const iw = exp.input_window || fc.input_window || {};
+  const rc = exp.risk_checks || {};
+  const prod = Boolean(d.forecast_produced ?? exp.forecast_produced);
+  const cons = Boolean(d.forecast_consumed ?? exp.forecast_consumed);
+  const kStat = d.kronos_status || exp.kronos_status || fc.status || "NOT_CONFIGURED";
+  const pol = d.policy_applied || exp.policy_applied || fc.policy || "RULE_ONLY";
+  const ruleSig = exp.rule_action || exp.rule_signal || "—";
+  const sigArr = Array.isArray(exp.strategy_signals) ? exp.strategy_signals : [];
+  const otherSignalsTxt = sigArr.length
+    ? sigArr.slice(0, 4).map((s) => `${s.variant_id || s.family || "sig"}=${s.direction || s.action || "HOLD"}`).join(", ") + (sigArr.length > 4 ? ` (+${sigArr.length - 4} more)` : "")
+    : ruleSig;
+  const confVal = fc.confidence ?? fc.up_probability;
+  const confTxt = confVal != null ? `${fmt(Number(confVal) * 100, 1)}%` : "—";
+  const bandTxt = fc.uncertainty_pct != null ? `${fmt(fc.uncertainty_pct, 2)}%` : "—";
+  const latTxt = fc.latency_ms != null ? `${fmt(fc.latency_ms, 1)} ms` : "—";
+  const winTxt = iw.bar_count ? `${iw.bar_count} bars (${iw.input_start || "?"} → ${iw.input_end || "?"})` : (fc.input_end ? `through ${fc.input_end}` : "completed-bar window");
+  let riskTxt = "Evaluated via authoritative paper broker";
+  if (Array.isArray(rc)) {
+    const failedChecks = rc.filter((c) => c && c.passed === false);
+    riskTxt = failedChecks.length
+      ? `REJECTED (${failedChecks.map((c) => `${c.check_id}: ${c.detail || "blocked"}`).join("; ")})`
+      : (rc.length ? `PASSED all ${rc.length} authoritative paper risk checks` : riskTxt);
+  } else if (rc && typeof rc === "object") {
+    riskTxt = rc.passed === false
+      ? `REJECTED (${(rc.rejection_reasons || []).join("; ") || "guardrail blocked"})`
+      : (rc.passed === true ? "PASSED authoritative paper risk bounds" : riskTxt);
+  }
+  el.className = `inline-status top-space ${d.action === "BUY" || d.action === "SELL" ? "ok" : (kStat.includes("FAIL") ? "warn" : "info")}`;
+  el.innerHTML = `
+    <strong>${escapeHtml(d.market)}:${escapeHtml(d.symbol)}</strong> · <code>${escapeHtml(d.decision_id || "—")}</code> · ${statusPill("SIMULATED · 0 BROKER ORDERS", "info")}<br>
+    <span><strong>Inputs:</strong> Strategy=<code>${escapeHtml(d.strategy)}</code> (${escapeHtml(d.timeframe || "—")}) · Window=${escapeHtml(winTxt)} · Strategy Signals=<code>${escapeHtml(otherSignalsTxt)}</code></span><br>
+    <span><strong>Kronos:</strong> Status=<code>${escapeHtml(kStat)}</code> · Produced=<code>${escapeHtml(String(prod))}</code> · Consumed=<code>${escapeHtml(String(cons))}</code> · Dir=<code>${escapeHtml(fc.direction || "—")}</code> · Conf=${escapeHtml(confTxt)} · Band=${escapeHtml(bandTxt)} · Latency=${escapeHtml(latTxt)} · Model=<code>${escapeHtml(fc.model_id || "NeoQuasar/Kronos-small")}</code></span><br>
+    <span><strong>Decision &amp; Risk:</strong> Policy=<code>${escapeHtml(pol)}</code> · Final Action=<strong>${escapeHtml(d.action)}</strong> · Risk=${escapeHtml(riskTxt)} · Order=<code>${escapeHtml(d.order_client_id || "NONE")}</code> · Reason=${escapeHtml(d.reason || exp.reason || "—")}</span>
+  `;
+}
+
+function renderDecisionInspector(rawDecisions) {
+  const mktFilter = ($("mm-decision-market-filter")?.value || "ALL").toUpperCase();
+  const textFilter = ($("mm-decision-symbol-filter")?.value || "").trim().toLowerCase();
+  const filtered = (rawDecisions || []).filter((d) => {
+    if (mktFilter !== "ALL" && String(d.market || "").toUpperCase() !== mktFilter) return false;
+    if (textFilter) {
+      const hay = `${d.symbol || ""} ${d.strategy || ""} ${d.reason || ""} ${d.kronos_status || ""}`.toLowerCase();
+      if (!hay.includes(textFilter)) return false;
+    }
+    return true;
+  });
+
+  if ($("mm-strategy-decision-rows")) {
+    $("mm-strategy-decision-rows").innerHTML = filtered.length ? filtered.map((d, idx) => {
+      const decKey = d.decision_id || `${d.market}:${d.symbol}:${idx}`;
+      const kBadge = d.forecast_consumed
+        ? `<br><span class="status-pill ok">KRONOS CONSUMED</span>`
+        : (d.forecast_produced
+          ? `<br><span class="status-pill info">PRODUCED · NOT CONSUMED</span>`
+          : (d.kronos_status && d.kronos_status !== "NOT_CONFIGURED"
+            ? `<br><span class="status-pill warn">${escapeHtml(d.kronos_status)}</span>`
+            : ""));
+      return `<tr data-inspect-decision="${escapeHtml(decKey)}" style="cursor:pointer">
+        <td><small>${escapeHtml(timeText(d.created_at || d.ts))}</small></td>
+        <td>${escapeHtml(d.market)}</td>
+        <td><strong>${escapeHtml(d.symbol)}</strong></td>
+        <td>${escapeHtml(d.strategy)} · ${escapeHtml(d.timeframe)}${kBadge}</td>
+        <td>${statusPill(d.action, d.action === "BUY" ? "ok" : d.action === "SELL" ? "err" : "")}</td>
+        <td>${escapeHtml(d.reason)}</td>
+        <td><code>${escapeHtml(d.order_client_id || "—")}</code></td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7" class="empty-state">No automated paper strategy decisions recorded yet.</td></tr>`;
+  }
+
+  if ($("mm-decision-symbol-cards")) {
+    const bySym = new Map();
+    for (const d of filtered) {
+      const k = `${d.market}:${d.symbol}`;
+      if (!bySym.has(k)) bySym.set(k, d);
+    }
+    const latestCards = [...bySym.values()].slice(0, 8);
+    if (!latestCards.length) {
+      $("mm-decision-symbol-cards").innerHTML = `<div class="empty-state">No matching per-symbol PAPER decisions.</div>`;
+    } else {
+      $("mm-decision-symbol-cards").innerHTML = latestCards.map((d, idx) => {
+        const decKey = d.decision_id || `${d.market}:${d.symbol}:${idx}`;
+        const exp = d.explanation || {};
+        const fc = exp.forecast_summary || exp.kronos_contribution || {};
+        const selectedCls = state.mm.selectedDecisionId === decKey ? "selected" : "";
+        return `<div class="decision-card ${selectedCls}" data-inspect-decision="${escapeHtml(decKey)}">
+          <div class="panel-head" style="margin-bottom:4px">
+            <strong>${escapeHtml(d.market)}:${escapeHtml(d.symbol)} · <small>${escapeHtml(d.strategy)}</small></strong>
+            ${statusPill(d.action, d.action === "BUY" ? "ok" : d.action === "SELL" ? "err" : "info")}
+          </div>
+          <div class="muted small">Rule: <code>${escapeHtml(exp.rule_action || exp.rule_signal || "—")}</code> · Kronos: <code>${escapeHtml(d.kronos_status || "NOT_CONFIGURED")}</code> · Consumed: <code>${escapeHtml(String(Boolean(d.forecast_consumed)))}</code></div>
+          <div class="muted small">Conf: ${fc.confidence != null ? `${fmt(Number(fc.confidence) * 100, 1)}%` : "—"} · Band: ${fc.uncertainty_pct != null ? `${fmt(fc.uncertainty_pct, 2)}%` : "—"} · Policy: <code>${escapeHtml(d.policy_applied || exp.policy_applied || "—")}</code></div>
+          <div class="muted small">${escapeHtml(String(d.reason || "").slice(0, 120))}</div>
+        </div>`;
+      }).join("");
+    }
+  }
+
+  const chosen = filtered.find((d, idx) => (d.decision_id || `${d.market}:${d.symbol}:${idx}`) === state.mm.selectedDecisionId) || filtered[0] || null;
+  renderSelectedDecisionExplanation(chosen);
+}
+
+function getStructuredLogQueryParams() {
+  const params = new URLSearchParams({ limit: "250" });
+  const win = $("log-filter-window")?.value || "all";
+  const sym = ($("log-filter-symbol")?.value || "").trim();
+  const evRaw = $("log-filter-event-type")?.value || "";
+  const sev = $("log-filter-severity")?.value || "";
+  const strat = ($("log-filter-strategy")?.value || "").trim();
+  const sess = ($("log-filter-session")?.value || "").trim();
+  const q = ($("log-filter-query")?.value || "").trim();
+  params.set("window", win);
+  if (sym) params.set("symbol", sym);
+  if (evRaw.startsWith("CAT:")) params.set("category", evRaw.slice(4));
+  else if (evRaw) params.set("event_type", evRaw);
+  if (sev) params.set("severity", sev);
+  if (strat) params.set("strategy", strat);
+  if (sess) params.set("session_id", sess);
+  if (q) params.set("query", q);
+  return params;
+}
+
+async function loadStructuredPaperLogs() {
+  if (!$("mm-structured-log-rows")) return;
+  const params = getStructuredLogQueryParams();
+  try {
+    const res = await api(`/api/markets/paper/logs?${params}`, { keepAuth: true });
+    state.mm.structuredLogs = res;
+    state.mm.structuredLogsError = "";
+    renderStructuredPaperLogs();
+  } catch (err) {
+    if (err && err.status === 404) {
+      state.mm.structuredLogsError = "";
+      renderStructuredPaperLogsFallback(state.mm.overview?.recent_audit || []);
+      return;
+    }
+    state.mm.structuredLogsError = err?.message || "Unable to load structured paper logs.";
+    renderStructuredPaperLogs();
+  }
+}
+
+function renderStructuredPaperLogsFallback(audits) {
+  if (!$("mm-structured-log-rows")) return;
+  const rows = (audits || []).map((a) => ({
+    timestamp: a.created_at || a.ts || "",
+    severity: String(a.event_kind || "").includes("REJECT") || String(a.event_kind || "").includes("FAIL") ? "WARN" : "INFO",
+    simulated: true,
+    execution_badge: "SIMULATED · LIVE_MARKET_PAPER (0 BROKER ORDERS)",
+    pnl_scope_label: "SIMULATED_PAPER_PNL_ONLY",
+    market: a.market || "ALL",
+    symbol: a.payload?.symbol || "",
+    event_type: a.event_kind || "AUDIT_EVENT",
+    strategy: a.payload?.strategy || "",
+    session_id: a.payload?.session_id || a.payload?.session_run_id || "",
+    decision_id: a.payload?.decision_id || "",
+    order_id: a.payload?.client_order_id || a.payload?.order_id || "",
+    fill_id: a.payload?.fill_id || "",
+    detail: a.payload || {},
+  }));
+  state.mm.structuredLogs = { total_matching: rows.length, returned_count: rows.length, events: rows };
+  renderStructuredPaperLogs();
+}
+
+function renderStructuredPaperLogs() {
+  const errEl = $("log-error-banner");
+  const rowsEl = $("mm-structured-log-rows");
+  if (!rowsEl) return;
+  if (state.mm.structuredLogsError) {
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = `Structured log query failed: ${state.mm.structuredLogsError}. Verify the local AXIOM server is reachable and click Refresh.`;
+    }
+    if ($("log-count-pill")) {
+      $("log-count-pill").textContent = "LOG ERROR";
+      $("log-count-pill").className = "status-pill err";
+    }
+    rowsEl.innerHTML = `<tr><td colspan="7" class="empty-state">Structured event stream unavailable due to query error above.</td></tr>`;
+    return;
+  }
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
+  const events = state.mm.structuredLogs?.events || [];
+  const total = state.mm.structuredLogs?.total_matching ?? events.length;
+  if ($("log-count-pill")) {
+    $("log-count-pill").textContent = `${events.length} / ${total} EVENTS`;
+    $("log-count-pill").className = "status-pill info";
+  }
+  if (!events.length) {
+    rowsEl.innerHTML = `<tr><td colspan="7" class="empty-state">No structured paper or Kronos events match the active filters.</td></tr>`;
+    return;
+  }
+  rowsEl.innerHTML = events.map((ev) => {
+    const sev = String(ev.severity || "INFO").toUpperCase();
+    const sevCls = sev === "ERROR" ? "err" : (sev === "WARN" ? "warn" : "info");
+    const simBadge = ev.simulated === false
+      ? statusPill(ev.execution_badge || "BROKER-CONFIRMED · REAL MONEY", "err")
+      : statusPill(ev.execution_badge || "SIMULATED · 0 BROKER ORDERS", "ok");
+    const corrParts = [];
+    if (ev.session_id) corrParts.push(`<span class="corr-chip" title="Session ID">sess:${escapeHtml(String(ev.session_id).slice(0, 14))}</span>`);
+    if (ev.decision_id) corrParts.push(`<span class="corr-chip" title="Decision ID">dec:${escapeHtml(String(ev.decision_id).slice(0, 16))}</span>`);
+    if (ev.order_id) corrParts.push(`<span class="corr-chip" title="Order ID">ord:${escapeHtml(String(ev.order_id).slice(0, 16))}</span>`);
+    if (ev.fill_id) corrParts.push(`<span class="corr-chip" title="Fill ID">fill:${escapeHtml(String(ev.fill_id).slice(0, 14))}</span>`);
+    return `<tr>
+      <td><small>${escapeHtml(timeText(ev.timestamp))}</small></td>
+      <td>${statusPill(sev, sevCls)}</td>
+      <td>${simBadge}<br><small class="muted"><code>${escapeHtml(ev.pnl_scope_label || "SIMULATED_PAPER_PNL_ONLY")}</code></small></td>
+      <td><strong>${escapeHtml(ev.market || "—")}</strong>${ev.symbol ? `:${escapeHtml(ev.symbol)}` : ""}</td>
+      <td><strong><code>${escapeHtml(ev.event_type || "EVENT")}</code></strong>${ev.strategy ? `<br><small class="muted">strategy=${escapeHtml(ev.strategy)}</small>` : ""}</td>
+      <td>${corrParts.length ? corrParts.join(" ") : `<span class="muted">—</span>`}</td>
+      <td><small>${escapeHtml(JSON.stringify(ev.detail || ev.payload || {}))}</small></td>
+    </tr>`;
+  }).join("");
 }
 
 async function searchMultiMarketCatalog() {
@@ -1609,6 +2140,7 @@ async function loadMultiMarketChart() {
   $("session-chart-symbol-wrap").hidden = true;
   $("mm-chart-symbol-wrap").hidden = false;
   $("mm-load-live-chart-btn").hidden = false;
+  setDisabled("reload-chart", false);
   const symbol = ($("mm-chart-symbol-input")?.value || (feedMode === "NSE" ? "RELIANCE" : "AAPL")).trim();
   const timeframe = $("chart-timeframe")?.value || "5m";
   const selectedIkey = feedMode === "NSE"
@@ -1639,19 +2171,25 @@ async function loadMultiMarketChart() {
     };
     state.chartView.endOffset = 0;
     state.chartView.visible = Math.min(160, Math.max(20, bars.length || 20));
+    document.querySelectorAll("[data-chart-timeframe]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.chartTimeframe === timeframe);
+    });
     $("chart-source").textContent = payload.data_feed_label || `${feedMode} READ-ONLY`;
     $("chart-source").className = `status-pill ${connStatePillClass(payload.connection_state)}`;
-    $("chart-feed-context").className = `inline-status ${bars.length ? "ok" : "warn"}`;
+    $("chart-feed-context").className = `inline-status ${bars.length ? "ok" : (payload.error ? "err" : "warn")}`;
     const entInfo = payload.feed_entitlement_label ? ` · Entitlement: ${payload.feed_entitlement_label}` : "";
     const keyInfo = resolvedKey ? ` · Key: ${resolvedKey} (${payload.exchange || feedMode})` : "";
     const ageInfo = payload.quote_age_seconds != null ? ` · Quote age: ${payload.quote_age_seconds}s` : (payload.bar_age_seconds != null ? ` · Bar age: ${payload.bar_age_seconds}s` : "");
     const sessInfo = payload.market_session_status ? ` · Session: ${payload.market_session_status}` : "";
+    const errInfo = payload.error ? ` · Provider error: ${payload.error}` : "";
     $("chart-feed-context").textContent = bars.length
-      ? `${payload.data_feed_label} · Source: ${payload.data_source} · ${bars.length} real OHLCV bars loaded${keyInfo}${entInfo}${ageInfo}${sessInfo}.`
-      : `${payload.data_feed_label} (${payload.connection_state})${keyInfo}${entInfo}${sessInfo}. AXIOM never substitutes sample or replay bars for live ${feedMode} market data.`;
+      ? `${payload.data_feed_label} · Provider: ${payload.provider || payload.data_source} · ${bars.length} real OHLCV bars loaded${keyInfo}${entInfo}${ageInfo}${sessInfo}.`
+      : `${payload.data_feed_label} (${payload.connection_state})${keyInfo}${entInfo}${sessInfo}${errInfo}. AXIOM never substitutes sample or replay bars for live ${feedMode} market data.`;
     if (!bars.length && $("chart-empty")) {
       $("chart-empty").hidden = false;
-      $("chart-empty").textContent = `${feedMode} live bars unavailable (${payload.connection_state}). Save ${feedMode === "NSE" ? "Upstox daily access_token" : "Alpaca Market Data API Key & Secret"} on Connections.`;
+      $("chart-empty").textContent = payload.error
+        ? `${feedMode} live bars unavailable (${payload.connection_state}): ${payload.error}. Zero sample fallback.`
+        : `${feedMode} live bars unavailable (${payload.connection_state}). Save ${feedMode === "NSE" ? "Upstox daily access_token" : "Alpaca Market Data API Key & Secret"} on Connections.`;
     }
     const srcTs = payload.source_timestamp ? `src ${timeText(payload.source_timestamp)} · ` : "";
     const recvTs = payload.local_received_at || payload.generated_at;
@@ -1715,6 +2253,218 @@ function switchTicketTab(tab) {
   if ($("ticket-tab-mm")) $("ticket-tab-mm").classList.toggle("active", isMM);
   if ($("session-ticket-pane")) $("session-ticket-pane").hidden = isMM;
   if ($("mm-ticket-pane")) $("mm-ticket-pane").hidden = !isMM;
+}
+
+function mmExecutionModeLabel(mkt, ov) {
+  // Every order/position row must state the market's current execution path so a
+  // simulated ledger can never be mistaken for live routing (and vice versa).
+  const modes = (ov && ov.execution_modes) || {};
+  const mode = String(modes[mkt] || "PAPER").toUpperCase();
+  if (mode === "LIVE") return `${mkt} · ROUTED LIVE (real money)`;
+  if (mode === "OFF") return `${mkt} · EXECUTION OFF`;
+  return `${mkt} · PAPER (simulated)`;
+}
+
+function liveGatePillClass(state) {
+  const s = String(state || "DISABLED").toUpperCase();
+  if (s === "ACTIVE") return "err";
+  if (s === "ARMED" || s === "READINESS_FAILED") return "warn";
+  if (s === "KILL_SWITCH") return "err";
+  return "";
+}
+
+function liveModePillClass(mode) {
+  return String(mode || "PAPER").toUpperCase() === "LIVE" ? "err" : "info";
+}
+
+function setLiveExecOutput(message, tone) {
+  const el = $("mm-live-exec-output");
+  if (!el) return;
+  el.className = `inline-status top-space ${tone || ""}`.trim();
+  el.textContent = message;
+}
+
+function renderLiveExecutionPanel(ov) {
+  if (!$("mm-live-execution-panel")) return;
+  const exec = (ov && ov.live_execution && ov.live_execution.markets) || null;
+  const modes = (ov && ov.execution_modes) || {};
+
+  for (const mkt of ["NSE", "NASDAQ"]) {
+    const key = mkt === "NSE" ? "nse" : "nasdaq";
+    const row = (exec && exec[mkt]) || null;
+    const mode = String((row && row.mode) || modes[mkt] || "PAPER").toUpperCase();
+    const gateState = String((row && row.gate && row.gate.state) || "DISABLED").toUpperCase();
+    const modePill = $(`mm-live-exec-${key}-pill`);
+    if (modePill) {
+      modePill.textContent = `${mkt} · ${mode}${mode === "LIVE" ? " · REAL MONEY" : mode === "PAPER" ? " · SIMULATED" : " · NO EXECUTION"}`;
+      modePill.className = `status-pill ${liveModePillClass(mode)}`;
+    }
+    const gatePill = $(`mm-live-gate-${key}`);
+    if (gatePill) {
+      gatePill.textContent = gateState;
+      gatePill.className = `status-pill ${liveGatePillClass(gateState)}`;
+    }
+    const select = $(`mm-live-mode-${key}`);
+    if (select && document.activeElement !== select) select.value = mode;
+    const limits = (row && row.risk_limits) || {};
+    const pairs = [
+      [`mm-live-limits-${key}-order`, limits.max_order_value],
+      [`mm-live-limits-${key}-orders`, limits.max_daily_orders],
+      [`mm-live-limits-${key}-loss`, limits.max_daily_loss],
+      [`mm-live-limits-${key}-pos`, limits.max_open_positions],
+      [`mm-live-limits-${key}-symexp`, limits.max_symbol_exposure],
+      [`mm-live-limits-${key}-totexp`, limits.max_total_exposure],
+      [`mm-live-limits-${key}-age`, limits.max_quote_age_seconds],
+      [`mm-live-limits-${key}-dev`, limits.max_price_deviation_bps],
+    ];
+    for (const [id, value] of pairs) {
+      const input = $(id);
+      if (input && document.activeElement !== input && value !== undefined && Number(value) > 0 && !input.value) {
+        input.value = String(value);
+      }
+    }
+    const out = $(`mm-live-readiness-${key}-out`);
+    if (out && row) {
+      const missing = (row.missing_dependencies || []).length
+        ? ` Missing dependencies: ${row.missing_dependencies.join(" · ")}.`
+        : "";
+      const blocked = row.blocked ? ` BLOCKED: ${row.blocked}${row.blocked_detail ? ` — ${row.blocked_detail}` : ""}.` : "";
+      out.textContent = `Mode ${mode} · gate ${gateState} · broker ${row.broker || "—"} · limits ${row.risk_limits?.configured ? "configured" : "NOT configured (fail closed)"}.${missing}${blocked}`;
+      out.className = `inline-status top-space ${row.configured && gateState === "ACTIVE" ? "err" : row.configured ? "warn" : "err"}`;
+    }
+  }
+
+  const audits = (ov && ov.live_audit) || [];
+  if ($("mm-live-audit-rows")) {
+    $("mm-live-audit-rows").innerHTML = audits.length
+      ? audits.map((a) => `
+      <tr>
+        <td>${a.seq}</td>
+        <td><small>${escapeHtml(timeText(a.created_at))}</small></td>
+        <td>${statusPill(a.market, a.market === "NSE" ? "info" : "ok")}</td>
+        <td><strong>${escapeHtml(a.event_kind)}</strong></td>
+        <td><small>${escapeHtml(JSON.stringify(a.payload || {}).slice(0, 260))}</small></td>
+        <td><code>${escapeHtml(String(a.entry_hash || "").slice(0, 14))}…</code></td>
+      </tr>`).join("")
+      : `<tr><td colspan="6" class="empty-state">No live execution audit events recorded. LIVE has never been activated.</td></tr>`;
+  }
+}
+
+function liveAction(market, action, body) {
+  const mkt = String(market).toLowerCase();
+  const method = action === "readiness" ? "GET" : "POST";
+  const path = `/api/markets/live/${mkt}/${action}`;
+  return api(path, { method, body: method === "POST" ? (body || {}) : undefined, keepAuth: method === "GET" });
+}
+
+function bindLiveExecutionEvents() {
+  const panel = $("mm-live-execution-panel");
+  if (!panel) return;
+  // Idempotent: a second bind would double-submit real-money actions on one click.
+  if (panel.dataset.liveBound === "1") return;
+  panel.dataset.liveBound = "1";
+  for (const [mkt, key] of [["NSE", "nse"], ["NASDAQ", "nasdaq"]]) {
+    const guard = async (label, fn) => {
+      try {
+        await fn();
+      } catch (err) {
+        setLiveExecOutput(`${mkt} ${label} failed: ${err.message}`, "err");
+      }
+    };
+
+    $(`mm-live-mode-save-${key}`)?.addEventListener("click", () => guard("mode save", async () => {
+      const mode = ($(`mm-live-mode-${key}`)?.value || "PAPER").toUpperCase();
+      const res = await liveAction(mkt, "mode", { mode });
+      setLiveExecOutput(
+        `${mkt} execution mode is now ${res.mode}. ${mode === "LIVE" ? "LIVE remains DISABLED until readiness, Arm, and the typed phrase." : "Local paper routing applies; live gate disarmed."}`,
+        mode === "LIVE" ? "warn" : "ok",
+      );
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-limits-save-${key}`)?.addEventListener("click", () => guard("limits save", async () => {
+      // All eight limits are required: the server rejects a partial/zero set (fail closed),
+      // so the form must never send a silently-incomplete limit set.
+      const field = (id) => Number($(`mm-live-limits-${key}-${id}`)?.value || 0);
+      const body = {
+        max_order_value: field("order"),
+        max_daily_orders: field("orders"),
+        max_daily_loss: field("loss"),
+        max_open_positions: field("pos"),
+        max_symbol_exposure: field("symexp"),
+        max_total_exposure: field("totexp"),
+        max_quote_age_seconds: field("age"),
+        max_price_deviation_bps: field("dev"),
+      };
+      const missing = Object.entries(body).filter(([, value]) => !(Number(value) > 0)).map(([name]) => name);
+      if (missing.length) {
+        throw new Error(`all eight limits are required (missing: ${missing.join(", ")}); partial limits fail closed`);
+      }
+      const res = await liveAction(mkt, "limits", body);
+      setLiveExecOutput(`${mkt} live risk limits saved (${JSON.stringify(res.risk_limits)}). Gate disarmed until re-armed.`, "ok");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-readiness-${key}`)?.addEventListener("click", () => guard("readiness", async () => {
+      const res = await liveAction(mkt, "readiness");
+      const failed = res.failed || [];
+      const out = $(`mm-live-readiness-${key}-out`);
+      if (out) {
+        out.className = `inline-status top-space ${res.ok ? "warn" : "err"}`;
+        out.textContent = res.ok
+          ? `${mkt} readiness PASSED (${Object.keys(res.checks || {}).length} checks). Arm is still required before Activate.`
+          : `${mkt} readiness FAILED: ${failed.join(", ")}.`;
+      }
+      setLiveExecOutput(
+        res.ok ? `${mkt} readiness passed; Arm is required next.` : `${mkt} readiness blocked by ${failed.length} check(s).`,
+        res.ok ? "warn" : "err",
+      );
+    }));
+
+    $(`mm-live-arm-${key}`)?.addEventListener("click", () => guard("arm", async () => {
+      const res = await liveAction(mkt, "arm");
+      setLiveExecOutput(`${mkt} gate ARMED (${res.gate?.state}). No order can be sent until the phrase-confirmed Activate.`, "warn");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-activate-${key}`)?.addEventListener("click", () => guard("activate", async () => {
+      const phrase = ($(`mm-live-phrase-${key}`)?.value || "").trim();
+      const ack = Boolean($(`mm-live-ack-${key}`)?.checked);
+      if (!ack) throw new Error("acknowledgement checkbox is required");
+      if (phrase !== "ACTIVATE LIVE REAL-MONEY TRADING") throw new Error("the exact confirmation phrase is required");
+      const res = await liveAction(mkt, "activate", { confirm_live_trading: phrase, acknowledge_risk: ack });
+      const phraseInput = $(`mm-live-phrase-${key}`);
+      if (phraseInput) phraseInput.value = "";
+      const ackInput = $(`mm-live-ack-${key}`);
+      if (ackInput) ackInput.checked = false;
+      setLiveExecOutput(`${mkt} LIVE is ${res.gate?.state || "ACTIVE"} — real-money orders may be routed while the gate stays ACTIVE. Emergency Stop remains available.`, "err");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-disarm-${key}`)?.addEventListener("click", () => guard("disarm", async () => {
+      await liveAction(mkt, "disarm", { reason: "operator disarm from terminal" });
+      setLiveExecOutput(`${mkt} gate DISARMED. The live client is unbound.`, "ok");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-estop-${key}`)?.addEventListener("click", () => guard("emergency stop", async () => {
+      const res = await liveAction(mkt, "emergency-stop", { reason: "operator per-market emergency stop", cancel_working: false });
+      setLiveExecOutput(`${mkt} EMERGENCY STOP engaged (${res.gate?.state}). The other market's safeguards are untouched.`, "err");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-reset-${key}`)?.addEventListener("click", () => guard("kill-switch reset", async () => {
+      await liveAction(mkt, "reset-kill-switch", { operator_ack: true });
+      setLiveExecOutput(`${mkt} kill switch cleared; gate returns to DISABLED and must be re-armed.`, "warn");
+      await loadMultiMarketOverview();
+    }));
+
+    $(`mm-live-reconcile-${key}`)?.addEventListener("click", () => guard("reconcile", async () => {
+      const res = await liveAction(mkt, "reconcile");
+      setLiveExecOutput(`${mkt} reconciled with the broker (${res.resolved_intents || 0} intent(s) resolved).`, "ok");
+      await loadMultiMarketOverview();
+    }));
+  }
 }
 
 function bindMultiMarketEvents() {
@@ -1942,24 +2692,155 @@ function bindMultiMarketEvents() {
     } catch (err) { toast("Paper order error", err.message, "err"); }
   });
 
+  const formatCoverageSummary = (analysis) => {
+    if (!analysis || !analysis.counts) return "";
+    const c = analysis.counts;
+    return `Symbols: ${c.succeeded ?? 0}/${c.selected_symbols ?? 0} succeeded · ${c.missing_data ?? 0} missing · ${c.failed ?? 0} failed`;
+  };
+
+  const getSelectedMarketsFromUi = () => {
+    const out = [];
+    if ($("mm-select-nse")?.checked) out.push("NSE");
+    if ($("mm-select-nasdaq")?.checked) out.push("NASDAQ");
+    return out;
+  };
+
+  for (const cbId of ["mm-select-nse", "mm-select-nasdaq"]) {
+    $(cbId)?.addEventListener("change", async () => {
+      const selected = getSelectedMarketsFromUi();
+      if (!selected.length) {
+        $(cbId).checked = true;
+        toast("At least one market required", "Keep NSE and/or NASDAQ selected for paper simulation.", "warn");
+        return;
+      }
+      try {
+        await api("/api/markets/paper/selection", { body: { markets: selected } });
+        await loadMultiMarketOverview();
+        toast("Selected markets updated", `Active selection: ${selected.join(" + ")} · ledgers & positions preserved.`, "ok");
+      } catch (err) {
+        toast("Market selection failed", err.message, "err");
+      }
+    });
+  }
+
+  const startSelectedMarketsConcurrently = async () => {
+    const selected = getSelectedMarketsFromUi();
+    if (!selected.length) {
+      toast("No markets selected", "Select NSE and/or NASDAQ first.", "warn");
+      return;
+    }
+    const strategy_by_market = {
+      NSE: $("mm-strat-nse-select")?.value || "parallel_ensemble",
+      NASDAQ: $("mm-strat-nasdaq-select")?.value || "parallel_ensemble",
+    };
+    const timeframe_by_market = {
+      NSE: $("mm-strat-nse-tf")?.value || "5m",
+      NASDAQ: $("mm-strat-nasdaq-tf")?.value || "5m",
+    };
+    const kronos_enabled_by_market = {};
+    for (const [m, pref] of [["NSE", "mm-nse"], ["NASDAQ", "mm-nasdaq"]]) {
+      const km = $(`${pref}-kronos-mode`)?.value || "auto";
+      if (km === "enabled") kronos_enabled_by_market[m] = true;
+      else if (km === "disabled") kronos_enabled_by_market[m] = false;
+    }
+    const kronos_policy_by_market = {
+      NSE: $("mm-nse-kronos-policy")?.value || "FAIL_CLOSED_NO_ENTRY",
+      NASDAQ: $("mm-nasdaq-kronos-policy")?.value || "FAIL_CLOSED_NO_ENTRY",
+    };
+    try {
+      const res = await api("/api/markets/paper/sessions/start", {
+        body: {
+          markets: selected,
+          default_strategy: "parallel_ensemble",
+          default_timeframe: "5m",
+          strategy_by_market,
+          timeframe_by_market,
+          kronos_enabled_by_market,
+          kronos_policy_by_market,
+          execute_immediately: true,
+        },
+      });
+      await loadMultiMarketOverview();
+      const parts = selected.map((m) => {
+        const s = res.markets?.[m];
+        const cov = formatCoverageSummary(s?.initial_analysis || s?.last_analysis);
+        return `${m}: ${s?.session_state || "ERROR"}${cov ? ` (${cov})` : ""}`;
+      });
+      toast("Selected Markets Started (Paper Only)", `${parts.join(" · ")} · 0 broker orders.`, res.ok ? "ok" : "warn");
+    } catch (err) {
+      toast("Multi-market start blocked", err.message, "err");
+    }
+  };
+
+  const transitionSelectedMarketsConcurrently = async (action) => {
+    const selected = getSelectedMarketsFromUi();
+    if (!selected.length) return;
+    try {
+      const res = await api("/api/markets/paper/sessions/transition", {
+        body: { action, markets: selected, reason: `operator multi-market ${action}`, execute_immediately: true },
+      });
+      await loadMultiMarketOverview();
+      const parts = selected.map((m) => {
+        const s = res.markets?.[m];
+        const cov = action === "resume" ? formatCoverageSummary(s?.initial_analysis || s?.last_analysis) : "";
+        return `${m}: ${s?.session_state || "—"}${cov ? ` (${cov})` : ""}`;
+      });
+      toast(`Selected Markets ${action.toUpperCase()}`, `${parts.join(" · ")} · 0 broker orders.`, "ok");
+    } catch (err) {
+      toast(`Multi-market ${action} failed`, err.message, "err");
+    }
+  };
+
+  const analyzeMarketsConcurrently = async (marketsList = null) => {
+    const targets = marketsList || getSelectedMarketsFromUi();
+    try {
+      const res = await api("/api/markets/paper/analyze", { body: { markets: targets } });
+      await loadMultiMarketOverview();
+      const parts = (res.selected_markets || targets).map((m) => `${m}: ${formatCoverageSummary(res.reports?.[m]) || "no report"}`);
+      toast("Immediate Symbol Analysis Complete", `${parts.join(" · ")} · 0 simulated or broker orders.`, "ok");
+    } catch (err) {
+      toast("Symbol analysis failed", err.message, "err");
+    }
+  };
+
+  $("mm-start-selected-btn")?.addEventListener("click", startSelectedMarketsConcurrently);
+  $("mm-strat-start-both-btn")?.addEventListener("click", startSelectedMarketsConcurrently);
+  $("mm-resume-selected-btn")?.addEventListener("click", () => transitionSelectedMarketsConcurrently("resume"));
+  $("mm-strat-resume-both-btn")?.addEventListener("click", () => transitionSelectedMarketsConcurrently("resume"));
+  $("mm-pause-selected-btn")?.addEventListener("click", () => transitionSelectedMarketsConcurrently("pause"));
+  $("mm-stop-selected-btn")?.addEventListener("click", () => transitionSelectedMarketsConcurrently("stop"));
+  $("mm-analyze-selected-btn")?.addEventListener("click", () => analyzeMarketsConcurrently());
+  $("mm-strat-analyze-both-btn")?.addEventListener("click", () => analyzeMarketsConcurrently());
+
   // Strategy Session Controls (NSE & NASDAQ)
   const bindPaperLifecycle = (mkt, prefix) => {
     $(`${prefix}-start-btn`)?.addEventListener("click", async () => {
       try {
-        const strategy = $(`mm-strat-${mkt.toLowerCase()}-select`).value;
-        const timeframe = $(`mm-strat-${mkt.toLowerCase()}-tf`).value;
+        const mktLower = mkt.toLowerCase();
+        const strategy = $(`mm-strat-${mktLower}-select`).value;
+        const timeframe = $(`mm-strat-${mktLower}-tf`).value;
+        const kMode = $(`${prefix}-kronos-mode`)?.value || "auto";
+        const kPolicy = $(`${prefix}-kronos-policy`)?.value || "";
         const wl = (state.mm.overview?.watchlists?.[mkt] || []).map((w) => w.symbol);
-        await api("/api/markets/paper/session/start", { body: { market: mkt, strategy, timeframe, symbols: wl } });
+        const startBody = { market: mkt, strategy, timeframe, symbols: wl };
+        if (kMode === "enabled") startBody.kronos_enabled = true;
+        else if (kMode === "disabled") startBody.kronos_enabled = false;
+        if (kPolicy) startBody.kronos_failure_policy = kPolicy;
+        const snap = await api("/api/markets/paper/session/start", { body: startBody });
         await loadMultiMarketOverview();
-        toast(`${mkt} Paper Session Started`, `Strategy=${strategy} (${timeframe}) · 0 broker orders.`, "ok");
+        const kLc = snap?.kronos_session?.lifecycle_state || "NOT_CONFIGURED";
+        const cov = formatCoverageSummary(snap?.initial_analysis || snap?.last_analysis);
+        toast(`${mkt} Paper Session Started`, `Strategy=${strategy} (${timeframe})${cov ? ` · ${cov}` : ""} · Kronos=${kLc} · 0 broker orders.`, "ok");
       } catch (err) { toast(`${mkt} start blocked`, err.message, "err"); }
     });
+    $(`${prefix}-analyze-btn`)?.addEventListener("click", () => analyzeMarketsConcurrently([mkt]));
     for (const act of ["pause", "resume", "stop"]) {
       $(`${prefix}-${act}-btn`)?.addEventListener("click", async () => {
         try {
-          await api("/api/markets/paper/session/transition", { body: { market: mkt, action: act, reason: `operator ${act}` } });
+          const snap = await api("/api/markets/paper/session/transition", { body: { market: mkt, action: act, reason: `operator ${act}` } });
           await loadMultiMarketOverview();
-          toast(`${mkt} Paper ${act.toUpperCase()}`, "Session state updated.", "ok");
+          const cov = act === "resume" ? formatCoverageSummary(snap?.initial_analysis || snap?.last_analysis) : "";
+          toast(`${mkt} Paper ${act.toUpperCase()}`, `State=${snap?.session_state || act.toUpperCase()}${cov ? ` · ${cov}` : ""} · 0 broker orders.`, "ok");
         } catch (err) { toast(`${mkt} ${act} failed`, err.message, "err"); }
       });
     }
@@ -1978,6 +2859,68 @@ function bindMultiMarketEvents() {
   };
   bindPaperLifecycle("NSE", "mm-nse");
   bindPaperLifecycle("NASDAQ", "mm-nasdaq");
+
+  // Kronos PAPER Contribution & Failure Policy Form
+  $("mm-kronos-policy-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const feedback = $("mm-kp-policy-feedback");
+    try {
+      const body = {
+        paper_session_enabled: $("mm-kp-session-enabled")?.value === "true",
+        failure_policy: $("mm-kp-failure-policy")?.value || "FAIL_CLOSED_NO_ENTRY",
+        conflict_policy: $("mm-kp-conflict-policy")?.value || "VETO_CONFLICTING_ENTRY",
+        min_confidence: Number($("mm-kp-min-confidence")?.value || 0.55),
+        max_uncertainty_pct: Number($("mm-kp-max-uncertainty")?.value || 8.0),
+        weight_cap: Number($("mm-kp-weight-cap")?.value || 0.20),
+      };
+      const updated = await api("/api/model-lab/kronos/paper-policy", { body });
+      if (state.mm.overview) state.mm.overview.kronos = updated;
+      if (state.ml.overview) state.ml.overview.kronos = updated;
+      renderMultiMarketDesk();
+      renderModelLab();
+      if (feedback) {
+        feedback.className = "inline-status top-space ok";
+        feedback.textContent = `Saved Kronos PAPER policy: failure_policy=${updated.config?.failure_policy} · conflict_policy=${updated.config?.conflict_policy} · min_conf=${updated.config?.min_confidence} · max_band=${updated.config?.max_uncertainty_pct}% · weight_cap=${updated.config?.weight_cap}. Live execution remains OFF.`;
+      }
+      toast("Kronos PAPER policy saved", `Failure policy=${updated.config?.failure_policy} · LIVE=OFF.`, "ok");
+    } catch (err) {
+      if (feedback) {
+        feedback.className = "inline-status top-space err";
+        feedback.textContent = `Kronos policy update rejected: ${err.message}`;
+      }
+      toast("Kronos policy update failed", err.message, "err");
+    }
+  });
+
+  // Per-Symbol PAPER Decision Inspector Filters & Row Clicks
+  $("mm-refresh-decisions-btn")?.addEventListener("click", loadPaperDecisions);
+  $("mm-decision-market-filter")?.addEventListener("change", () => { renderMultiMarketDesk(); loadPaperDecisions(); });
+  $("mm-decision-symbol-filter")?.addEventListener("input", () => renderMultiMarketDesk());
+  $("mm-decision-inspector-panel")?.addEventListener("click", (e) => {
+    const row = e.target.closest("[data-inspect-decision]");
+    if (!row) return;
+    state.mm.selectedDecisionId = row.dataset.inspectDecision || "";
+    renderMultiMarketDesk();
+  });
+
+  // Correlated Structured Paper & Kronos Log Filters
+  $("log-filter-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    loadStructuredPaperLogs();
+  });
+  for (const id of ["log-filter-window", "log-filter-event-type", "log-filter-severity"]) {
+    $(id)?.addEventListener("change", () => loadStructuredPaperLogs());
+  }
+  $("log-reset-filters-btn")?.addEventListener("click", () => {
+    if ($("log-filter-window")) $("log-filter-window").value = "all";
+    if ($("log-filter-symbol")) $("log-filter-symbol").value = "";
+    if ($("log-filter-event-type")) $("log-filter-event-type").value = "";
+    if ($("log-filter-severity")) $("log-filter-severity").value = "";
+    if ($("log-filter-strategy")) $("log-filter-strategy").value = "";
+    if ($("log-filter-session")) $("log-filter-session").value = "";
+    if ($("log-filter-query")) $("log-filter-query").value = "";
+    loadStructuredPaperLogs();
+  });
 
   // Alpaca Broker Mode & Gate Controls
   $("mm-alpaca-enable-paper-btn")?.addEventListener("click", async () => {
@@ -2274,11 +3217,14 @@ function renderModelLab() {
     $("ml-kronos-toggle-pill").textContent = k.inference_enabled ? "FORECASTING ENABLED" : "FORECASTING DISABLED";
     $("ml-kronos-toggle-pill").className = `status-pill ${k.inference_enabled ? "ok" : "info"}`;
   }
+  renderKronosTruthMatrix("ml-kronos-truth-grid", k);
+  renderKronosPaperSection(k, state.mm.overview?.paper?.NSE || {}, state.mm.overview?.paper?.NASDAQ || {});
 
   if ($("ml-kronos-details")) {
     const plan = k.install_plan || {};
     const rows = [
       ["Provider State", pState],
+      ["PAPER Lifecycle", `${k.lifecycle_state || "NOT_CONFIGURED"} (${cfg.failure_policy || "FAIL_CLOSED_NO_ENTRY"})`],
       ["Upstream Source", `${plan.upstream?.repository || "shiyu-coder/Kronos"} @ ${String(plan.upstream?.commit || "67b630e67f6a").slice(0, 12)}`],
       ["License", k.license || "MIT License"],
       ["Model Pin", `NeoQuasar/Kronos-small @ ${String(kEngine.model_revision || plan.model?.revision || "").slice(0, 12)}`],
@@ -2286,6 +3232,7 @@ function renderModelLab() {
       ["Manifest SHA-256", `${String(kEngine.manifest_sha256 || plan.manifest_sha256 || "—").slice(0, 20)}…`],
       ["Weights Verified", String(Boolean(kEngine.artifact_verified))],
       ["Self-Test Verdict", kEngine.last_self_test?.status || "NOT_VERIFIED"],
+      ["Produced / Consumed", `${diag.forecast_produced_count ?? 0} produced / ${diag.forecast_consumed_count ?? 0} consumed in PAPER`],
       ["Trading Effect", k.execution_authorization_effect || "NONE"],
     ];
     $("ml-kronos-details").innerHTML = rows.map(([dt, dd]) => `<dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd>`).join("");

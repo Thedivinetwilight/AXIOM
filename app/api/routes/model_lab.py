@@ -39,6 +39,21 @@ class KronosConfigBody(BaseModel):
     max_context_bars: int | None = Field(default=None, ge=32, le=512)
     max_forecast_age_seconds: int | None = Field(default=None, ge=30, le=86400)
     cpu_threads_cap: int | None = Field(default=None, ge=1, le=16)
+    paper_session_enabled: bool | None = None
+    weight_cap: float | None = Field(default=None, ge=0.0, le=0.25)
+    min_confidence: float | None = Field(default=None, ge=0.50, le=0.95)
+    max_uncertainty_pct: float | None = Field(default=None, ge=0.5, le=50.0)
+    conflict_policy: str | None = Field(default=None, max_length=48)
+    failure_policy: str | None = Field(default=None, max_length=48)
+
+
+class KronosPaperPolicyBody(BaseModel):
+    paper_session_enabled: bool | None = None
+    weight_cap: float | None = Field(default=None, ge=0.0, le=0.25)
+    min_confidence: float | None = Field(default=None, ge=0.50, le=0.95)
+    max_uncertainty_pct: float | None = Field(default=None, ge=0.5, le=50.0)
+    conflict_policy: str | None = Field(default=None, max_length=48)
+    failure_policy: str | None = Field(default=None, max_length=48)
 
 
 class KronosForecastBody(BaseModel):
@@ -130,6 +145,26 @@ def kronos_config(body: KronosConfigBody, request: Request):
         return _kronos(request).update_config(**updates)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/kronos/paper-policy")
+def kronos_paper_policy_get(request: Request):
+    return _kronos(request).paper_policy_view()
+
+
+@router.post("/kronos/paper-policy")
+def kronos_paper_policy_update(body: KronosPaperPolicyBody, request: Request):
+    updates = body.model_dump(exclude_none=True)
+    try:
+        st = _kronos(request).update_config(**updates)
+        return {"ok": True, "paper_policy": st["paper_policy"], "kronos": st}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/kronos/events")
+def kronos_lifecycle_events(request: Request, limit: int = 200):
+    return {"events": _kronos(request).lifecycle_events(limit=limit)}
 
 
 @router.post("/kronos/load")

@@ -416,6 +416,8 @@ class PortfolioRiskAllocator:
 
         kronos_contribution = {
             **kronos_info,
+            "forecast_produced": bool(kronos_forecast is not None),
+            "advisory_used": bool(kronos_weight_applied > 0.0),
             "policy": cfg.kronos_fail_closed_policy,
             "advisory_weight_applied": round(kronos_weight_applied, 4),
             "degraded_to_non_kronos": kronos_degraded,

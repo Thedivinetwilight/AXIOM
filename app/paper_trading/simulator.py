@@ -23,6 +23,8 @@ _AUDIT_FIELDS = {
     "price", "fee", "status", "reason", "processed_bars", "actionable_signals",
     "orders_created", "fills", "realized_pnl", "unrealized_pnl_delta",
     "ending_unrealized_pnl", "equity_delta",
+    "kronos_configured", "kronos_lifecycle_state", "kronos_status",
+    "forecast_produced", "forecast_consumed", "decision_id",
 }
 
 
@@ -35,8 +37,12 @@ class BotState(str, Enum):
 
 
 class PaperSimulator:
-    def __init__(self, broker):
+    def __init__(self, broker, *, kronos_provider=None):
         self.broker = broker
+        self.kronos_provider = kronos_provider
+        self.kronos_enabled = False
+        self.kronos_failure_policy = "FAIL_CLOSED_NO_ENTRY"
+        self.kronos_decisions: dict[str, dict] = {}
         self.state = BotState.STOPPED
         self.provider = None
         self.strategy = None
@@ -269,6 +275,17 @@ class PaperSimulator:
                     status[key] = feed[key]
         status["processing_latency_ms"] = dict(self.latency)
         status["risk_counters"] = dict(self.risk_counters)
+        status["kronos_session"] = (
+            self.kronos_provider.session_view("LOCAL_SIMULATOR:paper")
+            if self.kronos_provider is not None and hasattr(self.kronos_provider, "session_view")
+            else {
+                "session_key": "LOCAL_SIMULATOR:paper",
+                "kronos_configured": bool(self.kronos_enabled),
+                "lifecycle_state": "NOT_CONFIGURED",
+                "failure_policy": self.kronos_failure_policy,
+            }
+        )
+        status["kronos_decisions"] = dict(self.kronos_decisions)
         if hasattr(self.broker, "risk_limits"):
             status["paper_risk_limits"] = self.broker.risk_limits.to_dict()
             status["paper_risk_halts"] = dict(
@@ -276,7 +293,21 @@ class PaperSimulator:
             )
         return status
 
-    async def start(self, provider, strategy, symbols):
+    def _infer_kronos_market(self, symbol: str = "") -> str:
+        prov_name = type(self.provider).__name__.lower() if self.provider else ""
+        if "upstox" in prov_name or str(symbol).upper().startswith("NSE"):
+            return "NSE"
+        return "NASDAQ"
+
+    async def start(
+        self,
+        provider,
+        strategy,
+        symbols,
+        *,
+        kronos_enabled: bool | None = None,
+        kronos_failure_policy: str | None = None,
+    ):
         if self.task and not self.task.done():
             raise ValueError("Bot already active")
         if not symbols or len(set(symbols)) != len(symbols):
@@ -294,8 +325,30 @@ class PaperSimulator:
         if getattr(provider, "requires_fresh_live", False):
             if strategy.name != "manual_only":
                 raise ValueError("Fresh MT5 market data is manual-only; strategy automation stays OFF")
+            if kronos_enabled:
+                raise ValueError("Fresh MT5 market data is manual-only; Kronos automation stays OFF")
             if getattr(provider, "status", None) not in {"CONNECTED", "STREAMING"}:
                 raise ValueError("Prepare authenticated fresh advancing MT5 data before starting paper")
+        k_requested = (
+            bool(kronos_enabled)
+            if kronos_enabled is not None
+            else (
+                bool(
+                    self.kronos_provider is not None
+                    and hasattr(self.kronos_provider, "is_configured_for_paper_strategy")
+                    and self.kronos_provider.is_configured_for_paper_strategy(strategy.name)
+                )
+            )
+        )
+        eff_k_policy = (
+            str(kronos_failure_policy)
+            if kronos_failure_policy
+            else (
+                str(self.kronos_provider.config.failure_policy)
+                if self.kronos_provider is not None and hasattr(self.kronos_provider, "config")
+                else "FAIL_CLOSED_NO_ENTRY"
+            )
+        )
         market_data_context = {
             "provider": getattr(provider, "provider_name", type(provider).__name__),
             "requires_fresh_live": bool(getattr(provider, "requires_fresh_live", False)),
@@ -329,12 +382,16 @@ class PaperSimulator:
             self.provider, self.strategy, self.symbols, self.state, self.error,
             self._history, self.processed, dict(self.signals), dict(self.risk_counters),
             dict(self.latency), self.run, self.stop_reason, self._event_sequence, self.task,
+            self.kronos_enabled, self.kronos_failure_policy, dict(self.kronos_decisions),
         )
         new_task = None
         try:
             self.broker.context["selection"] = config
             self.broker.context["market_data"] = market_data_context
             self.provider, self.strategy, self.symbols = provider, strategy, symbols
+            self.kronos_enabled = k_requested
+            self.kronos_failure_policy = eff_k_policy
+            self.kronos_decisions = {}
             self.error, self.state = None, BotState.STARTING
             self.stop_reason = None
             self.processed = 0
@@ -357,6 +414,17 @@ class PaperSimulator:
                 "orders_created": 0,
                 "fills": 0,
             }
+            k_lc = "NOT_CONFIGURED"
+            if self.kronos_provider is not None and hasattr(self.kronos_provider, "start_for_paper_session"):
+                k_res = self.kronos_provider.start_for_paper_session(
+                    "LOCAL_SIMULATOR:paper",
+                    session_id=self.run["run_id"],
+                    market=self._infer_kronos_market(symbols[0] if symbols else ""),
+                    strategy=strategy.name,
+                    kronos_requested=k_requested,
+                    failure_policy=eff_k_policy,
+                )
+                k_lc = str(k_res.get("lifecycle_state") or "NOT_CONFIGURED")
             result = self.status()
             new_task = asyncio.create_task(self._run())
             self.task = new_task
@@ -366,6 +434,7 @@ class PaperSimulator:
                 strategy=strategy.name, review_policy=self._review_policy(),
                 automation_enabled=self._automation_enabled(), symbols=symbols,
                 timeframe=self.broker.timeframe, state=self.state.value,
+                kronos_configured=k_requested, kronos_lifecycle_state=k_lc,
             )
         except Exception:
             if new_task is not None:
@@ -381,6 +450,7 @@ class PaperSimulator:
                 self.provider, self.strategy, self.symbols, self.state, self.error,
                 self._history, self.processed, self.signals, self.risk_counters,
                 self.latency, self.run, self.stop_reason, self._event_sequence, self.task,
+                self.kronos_enabled, self.kronos_failure_policy, self.kronos_decisions,
             ) = previous
             raise
         return result
@@ -432,17 +502,103 @@ class PaperSimulator:
         # strategy decision. Journal that execution before the next signal.
         self._audit_new_execution(execution_orders_before, execution_fills_before)
         history.append(candle)
-        history[:] = history[-self.strategy.history_limit :]
+        history_cap = max(int(self.strategy.history_limit), 64) if self.kronos_enabled else int(self.strategy.history_limit)
+        history[:] = history[-history_cap :]
         drawn = self.chart_bars.setdefault(candle.symbol, [])
         drawn.append(candle)
         del drawn[: -self.chart_limit]
         evaluated = time.perf_counter()
-        signal = (
-            self.strategy.generate_signal(tuple(history))
+        rule_signal = (
+            self.strategy.generate_signal(tuple(history[-int(self.strategy.history_limit) :]))
             if self.state == BotState.RUNNING
             else Signal.HOLD
         )
-        self.signals[candle.symbol] = {"signal": signal.value, "timestamp": snapshot["timestamp"]}
+        signal = rule_signal
+        dec_id = ""
+        k_combined = None
+        if self.state == BotState.RUNNING and self.kronos_enabled and self.kronos_provider is not None:
+            from app.markets.kronos_decision import combine_paper_strategy_decision
+
+            dec_id = f"simdec-{uuid4().hex[:14]}"
+            run_id = str((self.run or {}).get("run_id") or "")
+            mkt = self._infer_kronos_market(candle.symbol)
+            k_call = self.kronos_provider.predict_for_session(
+                "LOCAL_SIMULATOR:paper",
+                session_id=run_id,
+                decision_id=dec_id,
+                market=mkt,
+                symbol=candle.symbol,
+                timeframe=self.broker.timeframe,
+                bars=history,
+            )
+            pos = self.broker.portfolio.positions.get(candle.symbol)
+            cur_qty = float(pos.quantity) if pos is not None else 0.0
+            pol_cfg = dict(self.kronos_provider.config.to_dict()) if hasattr(self.kronos_provider.config, "to_dict") else {}
+            if self.kronos_failure_policy:
+                pol_cfg["failure_policy"] = self.kronos_failure_policy
+            k_combined = combine_paper_strategy_decision(
+                strategy=self.strategy.name,
+                bars=history,
+                base_rule_signal={"action": rule_signal.value, "reason": f"rule_signal={rule_signal.value}"},
+                kronos_configured=True,
+                kronos_outcome=k_call,
+                policy=pol_cfg,
+                current_position_qty=cur_qty,
+            )
+            final_act = str(k_combined.get("action") or "HOLD").upper()
+            signal = (
+                Signal.BUY if final_act == "BUY"
+                else Signal.SELL if final_act == "SELL"
+                else Signal.HOLD
+            )
+            if bool(k_combined.get("forecast_consumed")):
+                self.kronos_provider.record_forecast_consumption(
+                    "LOCAL_SIMULATOR:paper",
+                    session_id=run_id,
+                    decision_id=dec_id,
+                    market=mkt,
+                    symbol=candle.symbol,
+                    timeframe=self.broker.timeframe,
+                    strategy=self.strategy.name,
+                    forecast=k_call.get("forecast") if isinstance(k_call, dict) else None,
+                    final_action=signal.value,
+                    contribution_detail=str(k_combined.get("reason") or ""),
+                )
+            self.kronos_decisions[candle.symbol] = {
+                "decision_id": dec_id,
+                "timestamp": snapshot["timestamp"],
+                "symbol": candle.symbol,
+                "strategy": self.strategy.name,
+                "rule_signal": rule_signal.value,
+                "final_signal": signal.value,
+                **k_combined,
+            }
+            self._audit(
+                "PAPER_STRATEGY_SIGNAL",
+                symbol=candle.symbol,
+                signal=signal.value,
+                strategy=self.strategy.name,
+                market_timestamp=snapshot["timestamp"],
+                decision_id=dec_id,
+                kronos_status=str(k_combined.get("kronos_status") or ""),
+                forecast_produced=bool(k_combined.get("forecast_produced")),
+                forecast_consumed=bool(k_combined.get("forecast_consumed")),
+                reason=str(k_combined.get("reason") or ""),
+            )
+        self.signals[candle.symbol] = {
+            "signal": signal.value,
+            "timestamp": snapshot["timestamp"],
+            **(
+                {
+                    "decision_id": dec_id,
+                    "kronos_status": k_combined.get("kronos_status"),
+                    "forecast_produced": k_combined.get("forecast_produced"),
+                    "forecast_consumed": k_combined.get("forecast_consumed"),
+                }
+                if k_combined is not None
+                else {}
+            ),
+        }
         if provenance:
             decisions = self.broker.context.setdefault("decision_provenance", {})
             decisions[candle.symbol] = {
@@ -458,7 +614,7 @@ class PaperSimulator:
         )
         orders_before = len(self.broker.orders)
         fills_before = len(self.broker.fills)
-        if signal != Signal.HOLD:
+        if signal != Signal.HOLD and k_combined is None:
             self._audit(
                 "PAPER_STRATEGY_SIGNAL",
                 symbol=candle.symbol, signal=signal.value, strategy=self.strategy.name,
@@ -468,6 +624,32 @@ class PaperSimulator:
             signal, candle.symbol, snapshot["timestamp"], self.strategy.name, persist=False
         )
         created, new_fills = self._audit_new_execution(orders_before, fills_before)
+        if k_combined is not None and hasattr(self.broker, "repo") and hasattr(self.broker.repo, "record_system_event"):
+            try:
+                self.broker.repo.record_system_event(
+                    "PAPER_STRATEGY_DECISION",
+                    {
+                        "decision_id": dec_id,
+                        "run_id": str((self.run or {}).get("run_id") or ""),
+                        "session_id": str((self.run or {}).get("run_id") or ""),
+                        "market": self._infer_kronos_market(candle.symbol),
+                        "symbol": candle.symbol,
+                        "timeframe": self.broker.timeframe,
+                        "strategy": self.strategy.name,
+                        "rule_signal": rule_signal.value,
+                        "final_signal": signal.value,
+                        "orders_created": created,
+                        "fills": new_fills,
+                        "kronos_status": k_combined.get("kronos_status"),
+                        "forecast_produced": k_combined.get("forecast_produced"),
+                        "forecast_consumed": k_combined.get("forecast_consumed"),
+                        "policy_applied": k_combined.get("policy_applied"),
+                        "reason": k_combined.get("reason"),
+                        "kronos_decision": k_combined,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("record_decision_event_failed", extra={"error": type(exc).__name__})
         if signal != Signal.HOLD:
             if self.run:
                 self.run["actionable_signals"] += 1
@@ -545,6 +727,12 @@ class PaperSimulator:
         self.broker.cancel_all()
         if self.provider:
             await self.provider.close()
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "stop_for_paper_session"):
+            self.kronos_provider.stop_for_paper_session(
+                "LOCAL_SIMULATOR:paper",
+                session_id=str((self.run or {}).get("run_id") or ""),
+                reason=str(self.stop_reason or "stopped").lower(),
+            )
         if self.state != BotState.ERROR:
             self.state = BotState.STOPPED
         if self.run:
@@ -611,6 +799,12 @@ class PaperSimulator:
         for order in self.broker.get_orders():
             if order["side"] == "BUY" and order["status"] in {"NEW", "PARTIALLY_FILLED"}:
                 self.broker.cancel_order(order["id"])
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "pause_for_paper_session"):
+            self.kronos_provider.pause_for_paper_session(
+                "LOCAL_SIMULATOR:paper",
+                session_id=str((self.run or {}).get("run_id") or ""),
+                reason="operator_pause",
+            )
         self._audit(
             "PAPER_SESSION_PAUSED", state=self.state.value,
             processed_bars=self.processed, strategy=self.strategy.name,
@@ -624,6 +818,15 @@ class PaperSimulator:
         if callable(readiness):
             readiness()
         self.state, self.error = BotState.RUNNING, None
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "start_for_paper_session"):
+            self.kronos_provider.start_for_paper_session(
+                "LOCAL_SIMULATOR:paper",
+                session_id=str((self.run or {}).get("run_id") or ""),
+                market=self._infer_kronos_market(self.symbols[0] if self.symbols else ""),
+                strategy=self.strategy.name if self.strategy else "manual_only",
+                kronos_requested=bool(self.kronos_enabled),
+                failure_policy=self.kronos_failure_policy,
+            )
         self._audit(
             "PAPER_SESSION_RESUMED", state=self.state.value,
             processed_bars=self.processed, strategy=self.strategy.name,

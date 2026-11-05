@@ -135,6 +135,32 @@ The persistent header displays active market switchers (`NSE · INR ₹` and `NA
 - **NASDAQ via Alpaca (`05 Strategies & automation` + `06 Risk & live gates` + `07 Connections`)**: Save `ALPACA_BROKER_PAPER` or `ALPACA_BROKER_LIVE` keys in slot 3 on `07 Connections`, save positive USD hard limits on `06 Risk & live gates`, run **Test /v2/account + /v2/clock (Read-Only)**, then on `05 Strategies & automation` run **Readiness**, **Arm Gate**, and (only when `ALPACA_BROKER_ENABLED=true` and deliberately intended) enter the exact confirmation phrase to **Activate**.
 - **NSE via Upstox (`/autonomy`)**: Save `UPSTOX_LIVE_ACCESS_TOKEN` in slot 3 on `07 Connections`, configure `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, and SEBI static IP registration, and complete daily readiness, **Arm**, and **Activate** on `/autonomy` (documented in `docs/AUTONOMY.md` / `/autonomy/manual`).
 
+#### 4.3.1 Per-market LIVE execution coordinator (manual, per market, disarmed after every restart)
+
+`LIVE-MARKET LIVE` is a **separate execution path** from `LIVE-MARKET PAPER`: it has its own per-market SQLite journal, order intents, audit hash chain, risk limits, and broker clients. It never converts a paper session, and a market set to `LIVE` is refused by every paper endpoint (`409`, mode separation). Both markets start as `PAPER` with the gate `DISABLED` on every process start, crash recovery, and restart — nothing about live trading is persisted except the mode *intent*, the journal, and the limits.
+
+Do this **per market**, only when you intend to place real orders (NSE = real INR, NASDAQ = real USD):
+
+1. **Configure the broker for live** (nothing below works with paper credentials):
+   - NSE: `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, `AXIOM_UPSTOX_EXPECTED_PUBLIC_IP` (the SEBI-registered static IP), a separate `UPSTOX_LIVE_ACCESS_TOKEN`, and today's authoritative Upstox BOD instrument catalog.
+   - NASDAQ: `ALPACA_BROKER_ENABLED=true`, broker environment **`live`**, separate `ALPACA_BROKER_LIVE` key/secret, and positive `BrokerRiskLimits`.
+2. On **`05 Strategies & automation` → Per-Market Live Execution Coordinator**, select the market's mode **`LIVE`** and click **Save NSE/NASDAQ mode**. The gate stays `DISABLED`; the mode alone cannot place an order.
+3. Enter and save **all eight** of that market's limits: max order value, daily orders, daily loss, open positions, max symbol exposure, max total exposure, max quote age (seconds), and max price deviation (bps). The panel refuses to send a partial set and the API rejects one too: zero or partial limits **fail closed** — readiness reports `risk_limits_configured=false` and Arm is refused.
+4. Click **Readiness**. Every check must pass (credentials, algo name, static IP, authoritative same-day catalog, market session, account readable and not blocked, broker live environment for NASDAQ).
+5. Click **1. Arm**. The gate becomes `ARMED`; it still cannot send orders.
+6. Type the exact phrase `ACTIVATE LIVE REAL-MONEY TRADING`, tick the acknowledgement checkbox, and click **2. Activate LIVE**. The gate becomes `ACTIVE` and a 300-second in-memory permit is minted. **Activate is refused if the phrase or the acknowledgement is missing.**
+7. Orders are now routed only for that market while the gate is `ACTIVE`, inside the central risk gate (order value, daily orders, daily loss, open positions, symbol/total exposure, quote freshness, price deviation, duplicate suppression), and only while the market is open. Closed markets still analyze but never submit.
+
+Stopping and recovery:
+
+- **Disarm** returns the gate to `DISABLED` and drops the permit.
+- **Emergency Stop** is per market: it halts that market only (`KILL_SWITCH`) and never disables the other market's safeguards. **Reset kill switch** requires an explicit operator acknowledgement.
+- A submission with an **unknown outcome** (timeout, ambiguous acknowledgement, transport error) latches the market as `UNRESOLVED_ORDER_INTENT`, disarms it, and blocks further orders until **Reconcile** confirms broker state. Never retry an uncertain order by hand.
+- A failed protective stop on NASDAQ latches `PROTECTION_FAILED` and disarms the market for operator action.
+- Restarting AXIOM, recovering from a crash, or a background-cycle timeout leaves the market **disarmed** (`DISABLED` / `CYCLE_TIMEOUT_RECONCILE_REQUIRED`) and requires readiness, Arm, and Activate again.
+
+Safety limits of this implementation: NSE live routing uses the existing **protected multi-leg GTT v3** integration, so it only sends `BUY` entries that carry both a stop and a target; `SELL` exits must be placed manually in Upstox (the adapter refuses and audits `exit_route_unsupported`). NASDAQ routing uses the existing gated Alpaca Trading v2 client (limit entry + a separate protective stop order); the status of both orders is reported per submission.
+
 ---
 
 ## 5. LOCAL PAPER and replay accounting

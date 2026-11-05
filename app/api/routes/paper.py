@@ -144,7 +144,12 @@ async def start(body: PaperStartRequest, request: Request):
             # Readiness completes before STARTING is returned. Failure closes
             # only this new provider; it never calls simulator.stop/cancel_all.
             provider.prepare()
-        result = await request.app.state.simulator.start(provider, strategy, symbols)
+        start_kwargs = {}
+        if body.kronos_enabled is not None:
+            start_kwargs["kronos_enabled"] = body.kronos_enabled
+        if body.kronos_failure_policy is not None:
+            start_kwargs["kronos_failure_policy"] = body.kronos_failure_policy
+        result = await request.app.state.simulator.start(provider, strategy, symbols, **start_kwargs)
     except Exception:
         if body.source == "vantage_mt5":
             await provider.close()

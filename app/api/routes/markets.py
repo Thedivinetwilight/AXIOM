@@ -43,6 +43,8 @@ class PaperSessionStartBody(BaseModel):
     strategy: str = Field(default="manual_only", max_length=40)
     timeframe: str = Field(default="5m", max_length=8)
     symbols: list[str] = Field(default_factory=list)
+    kronos_enabled: bool | None = None
+    kronos_failure_policy: str | None = Field(default=None, max_length=40)
 
 
 class PaperSessionTransitionBody(BaseModel):
@@ -110,11 +112,67 @@ class GlobalResetBody(BaseModel):
     confirm_phrase: str = Field(default="", max_length=80)
 
 
+class MultiMarketSelectionBody(BaseModel):
+    markets: list[str] = Field(min_length=1, max_length=4)
+
+
+class MultiMarketSessionStartBody(BaseModel):
+    markets: list[str] | None = None
+    default_strategy: str = Field(default="parallel_ensemble", max_length=64)
+    default_timeframe: str = Field(default="5m", max_length=8)
+    strategy_by_market: dict[str, str] = Field(default_factory=dict)
+    timeframe_by_market: dict[str, str] = Field(default_factory=dict)
+    kronos_enabled_by_market: dict[str, bool] = Field(default_factory=dict)
+    kronos_policy_by_market: dict[str, str] = Field(default_factory=dict)
+    execute_immediately: bool = True
+
+
+class MultiMarketTransitionBody(BaseModel):
+    action: str = Field(pattern="^(start|pause|resume|stop)$")
+    markets: list[str] | None = None
+    reason: str = Field(default="", max_length=200)
+    execute_immediately: bool = True
+
+
+class MultiMarketAnalyzeBody(BaseModel):
+    markets: list[str] | None = None
+
+
+class MultiMarketRunCycleBody(BaseModel):
+    markets: list[str] | None = None
+    only_active: bool = True
+    market_timeout_seconds: float = Field(default=12.0, ge=0.1, le=60.0)
+
+
 def _paper_engine(request: Request):
     eng = getattr(request.app.state, "live_paper_engine", None)
     if eng is None:
         raise HTTPException(503, "Live-Market Paper engine is not initialized")
     return eng
+
+
+def _live_coordinator(request: Request):
+    coord = getattr(request.app.state, "live_execution", None)
+    if coord is None:
+        raise HTTPException(503, "Live execution coordinator is not initialized")
+    return coord
+
+
+def _ensure_paper_routing(request: Request, market: str) -> None:
+    """Refuse to run local paper simulation for a market routed LIVE.
+
+    Execution paths are separate by design: a market is either simulated locally
+    (PAPER) or routed to its real broker (LIVE), never both, and never silently.
+    """
+    coord = getattr(request.app.state, "live_execution", None)
+    if coord is None:
+        return
+    if not coord.paper_execution_allowed(market):
+        raise HTTPException(
+            409,
+            f"{market} is routed to LIVE execution. Local paper simulation does not run for "
+            "this market (mode separation). Use the live endpoints or set mode back to PAPER.",
+        )
 
 
 def _nasdaq_catalog(request: Request):
@@ -159,16 +217,25 @@ def _live_status_summary(request: Request) -> dict[str, Any]:
     upstox_live_tok, upstox_live_src = resolve_live_token(getattr(request.app.state, "upstox_live_token", None))
     autonomy_sessions = autonomy.sessions() if autonomy is not None else []
     nse_live_flag = bool(getattr(getattr(autonomy, "settings", None), "live_enabled", False))
-    nse_algo_name = bool(str(getattr(getattr(autonomy, "settings", None), "algo_name", "") or "").strip())
+    nse_algo_name = bool(
+        str(getattr(getattr(autonomy, "settings", None), "upstox_algo_name", "") or "").strip()
+    )
 
     broker_rt = getattr(request.app.state, "alpaca_broker_runtime", None)
     alpaca_svc = getattr(request.app.state, "alpaca_broker", None) or (broker_rt.service if broker_rt else None)
     alpaca_creds = broker_rt.credential_status() if broker_rt else None
     us_live_flag = bool(request.app.state.settings.alpaca_broker_enabled)
     us_live_creds = bool(alpaca_creds and alpaca_creds["live"]["present"])
+    coordinator = getattr(request.app.state, "live_execution", None)
+    live_binding = coordinator.status() if coordinator is not None else {}
 
     return {
         "default_live_execution": "OFF",
+        "execution_paths_are_separate": True,
+        "modes": {
+            "LIVE_MARKET_PAPER": "local simulated orders on real read-only market data",
+            "LIVE_MARKET_LIVE": "real broker orders, per-market Arm + phrase-confirmed Activate",
+        },
         "nse": {
             "market": "NSE",
             "currency": "INR",
@@ -193,6 +260,14 @@ def _live_status_summary(request: Request) -> dict[str, Any]:
                 if not ok
             ],
             "autonomy_session": autonomy_sessions[0] if autonomy_sessions else None,
+            "execution_mode": (live_binding.get("NSE") or {}).get("mode", "PAPER"),
+            "live_gate_state": ((live_binding.get("NSE") or {}).get("gate") or {}).get("state", "DISABLED"),
+            "live_order_path_available": bool(
+                (live_binding.get("NSE") or {}).get("live_available")
+            ),
+            "missing_coordinator_dependencies": (live_binding.get("NSE") or {}).get(
+                "missing_dependencies", []
+            ),
         },
         "nasdaq": {
             "market": "NASDAQ",
@@ -216,6 +291,16 @@ def _live_status_summary(request: Request) -> dict[str, Any]:
                 if not ok
             ],
             "broker_status": alpaca_svc.status() if alpaca_svc is not None else None,
+            "execution_mode": (live_binding.get("NASDAQ") or {}).get("mode", "PAPER"),
+            "live_gate_state": ((live_binding.get("NASDAQ") or {}).get("gate") or {}).get(
+                "state", "DISABLED"
+            ),
+            "live_order_path_available": bool(
+                (live_binding.get("NASDAQ") or {}).get("live_available")
+            ),
+            "missing_coordinator_dependencies": (live_binding.get("NASDAQ") or {}).get(
+                "missing_dependencies", []
+            ),
         },
     }
 
@@ -550,8 +635,19 @@ def markets_overview(request: Request):
     eng = _paper_engine(request)
     nse_cat = _nse_search_catalog(request)
     nasdaq_cat = _nasdaq_catalog(request)
+    runner = getattr(request.app.state, "mm_paper_runner", None)
+    live_runner = getattr(request.app.state, "mm_live_runner", None)
+    coordinator = getattr(request.app.state, "live_execution", None)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "selected_markets": eng.selected_markets(),
+        "runner": runner.status() if runner is not None else None,
+        "live_runner": live_runner.status() if live_runner is not None else None,
+        "live_execution": coordinator.live_status_summary() if coordinator is not None else None,
+        "execution_modes": (
+            {m: coordinator.mode(m) for m in ("NSE", "NASDAQ")} if coordinator is not None
+            else {"NSE": "PAPER", "NASDAQ": "PAPER"}
+        ),
         "product_modes": [
             {
                 "id": "LIVE_MARKET_PAPER",
@@ -583,7 +679,15 @@ def markets_overview(request: Request):
             "NSE": nse_cat.reconciliation_report(),
             "NASDAQ": nasdaq_cat.reconciliation_report(),
         },
+        "kronos": (
+            request.app.state.kronos_provider.status()
+            if getattr(request.app.state, "kronos_provider", None) is not None
+            else None
+        ),
         "recent_audit": eng.audit_log(limit=40),
+        "live_audit": (
+            coordinator.journal.audit_log(limit=25) if coordinator is not None else []
+        ),
     }
 
 
@@ -845,6 +949,8 @@ def live_readonly_chart(
                 "real_order_api_used": False,
                 "generated_at": now.isoformat(),
             }
+        from app.monitoring.paper_events import redact_sensitive_data
+
         reader = UpstoxReadOnly(lambda: tok, clock=lambda: now)
         bars = []
         error_detail = None
@@ -853,8 +959,8 @@ def live_readonly_chart(
                 bars = reader.intraday_candles(inst["instrument_key"], inst["display_symbol"], timeframe)
             if not bars:
                 bars = reader.historical_candles(inst["instrument_key"], inst["display_symbol"], timeframe)
-        except (UpstoxAuthError, ReconciliationFailure, ValueError) as exc:
-            error_detail = str(exc)[:220]
+        except Exception as exc:
+            error_detail = str(redact_sensitive_data(str(exc)))[:220]
         quote_ver = verify_upstox_market_data(tok, credential_source=src, instrument_key=inst["instrument_key"], now=now)
         conn_state = quote_ver["connection_state"] if bars or quote_ver.get("quote") else ("REJECTED" if "rejected" in (error_detail or "").lower() else "UNAVAILABLE")
         last_bar_ts = bars[-1].timestamp if bars else None
@@ -946,11 +1052,13 @@ def live_readonly_chart(
     start = now - timedelta(days=lookback_days)
     bars = []
     error_detail = None
+    from app.monitoring.paper_events import redact_sensitive_data
+
     hist = AlpacaHistoricalProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
     try:
         bars = hist.get_candles(sym_clean, timeframe_fetch, start, now)
     except Exception as exc:
-        error_detail = str(exc)[:220]
+        error_detail = str(redact_sensitive_data(str(exc)))[:220]
     finally:
         hist.close()
 
@@ -1000,6 +1108,384 @@ def live_readonly_chart(
 # -- Live-Market Paper Endpoints -----------------------------------------------
 
 
+def _collect_extra_structured_events(
+    request: Request,
+    *,
+    include_broker_audit: bool = True,
+) -> list[dict[str, Any]]:
+    from app.monitoring.paper_events import normalize_structured_event
+
+    extras: list[dict[str, Any]] = []
+    repo = getattr(request.app.state, "repository", None)
+    if repo is not None and hasattr(repo, "list_system_events"):
+        try:
+            for row in repo.list_system_events(limit=400):
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                kind = str(row.get("kind") or payload.get("kind") or "SYSTEM_EVENT")
+                if not (kind.startswith("PAPER_") or kind.startswith("KRONOS_")):
+                    continue
+                mkt_val = str(payload.get("market") or "LOCAL_SIM").upper()
+                extras.append(
+                    normalize_structured_event(
+                        event_id=str(row.get("id") or row.get("event_id") or f"sim-{len(extras)}"),
+                        timestamp=str(row.get("ts") or ""),
+                        event_type=kind,
+                        market=mkt_val,
+                        source="LOCAL_SIMULATOR_PAPER",
+                        payload={**payload, "simulated": True, "real_money": False},
+                    )
+                )
+        except Exception as exc:
+            extras.append(
+                normalize_structured_event(
+                    event_id=f"sim-err-{len(extras)}",
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    event_type="SYSTEM_EVENT_READ_ERROR",
+                    market="LOCAL_SIM",
+                    source="LOCAL_SIMULATOR_PAPER",
+                    payload={"error": type(exc).__name__, "simulated": True, "real_money": False},
+                )
+            )
+
+    if include_broker_audit:
+        alpaca_svc = getattr(request.app.state, "alpaca_broker", None)
+        if alpaca_svc is not None and hasattr(alpaca_svc, "status"):
+            try:
+                alp_st = alpaca_svc.status()
+                is_live_env = str(alp_st.get("environment") or "").lower() == "live"
+                for ev in (alp_st.get("recent_audit") or [])[:80]:
+                    if not isinstance(ev, dict):
+                        continue
+                    det = dict(ev.get("detail")) if isinstance(ev.get("detail"), dict) else dict(ev)
+                    det["simulated"] = not is_live_env
+                    det["real_money"] = is_live_env
+                    extras.append(
+                        normalize_structured_event(
+                            event_id=f"alp-{ev.get('seq') or ev.get('id') or len(extras)}",
+                            timestamp=str(ev.get("ts") or ev.get("timestamp") or ""),
+                            event_type=str(ev.get("kind") or ev.get("event_kind") or "BROKER_AUDIT"),
+                            market="NASDAQ",
+                            source="ALPACA_LIVE_BROKER" if is_live_env else "ALPACA_PAPER_BROKER",
+                            payload=det,
+                        )
+                    )
+            except Exception as exc:
+                extras.append(
+                    normalize_structured_event(
+                        event_id=f"alp-err-{len(extras)}",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        event_type="BROKER_AUDIT_READ_ERROR",
+                        market="NASDAQ",
+                        source="ALPACA_PAPER_BROKER",
+                        payload={"error": type(exc).__name__, "simulated": True, "real_money": False},
+                    )
+                )
+
+    return extras
+
+
+@router.get("/paper/logs")
+def paper_structured_logs(
+    request: Request,
+    window: str = Query(default="all", max_length=16),
+    since: str = Query(default="", max_length=64),
+    until: str = Query(default="", max_length=64),
+    market: str = Query(default="", max_length=24),
+    symbol: str = Query(default="", max_length=64),
+    category: str = Query(default="", max_length=32),
+    event_type: str = Query(default="", max_length=64),
+    severity: str = Query(default="", max_length=24),
+    strategy: str = Query(default="", max_length=64),
+    session_id: str = Query(default="", max_length=80),
+    query: str = Query(default="", max_length=120),
+    include_broker_audit: bool = Query(default=True),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    eng = _paper_engine(request)
+    extras = _collect_extra_structured_events(
+        request,
+        include_broker_audit=bool(include_broker_audit) if isinstance(include_broker_audit, bool) else True,
+    )
+    return eng.structured_logs(
+        window=window if isinstance(window, str) else "all",
+        since=since if isinstance(since, str) else "",
+        until=until if isinstance(until, str) else "",
+        market=market if isinstance(market, str) else "",
+        symbol=symbol if isinstance(symbol, str) else "",
+        category=category if isinstance(category, str) else "",
+        event_type=event_type if isinstance(event_type, str) else "",
+        severity=severity if isinstance(severity, str) else "",
+        strategy=strategy if isinstance(strategy, str) else "",
+        session_id=session_id if isinstance(session_id, str) else "",
+        query=query if isinstance(query, str) else "",
+        limit=limit if isinstance(limit, int) else 200,
+        extra_events=extras,
+    )
+
+
+@router.get("/paper/decisions")
+def paper_decisions_inspector(
+    request: Request,
+    market: str = Query(default="ALL", max_length=16),
+    symbol: str = Query(default="", max_length=64),
+    strategy: str = Query(default="", max_length=64),
+    session_id: str = Query(default="", max_length=80),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    eng = _paper_engine(request)
+    mkt_f = (market if isinstance(market, str) else "ALL").strip().upper() or "ALL"
+    sym_f = (symbol if isinstance(symbol, str) else "").strip().upper()
+    strat_f = (strategy if isinstance(strategy, str) else "").strip().lower()
+    sess_f = (session_id if isinstance(session_id, str) else "").strip()
+    lim = limit if isinstance(limit, int) else 100
+
+    items: list[dict[str, Any]] = []
+    for mkt_code in ("NSE", "NASDAQ"):
+        if mkt_f not in {"ALL", "", mkt_code}:
+            continue
+        snap = eng.market_snapshot(mkt_code)
+        for d in snap.get("decisions") or []:
+            row = {
+                **d,
+                "execution_origin": "LIVE_MARKET_PAPER",
+                "simulated": True,
+                "execution_badge": "SIMULATED · LIVE_MARKET_PAPER (0 BROKER ORDERS)",
+            }
+            items.append(row)
+
+    sim = getattr(request.app.state, "simulator", None)
+    if sim is not None and mkt_f in {"ALL", "", "LOCAL_SIM", "NASDAQ", "NSE"}:
+        for sym_k, kd in (getattr(sim, "kronos_decisions", None) or {}).items():
+            items.append(
+                {
+                    "decision_id": kd.get("decision_id"),
+                    "market": sim._infer_kronos_market(sym_k) if hasattr(sim, "_infer_kronos_market") else "NASDAQ",
+                    "session_run_id": str((getattr(sim, "run", None) or {}).get("run_id") or ""),
+                    "symbol": sym_k,
+                    "strategy": kd.get("strategy"),
+                    "timeframe": getattr(sim.broker, "timeframe", ""),
+                    "action": kd.get("final_signal") or kd.get("action"),
+                    "reason": kd.get("reason"),
+                    "kronos_status": kd.get("kronos_status"),
+                    "forecast_produced": bool(kd.get("forecast_produced")),
+                    "forecast_consumed": bool(kd.get("forecast_consumed")),
+                    "policy_applied": kd.get("policy_applied"),
+                    "explanation": kd,
+                    "ts": kd.get("timestamp"),
+                    "execution_origin": "LOCAL_SIMULATOR_PAPER",
+                    "simulated": True,
+                    "execution_badge": "SIMULATED · LOCAL_SIMULATOR_PAPER (0 BROKER ORDERS)",
+                }
+            )
+
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        if mkt_f not in {"ALL", ""} and str(item.get("market") or "").upper() != mkt_f:
+            continue
+        if sym_f and sym_f not in str(item.get("symbol") or "").upper() and sym_f not in str(item.get("instrument_key") or "").upper():
+            continue
+        if strat_f and strat_f not in str(item.get("strategy") or "").lower():
+            continue
+        if sess_f and str(item.get("session_run_id") or "") != sess_f:
+            continue
+        filtered.append(item)
+
+    filtered.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for row in filtered:
+        key = f"{row.get('market')}:{row.get('symbol')}"
+        if key not in by_symbol:
+            by_symbol[key] = row
+
+    k_prov = getattr(request.app.state, "kronos_provider", None)
+    return {
+        "total": len(filtered),
+        "decisions": filtered[:lim],
+        "latest_by_symbol": list(by_symbol.values()),
+        "kronos": k_prov.status() if k_prov is not None else None,
+    }
+
+
+@router.get("/paper/runner")
+def paper_runner_status(request: Request):
+    runner = getattr(request.app.state, "mm_paper_runner", None)
+    eng = _paper_engine(request)
+    return {
+        "ok": True,
+        "selected_markets": eng.selected_markets(),
+        "runner": runner.status() if runner is not None else {
+            "enabled": False,
+            "background_loop_running": False,
+            "selected_markets": eng.selected_markets(),
+            "live_trading_enabled": False,
+            "broker_order_api_calls": 0,
+            "markets": {},
+        },
+    }
+
+
+@router.get("/paper/selection")
+def paper_get_selection(request: Request):
+    eng = _paper_engine(request)
+    return {"ok": True, "selected_markets": eng.selected_markets()}
+
+
+@router.post("/paper/selection")
+def paper_set_selection(body: MultiMarketSelectionBody, request: Request):
+    try:
+        return _paper_engine(request).set_selected_markets(body.markets)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/paper/sessions/start")
+def paper_multi_sessions_start(body: MultiMarketSessionStartBody, request: Request):
+    """Concurrently start and immediately analyze all selected markets in local paper mode."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    eng = _paper_engine(request)
+    if body.markets:
+        try:
+            eng.set_selected_markets(body.markets)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    targets = eng.selected_markets()
+
+    def _start_one(mkt: str) -> tuple[str, dict[str, Any]]:
+        strat = (body.strategy_by_market.get(mkt) or body.default_strategy or "parallel_ensemble").strip()
+        tf = (body.timeframe_by_market.get(mkt) or body.default_timeframe or "5m").strip()
+        k_en = body.kronos_enabled_by_market.get(mkt)
+        k_pol = body.kronos_policy_by_market.get(mkt)
+        snap = eng.start_session(
+            mkt,
+            strategy=strat,
+            timeframe=tf,
+            kronos_enabled=k_en,
+            kronos_failure_policy=k_pol,
+            analyze_immediately=True,
+            execute_immediately=body.execute_immediately,
+        )
+        return mkt, snap
+
+    out: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        futs = {m: pool.submit(_start_one, m) for m in targets}
+        for m, fut in futs.items():
+            try:
+                _, snap_m = fut.result()
+                out[m] = snap_m
+            except Exception as exc:
+                errors[m] = str(exc)[:220]
+    if errors and not out:
+        raise HTTPException(409, "; ".join(f"{k}: {v}" for k, v in errors.items()))
+    return {
+        "ok": not errors,
+        "simulated_only": True,
+        "live_trading_enabled": False,
+        "broker_order_api_calls": 0,
+        "selected_markets": targets,
+        "markets": out,
+        "errors": errors,
+    }
+
+
+@router.post("/paper/sessions/transition")
+def paper_multi_sessions_transition(body: MultiMarketTransitionBody, request: Request):
+    """Concurrently start/pause/resume/stop selected markets; Resume/Start immediately analyzes symbols."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    eng = _paper_engine(request)
+    targets = [m.strip().upper() for m in body.markets] if body.markets else eng.selected_markets()
+    if not body.markets:
+        targets = [m for m in targets if eng.execution_mode_provider is None or eng.execution_mode_provider(m) != "LIVE"]
+    else:
+        for mkt in targets:
+            _ensure_paper_routing(request, mkt)
+    immediate = body.action.strip().lower() in {"start", "resume"}
+
+    def _trans_one(mkt: str) -> tuple[str, dict[str, Any]]:
+        snap = eng.transition_session(
+            mkt,
+            body.action,
+            reason=body.reason,
+            analyze_immediately=immediate,
+            execute_immediately=bool(immediate and body.execute_immediately),
+        )
+        return mkt, snap
+
+    out: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        futs = {m: pool.submit(_trans_one, m) for m in targets}
+        for m, fut in futs.items():
+            try:
+                _, snap_m = fut.result()
+                out[m] = snap_m
+            except Exception as exc:
+                errors[m] = str(exc)[:220]
+    if errors and not out:
+        raise HTTPException(409, "; ".join(f"{k}: {v}" for k, v in errors.items()))
+    return {
+        "ok": not errors,
+        "action": body.action,
+        "simulated_only": True,
+        "live_trading_enabled": False,
+        "broker_order_api_calls": 0,
+        "selected_markets": targets,
+        "markets": out,
+        "errors": errors,
+    }
+
+
+@router.post("/paper/analyze")
+def paper_multi_analyze(body: MultiMarketAnalyzeBody, request: Request):
+    """Concurrently analyze all selected symbols across all enabled strategies for selected markets (0 orders)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    eng = _paper_engine(request)
+    targets = [m.strip().upper() for m in body.markets] if body.markets else eng.selected_markets()
+    if not body.markets:
+        targets = [m for m in targets if eng.execution_mode_provider is None or eng.execution_mode_provider(m) != "LIVE"]
+    else:
+        for mkt in targets:
+            _ensure_paper_routing(request, mkt)
+    reports: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+        futs = {m: pool.submit(eng.analyze_market, m, trigger="operator_analyze") for m in targets}
+        for m, fut in futs.items():
+            try:
+                reports[m] = fut.result()
+            except Exception as exc:
+                errors[m] = str(exc)[:220]
+    return {
+        "ok": not errors,
+        "simulated_only": True,
+        "live_trading_enabled": False,
+        "broker_order_api_calls": 0,
+        "selected_markets": targets,
+        "reports": reports,
+        "errors": errors,
+    }
+
+
+@router.post("/paper/run-cycle")
+def paper_multi_run_cycle(body: MultiMarketRunCycleBody, request: Request):
+    """Advance all eligible selected markets concurrently with per-market timeout isolation."""
+    eng = _paper_engine(request)
+    for mkt in body.markets or ():
+        _ensure_paper_routing(request, mkt)
+    try:
+        return eng.advance_selected_markets_concurrently(
+            markets=body.markets,
+            only_active=body.only_active,
+            market_timeout_seconds=body.market_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/paper/{market}")
 def paper_snapshot(market: str, request: Request):
     try:
@@ -1010,12 +1496,17 @@ def paper_snapshot(market: str, request: Request):
 
 @router.post("/paper/session/start")
 def paper_session_start(body: PaperSessionStartBody, request: Request):
+    _ensure_paper_routing(request, body.market)
     try:
         return _paper_engine(request).start_session(
             body.market,
             strategy=body.strategy,
             timeframe=body.timeframe,
             symbols=body.symbols,
+            kronos_enabled=body.kronos_enabled,
+            kronos_failure_policy=body.kronos_failure_policy,
+            analyze_immediately=True,
+            execute_immediately=True,
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1023,8 +1514,16 @@ def paper_session_start(body: PaperSessionStartBody, request: Request):
 
 @router.post("/paper/session/transition")
 def paper_session_transition(body: PaperSessionTransitionBody, request: Request):
+    _ensure_paper_routing(request, body.market)
+    immediate = body.action.strip().lower() in {"start", "resume"}
     try:
-        return _paper_engine(request).transition_session(body.market, body.action, reason=body.reason)
+        return _paper_engine(request).transition_session(
+            body.market,
+            body.action,
+            reason=body.reason,
+            analyze_immediately=immediate,
+            execute_immediately=immediate,
+        )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -1039,6 +1538,7 @@ def paper_reset(body: PaperResetBody, request: Request):
 
 @router.post("/paper/config")
 def paper_config_update(body: PaperConfigBody, request: Request):
+    _ensure_paper_routing(request, body.market)
     updates = body.model_dump(exclude={"market"}, exclude_none=True)
     try:
         return {"ok": True, "config": _paper_engine(request).update_config(body.market, **updates)}
@@ -1048,6 +1548,7 @@ def paper_config_update(body: PaperConfigBody, request: Request):
 
 @router.post("/paper/preview")
 def paper_preview(body: PaperOrderBody, request: Request):
+    _ensure_paper_routing(request, body.market)
     target_sym = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     return _paper_engine(request).preview_order(
         market=body.market,
@@ -1067,6 +1568,7 @@ def paper_preview(body: PaperOrderBody, request: Request):
 
 @router.post("/paper/orders")
 def paper_submit_order(body: PaperOrderBody, request: Request):
+    _ensure_paper_routing(request, body.market)
     target_sym = (body.instrument_key or body.symbol) if body.market.upper() == "NSE" else body.symbol
     return _paper_engine(request).submit_order(
         client_order_id=body.client_order_id,
@@ -1170,7 +1672,13 @@ def paper_audit_export(request: Request, market: str = "", limit: int = Query(de
 
 @router.get("/live/status")
 def live_status(request: Request):
-    return _live_status_summary(request)
+    summary = _live_status_summary(request)
+    coordinator = getattr(request.app.state, "live_execution", None)
+    runner = getattr(request.app.state, "mm_live_runner", None)
+    summary["execution"] = coordinator.live_status_summary() if coordinator is not None else None
+    summary["runner"] = runner.status() if runner is not None else None
+    summary["audit"] = coordinator.journal.audit_log(limit=40) if coordinator is not None else []
+    return summary
 
 
 @router.post("/emergency-stop")
@@ -1182,6 +1690,10 @@ def global_emergency_stop(body: GlobalEmergencyBody, request: Request):
     eng = getattr(request.app.state, "live_paper_engine", None)
     if eng is not None:
         results["live_market_paper"] = eng.emergency_stop(reason)
+
+    k_prov = getattr(request.app.state, "kronos_provider", None)
+    if k_prov is not None:
+        results["kronos"] = k_prov.stop_all_sessions(reason=reason)
 
     autonomy = getattr(request.app.state, "autonomy", None)
     if autonomy is not None:
@@ -1309,3 +1821,176 @@ def get_trade_monitor_chart(
         "markers": marker_payload["markers"],
     }
 
+
+# ---------------------------------------------------------------------------
+# LIVE execution (separate real-money path; per-market gate, disarmed by default)
+# ---------------------------------------------------------------------------
+
+
+class LiveModeBody(BaseModel):
+    mode: str = Field(pattern="^(OFF|PAPER|LIVE|off|paper|live)$")
+
+
+class LiveActivateBody(BaseModel):
+    confirm_live_trading: str = Field(default="", max_length=120)
+    acknowledge_risk: bool = False
+
+
+class LiveDisarmBody(BaseModel):
+    reason: str = Field(default="operator disarm", max_length=200)
+
+
+class LiveEmergencyStopBody(BaseModel):
+    reason: str = Field(default="operator emergency stop", max_length=200)
+    cancel_working: bool = False
+
+
+class LiveResetKillBody(BaseModel):
+    operator_ack: bool = False
+
+
+class LiveLimitsBody(BaseModel):
+    max_order_value: float | None = Field(default=None, gt=0)
+    max_daily_orders: int | None = Field(default=None, gt=0)
+    max_daily_loss: float | None = Field(default=None, gt=0)
+    max_open_positions: int | None = Field(default=None, gt=0)
+    max_symbol_exposure: float | None = Field(default=None, gt=0)
+    max_total_exposure: float | None = Field(default=None, gt=0)
+    max_quote_age_seconds: float | None = Field(default=None, gt=0)
+    max_price_deviation_bps: float | None = Field(default=None, gt=0)
+
+
+def _live_http_error(exc: Exception) -> HTTPException:
+    from app.markets.live_execution import (
+        LiveBrokerRejected,
+        LiveExecutionError,
+        LiveGateRefused,
+        LiveReconciliationFailed,
+        LiveSubmissionUncertain,
+    )
+
+    if isinstance(exc, LiveGateRefused):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, LiveReconciliationFailed):
+        return HTTPException(503, str(exc))
+    if isinstance(exc, LiveSubmissionUncertain):
+        return HTTPException(503, str(exc))
+    if isinstance(exc, LiveBrokerRejected):
+        return HTTPException(422, str(exc))
+    if isinstance(exc, LiveExecutionError):
+        return HTTPException(422, str(exc))
+    return HTTPException(500, "Live execution request failed")
+
+
+@router.get("/live/audit")
+def live_execution_audit(
+    request: Request,
+    market: str = Query(default="", max_length=8),
+    limit: int = Query(default=150, ge=1, le=500),
+):
+    coordinator = _live_coordinator(request)
+    mkt = market.upper() if market.upper() in {"NSE", "NASDAQ"} else ""
+    return {
+        "ok": True,
+        "real_money": True,
+        "events": coordinator.journal.audit_log(market=mkt, limit=limit),
+    }
+
+
+@router.get("/live/{market}/readiness")
+def live_readiness(market: str, request: Request, symbol: str | None = Query(default=None)):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.readiness(market, symbol=symbol)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/mode")
+def live_set_mode(market: str, body: LiveModeBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.set_mode(market, body.mode)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/limits")
+def live_set_limits(market: str, body: LiveLimitsBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.update_limits(market, **body.model_dump(exclude_none=True))
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/arm")
+def live_arm(market: str, request: Request, symbol: str | None = Query(default=None)):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.arm(market, symbol=symbol)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/activate")
+def live_activate(market: str, body: LiveActivateBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.activate(
+            market,
+            confirm_phrase=body.confirm_live_trading,
+            acknowledge_risk=body.acknowledge_risk,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/disarm")
+def live_disarm(market: str, body: LiveDisarmBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.disarm(market, body.reason)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/emergency-stop")
+def live_emergency_stop(market: str, body: LiveEmergencyStopBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.emergency_stop(
+            market, body.reason, cancel_working=body.cancel_working
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/reset-kill-switch")
+def live_reset_kill_switch(market: str, body: LiveResetKillBody, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.reset_kill_switch(market, operator_ack=body.operator_ack)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/reconcile")
+def live_reconcile(market: str, request: Request):
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.reconcile(market)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
+@router.post("/live/{market}/run-cycle")
+def live_run_cycle(market: str, request: Request):
+    """Evaluate all selected symbols and route only ACTIVE-gate live decisions."""
+    coordinator = _live_coordinator(request)
+    try:
+        return coordinator.advance_market(
+            market, getattr(request.app.state, "ensemble_service", None)
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc

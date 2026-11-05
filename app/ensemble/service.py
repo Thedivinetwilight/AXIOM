@@ -568,6 +568,9 @@ class StrategyEnsembleService:
         quotes_override: dict[str, dict[str, Any]] | None = None,
         session_open_override: bool | None = None,
         execute_in_paper: bool = False,
+        persist_decisions: bool = True,
+        invoke_kronos: bool = True,
+        pre_fetch_errors: dict[str, str] | None = None,
         now_utc: datetime | None = None,
     ) -> dict[str, Any]:
         """Evaluate watchlist instruments in parallel (1 fetch per symbol), run the single
@@ -579,51 +582,111 @@ class StrategyEnsembleService:
         tf = normalize_timeframe(timeframe or self.default_timeframe)
         ref_now = (now_utc or self._now()).astimezone(UTC)
 
-        # Resolve target watchlist symbols
+        # Resolve target watchlist symbols (normalizing NSE instrument keys to trading symbols while preserving raw lookup keys)
+        raw_targets: list[str] = []
         if symbols:
-            target_syms = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+            raw_targets = [s.strip().upper() for s in symbols if s and s.strip()]
         elif bars_override:
-            target_syms = sorted({s.strip().upper() for s in bars_override})
+            raw_targets = [s.strip().upper() for s in bars_override if s and s.strip()]
         elif self.paper_engine is not None:
             wl = self.paper_engine.list_watchlists().get(mkt) or []
-            target_syms = sorted({str(item.get("symbol", "")).upper() for item in wl if item.get("symbol")})
-        else:
-            target_syms = []
+            raw_targets = [str(item.get("symbol", "")).upper() for item in wl if item.get("symbol")]
+
+        sym_meta_map: dict[str, dict[str, Any]] = {}
+        raw_lookup_by_sym: dict[str, str] = {}
+        fetch_errors: dict[str, str] = dict(pre_fetch_errors or {})
+        for raw_s in sorted(set(raw_targets)):
+            try:
+                meta = self._resolve_instrument(mkt, raw_s)
+                canon = str(meta.get("trading_symbol") or meta.get("symbol") or raw_s).strip().upper()
+                sym_meta_map[canon] = meta
+                raw_lookup_by_sym.setdefault(canon, raw_s)
+                if raw_s in fetch_errors and canon not in fetch_errors:
+                    fetch_errors[canon] = fetch_errors.pop(raw_s)
+            except Exception as exc:  # noqa: BLE001
+                fetch_errors[raw_s] = f"Instrument resolution failed: {str(exc)[:160]}"
+
+        target_syms = sorted(sym_meta_map.keys())
 
         # Single bar & quote fetch per symbol (never per variant!)
         bars_map: dict[str, list[Candle]] = {}
         quotes_map: dict[str, dict[str, Any]] = {}
-        fetch_errors: dict[str, str] = {}
         bar_api_calls = 0
         quote_api_calls = 0
 
         for sym in target_syms:
-            if bars_override is not None and sym in bars_override:
-                bars_map[sym] = bars_override[sym]
-            else:
+            raw_ref = raw_lookup_by_sym.get(sym, sym)
+            inst = sym_meta_map[sym]
+            ikey = str(inst.get("instrument_key") or "")
+            if bars_override is not None and (sym in bars_override or raw_ref in bars_override or (ikey and ikey in bars_override)):
+                found_bars = (
+                    bars_override.get(sym)
+                    if sym in bars_override
+                    else (bars_override.get(raw_ref) if raw_ref in bars_override else bars_override.get(ikey))
+                )
+                if found_bars:
+                    bars_map[sym] = found_bars
+            elif sym not in fetch_errors:
                 bar_fn = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
                 if bar_fn is not None:
                     try:
                         bar_api_calls += 1
-                        bars_map[sym] = bar_fn(sym, tf)
+                        fetched_b = bar_fn(raw_ref, tf)
+                        if fetched_b:
+                            bars_map[sym] = fetched_b
+                        else:
+                            fetch_errors.setdefault(sym, f"Empty {tf} bar history returned by provider")
                     except Exception as exc:  # noqa: BLE001
                         fetch_errors[sym] = f"Bar fetch failed: {str(exc)[:160]}"
+                else:
+                    fetch_errors.setdefault(sym, f"No historical bar provider configured for {mkt}")
 
-            if quotes_override is not None and sym in quotes_override:
-                quotes_map[sym] = quotes_override[sym]
+            if quotes_override is not None and (sym in quotes_override or raw_ref in quotes_override or (ikey and ikey in quotes_override)):
+                found_q = (
+                    quotes_override.get(sym)
+                    if sym in quotes_override
+                    else (quotes_override.get(raw_ref) if raw_ref in quotes_override else quotes_override.get(ikey))
+                )
+                if found_q:
+                    quotes_map[sym] = found_q
             else:
                 q_fn = self.nse_quote_provider if mkt == "NSE" else self.nasdaq_quote_provider
                 if q_fn is not None:
                     try:
                         quote_api_calls += 1
-                        inst = self._resolve_instrument(mkt, sym)
-                        lookup_key = str(inst.get("instrument_key") or sym) if mkt == "NSE" else sym
+                        lookup_key = ikey if (mkt == "NSE" and ikey) else sym
                         quotes_map[sym] = q_fn(lookup_key)
                     except Exception as exc:  # noqa: BLE001
                         fetch_errors.setdefault(sym, f"Quote fetch failed: {str(exc)[:160]}")
 
         with self._lock:
             variants = self.registry.list_variants(enabled_only=False)
+            enabled_only_vars = [v for v in variants if getattr(v, "enabled", True)]
+            if persist_decisions and not self.weights[mkt] and not self.calibrators[mkt].fitted and bars_map and enabled_only_vars:
+                longest_sym, longest_bars = max(bars_map.items(), key=lambda kv: len(kv[1] or []))
+                if longest_bars and len(longest_bars) >= 130:
+                    try:
+                        wf_auto = WalkForwardWeightLearner().fit_weights_and_calibrator(
+                            bars=longest_bars,
+                            variants=enabled_only_vars,
+                            market=mkt,
+                            timeframe=tf,
+                            dev_end_idx=len(longest_bars) - 2,
+                            embargo_bars=2,
+                            folds=3,
+                        )
+                        self.weights[mkt] = dict(wf_auto["weights"])
+                        self.calibrators[mkt] = wf_auto["calibrator"]
+                        self.weight_metadata[mkt] = {
+                            "source": "auto_causal_walk_forward",
+                            "symbol": longest_sym,
+                            "dev_end_ts": longest_bars[-3].timestamp.isoformat(),
+                            "multiple_testing": wf_auto["multiple_testing"],
+                        }
+                        self._save_kv(f"weights_{mkt}", {"weights": self.weights[mkt], "metadata": self.weight_metadata[mkt]})
+                        self._save_kv(f"calibrator_{mkt}", self.calibrators[mkt].to_state_dict())
+                    except Exception as exc:  # noqa: BLE001
+                        _ = exc
             allocator = self.allocators[mkt]
             weights = dict(self.weights[mkt])
             calibrator = self.calibrators[mkt]
@@ -652,7 +715,7 @@ class StrategyEnsembleService:
                 for o in (snap.get("orders") or [])
                 if str(o.get("status", "")).upper() in {"WORKING", "PARTIALLY_FILLED"}
             ]
-            hard_limits = dict(snap.get("limits") or {})
+            hard_limits = dict(snap.get("risk_limits") or snap.get("limits") or {})
             paper_running = str(snap.get("session_state") or "") == "RUNNING"
         else:
             default_cash = 1_000_000.0 if mkt == "NSE" else 100_000.0
@@ -676,34 +739,72 @@ class StrategyEnsembleService:
 
         sess_open = session_open_override if session_open_override is not None else self._market_session_open(mkt, ref_now)
         expected_manifest_sha: str | None = None
-        if self.kronos_provider is not None and getattr(self.kronos_provider, "kronos", None) is not None:
-            expected_manifest_sha = str(self.kronos_provider.kronos.status().get("artifact_digest") or "") or None
+        sess_key = f"LIVE_MARKET_PAPER:{mkt}"
+        sess_map: dict[str, Any] = {}
+        if self.kronos_provider is not None:
+            if getattr(self.kronos_provider, "kronos", None) is not None:
+                k_st = self.kronos_provider.kronos.status()
+                expected_manifest_sha = str(k_st.get("artifact_digest") or k_st.get("manifest_sha256") or "") or None
+            if hasattr(self.kronos_provider, "session_view"):
+                sess_map = self.kronos_provider.session_view(sess_key)
+
+        eff_allocator = allocator
+        if sess_map.get("kronos_configured") and not allocator.config.kronos_enabled:
+            cfg_dict = allocator.config.to_dict()
+            cfg_dict["kronos_enabled"] = True
+            cfg_dict["kronos_fail_closed_policy"] = (
+                "REQUIRE_KRONOS"
+                if str(sess_map.get("failure_policy") or "FAIL_CLOSED_NO_ENTRY") == "FAIL_CLOSED_NO_ENTRY"
+                else "DEGRADE_TO_ENSEMBLE"
+            )
+            sess_pol = sess_map.get("policy") if isinstance(sess_map.get("policy"), dict) else {}
+            if sess_pol.get("weight") is not None:
+                cfg_dict["kronos_advisory_weight"] = max(0.05, min(0.35, float(sess_pol["weight"])))
+            eff_allocator = PortfolioRiskAllocator(PortfolioAllocationConfig(**cfg_dict))
 
         decisions: list[dict[str, Any]] = []
         orders_submitted = 0
+        enabled_variants_cnt = sum(1 for v in variants if getattr(v, "enabled", True))
 
         for sym in sorted(batch["instruments"].keys()):
             inst_eval = batch["instruments"][sym]
             ctx: SharedIndicatorContext = inst_eval["context"]
             bar_ts = inst_eval["bar_meta"]["latest_bar_timestamp"]
-            already_done = self._has_bar_decision(mkt, sym, tf, bar_ts)
+            already_done = self._has_bar_decision(mkt, sym, tf, bar_ts) if persist_decisions else False
 
             k_fc: dict[str, Any] | None = None
-            if allocator.config.kronos_enabled and self.kronos_provider is not None and not already_done:
-                try:
-                    k_fc = self.kronos_provider.predict(
+            k_err_code: str | None = None
+            k_err_reason: str | None = None
+            if invoke_kronos and eff_allocator.config.kronos_enabled and self.kronos_provider is not None and not already_done:
+                if sess_map.get("kronos_configured") and hasattr(self.kronos_provider, "predict_for_session"):
+                    k_out = self.kronos_provider.predict_for_session(
+                        sess_key,
+                        session_id=str(sess_map.get("session_id") or ""),
                         market=mkt,
                         symbol=sym,
                         timeframe=tf,
                         bars=ctx.bars,
-                        require_fresh=False,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    k_fc = None
-                    _ = exc
+                    k_fc = k_out.get("forecast")
+                    k_err_code = k_out.get("error_code")
+                    k_err_reason = k_out.get("error_reason")
+                else:
+                    try:
+                        k_fc = self.kronos_provider.predict(
+                            market=mkt,
+                            symbol=sym,
+                            timeframe=tf,
+                            bars=ctx.bars,
+                            require_fresh=False,
+                            allow_when_toggle_off=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        k_fc = None
+                        k_err_code = type(exc).__name__
+                        k_err_reason = str(exc)[:180]
 
-            inst_meta = self._resolve_instrument(mkt, sym)
-            dec = allocator.allocate_symbol(
+            inst_meta = sym_meta_map.get(sym) or self._resolve_instrument(mkt, sym)
+            dec = eff_allocator.allocate_symbol(
                 market=mkt,
                 symbol=sym,
                 timeframe=tf,
@@ -724,12 +825,36 @@ class StrategyEnsembleService:
                 hard_limits=hard_limits,
                 now_utc=ref_now,
             )
+            if k_err_reason and isinstance(dec.get("kronos_contribution"), dict) and k_fc is None:
+                dec["kronos_contribution"]["failure_code"] = k_err_code
+                dec["kronos_contribution"]["failure_reason"] = k_err_reason
+            if (
+                persist_decisions
+                and not already_done
+                and isinstance(k_fc, dict)
+                and bool((dec.get("kronos_contribution") or {}).get("advisory_used"))
+                and self.kronos_provider is not None
+                and hasattr(self.kronos_provider, "record_forecast_consumption")
+            ):
+                self.kronos_provider.record_forecast_consumption(
+                    session_key=sess_key,
+                    session_id=str(sess_map.get("session_id") or ""),
+                    decision_id=str(dec.get("decision_id") or ""),
+                    market=mkt,
+                    symbol=sym,
+                    timeframe=tf,
+                    strategy="parallel_ensemble",
+                    forecast=k_fc,
+                    final_action=str(dec.get("final_action") or "NO_TRADE"),
+                    contribution_detail="PortfolioRiskAllocator Kronos advisory blend",
+                )
 
             paper_oid: str | None = None
             if not already_done:
                 if (
                     execute_in_paper
                     and paper_running
+                    and sess_open
                     and self.paper_engine is not None
                     and dec["final_action"] in {"BUY", "SELL"}
                     and dec["selected_qty"] > 0
@@ -778,10 +903,15 @@ class StrategyEnsembleService:
                         if str(p.get("symbol", "")).upper() == sym:
                             p["qty"] = max(0.0, float(p["qty"]) - dec["selected_qty"])
 
-                persisted_id = self._record_decision(dec, inst_eval["signals"], paper_order_id=paper_oid)
-                dec["decision_id"] = persisted_id
-                dec["paper_order_id"] = paper_oid
-                dec["idempotent_duplicate_skipped"] = persisted_id is None
+                if persist_decisions:
+                    persisted_id = self._record_decision(dec, inst_eval["signals"], paper_order_id=paper_oid)
+                    dec["decision_id"] = persisted_id
+                    dec["paper_order_id"] = paper_oid
+                    dec["idempotent_duplicate_skipped"] = persisted_id is None
+                else:
+                    dec["decision_id"] = f"preview-{mkt.lower()}-{sym.lower()}"
+                    dec["paper_order_id"] = None
+                    dec["idempotent_duplicate_skipped"] = False
             else:
                 dec["decision_id"] = None
                 dec["paper_order_id"] = None
@@ -789,9 +919,21 @@ class StrategyEnsembleService:
 
             decisions.append(dec)
 
+        combined_rejected = dict(batch["rejected_instruments"])
+        for sym in target_syms:
+            if sym not in batch["instruments"] and sym not in combined_rejected:
+                err_msg = fetch_errors.get(sym) or "No completed bars available for symbol"
+                code = "MISSING_DATA" if ("empty" in err_msg.lower() or "no historical" in err_msg.lower() or "no completed" in err_msg.lower()) else "FETCH_ERROR"
+                combined_rejected[sym] = {"code": code, "reason": err_msg}
+        for k, v in fetch_errors.items():
+            if k not in batch["instruments"] and k not in combined_rejected:
+                combined_rejected[k] = {"code": "FETCH_ERROR", "reason": v}
+
         return {
             "market": mkt,
             "timeframe": tf,
+            "session_open": bool(sess_open),
+            "enabled_variants_count": enabled_variants_cnt,
             "evaluated_at": ref_now.isoformat(),
             "execute_in_paper": execute_in_paper,
             "broker_order_api_calls": 0,
@@ -801,10 +943,7 @@ class StrategyEnsembleService:
             "wall_ms": batch["wall_ms"],
             "orders_submitted_simulated": orders_submitted,
             "decisions": decisions,
-            "rejected_instruments": {
-                **batch["rejected_instruments"],
-                **{k: {"code": "FETCH_ERROR", "reason": v} for k, v in fetch_errors.items() if k not in batch["instruments"]},
-            },
+            "rejected_instruments": combined_rejected,
         }
 
     def run_ablation_study(

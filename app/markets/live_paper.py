@@ -15,6 +15,8 @@ Hard structural safety guarantees:
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -24,12 +26,19 @@ import math
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from typing import Any, Callable
 import uuid
 
 from app.data.models import Candle, parse_timestamp
+from app.markets.kronos_decision import build_forecast_summary, combine_paper_strategy_decision
 from app.markets.nse_reconciliation import nse_session_status, tick_precision_decimals
 from app.markets.us_calendar import USEquitiesCalendar
+from app.monitoring.paper_events import (
+    filter_structured_events,
+    normalize_structured_event,
+    redact_sensitive_data,
+)
 
 MARKETS = ("NSE", "NASDAQ")
 SESSION_STATES = (
@@ -328,6 +337,7 @@ class LiveMarketPaperEngine:
         ensemble_service: Any | None = None,
         nse_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         nasdaq_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
+        execution_mode_provider: Callable[[str], str] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._in_memory = str(db_path) == ":memory:"
@@ -348,6 +358,9 @@ class LiveMarketPaperEngine:
         self.ensemble_service = ensemble_service
         self.nse_instrument_resolver = nse_instrument_resolver
         self.nasdaq_instrument_resolver = nasdaq_instrument_resolver
+        # LIVE-mode markets are executed only by app.markets.live_execution; the
+        # local paper engine must never simulate fills for a market routed LIVE.
+        self.execution_mode_provider = execution_mode_provider
         self.us_calendar = USEquitiesCalendar()
         self._last_quote_ts_by_key: dict[tuple[str, str], datetime] = {}
 
@@ -355,8 +368,24 @@ class LiveMarketPaperEngine:
             "NSE": PaperMarketConfig.default_nse(),
             "NASDAQ": PaperMarketConfig.default_nasdaq(),
         }
+        self._market_cycle_locks: dict[str, threading.RLock] = {
+            m: threading.RLock() for m in MARKETS
+        }
+        self._closed = False
         self._init_schema()
         self._bootstrap_or_recover()
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "register_event_sink"):
+            self.kronos_provider.register_event_sink(self._on_kronos_lifecycle_event)
+
+    def _on_kronos_lifecycle_event(self, ev: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        mkt = str(ev.get("market") or "").upper()
+        if mkt not in MARKETS:
+            return
+        payload = dict(ev.get("payload") or {})
+        with self._lock, self._connect() as conn:
+            self._append_audit_conn(conn, mkt, str(ev.get("event_type") or "KRONOS_EVENT"), payload)
 
     def _connect(self) -> sqlite3.Connection:
         if self._mem_conn is not None:
@@ -496,6 +525,10 @@ class LiveMarketPaperEngine:
                 ("session_run_id", "TEXT"),
                 ("session_start_equity", "REAL"),
                 ("session_start_realized_pnl", "REAL"),
+                ("kronos_enabled", "INTEGER"),
+                ("kronos_failure_policy", "TEXT"),
+                ("selected_for_multi", "INTEGER NOT NULL DEFAULT 1"),
+                ("last_analysis_json", "TEXT"),
             ):
                 if col_name not in acct_cols:
                     conn.execute(f"ALTER TABLE live_paper_accounts ADD COLUMN {col_name} {col_def}")
@@ -510,6 +543,21 @@ class LiveMarketPaperEngine:
             ):
                 if col_name not in fill_cols:
                     conn.execute(f"ALTER TABLE live_paper_fills ADD COLUMN {col_name} {col_def}")
+
+            dec_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(live_paper_decisions)").fetchall()
+            }
+            for col_name, col_def in (
+                ("session_run_id", "TEXT"),
+                ("kronos_status", "TEXT"),
+                ("forecast_produced", "INTEGER DEFAULT 0"),
+                ("forecast_consumed", "INTEGER DEFAULT 0"),
+                ("policy_applied", "TEXT"),
+                ("explanation_json", "TEXT"),
+            ):
+                if col_name not in dec_cols:
+                    conn.execute(f"ALTER TABLE live_paper_decisions ADD COLUMN {col_name} {col_def}")
 
     def _bootstrap_or_recover(self) -> None:
         now = _utc_now(self._clock)
@@ -594,11 +642,15 @@ class LiveMarketPaperEngine:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         now_iso = _utc_now(self._clock).isoformat()
+        safe_payload = redact_sensitive_data(payload)
+        if not isinstance(safe_payload, dict):
+            safe_payload = {"detail": str(safe_payload)}
         enriched = {
             "simulated": True,
+            "real_money": False,
             "execution_mode": "LIVE_MARKET_PAPER",
             "market": market,
-            **payload,
+            **safe_payload,
         }
         serialized = json.dumps(enriched, sort_keys=True)
         last = conn.execute(
@@ -924,11 +976,110 @@ class LiveMarketPaperEngine:
             )
         return {"removed": cur.rowcount > 0, "market": mkt, "symbol": sym}
 
-    # -- Session Controls ------------------------------------------------------
+    # -- Multi-Market Selection & Session Controls -----------------------------
+
+    def selected_markets(self) -> list[str]:
+        """Return markets currently selected for concurrent analysis & paper execution."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT market, selected_for_multi FROM live_paper_accounts"
+            ).fetchall()
+        by_mkt = {str(r["market"]).upper(): bool(r["selected_for_multi"]) for r in rows}
+        return [m for m in MARKETS if by_mkt.get(m, True)]
+
+    def set_selected_markets(self, markets: list[str]) -> dict[str, Any]:
+        """Update selected markets without resetting any account, position, order, or watchlist."""
+        cleaned: list[str] = []
+        for raw in markets or []:
+            m = self._validate_market(raw)
+            if m not in cleaned:
+                cleaned.append(m)
+        if not cleaned:
+            raise ValueError("Select at least one market (NSE and/or NASDAQ)")
+        now_iso = _utc_now(self._clock).isoformat()
+        with self._lock, self._connect() as conn:
+            for mkt in MARKETS:
+                sel_flag = 1 if mkt in cleaned else 0
+                conn.execute(
+                    "UPDATE live_paper_accounts SET selected_for_multi = ?, updated_at = ? WHERE market = ?",
+                    (sel_flag, now_iso, mkt),
+                )
+                self._append_audit_conn(
+                    conn,
+                    mkt,
+                    "PAPER_SELECTED_MARKETS_UPDATED",
+                    {"selected": bool(sel_flag), "selected_markets": cleaned},
+                )
+        return {"ok": True, "selected_markets": cleaned}
+
+    def _effective_symbols_for_market(
+        self,
+        market: str,
+        explicit_symbols: list[str] | None = None,
+    ) -> list[str]:
+        """Resolve selected symbols for a market: explicit list -> saved session symbols -> pinned watchlist."""
+        mkt = self._validate_market(market)
+        has_explicit = bool(explicit_symbols and any(s and str(s).strip() for s in explicit_symbols))
+        candidates: list[str] = [s for s in (explicit_symbols or []) if s and str(s).strip()]
+        wl_symbol_by_candidate: dict[str, str] = {}
+        if not candidates:
+            with self._lock, self._connect() as conn:
+                row = conn.execute(
+                    "SELECT symbols_json FROM live_paper_accounts WHERE market = ?",
+                    (mkt,),
+                ).fetchone()
+                saved = json.loads(row["symbols_json"] or "[]") if row else []
+                if saved:
+                    candidates = [str(s) for s in saved if s and str(s).strip()]
+                else:
+                    wl_rows = conn.execute(
+                        "SELECT symbol, instrument_key FROM live_paper_watchlists WHERE market = ? ORDER BY added_at ASC, symbol ASC",
+                        (mkt,),
+                    ).fetchall()
+                    for wr in wl_rows:
+                        sym_txt = str(wr["symbol"] or "").strip()
+                        ikey_txt = str(wr["instrument_key"] or "").strip()
+                        if mkt == "NSE" and ikey_txt:
+                            candidates.append(ikey_txt)
+                            wl_symbol_by_candidate[ikey_txt] = sym_txt or ikey_txt
+                        elif sym_txt:
+                            candidates.append(sym_txt)
+                            wl_symbol_by_candidate[sym_txt] = sym_txt
+        has_resolver = (
+            self.nse_instrument_resolver is not None
+            if mkt == "NSE"
+            else self.nasdaq_instrument_resolver is not None
+        )
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for s in candidates:
+            if not has_resolver and not has_explicit:
+                fb_sym = wl_symbol_by_candidate.get(s, str(s).split("|")[-1]).upper()
+                if fb_sym and fb_sym not in seen:
+                    seen.add(fb_sym)
+                    resolved.append(fb_sym)
+                continue
+            try:
+                inst = self._resolve_instrument(mkt, s)
+            except ValueError:
+                if has_explicit:
+                    raise
+                continue
+            if mkt == "NSE" and "|" in str(s) and has_explicit:
+                key_out = str(inst.get("instrument_key") or inst.get("trading_symbol"))
+            else:
+                key_out = str(inst.get("trading_symbol") or inst.get("symbol"))
+            canon = str(inst.get("trading_symbol") or inst.get("symbol") or key_out).upper()
+            if canon not in seen:
+                seen.add(canon)
+                resolved.append(key_out)
+        return resolved
 
     def update_config(self, market: str, **updates: Any) -> dict[str, Any]:
         mkt = self._validate_market(market)
         current = asdict(self.configs[mkt])
+        strat_update = str(updates["strategy"]).strip() if updates.get("strategy") else None
+        tf_update = str(updates["timeframe"]).strip() if updates.get("timeframe") else None
         for key, val in updates.items():
             if key in current and key not in {"market", "currency"} and val is not None:
                 current[key] = type(current[key])(val)
@@ -938,12 +1089,60 @@ class LiveMarketPaperEngine:
         self.configs[mkt] = cfg
         now_iso = _utc_now(self._clock).isoformat()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "UPDATE live_paper_accounts SET config_json = ?, updated_at = ? WHERE market = ?",
-                (json.dumps(asdict(cfg), sort_keys=True), now_iso, mkt),
-            )
-            self._append_audit_conn(conn, mkt, "PAPER_CONFIG_UPDATED", {"config": asdict(cfg)})
+            if strat_update and tf_update:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET config_json = ?, strategy = ?, timeframe = ?, updated_at = ? WHERE market = ?",
+                    (json.dumps(asdict(cfg), sort_keys=True), strat_update, tf_update, now_iso, mkt),
+                )
+            elif strat_update:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET config_json = ?, strategy = ?, updated_at = ? WHERE market = ?",
+                    (json.dumps(asdict(cfg), sort_keys=True), strat_update, now_iso, mkt),
+                )
+            elif tf_update:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET config_json = ?, timeframe = ?, updated_at = ? WHERE market = ?",
+                    (json.dumps(asdict(cfg), sort_keys=True), tf_update, now_iso, mkt),
+                )
+            else:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET config_json = ?, updated_at = ? WHERE market = ?",
+                    (json.dumps(asdict(cfg), sort_keys=True), now_iso, mkt),
+                )
+            audit_payload: dict[str, Any] = {"config": asdict(cfg)}
+            if strat_update:
+                audit_payload["strategy"] = strat_update
+            if tf_update:
+                audit_payload["timeframe"] = tf_update
+            self._append_audit_conn(conn, mkt, "PAPER_CONFIG_UPDATED", audit_payload)
         return asdict(cfg)
+
+    def _session_key(self, market: str) -> str:
+        return f"LIVE_MARKET_PAPER:{market.upper()}"
+
+    def _resolve_kronos_requested(
+        self,
+        market: str,
+        strategy: str,
+        explicit_kronos_enabled: bool | None,
+    ) -> bool:
+        strat = (strategy or "manual_only").strip().lower()
+        ens_kronos = False
+        if strat == "parallel_ensemble" and self.ensemble_service is not None:
+            alloc = (getattr(self.ensemble_service, "allocators", None) or {}).get(market.upper())
+            if alloc is not None:
+                ens_kronos = bool(getattr(alloc.config, "kronos_enabled", False))
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "is_configured_for_paper_strategy"):
+            return bool(
+                self.kronos_provider.is_configured_for_paper_strategy(
+                    strat,
+                    explicit_kronos_enabled=explicit_kronos_enabled,
+                    ensemble_kronos_enabled=ens_kronos,
+                )
+            )
+        if explicit_kronos_enabled is not None:
+            return bool(explicit_kronos_enabled)
+        return strat in {"kronos_ensemble", "kronos_informed"} or ens_kronos
 
     def start_session(
         self,
@@ -952,6 +1151,10 @@ class LiveMarketPaperEngine:
         strategy: str = "manual_only",
         timeframe: str = "5m",
         symbols: list[str] | None = None,
+        kronos_enabled: bool | None = None,
+        kronos_failure_policy: str | None = None,
+        analyze_immediately: bool = False,
+        execute_immediately: bool = False,
     ) -> dict[str, Any]:
         mkt = self._validate_market(market)
         now = _utc_now(self._clock)
@@ -962,13 +1165,19 @@ class LiveMarketPaperEngine:
             if sess["is_open"]
             else f"{mkt} regular session is currently {sess['state']}; waiting for live session open."
         )
-        resolved_syms: list[str] = []
-        for s in (symbols or []):
-            inst = self._resolve_instrument(mkt, s)
-            if mkt == "NSE" and "|" in str(s):
-                resolved_syms.append(str(inst.get("instrument_key") or inst.get("trading_symbol")))
-            else:
-                resolved_syms.append(str(inst.get("trading_symbol") or inst.get("symbol")))
+        resolved_syms = self._effective_symbols_for_market(mkt, symbols)
+        strat_clean = strategy.strip() or "manual_only"
+        tf_clean = timeframe.strip() or "5m"
+        k_requested = self._resolve_kronos_requested(mkt, strat_clean, kronos_enabled)
+        eff_policy = (
+            str(kronos_failure_policy).strip()
+            if kronos_failure_policy
+            else (
+                str(self.kronos_provider.config.failure_policy)
+                if self.kronos_provider is not None and hasattr(self.kronos_provider, "config")
+                else "FAIL_CLOSED_NO_ENTRY"
+            )
+        )
         run_id = f"run-{mkt.lower()}-{uuid.uuid4().hex[:12]}"
         today_str = str((sess.get("detail") or {}).get("trading_day") or now.date().isoformat())
         with self._lock, self._connect() as conn:
@@ -988,20 +1197,23 @@ class LiveMarketPaperEngine:
                 SET session_state = ?, state_reason = ?, strategy = ?, timeframe = ?,
                     symbols_json = ?, session_run_id = ?, session_start_equity = ?,
                     session_start_realized_pnl = ?, day_start_equity = ?, trading_day = ?,
+                    kronos_enabled = ?, kronos_failure_policy = ?,
                     started_at = ?, updated_at = ?
                 WHERE market = ?
                 """,
                 (
                     state,
                     reason,
-                    strategy.strip() or "manual_only",
-                    timeframe.strip() or "5m",
+                    strat_clean,
+                    tf_clean,
                     json.dumps(resolved_syms),
                     run_id,
                     curr_eq,
                     curr_realized,
                     day_eq,
                     today_str,
+                    1 if k_requested else 0,
+                    eff_policy,
                     now.isoformat(),
                     now.isoformat(),
                     mkt,
@@ -1014,40 +1226,96 @@ class LiveMarketPaperEngine:
                 {
                     "session_run_id": run_id,
                     "state": state,
-                    "strategy": strategy,
-                    "timeframe": timeframe,
+                    "strategy": strat_clean,
+                    "timeframe": tf_clean,
                     "symbols": resolved_syms,
+                    "kronos_configured": k_requested,
+                    "kronos_failure_policy": eff_policy,
                     "session_start_equity": curr_eq,
                     "persisted_historical_realized_pnl": curr_realized,
                 },
             )
-        return self.market_snapshot(mkt)
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "start_for_paper_session"):
+            self.kronos_provider.start_for_paper_session(
+                self._session_key(mkt),
+                session_id=run_id,
+                market=mkt,
+                strategy=strat_clean,
+                kronos_requested=k_requested,
+                failure_policy=eff_policy,
+            )
+        initial_analysis: dict[str, Any] | None = None
+        if analyze_immediately:
+            initial_analysis = self.analyze_market(mkt, trigger="session_start")
+        has_succeeded_data = initial_analysis is None or int((initial_analysis.get("counts") or {}).get("succeeded") or 0) > 0
+        if execute_immediately and sess["is_open"] and strat_clean.lower() != "manual_only" and has_succeeded_data:
+            tick_out = self.sync_live_tick(mkt)
+            if initial_analysis is not None:
+                tick_out["initial_analysis"] = tick_out.get("last_analysis") or initial_analysis
+            return tick_out
+        snap = self.market_snapshot(mkt)
+        if initial_analysis is not None:
+            snap["initial_analysis"] = initial_analysis
+        return snap
 
-    def transition_session(self, market: str, action: str, *, reason: str = "") -> dict[str, Any]:
+    def transition_session(
+        self,
+        market: str,
+        action: str,
+        *,
+        reason: str = "",
+        analyze_immediately: bool = False,
+        execute_immediately: bool = False,
+    ) -> dict[str, Any]:
         mkt = self._validate_market(market)
         act = action.strip().lower()
         if act == "start":
             with self._lock, self._connect() as conn:
                 r_cfg = conn.execute(
-                    "SELECT strategy, timeframe FROM live_paper_accounts WHERE market = ?",
+                    "SELECT strategy, timeframe, symbols_json, kronos_enabled, kronos_failure_policy FROM live_paper_accounts WHERE market = ?",
                     (mkt,),
                 ).fetchone()
-                strat = str(r_cfg["strategy"]) if r_cfg and r_cfg["strategy"] else self.configs[mkt].strategy
-                tf = str(r_cfg["timeframe"]) if r_cfg and r_cfg["timeframe"] else self.configs[mkt].timeframe
-            return self.start_session(mkt, strategy=strat, timeframe=tf)
+                strat = str(r_cfg["strategy"]) if r_cfg and r_cfg["strategy"] else "manual_only"
+                tf = str(r_cfg["timeframe"]) if r_cfg and r_cfg["timeframe"] else "5m"
+                saved_syms = json.loads(r_cfg["symbols_json"] or "[]") if r_cfg else None
+                k_en = bool(r_cfg["kronos_enabled"]) if (r_cfg and r_cfg["kronos_enabled"] is not None) else None
+                k_pol = str(r_cfg["kronos_failure_policy"]) if (r_cfg and r_cfg["kronos_failure_policy"]) else None
+            return self.start_session(
+                mkt,
+                strategy=strat,
+                timeframe=tf,
+                symbols=saved_syms or None,
+                kronos_enabled=k_en,
+                kronos_failure_policy=k_pol,
+                analyze_immediately=analyze_immediately,
+                execute_immediately=execute_immediately,
+            )
         now = _utc_now(self._clock)
+        prior_run_id = ""
+        active_run_id = ""
+        strat_for_k = "manual_only"
+        k_req_resume = False
+        k_pol_resume = "FAIL_CLOSED_NO_ENTRY"
+        sess_for_resume: dict[str, Any] | None = None
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT session_state FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
+            row = conn.execute("SELECT * FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
             curr_state = str(row["session_state"]) if row else "STOPPED"
+            prior_run_id = str(row["session_run_id"] or "") if row else ""
+            strat_for_k = str(row["strategy"] or "manual_only") if row else "manual_only"
+            saved_syms_resume = json.loads(row["symbols_json"] or "[]") if row else []
+            k_req_resume = bool(row["kronos_enabled"]) if (row and row["kronos_enabled"] is not None) else self._resolve_kronos_requested(mkt, strat_for_k, None)
+            k_pol_resume = str(row["kronos_failure_policy"] or "FAIL_CLOSED_NO_ENTRY") if row else "FAIL_CLOSED_NO_ENTRY"
             if act == "pause":
                 next_state = "PAUSED"
                 next_reason = reason or "Paused by operator"
+                active_run_id = prior_run_id
             elif act == "resume":
                 if curr_state == "EMERGENCY_STOPPED":
                     raise RuntimeError("Reset Emergency Stop explicitly before resuming")
-                sess = self._market_session_info(mkt, now)
-                next_state = "RUNNING" if sess["is_open"] else "MARKET_CLOSED_WAITING"
-                next_reason = None if sess["is_open"] else f"{mkt} session is {sess['state']}"
+                sess_for_resume = self._market_session_info(mkt, now)
+                next_state = "RUNNING" if sess_for_resume["is_open"] else "MARKET_CLOSED_WAITING"
+                next_reason = None if sess_for_resume["is_open"] else f"{mkt} session is {sess_for_resume['state']}"
+                active_run_id = prior_run_id or f"run-{mkt.lower()}-{uuid.uuid4().hex[:12]}"
             elif act == "stop":
                 next_state = "STOPPED"
                 next_reason = reason or "OPERATOR_STOP"
@@ -1058,18 +1326,464 @@ class LiveMarketPaperEngine:
                     "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, session_run_id = NULL, updated_at = ? WHERE market = ?",
                     (next_state, next_reason, now.isoformat(), mkt),
                 )
+            elif act == "resume" and not saved_syms_resume:
+                eff_syms_resume = self._effective_symbols_for_market(mkt)
+                conn.execute(
+                    "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, session_run_id = ?, symbols_json = ?, updated_at = ? WHERE market = ?",
+                    (next_state, next_reason, active_run_id or None, json.dumps(eff_syms_resume), now.isoformat(), mkt),
+                )
             else:
                 conn.execute(
-                    "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, updated_at = ? WHERE market = ?",
-                    (next_state, next_reason, now.isoformat(), mkt),
+                    "UPDATE live_paper_accounts SET session_state = ?, state_reason = ?, session_run_id = ?, updated_at = ? WHERE market = ?",
+                    (next_state, next_reason, active_run_id or None, now.isoformat(), mkt),
                 )
             self._append_audit_conn(
                 conn,
                 mkt,
                 f"PAPER_SESSION_{next_state}",
-                {"previous_state": curr_state, "reason": next_reason},
+                {
+                    "session_run_id": active_run_id or prior_run_id,
+                    "strategy": strat_for_k,
+                    "previous_state": curr_state,
+                    "reason": next_reason,
+                },
             )
-        return self.market_snapshot(mkt)
+        if self.kronos_provider is not None:
+            if act == "stop" and hasattr(self.kronos_provider, "stop_for_paper_session"):
+                self.kronos_provider.stop_for_paper_session(
+                    self._session_key(mkt),
+                    session_id=prior_run_id,
+                    reason=next_reason or "operator stop",
+                )
+            elif act == "pause" and hasattr(self.kronos_provider, "pause_for_paper_session"):
+                self.kronos_provider.pause_for_paper_session(
+                    self._session_key(mkt),
+                    session_id=prior_run_id,
+                    reason=next_reason or "operator pause",
+                )
+            elif act == "resume" and hasattr(self.kronos_provider, "start_for_paper_session"):
+                self.kronos_provider.start_for_paper_session(
+                    self._session_key(mkt),
+                    session_id=active_run_id,
+                    market=mkt,
+                    strategy=strat_for_k,
+                    kronos_requested=k_req_resume,
+                    failure_policy=k_pol_resume,
+                )
+        initial_analysis: dict[str, Any] | None = None
+        if act == "resume" and analyze_immediately:
+            initial_analysis = self.analyze_market(mkt, trigger="session_resume")
+        has_succeeded_resume = initial_analysis is None or int((initial_analysis.get("counts") or {}).get("succeeded") or 0) > 0
+        if (
+            act == "resume"
+            and execute_immediately
+            and sess_for_resume is not None
+            and sess_for_resume["is_open"]
+            and strat_for_k.lower() != "manual_only"
+            and has_succeeded_resume
+        ):
+            tick_out = self.sync_live_tick(mkt)
+            if initial_analysis is not None:
+                tick_out["initial_analysis"] = tick_out.get("last_analysis") or initial_analysis
+            return tick_out
+        snap = self.market_snapshot(mkt)
+        if initial_analysis is not None:
+            snap["initial_analysis"] = initial_analysis
+        return snap
+
+    def _normalize_raw_bars(self, sym: str, raw_bars_list: Any) -> tuple[list[Candle], str | None]:
+        """Convert Candle or dict list into validated monotonic Candle objects."""
+        if not raw_bars_list:
+            return [], "EMPTY_BARS"
+        bars: list[Candle] = []
+        for raw_b in raw_bars_list:
+            if isinstance(raw_b, Candle):
+                bars.append(raw_b)
+            elif isinstance(raw_b, dict):
+                try:
+                    c_px = float(raw_b["close"])
+                    bars.append(
+                        Candle(
+                            symbol=str(raw_b.get("symbol") or sym).replace("|", "_"),
+                            timestamp=parse_timestamp(str(raw_b["timestamp"])),
+                            open=float(raw_b.get("open", c_px)),
+                            high=float(raw_b.get("high", c_px)),
+                            low=float(raw_b.get("low", c_px)),
+                            close=c_px,
+                            volume=float(raw_b.get("volume", 0.0)),
+                        )
+                    )
+                except (KeyError, ValueError, TypeError):
+                    return [], "MALFORMED_BAR_OHLCV"
+            else:
+                return [], "MALFORMED_BAR_OHLCV"
+        prev_bts: datetime | None = None
+        for b in bars:
+            if (
+                not all(math.isfinite(v) and v > 0 for v in (b.open, b.high, b.low, b.close))
+                or not math.isfinite(b.volume)
+                or b.volume < 0
+                or b.low > min(b.open, b.close)
+                or b.high < max(b.open, b.close)
+            ):
+                return [], "MALFORMED_BAR_OHLCV"
+            if prev_bts is not None and b.timestamp <= prev_bts:
+                return [], "OUT_OF_ORDER_OR_DUPLICATE_BAR"
+            prev_bts = b.timestamp
+        return bars, None
+
+    def analyze_market(
+        self,
+        market: str,
+        *,
+        trigger: str = "manual",
+        symbols: list[str] | None = None,
+        quotes_by_symbol: dict[str, dict[str, Any]] | None = None,
+        bars_by_symbol: dict[str, list[Candle]] | None = None,
+    ) -> dict[str, Any]:
+        """Read-only per-symbol analysis across all enabled strategies for a market.
+
+        Works during both OPEN and CLOSED exchange sessions when historical bar data
+        is available, clearly reporting succeeded, missing-data, stale-data, and failed
+        symbols while placing ZERO simulated or broker orders.
+        """
+        mkt = self._validate_market(market)
+        t0 = time.perf_counter()
+        with self._market_cycle_locks[mkt]:
+            now = _utc_now(self._clock)
+            sess = self._market_session_info(mkt, now)
+            with self._lock, self._connect() as conn:
+                acct = conn.execute("SELECT * FROM live_paper_accounts WHERE market = ?", (mkt,)).fetchone()
+                curr_state = str(acct["session_state"]) if acct else "STOPPED"
+                strategy = str(acct["strategy"] or "manual_only") if acct else "manual_only"
+                timeframe = str(acct["timeframe"] or "5m") if acct else "5m"
+                active_run_id = str(acct["session_run_id"] or "") if (acct and "session_run_id" in acct.keys()) else ""
+                pos_syms = [
+                    str(r["symbol"])
+                    for r in conn.execute("SELECT symbol FROM live_paper_positions WHERE market = ?", (mkt,))
+                ]
+
+            eff_syms = self._effective_symbols_for_market(mkt, symbols)
+            for ps in pos_syms:
+                if ps not in eff_syms and not any(ps == x.split("|")[-1] for x in eff_syms):
+                    eff_syms.append(ps)
+
+            bar_fetcher = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
+            quote_fetcher = self.nse_quote_provider if mkt == "NSE" else self.nasdaq_quote_provider
+
+            def _probe_symbol(raw_sym: str) -> dict[str, Any]:
+                try:
+                    inst = self._resolve_instrument(mkt, raw_sym)
+                except Exception as exc:
+                    return {
+                        "symbol": str(raw_sym).upper(),
+                        "instrument_key": str(raw_sym),
+                        "status": "FAILED",
+                        "code": "INSTRUMENT_RESOLUTION_ERROR",
+                        "reason": str(redact_sensitive_data(str(exc)))[:200],
+                        "bars": [],
+                        "quote": None,
+                    }
+                canon = str(inst.get("trading_symbol") or inst.get("symbol") or raw_sym).upper()
+                ikey = str(inst.get("instrument_key") or canon)
+                q_obj: dict[str, Any] | None = None
+                q_status = "UNAVAILABLE"
+                q_reason = ""
+                q_age: float | None = None
+                if quotes_by_symbol and (canon in quotes_by_symbol or raw_sym in quotes_by_symbol or ikey in quotes_by_symbol):
+                    q_obj = quotes_by_symbol.get(canon) or quotes_by_symbol.get(raw_sym) or quotes_by_symbol.get(ikey)
+                elif quote_fetcher is not None:
+                    try:
+                        q_obj = self._fetch_live_quote(mkt, inst)
+                    except Exception as exc:
+                        ec, ed = self._classify_fetch_exception(mkt, exc)
+                        q_status = ec
+                        q_reason = str(redact_sensitive_data(ed))[:180]
+                if q_obj is not None:
+                    q_val = self._validate_quote_for_paper(
+                        mkt, inst, q_obj, now, sess_info=sess, record_monotonic_watermark=False
+                    )
+                    q_age = q_val.get("quote_age_seconds")
+                    if q_val["valid_for_fill"]:
+                        q_status = "FRESH"
+                    elif not sess["is_open"] and q_val.get("reason_code") in {"MARKET_CLOSED", "STALE_QUOTE"}:
+                        q_status = "CLOSED_LAST_QUOTE"
+                        q_reason = str(q_val.get("reason_detail") or "")
+                    else:
+                        q_status = str(q_val.get("reason_code") or "INVALID_QUOTE")
+                        q_reason = str(q_val.get("reason_detail") or "")
+
+                raw_bars: Any = None
+                b_err_code: str | None = None
+                b_err_detail: str = ""
+                if bars_by_symbol is not None and (canon in bars_by_symbol or raw_sym in bars_by_symbol or ikey in bars_by_symbol):
+                    raw_bars = (
+                        bars_by_symbol.get(canon)
+                        if canon in bars_by_symbol
+                        else (bars_by_symbol.get(raw_sym) if raw_sym in bars_by_symbol else bars_by_symbol.get(ikey))
+                    )
+                elif bar_fetcher is not None:
+                    try:
+                        raw_bars = bar_fetcher(raw_sym, timeframe)
+                    except Exception as exc:
+                        ec, ed = self._classify_fetch_exception(mkt, exc)
+                        b_err_code = ec
+                        b_err_detail = str(redact_sensitive_data(ed))[:200]
+                else:
+                    b_err_code = "NO_BARS_PROVIDER"
+                    b_err_detail = f"Historical bar provider is not configured for {mkt}"
+
+                if b_err_code is not None:
+                    is_missing_cred = b_err_code in {"MISSING_CREDENTIALS", "NO_BARS_PROVIDER"} or "not configured" in b_err_detail.lower()
+                    return {
+                        "symbol": canon,
+                        "instrument_key": ikey,
+                        "status": "MISSING_DATA" if is_missing_cred else "FAILED",
+                        "code": b_err_code,
+                        "reason": b_err_detail,
+                        "quote_status": q_status,
+                        "quote_age_seconds": q_age,
+                        "quote_note": q_reason,
+                        "bars": [],
+                        "quote": q_obj,
+                    }
+
+                norm_bars, norm_err = self._normalize_raw_bars(canon, raw_bars)
+                if norm_err == "EMPTY_BARS":
+                    return {
+                        "symbol": canon,
+                        "instrument_key": ikey,
+                        "status": "MISSING_DATA",
+                        "code": "EMPTY_BARS",
+                        "reason": f"Provider returned 0 completed {timeframe} bars for {mkt}:{canon}",
+                        "quote_status": q_status,
+                        "quote_age_seconds": q_age,
+                        "quote_note": q_reason,
+                        "bars": [],
+                        "quote": q_obj,
+                    }
+                if norm_err is not None:
+                    return {
+                        "symbol": canon,
+                        "instrument_key": ikey,
+                        "status": "FAILED",
+                        "code": norm_err,
+                        "reason": f"Invalid OHLCV bar payload ({norm_err}) for {mkt}:{canon}",
+                        "quote_status": q_status,
+                        "quote_age_seconds": q_age,
+                        "quote_note": q_reason,
+                        "bars": [],
+                        "quote": q_obj,
+                    }
+                if len(norm_bars) < 21:
+                    return {
+                        "symbol": canon,
+                        "instrument_key": ikey,
+                        "status": "MISSING_DATA",
+                        "code": "INSUFFICIENT_BARS",
+                        "reason": f"Only {len(norm_bars)} completed {timeframe} bar(s) available (need >= 21)",
+                        "bar_count": len(norm_bars),
+                        "latest_bar_timestamp": norm_bars[-1].timestamp.isoformat() if norm_bars else None,
+                        "quote_status": q_status,
+                        "quote_age_seconds": q_age,
+                        "quote_note": q_reason,
+                        "bars": norm_bars,
+                        "quote": q_obj,
+                    }
+
+                sym_status = "SUCCEEDED"
+                if sess["is_open"] and q_status in {"STALE_QUOTE", "DELAYED_FEED_BLOCKED", "OUT_OF_ORDER_QUOTE"}:
+                    sym_status = "STALE_DATA"
+
+                return {
+                    "symbol": canon,
+                    "instrument_key": ikey,
+                    "status": sym_status,
+                    "code": "OK_OPEN_SESSION" if (sess["is_open"] and sym_status == "SUCCEEDED") else ("OK_CLOSED_SESSION_ANALYZED" if not sess["is_open"] else q_status),
+                    "reason": (
+                        f"Analyzed {len(norm_bars)} completed {timeframe} bars"
+                        + ("" if sess["is_open"] else f" ({mkt} {sess['state']} — simulated orders gated until open session)")
+                        + (f"; quote {q_reason}" if (sym_status == "STALE_DATA" and q_reason) else "")
+                    ),
+                    "bar_count": len(norm_bars),
+                    "latest_bar_timestamp": norm_bars[-1].timestamp.isoformat(),
+                    "last_close": round(float(norm_bars[-1].close), 4),
+                    "quote_status": q_status,
+                    "quote_age_seconds": q_age,
+                    "quote_note": q_reason,
+                    "bars": norm_bars,
+                    "quote": q_obj,
+                }
+
+            probed_rows: list[dict[str, Any]] = []
+            if len(eff_syms) > 1 and bars_by_symbol is None and quotes_by_symbol is None:
+                max_w = min(4, len(eff_syms))
+                with ThreadPoolExecutor(max_workers=max_w) as pool:
+                    probed_rows = list(pool.map(_probe_symbol, eff_syms))
+            else:
+                probed_rows = [_probe_symbol(s) for s in eff_syms]
+
+            valid_bars_map: dict[str, list[Candle]] = {
+                r["symbol"]: r["bars"] for r in probed_rows if len(r.get("bars") or []) >= 21
+            }
+            valid_quotes_map: dict[str, dict[str, Any]] = {
+                r["symbol"]: r["quote"] for r in probed_rows if isinstance(r.get("quote"), dict)
+            }
+
+            ens_by_sym: dict[str, dict[str, Any]] = {}
+            enabled_variants_count = 0
+            if self.ensemble_service is not None and valid_bars_map:
+                try:
+                    ens_preview = self.ensemble_service.evaluate_watchlist_cycle(
+                        mkt,
+                        symbols=sorted(valid_bars_map.keys()),
+                        timeframe=timeframe,
+                        bars_override=valid_bars_map,
+                        quotes_override=valid_quotes_map,
+                        session_open_override=bool(sess["is_open"]),
+                        execute_in_paper=False,
+                        persist_decisions=False,
+                        invoke_kronos=False,
+                        now_utc=now,
+                    )
+                    enabled_variants_count = int(ens_preview.get("enabled_variants_count") or 0)
+                    for d_item in ens_preview.get("decisions") or []:
+                        ens_by_sym[str(d_item.get("symbol") or "").upper()] = d_item
+                except Exception as exc:
+                    _ = exc
+            elif self.ensemble_service is not None:
+                try:
+                    enabled_variants_count = len(self.ensemble_service.registry.list_variants(enabled_only=True))
+                except Exception as exc:
+                    _ = exc
+
+            succeeded_syms: list[str] = []
+            missing_syms: list[str] = []
+            stale_syms: list[str] = []
+            failed_syms: list[str] = []
+            symbol_reports: list[dict[str, Any]] = []
+
+            for r in probed_rows:
+                sym = r["symbol"]
+                st = r["status"]
+                if st == "SUCCEEDED":
+                    succeeded_syms.append(sym)
+                elif st == "MISSING_DATA":
+                    missing_syms.append(sym)
+                elif st == "STALE_DATA":
+                    stale_syms.append(sym)
+                else:
+                    failed_syms.append(sym)
+
+                ens_dec = ens_by_sym.get(sym)
+                rule_sig = None
+                if r.get("bars") and len(r["bars"]) >= 21 and strategy.lower() not in {"manual_only", "parallel_ensemble"}:
+                    rule_sig = evaluate_bar_strategy_signal(strategy, r["bars"])
+
+                agg = (ens_dec or {}).get("aggregation") or {}
+                cal = (ens_dec or {}).get("calibration") or {}
+                symbol_reports.append(
+                    {
+                        "symbol": sym,
+                        "instrument_key": r["instrument_key"],
+                        "status": st,
+                        "code": r["code"],
+                        "reason": r["reason"],
+                        "bar_count": r.get("bar_count", 0),
+                        "latest_bar_timestamp": r.get("latest_bar_timestamp"),
+                        "last_close": r.get("last_close"),
+                        "quote_status": r.get("quote_status", "UNAVAILABLE"),
+                        "quote_age_seconds": r.get("quote_age_seconds"),
+                        "trade_eligible_now": bool(
+                            sess["is_open"]
+                            and curr_state == "RUNNING"
+                            and strategy.lower() != "manual_only"
+                            and st == "SUCCEEDED"
+                        ),
+                        "ensemble_raw_intent": (ens_dec or {}).get("raw_intent"),
+                        "ensemble_final_action": (ens_dec or {}).get("final_action"),
+                        "ensemble_consensus": agg.get("post_kronos_consensus"),
+                        "active_weighted_variants": agg.get("active_weighted_variants"),
+                        "calibrated_confidence": cal.get("calibrated_confidence"),
+                        "no_trade_reasons": (ens_dec or {}).get("no_trade_reasons") or [],
+                        "rule_signal": (rule_sig or {}).get("action") if rule_sig else None,
+                    }
+                )
+
+            wall_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            report = {
+                "market": mkt,
+                "currency": self.configs[mkt].currency,
+                "trigger": trigger,
+                "analyzed_at": now.isoformat(),
+                "wall_ms": wall_ms,
+                "session_run_id": active_run_id or None,
+                "session_state": curr_state,
+                "exchange_session": sess,
+                "strategy": strategy,
+                "timeframe": timeframe,
+                "enabled_strategy_variants": enabled_variants_count,
+                "trade_execution_permitted_now": bool(
+                    sess["is_open"] and curr_state == "RUNNING" and strategy.lower() != "manual_only"
+                ),
+                "counts": {
+                    "selected_symbols": len(eff_syms),
+                    "succeeded": len(succeeded_syms),
+                    "missing_data": len(missing_syms),
+                    "stale_data": len(stale_syms),
+                    "failed": len(failed_syms),
+                },
+                "succeeded_symbols": succeeded_syms,
+                "missing_data_symbols": missing_syms,
+                "stale_data_symbols": stale_syms,
+                "failed_symbols": failed_syms,
+                "symbols": symbol_reports,
+                "simulated_only": True,
+                "broker_order_api_calls": 0,
+            }
+
+            with self._lock, self._connect() as conn:
+                conn.execute(
+                    "UPDATE live_paper_accounts SET last_analysis_json = ?, updated_at = ? WHERE market = ?",
+                    (json.dumps(report, sort_keys=True), now.isoformat(), mkt),
+                )
+                self._append_audit_conn(
+                    conn,
+                    mkt,
+                    "PAPER_MARKET_ANALYSIS_REPORT",
+                    {
+                        "session_run_id": active_run_id,
+                        "trigger": trigger,
+                        "strategy": strategy,
+                        "timeframe": timeframe,
+                        "exchange_session_state": sess.get("state"),
+                        "exchange_open": bool(sess.get("is_open")),
+                        "counts": report["counts"],
+                        "succeeded_symbols": succeeded_syms,
+                        "missing_data_symbols": missing_syms,
+                        "stale_data_symbols": stale_syms,
+                        "failed_symbols": failed_syms,
+                        "wall_ms": wall_ms,
+                    },
+                )
+                for sr in symbol_reports:
+                    if sr["status"] in {"MISSING_DATA", "STALE_DATA", "FAILED"}:
+                        self._append_audit_conn(
+                            conn,
+                            mkt,
+                            "PAPER_SYMBOL_SKIPPED",
+                            {
+                                "session_run_id": active_run_id,
+                                "symbol": sr["symbol"],
+                                "instrument_key": sr["instrument_key"],
+                                "strategy": strategy,
+                                "timeframe": timeframe,
+                                "status": sr["status"],
+                                "code": sr["code"],
+                                "reason": sr["reason"],
+                            },
+                        )
+            return report
 
     def reset_paper_account(self, market: str, *, confirm: bool = False) -> dict[str, Any]:
         if not confirm:
@@ -1094,6 +1808,8 @@ class LiveMarketPaperEngine:
                 (cfg.starting_cash, cfg.starting_cash, now.date().isoformat(), cfg.starting_cash, now.isoformat(), mkt),
             )
             self._append_audit_conn(conn, mkt, "PAPER_ACCOUNT_RESET", {"starting_cash": cfg.starting_cash})
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "stop_for_paper_session"):
+            self.kronos_provider.stop_for_paper_session(self._session_key(mkt), reason="paper account reset")
         return self.market_snapshot(mkt)
 
     # -- Order Preview & Simulated Execution -----------------------------------
@@ -1385,6 +2101,8 @@ class LiveMarketPaperEngine:
         take_profit: float | None = None,
         quote_override: dict[str, Any] | None = None,
         allow_off_hours_working: bool = False,
+        decision_id: str | None = None,
+        strategy_source: str | None = None,
     ) -> dict[str, Any]:
         mkt = self._validate_market(market)
         cid = (client_order_id or f"lmp-{mkt.lower()}-{uuid.uuid4().hex[:14]}").strip()
@@ -1403,6 +2121,12 @@ class LiveMarketPaperEngine:
                     "execution_mode": "LIVE_MARKET_PAPER",
                     "order": dict(existing),
                 }
+            acct_row = conn.execute(
+                "SELECT session_run_id, strategy FROM live_paper_accounts WHERE market = ?",
+                (mkt,),
+            ).fetchone()
+            active_run_id = str(acct_row["session_run_id"] or "") if acct_row else ""
+            active_strat = strategy_source or (str(acct_row["strategy"] or "") if acct_row else "")
 
         preview = self.preview_order(
             market=mkt,
@@ -1424,6 +2148,20 @@ class LiveMarketPaperEngine:
         order_id = f"ord-{uuid.uuid4().hex[:12]}"
 
         if not preview["ok"]:
+            risk_gate_codes = {
+                "max_order_value",
+                "max_symbol_exposure",
+                "max_total_exposure",
+                "max_open_positions",
+                "max_daily_loss",
+                "max_daily_orders",
+                "emergency_stop",
+                "cash_balance",
+            }
+            violated_risk_checks = [
+                c for c in (preview.get("checks") or [])
+                if not c.get("ok") and str(c.get("check") or "").lower() in risk_gate_codes
+            ]
             with self._lock, self._connect() as conn:
                 self._append_audit_conn(
                     conn,
@@ -1431,10 +2169,33 @@ class LiveMarketPaperEngine:
                     "PAPER_ORDER_REJECTED",
                     {
                         "client_order_id": cid,
+                        "order_id": order_id,
+                        "decision_id": decision_id or "",
+                        "session_run_id": active_run_id,
+                        "strategy": active_strat,
                         "symbol": preview.get("symbol", symbol),
+                        "side": preview.get("side", side),
+                        "qty": qty,
                         "reasons": preview["rejection_reasons"],
                     },
                 )
+                if violated_risk_checks:
+                    self._append_audit_conn(
+                        conn,
+                        mkt,
+                        "PAPER_RISK_LIMIT_EVENT",
+                        {
+                            "client_order_id": cid,
+                            "decision_id": decision_id or "",
+                            "session_run_id": active_run_id,
+                            "strategy": active_strat,
+                            "symbol": preview.get("symbol", symbol),
+                            "side": preview.get("side", side),
+                            "qty": qty,
+                            "violated_limits": [c.get("detail") for c in violated_risk_checks],
+                            "checks": violated_risk_checks,
+                        },
+                    )
             return {
                 "ok": False,
                 "duplicate": False,
@@ -1505,6 +2266,9 @@ class LiveMarketPaperEngine:
                 {
                     "client_order_id": cid,
                     "order_id": order_id,
+                    "decision_id": decision_id or "",
+                    "session_run_id": active_run_id,
+                    "strategy": active_strat,
                     "symbol": preview["symbol"],
                     "instrument_key": preview["instrument_key"],
                     "side": preview["side"],
@@ -1513,7 +2277,15 @@ class LiveMarketPaperEngine:
                 },
             )
             if quote_data is not None and bool(quote_fill_val.get("valid_for_fill")):
-                self._try_fill_order_conn(conn, cid, inst, quote_data, now)
+                self._try_fill_order_conn(
+                    conn,
+                    cid,
+                    inst,
+                    quote_data,
+                    now,
+                    decision_id=decision_id,
+                    strategy_source=active_strat,
+                )
             elif preview["time_in_force"] == "IOC":
                 conn.execute(
                     "UPDATE live_paper_orders SET status = 'EXPIRED', updated_at = ? WHERE client_order_id = ?",
@@ -1541,6 +2313,9 @@ class LiveMarketPaperEngine:
         inst: dict[str, Any],
         quote: dict[str, Any],
         now: datetime,
+        *,
+        decision_id: str | None = None,
+        strategy_source: str | None = None,
     ) -> dict[str, Any] | None:
         order = conn.execute(
             "SELECT * FROM live_paper_orders WHERE client_order_id = ?", (client_order_id,)
@@ -1748,6 +2523,22 @@ class LiveMarketPaperEngine:
         fill_id = f"fill-{uuid.uuid4().hex[:12]}"
         slip_amt = round(abs(fill_px - last) * fill_qty, 4)
         active_run_id = acct["session_run_id"] if "session_run_id" in acct.keys() else None
+        active_strat = strategy_source or (str(acct["strategy"] or "") if "strategy" in acct.keys() else "")
+        prev_pos_qty = float(pos["qty"]) if pos is not None else 0.0
+        cur_pos_row = conn.execute(
+            "SELECT qty, avg_entry_price FROM live_paper_positions WHERE market = ? AND symbol = ?",
+            (mkt, sym),
+        ).fetchone()
+        new_pos_qty = float(cur_pos_row["qty"]) if cur_pos_row is not None else 0.0
+        pos_change_kind = (
+            "OPENED"
+            if prev_pos_qty <= 1e-8 and new_pos_qty > 1e-8
+            else "CLOSED"
+            if prev_pos_qty > 1e-8 and new_pos_qty <= 1e-8
+            else "INCREASED"
+            if new_pos_qty > prev_pos_qty
+            else "REDUCED"
+        )
         conn.execute(
             """
             INSERT INTO live_paper_fills
@@ -1786,6 +2577,9 @@ class LiveMarketPaperEngine:
                 "fill_id": fill_id,
                 "fill_type": "SIMULATED",
                 "client_order_id": client_order_id,
+                "order_id": str(order["order_id"]),
+                "decision_id": decision_id or "",
+                "strategy": active_strat,
                 "symbol": sym,
                 "instrument_key": str(order["instrument_key"]),
                 "session_run_id": active_run_id,
@@ -1797,6 +2591,24 @@ class LiveMarketPaperEngine:
                 "status": new_status,
                 "quote_source": quote.get("source"),
                 "quote_timestamp": quote["timestamp"],
+            },
+        )
+        self._append_audit_conn(
+            conn,
+            mkt,
+            "PAPER_POSITION_CHANGED",
+            {
+                "change_type": pos_change_kind,
+                "symbol": sym,
+                "instrument_key": str(order["instrument_key"]),
+                "client_order_id": client_order_id,
+                "decision_id": decision_id or "",
+                "session_run_id": active_run_id,
+                "strategy": active_strat,
+                "prev_qty": round(prev_pos_qty, 6),
+                "new_qty": round(new_pos_qty, 6),
+                "avg_entry_price": round(float(cur_pos_row["avg_entry_price"]), 4) if cur_pos_row is not None else 0.0,
+                "realized_pnl_delta": realized_delta,
             },
         )
         return {"fill_id": fill_id, "fill_qty": fill_qty, "fill_price": fill_px, "status": new_status}
@@ -1958,7 +2770,40 @@ class LiveMarketPaperEngine:
     ) -> dict[str, Any]:
         """Mark open positions to live quotes, execute working orders/SL/TP, and evaluate strategy."""
         mkt = self._validate_market(market)
-        cfg = self.configs[mkt]
+        if self.execution_mode_provider is not None:
+            try:
+                routing_mode = str(self.execution_mode_provider(mkt) or "PAPER").upper()
+            except (ValueError, RuntimeError):
+                routing_mode = "PAPER"
+            if routing_mode == "LIVE":
+                return {
+                    "market": mkt,
+                    "currency": self.configs[mkt].currency,
+                    "session_state": self.market_snapshot(mkt).get("session_state"),
+                    "execution_mode": "LIVE_MARKET_LIVE",
+                    "paper_simulator_skipped": True,
+                    "skip_reason": (
+                        "This market is routed LIVE by app.markets.live_execution; the local "
+                        "paper simulator does not execute here (mode separation)."
+                    ),
+                    "simulated": False,
+                    "real_order_api_used": False,
+                    "broker_order_api_calls": 0,
+                }
+        with self._market_cycle_locks[mkt]:
+            return self._sync_live_tick_locked(
+                mkt,
+                quotes_by_symbol=quotes_by_symbol,
+                bars_by_symbol=bars_by_symbol,
+            )
+
+    def _sync_live_tick_locked(
+        self,
+        mkt: str,
+        *,
+        quotes_by_symbol: dict[str, dict[str, Any]] | None = None,
+        bars_by_symbol: dict[str, list[Candle]] | None = None,
+    ) -> dict[str, Any]:
         now = _utc_now(self._clock)
         sess = self._market_session_info(mkt, now)
 
@@ -1967,6 +2812,9 @@ class LiveMarketPaperEngine:
             curr_state = str(acct["session_state"])
             strategy = str(acct["strategy"])
             timeframe = str(acct["timeframe"])
+            active_run_id = str(acct["session_run_id"] or "") if "session_run_id" in acct.keys() else ""
+            acct_k_en = acct["kronos_enabled"] if "kronos_enabled" in acct.keys() else None
+            acct_k_pol = str(acct["kronos_failure_policy"] or "") if "kronos_failure_policy" in acct.keys() else ""
             watched_syms = json.loads(acct["symbols_json"])
             pos_rows = [dict(r) for r in conn.execute("SELECT * FROM live_paper_positions WHERE market = ?", (mkt,))]
             open_orders = [
@@ -1977,16 +2825,37 @@ class LiveMarketPaperEngine:
                 )
             ]
 
+        if not watched_syms and quotes_by_symbol is None and bars_by_symbol is None:
+            watched_syms = self._effective_symbols_for_market(mkt)
+
         if curr_state == "EMERGENCY_STOPPED":
             return self.market_snapshot(mkt)
 
-        if not sess["is_open"] and curr_state == "RUNNING":
-            with self._lock, self._connect() as conn:
-                conn.execute(
-                    "UPDATE live_paper_accounts SET session_state = 'MARKET_CLOSED_WAITING', state_reason = ?, updated_at = ? WHERE market = ?",
-                    (f"{mkt} regular session closed ({sess['state']}); waiting for next open.", now.isoformat(), mkt),
+        bar_fetcher = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
+
+        if not sess["is_open"]:
+            if curr_state == "RUNNING":
+                with self._lock, self._connect() as conn:
+                    conn.execute(
+                        "UPDATE live_paper_accounts SET session_state = 'MARKET_CLOSED_WAITING', state_reason = ?, updated_at = ? WHERE market = ?",
+                        (f"{mkt} regular session closed ({sess['state']}); waiting for next open.", now.isoformat(), mkt),
+                    )
+                    self._append_audit_conn(conn, mkt, "PAPER_SESSION_MARKET_CLOSED", {"session": sess["state"]})
+                curr_state = "MARKET_CLOSED_WAITING"
+            if (
+                curr_state == "MARKET_CLOSED_WAITING"
+                and strategy != "manual_only"
+                and (bars_by_symbol is not None or bar_fetcher is not None)
+            ):
+                closed_analysis = self.analyze_market(
+                    mkt,
+                    trigger="closed_session_cycle",
+                    symbols=list(bars_by_symbol.keys()) if bars_by_symbol else (watched_syms or None),
+                    quotes_by_symbol=quotes_by_symbol,
+                    bars_by_symbol=bars_by_symbol,
                 )
-                self._append_audit_conn(conn, mkt, "PAPER_SESSION_MARKET_CLOSED", {"session": sess["state"]})
+                snap_closed = self.market_snapshot(mkt)
+                return {**snap_closed, "triggered_orders": [], "closed_market_analysis": closed_analysis}
             return self.market_snapshot(mkt)
 
         active_symbols = sorted(
@@ -2004,14 +2873,17 @@ class LiveMarketPaperEngine:
 
         fetched_quotes: dict[str, dict[str, Any]] = {}
         stale_reasons: dict[str, str] = {}
+        quote_errors_by_symbol: dict[str, str] = {}
         disconnect_error: str | None = None
 
         for sym in active_symbols:
             try:
                 lookup_ref = ikey_by_sym.get(sym, sym) if mkt == "NSE" else sym
                 inst = self._resolve_instrument(mkt, lookup_ref)
+                canon_sym = str(inst.get("trading_symbol") or inst.get("symbol") or sym).upper()
                 q = (
                     (quotes_by_symbol or {}).get(sym)
+                    or (quotes_by_symbol or {}).get(canon_sym)
                     or (quotes_by_symbol or {}).get(str(inst.get("instrument_key") or ""))
                     or self._fetch_live_quote(mkt, inst)
                 )
@@ -2025,13 +2897,13 @@ class LiveMarketPaperEngine:
                 )
                 if q_val["valid_for_fill"]:
                     fetched_quotes[sym] = q
-                    if mkt == "NSE" and inst.get("trading_symbol"):
-                        fetched_quotes.setdefault(str(inst["trading_symbol"]), q)
+                    fetched_quotes.setdefault(canon_sym, q)
                 elif q_val["reason_code"] in {"STALE_QUOTE", "OUT_OF_ORDER_QUOTE", "DELAYED_FEED_BLOCKED", "MALFORMED_QUOTE"}:
-                    stale_reasons[sym] = f"[{q_val['reason_code']}] {q_val['reason_detail']}"
+                    stale_reasons[canon_sym] = f"[{q_val['reason_code']}] {q_val['reason_detail']}"
             except Exception as exc:
                 err_code, err_detail = self._classify_fetch_exception(mkt, exc)
                 disconnect_error = f"[{err_code}] {err_detail}"
+                quote_errors_by_symbol[sym.split("|")[-1].upper()] = disconnect_error
 
         if curr_state in {"STALE_FEED_PAUSED", "DISCONNECTED_PAUSED", "MARKET_CLOSED_WAITING"}:
             if sess["is_open"] and (not active_symbols or (fetched_quotes and not stale_reasons and not disconnect_error)):
@@ -2104,34 +2976,77 @@ class LiveMarketPaperEngine:
 
         # Evaluate completed-bar strategy decisions if session is RUNNING and strategy != manual_only
         resolved_bars_map = bars_by_symbol
+        bar_errors_by_symbol: dict[str, str] = {}
+        missing_bar_syms: list[str] = []
+        target_strategy_syms = list(bars_by_symbol.keys()) if bars_by_symbol is not None else (watched_syms or sorted(fetched_quotes.keys()))
+
         if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map is None:
-            bar_fetcher = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
             if bar_fetcher is not None:
                 auto_bars: dict[str, list[Candle]] = {}
-                for sym in watched_syms or sorted(fetched_quotes.keys()):
+                for sym in target_strategy_syms:
+                    canon_b = sym.split("|")[-1].upper()
                     try:
                         fetched_bars = bar_fetcher(sym, timeframe)
                         if fetched_bars:
                             auto_bars[sym] = fetched_bars
+                        else:
+                            missing_bar_syms.append(canon_b)
+                            bar_errors_by_symbol[canon_b] = f"Empty {timeframe} bar history returned by provider"
                     except Exception as exc:
-                        _ = exc
+                        ec, ed = self._classify_fetch_exception(mkt, exc)
+                        bar_errors_by_symbol[canon_b] = f"[{ec}] {redact_sensitive_data(ed)}"
                 resolved_bars_map = auto_bars
+            else:
+                for sym in target_strategy_syms:
+                    canon_b = sym.split("|")[-1].upper()
+                    missing_bar_syms.append(canon_b)
+                    bar_errors_by_symbol[canon_b] = f"No historical bar provider configured for {mkt}"
 
-        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map:
+        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only":
+            skipped_to_log: list[tuple[str, str, str]] = []
+            for s_err, msg_err in bar_errors_by_symbol.items():
+                st_kind = "MISSING_DATA" if s_err in missing_bar_syms else "FAILED"
+                skipped_to_log.append((s_err, st_kind, msg_err))
+            for s_qerr, msg_qerr in quote_errors_by_symbol.items():
+                if s_qerr not in bar_errors_by_symbol:
+                    skipped_to_log.append((s_qerr, "FAILED", f"Quote fetch failed: {msg_qerr}"))
+            for s_st, msg_st in stale_reasons.items():
+                if s_st not in bar_errors_by_symbol and s_st not in quote_errors_by_symbol:
+                    skipped_to_log.append((s_st, "STALE_DATA", msg_st))
+            if skipped_to_log:
+                with self._lock, self._connect() as conn:
+                    for s_sym, s_st, s_rsn in skipped_to_log:
+                        self._append_audit_conn(
+                            conn,
+                            mkt,
+                            "PAPER_SYMBOL_SKIPPED",
+                            {
+                                "session_run_id": active_run_id,
+                                "symbol": s_sym,
+                                "strategy": strategy,
+                                "timeframe": timeframe,
+                                "status": s_st,
+                                "reason": s_rsn,
+                            },
+                        )
+
+        if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and (resolved_bars_map or (strategy.strip().lower() == "parallel_ensemble" and self.ensemble_service is not None and target_strategy_syms)):
             if strategy.strip().lower() == "parallel_ensemble" and self.ensemble_service is not None:
                 ens_cycle = self.ensemble_service.evaluate_watchlist_cycle(
                     mkt,
-                    symbols=sorted(resolved_bars_map.keys()),
+                    symbols=target_strategy_syms or sorted((resolved_bars_map or {}).keys()),
                     timeframe=timeframe,
                     bars_override=resolved_bars_map,
                     quotes_override=fetched_quotes,
                     session_open_override=bool(sess["is_open"]),
                     execute_in_paper=True,
+                    pre_fetch_errors=bar_errors_by_symbol,
                     now_utc=now,
                 )
                 for dec_item in ens_cycle.get("decisions") or []:
                     if dec_item.get("idempotent_duplicate_skipped"):
                         continue
+                    dec_id = str(dec_item.get("decision_id") or f"dec-{uuid.uuid4().hex[:12]}")
                     act_lbl = str(dec_item.get("final_action") or "NO_TRADE")
                     reasons_list = dec_item.get("no_trade_reasons") or []
                     reason_lbl = (
@@ -2139,15 +3054,43 @@ class LiveMarketPaperEngine:
                         if act_lbl in {"BUY", "SELL"}
                         else f"NO_TRADE: {'; '.join(reasons_list[:2]) or 'Thresholds not met'}"
                     )
+                    k_contrib = dict(dec_item.get("kronos_contribution") or {})
+                    fc_used = bool(k_contrib.get("advisory_used"))
+                    fc_prod = bool(k_contrib.get("forecast_produced") or fc_used or k_contrib.get("status") in {"OK", "STALE", "WIDE_BAND_REJECTED", "LOW_CONFIDENCE"})
+                    k_st = str(k_contrib.get("status") or ("CONSUMED_CONFIRMED" if fc_used else "NOT_CONFIGURED"))
+                    pol_app = str(k_contrib.get("policy") or "PARALLEL_ENSEMBLE_ALLOCATOR")
+                    explanation_obj = {
+                        "decision_id": dec_id,
+                        "session_run_id": active_run_id,
+                        "strategy": "parallel_ensemble",
+                        "symbol": str(dec_item["symbol"]),
+                        "timeframe": timeframe,
+                        "kronos_status": k_st,
+                        "forecast_produced": fc_prod,
+                        "forecast_consumed": fc_used,
+                        "policy_applied": pol_app,
+                        "forecast_summary": k_contrib,
+                        "strategy_signals": {
+                            "primary_strategy": "parallel_ensemble",
+                            "aggregation": dec_item.get("aggregation"),
+                            "calibration": dec_item.get("calibration"),
+                            "regime": dec_item.get("regime"),
+                        },
+                        "risk_checks": dec_item.get("risk_checks") or [],
+                        "final_action": act_lbl,
+                        "order_client_id": dec_item.get("paper_order_id"),
+                    }
                     with self._lock, self._connect() as conn:
                         conn.execute(
                             """
                             INSERT INTO live_paper_decisions
-                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp, order_client_id, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp,
+                             order_client_id, created_at, session_run_id, kronos_status, forecast_produced,
+                             forecast_consumed, policy_applied, explanation_json)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
-                                str(dec_item.get("decision_id") or f"dec-{uuid.uuid4().hex[:12]}"),
+                                dec_id,
                                 mkt,
                                 str(dec_item["symbol"]),
                                 "parallel_ensemble",
@@ -2157,17 +3100,151 @@ class LiveMarketPaperEngine:
                                 str(dec_item["bar_timestamp"]),
                                 dec_item.get("paper_order_id"),
                                 now.isoformat(),
+                                active_run_id,
+                                k_st,
+                                1 if fc_prod else 0,
+                                1 if fc_used else 0,
+                                pol_app,
+                                json.dumps(explanation_obj, sort_keys=True),
                             ),
                         )
+                        self._append_audit_conn(
+                            conn,
+                            mkt,
+                            "PAPER_STRATEGY_DECISION",
+                            {
+                                "decision_id": dec_id,
+                                "session_run_id": active_run_id,
+                                "symbol": str(dec_item["symbol"]),
+                                "strategy": "parallel_ensemble",
+                                "timeframe": timeframe,
+                                "action": act_lbl,
+                                "reason": reason_lbl,
+                                "kronos_status": k_st,
+                                "forecast_produced": fc_prod,
+                                "forecast_consumed": fc_used,
+                                "order_client_id": dec_item.get("paper_order_id"),
+                            },
+                        )
+                succ_s = [str(d["symbol"]) for d in (ens_cycle.get("decisions") or [])]
+                rej_map = dict(ens_cycle.get("rejected_instruments") or {})
+                miss_s = [s for s, v in rej_map.items() if str(v.get("code") or "") in {"MISSING_DATA", "INSUFFICIENT_BARS"}]
+                fail_s = [s for s in rej_map if s not in miss_s]
+                stale_s = [s for s in stale_reasons if s not in rej_map]
+                live_cov = {
+                    "market": mkt,
+                    "currency": self.configs[mkt].currency,
+                    "trigger": "open_session_cycle",
+                    "analyzed_at": now.isoformat(),
+                    "wall_ms": ens_cycle.get("wall_ms", 0.0),
+                    "session_run_id": active_run_id or None,
+                    "session_state": curr_state,
+                    "exchange_session": sess,
+                    "strategy": "parallel_ensemble",
+                    "timeframe": timeframe,
+                    "enabled_strategy_variants": ens_cycle.get("enabled_variants_count", 0),
+                    "trade_execution_permitted_now": True,
+                    "counts": {
+                        "selected_symbols": len(set(succ_s) | set(rej_map.keys())),
+                        "succeeded": len(succ_s),
+                        "missing_data": len(miss_s),
+                        "stale_data": len(stale_s),
+                        "failed": len(fail_s),
+                    },
+                    "succeeded_symbols": succ_s,
+                    "missing_data_symbols": miss_s,
+                    "stale_data_symbols": stale_s,
+                    "failed_symbols": fail_s,
+                    "symbols": [
+                        {
+                            "symbol": str(d["symbol"]),
+                            "status": "STALE_DATA" if str(d["symbol"]) in stale_s else "SUCCEEDED",
+                            "code": "IDEMPOTENT_BAR" if d.get("idempotent_duplicate_skipped") else "EVALUATED",
+                            "reason": (
+                                "Bar already evaluated (idempotent skip)"
+                                if d.get("idempotent_duplicate_skipped")
+                                else f"Action={d.get('final_action')} · qty={d.get('selected_qty', 0)}"
+                            ),
+                            "latest_bar_timestamp": d.get("bar_timestamp"),
+                            "last_close": d.get("reference_price"),
+                            "trade_eligible_now": True,
+                            "ensemble_raw_intent": d.get("raw_intent"),
+                            "ensemble_final_action": d.get("final_action"),
+                            "ensemble_consensus": (d.get("aggregation") or {}).get("post_kronos_consensus"),
+                            "active_weighted_variants": (d.get("aggregation") or {}).get("active_weighted_variants"),
+                            "calibrated_confidence": (d.get("calibration") or {}).get("calibrated_confidence"),
+                            "no_trade_reasons": d.get("no_trade_reasons") or [],
+                        }
+                        for d in (ens_cycle.get("decisions") or [])
+                    ] + [
+                        {
+                            "symbol": r_sym,
+                            "status": "MISSING_DATA" if r_sym in miss_s else "FAILED",
+                            "code": str(r_info.get("code") or "REJECTED"),
+                            "reason": str(r_info.get("reason") or "Unavailable"),
+                            "trade_eligible_now": False,
+                            "no_trade_reasons": [str(r_info.get("reason") or "Unavailable")],
+                        }
+                        for r_sym, r_info in rej_map.items()
+                    ],
+                    "simulated_only": True,
+                    "broker_order_api_calls": 0,
+                }
+                with self._lock, self._connect() as conn:
+                    conn.execute(
+                        "UPDATE live_paper_accounts SET last_analysis_json = ?, updated_at = ? WHERE market = ?",
+                        (json.dumps(live_cov, sort_keys=True), now.isoformat(), mkt),
+                    )
                 snap = self.market_snapshot(mkt)
                 return {**snap, "triggered_orders": triggered_orders, "ensemble_cycle": ens_cycle}
 
-            for sym, bars in resolved_bars_map.items():
-                if not bars:
+            resolved_bars_map = resolved_bars_map or {}
+
+            k_configured = (
+                bool(acct_k_en)
+                if acct_k_en is not None
+                else self._resolve_kronos_requested(mkt, strategy, None)
+            )
+            policy_dict: dict[str, Any] = {}
+            if self.kronos_provider is not None and hasattr(self.kronos_provider, "paper_policy_view"):
+                policy_dict = dict(self.kronos_provider.paper_policy_view())
+            if acct_k_pol:
+                policy_dict["failure_policy"] = acct_k_pol
+
+            for sym, raw_bars_list in resolved_bars_map.items():
+                if not raw_bars_list:
                     continue
+                bars: list[Candle] = []
                 bar_err: str | None = None
+                for raw_b in raw_bars_list:
+                    if isinstance(raw_b, Candle):
+                        bars.append(raw_b)
+                    elif isinstance(raw_b, dict):
+                        try:
+                            c_px = float(raw_b["close"])
+                            bars.append(
+                                Candle(
+                                    symbol=str(raw_b.get("symbol") or sym).replace("|", "_"),
+                                    timestamp=parse_timestamp(str(raw_b["timestamp"])),
+                                    open=float(raw_b.get("open", c_px)),
+                                    high=float(raw_b.get("high", c_px)),
+                                    low=float(raw_b.get("low", c_px)),
+                                    close=c_px,
+                                    volume=float(raw_b.get("volume", 0.0)),
+                                )
+                            )
+                        except (KeyError, ValueError, TypeError):
+                            bar_err = "MALFORMED_BAR_OHLCV"
+                            break
+                    else:
+                        bar_err = "MALFORMED_BAR_OHLCV"
+                        break
+                if bar_err is None and not bars:
+                    continue
                 prev_bts: datetime | None = None
                 for b in bars:
+                    if bar_err is not None:
+                        break
                     if (
                         not all(math.isfinite(v) and v > 0 for v in (b.open, b.high, b.low, b.close))
                         or not math.isfinite(b.volume)
@@ -2182,15 +3259,18 @@ class LiveMarketPaperEngine:
                         break
                     prev_bts = b.timestamp
                 if bar_err is not None:
+                    bad_dec_id = f"dec-{uuid.uuid4().hex[:12]}"
                     with self._lock, self._connect() as conn:
                         conn.execute(
                             """
                             INSERT INTO live_paper_decisions
-                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp, order_client_id, created_at)
-                            VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, NULL, ?)
+                            (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp,
+                             order_client_id, created_at, session_run_id, kronos_status, forecast_produced,
+                             forecast_consumed, policy_applied)
+                            VALUES (?, ?, ?, ?, ?, 'HOLD', ?, ?, NULL, ?, ?, 'BAR_INTEGRITY_BLOCKED', 0, 0, 'BAR_VALIDATION_FAIL_CLOSED')
                             """,
                             (
-                                f"dec-{uuid.uuid4().hex[:12]}",
+                                bad_dec_id,
                                 mkt,
                                 sym,
                                 strategy,
@@ -2198,6 +3278,7 @@ class LiveMarketPaperEngine:
                                 f"BLOCKED [{bar_err}]: bar series failed integrity validation",
                                 bars[-1].timestamp.isoformat(),
                                 now.isoformat(),
+                                active_run_id,
                             ),
                         )
                     continue
@@ -2214,67 +3295,234 @@ class LiveMarketPaperEngine:
                 if already_evaluated is not None:
                     continue
 
-                k_fc: dict[str, Any] | None = None
-                if strategy.strip().lower() in {"kronos_ensemble", "kronos_informed"} and self.kronos_provider is not None:
-                    try:
-                        k_fc = self.kronos_provider.predict(
+                decision_id = f"dec-{uuid.uuid4().hex[:12]}"
+                strat_lower = strategy.strip().lower()
+                base_rule_sig = (
+                    {"action": "HOLD", "reason": ""}
+                    if strat_lower in {"kronos_ensemble", "kronos_informed"}
+                    else evaluate_bar_strategy_signal(strategy, bars)
+                )
+
+                k_outcome: dict[str, Any] | None = None
+                if k_configured:
+                    if self.kronos_provider is None:
+                        k_outcome = {
+                            "ok": False,
+                            "status": "UNAVAILABLE",
+                            "forecast": None,
+                            "error_code": "PROVIDER_MISSING",
+                            "error_reason": "Kronos provider is not configured on this engine",
+                            "latency_ms": None,
+                            "lifecycle_state": "FAILED",
+                        }
+                    elif hasattr(self.kronos_provider, "predict_for_session"):
+                        k_outcome = self.kronos_provider.predict_for_session(
+                            self._session_key(mkt),
+                            session_id=active_run_id,
+                            decision_id=decision_id,
                             market=mkt,
                             symbol=sym,
                             timeframe=timeframe,
                             bars=bars,
-                            require_fresh=False,
                         )
-                    except Exception as exc:
-                        k_fc = None
-                        _ = exc
+                    else:
+                        try:
+                            fc_raw = self.kronos_provider.predict(
+                                market=mkt,
+                                symbol=sym,
+                                timeframe=timeframe,
+                                bars=bars,
+                                require_fresh=False,
+                            )
+                            k_outcome = {"ok": True, "status": "OK", "forecast": fc_raw, "lifecycle_state": "RUNNING"}
+                        except Exception as exc:
+                            k_outcome = {
+                                "ok": False,
+                                "status": "FAILED",
+                                "forecast": None,
+                                "error_code": type(exc).__name__,
+                                "error_reason": str(exc)[:180],
+                                "lifecycle_state": "FAILED",
+                            }
 
-                decision = evaluate_bar_strategy_signal(strategy, bars, kronos_forecast=k_fc)
-                order_cid: str | None = None
-                q = fetched_quotes.get(sym)
-                if decision["action"] == "BUY" and q:
-                    inst = self._resolve_instrument(mkt, sym)
-                    lot = int(inst.get("quantity_step") or inst.get("lot_size") or 1)
-                    sub = self.submit_order(
+                with self._lock, self._connect() as conn:
+                    cur_held_row = conn.execute(
+                        "SELECT qty FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
+                        (mkt, sym, sym),
+                    ).fetchone()
+                cur_held_qty = float(cur_held_row["qty"]) if cur_held_row is not None else 0.0
+
+                decision = combine_paper_strategy_decision(
+                    strategy=strategy,
+                    bars=bars,
+                    base_rule_signal=base_rule_sig,
+                    kronos_configured=k_configured,
+                    kronos_outcome=k_outcome,
+                    policy=policy_dict,
+                    current_position_qty=cur_held_qty,
+                )
+                if (
+                    decision.get("forecast_consumed")
+                    and isinstance(k_outcome, dict)
+                    and isinstance(k_outcome.get("forecast"), dict)
+                    and self.kronos_provider is not None
+                    and hasattr(self.kronos_provider, "record_forecast_consumption")
+                ):
+                    self.kronos_provider.record_forecast_consumption(
+                        session_key=self._session_key(mkt),
+                        session_id=active_run_id,
+                        decision_id=decision_id,
                         market=mkt,
-                        symbol=str(inst.get("instrument_key") or sym) if mkt == "NSE" else sym,
-                        side="BUY",
-                        qty=float(lot),
-                        order_type="MARKET",
-                        product=str(inst.get("product") or ("D" if mkt == "NSE" else "CASH")),
-                        quote_override=q,
+                        symbol=sym,
+                        timeframe=timeframe,
+                        strategy=strategy,
+                        forecast=k_outcome["forecast"],
+                        final_action=decision["action"],
+                        contribution_detail=decision["reason"],
                     )
-                    if sub.get("ok") and sub.get("order"):
-                        order_cid = str(sub["order"]["client_order_id"])
-                elif decision["action"] == "SELL" and q:
+
+                order_cid: str | None = None
+                risk_checks: list[dict[str, Any]] = []
+                order_outcome = "NO_ORDER_HOLD"
+                final_action = str(decision["action"])
+                final_reason = str(decision["reason"])
+                q = fetched_quotes.get(sym)
+                if final_action == "BUY":
+                    if not q:
+                        order_outcome = "BLOCKED_NO_VALID_QUOTE"
+                        final_reason = f"{final_reason} · [Paper Risk Gate: no fresh quote for execution]"
+                    else:
+                        inst = self._resolve_instrument(mkt, sym)
+                        lot = int(inst.get("quantity_step") or inst.get("lot_size") or 1)
+                        sub = self.submit_order(
+                            market=mkt,
+                            symbol=str(inst.get("instrument_key") or sym) if mkt == "NSE" else sym,
+                            side="BUY",
+                            qty=float(lot),
+                            order_type="MARKET",
+                            product=str(inst.get("product") or ("D" if mkt == "NSE" else "CASH")),
+                            quote_override=q,
+                            decision_id=decision_id,
+                            strategy_source=strategy,
+                        )
+                        risk_checks = list((sub.get("preview") or {}).get("checks") or [])
+                        if sub.get("ok") and sub.get("order"):
+                            order_cid = str(sub["order"]["client_order_id"])
+                            order_outcome = f"SIMULATED_{sub['order']['status']}"
+                        else:
+                            rej = "; ".join((sub.get("preview") or {}).get("rejection_reasons") or ["Paper risk gate rejected order"])
+                            order_outcome = "REJECTED_BY_PAPER_RISK_GATE"
+                            final_reason = f"{final_reason} · [Paper Risk Rejected: {rej}]"
+                elif final_action == "SELL":
                     with self._lock, self._connect() as conn:
                         held = conn.execute(
-                            "SELECT symbol, qty FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
+                            "SELECT symbol, qty, instrument_key, product FROM live_paper_positions WHERE market = ? AND (symbol = ? OR instrument_key = ?)",
                             (mkt, sym, sym),
                         ).fetchone()
-                    if held and float(held["qty"]) > 0:
-                        closed = self.close_position(mkt, str(held["symbol"]), quote_override=q, reason=f"strategy:{strategy}")
-                        if closed.get("ok") and closed.get("order"):
-                            order_cid = str(closed["order"]["client_order_id"])
+                    if held and float(held["qty"]) > 0 and q:
+                        target_sym = str(held["instrument_key"]) if mkt == "NSE" and held["instrument_key"] else str(held["symbol"])
+                        sub_close = self.submit_order(
+                            client_order_id=f"lmp-close-{mkt.lower()}-{uuid.uuid4().hex[:10]}",
+                            market=mkt,
+                            symbol=target_sym,
+                            side="SELL",
+                            qty=float(held["qty"]),
+                            order_type="MARKET",
+                            product=str(held["product"]),
+                            time_in_force="DAY",
+                            quote_override=q,
+                            decision_id=decision_id,
+                            strategy_source=strategy,
+                        )
+                        risk_checks = list((sub_close.get("preview") or {}).get("checks") or [])
+                        if sub_close.get("ok") and sub_close.get("order"):
+                            order_cid = str(sub_close["order"]["client_order_id"])
+                            order_outcome = f"SIMULATED_CLOSE_{sub_close['order']['status']}"
+                    else:
+                        order_outcome = "NO_LONG_POSITION_TO_CLOSE"
+
+                risk_passed = order_outcome != "REJECTED_BY_PAPER_RISK_GATE"
+                explanation_obj = {
+                    "decision_id": decision_id,
+                    "session_run_id": active_run_id,
+                    "market": mkt,
+                    "symbol": sym,
+                    "strategy": strategy,
+                    "timeframe": timeframe,
+                    "bar_timestamp": decision.get("bar_ts") or latest_bar_iso,
+                    "rule_action": (decision.get("strategy_signals") or {}).get("rule_action"),
+                    "input_window": {
+                        "bar_count": len(bars),
+                        "input_start": bars[0].timestamp.isoformat(),
+                        "input_end": bars[-1].timestamp.isoformat(),
+                        "timeframe": timeframe,
+                    },
+                    "kronos_configured": k_configured,
+                    "kronos_status": decision["kronos_status"],
+                    "forecast_produced": bool(decision["forecast_produced"]),
+                    "forecast_consumed": bool(decision["forecast_consumed"]),
+                    "policy_applied": decision["policy_applied"],
+                    "forecast_summary": decision["forecast_summary"],
+                    "strategy_signals": decision["strategy_signals"],
+                    "contribution_policy": decision["contribution_policy"],
+                    "risk_checks": {
+                        "passed": risk_passed,
+                        "checks": risk_checks,
+                    },
+                    "order_outcome": order_outcome,
+                    "order_client_id": order_cid,
+                    "final_action": final_action,
+                    "simulated": True,
+                    "real_money": False,
+                }
 
                 with self._lock, self._connect() as conn:
                     conn.execute(
                         """
                         INSERT INTO live_paper_decisions
-                        (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp, order_client_id, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (decision_id, market, symbol, strategy, timeframe, action, reason, bar_timestamp,
+                         order_client_id, created_at, session_run_id, kronos_status, forecast_produced,
+                         forecast_consumed, policy_applied, explanation_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            f"dec-{uuid.uuid4().hex[:12]}",
+                            decision_id,
                             mkt,
                             sym,
                             strategy,
                             timeframe,
-                            decision["action"],
-                            decision["reason"],
+                            final_action,
+                            final_reason,
                             decision.get("bar_ts") or latest_bar_iso,
                             order_cid,
                             now.isoformat(),
+                            active_run_id,
+                            str(decision["kronos_status"]),
+                            1 if decision["forecast_produced"] else 0,
+                            1 if decision["forecast_consumed"] else 0,
+                            str(decision["policy_applied"]),
+                            json.dumps(explanation_obj, sort_keys=True),
                         ),
+                    )
+                    self._append_audit_conn(
+                        conn,
+                        mkt,
+                        "PAPER_STRATEGY_DECISION",
+                        {
+                            "decision_id": decision_id,
+                            "session_run_id": active_run_id,
+                            "symbol": sym,
+                            "strategy": strategy,
+                            "timeframe": timeframe,
+                            "action": final_action,
+                            "reason": final_reason,
+                            "kronos_status": decision["kronos_status"],
+                            "forecast_produced": bool(decision["forecast_produced"]),
+                            "forecast_consumed": bool(decision["forecast_consumed"]),
+                            "policy_applied": decision["policy_applied"],
+                            "order_outcome": order_outcome,
+                            "order_client_id": order_cid,
+                        },
                     )
         snap = self.market_snapshot(mkt)
         return {**snap, "triggered_orders": triggered_orders}
@@ -2319,13 +3567,24 @@ class LiveMarketPaperEngine:
             "simulated": True,
         }
 
-    def emergency_stop(self, reason: str = "operator emergency stop") -> dict[str, Any]:
-        """Halt all new paper entries and cancel unfilled working entry orders while keeping position SL/TP."""
+    def emergency_stop(
+        self,
+        reason: str = "operator emergency stop",
+        *,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        """Halt new paper entries and cancel unfilled working entry orders while keeping position SL/TP.
+
+        When ``market`` is provided (``NSE`` or ``NASDAQ``), only that market's paper
+        session and working orders are halted, preserving independent operation and
+        safeguards for the other market. When ``market`` is ``None``, all markets are halted.
+        """
+        target_markets = (self._validate_market(market),) if market else MARKETS
         now_iso = _utc_now(self._clock).isoformat()
         canceled_by_market: dict[str, int] = {}
         preserved_positions: dict[str, int] = {}
         with self._lock, self._connect() as conn:
-            for mkt in MARKETS:
+            for mkt in target_markets:
                 cur = conn.execute(
                     """
                     UPDATE live_paper_orders
@@ -2350,21 +3609,32 @@ class LiveMarketPaperEngine:
                     "PAPER_EMERGENCY_STOP",
                     {
                         "reason": reason,
+                        "scope": mkt if market else "ALL_MARKETS",
                         "canceled_working_orders": cur.rowcount,
                         "positions_with_preserved_sl_tp": int(pos_cnt),
                     },
                 )
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "stop_for_paper_session"):
+            for mkt in target_markets:
+                self.kronos_provider.stop_for_paper_session(
+                    self._session_key(mkt),
+                    reason=f"emergency stop: {reason}",
+                )
         return {
             "ok": True,
             "simulated": True,
+            "execution_mode": "LIVE_MARKET_PAPER",
+            "scope": target_markets[0] if market else "ALL_MARKETS",
+            "markets_halted": list(target_markets),
             "canceled_working_orders": canceled_by_market,
             "positions_with_preserved_sl_tp": preserved_positions,
         }
 
-    def reset_emergency_stop(self) -> dict[str, Any]:
+    def reset_emergency_stop(self, *, market: str | None = None) -> dict[str, Any]:
+        target_markets = (self._validate_market(market),) if market else MARKETS
         now_iso = _utc_now(self._clock).isoformat()
         with self._lock, self._connect() as conn:
-            for mkt in MARKETS:
+            for mkt in target_markets:
                 conn.execute(
                     """
                     UPDATE live_paper_accounts
@@ -2375,8 +3645,18 @@ class LiveMarketPaperEngine:
                     """,
                     (now_iso, mkt),
                 )
-                self._append_audit_conn(conn, mkt, "PAPER_EMERGENCY_STOP_CLEARED", {})
-        return {"ok": True, "nse": self.market_snapshot("NSE"), "nasdaq": self.market_snapshot("NASDAQ")}
+                self._append_audit_conn(
+                    conn,
+                    mkt,
+                    "PAPER_EMERGENCY_STOP_CLEARED",
+                    {"scope": mkt if market else "ALL_MARKETS"},
+                )
+        return {
+            "ok": True,
+            "scope": target_markets[0] if market else "ALL_MARKETS",
+            "nse": self.market_snapshot("NSE"),
+            "nasdaq": self.market_snapshot("NASDAQ"),
+        }
 
     def reconcile(self, market: str) -> dict[str, Any]:
         """Verify local SQLite cash + fill ledger + audit hash chain integrity."""
@@ -2415,6 +3695,10 @@ class LiveMarketPaperEngine:
         }
 
     def close(self) -> None:
+        self._closed = True
+        if self.kronos_provider is not None and hasattr(self.kronos_provider, "stop_for_paper_session"):
+            for mkt in MARKETS:
+                self.kronos_provider.stop_for_paper_session(self._session_key(mkt), reason="engine close")
         if self._mem_conn is not None:
             self._mem_conn.close()
             self._mem_conn = None
@@ -2432,7 +3716,13 @@ class LiveMarketPaperEngine:
                 )
             ]
             orders = [
-                dict(r)
+                {
+                    **dict(r),
+                    "simulated": True,
+                    "real_money": False,
+                    "execution_mode": "LIVE_MARKET_PAPER",
+                    "mode_label": "LIVE-MARKET PAPER · SIMULATED",
+                }
                 for r in conn.execute(
                     "SELECT * FROM live_paper_orders WHERE market = ? ORDER BY created_at DESC, rowid DESC LIMIT 100", (mkt,)
                 )
@@ -2441,7 +3731,10 @@ class LiveMarketPaperEngine:
                 {
                     **dict(r),
                     "simulated": True,
+                    "real_money": False,
                     "fill_type": "SIMULATED",
+                    "execution_mode": "LIVE_MARKET_PAPER",
+                    "mode_label": "LIVE-MARKET PAPER · SIMULATED",
                     "execution_destination": f"LOCAL_PAPER_SQLITE ({mkt})",
                     "fee_breakdown": json.loads(r["fees_json"] or "{}"),
                 }
@@ -2449,12 +3742,26 @@ class LiveMarketPaperEngine:
                     "SELECT * FROM live_paper_fills WHERE market = ? ORDER BY created_at DESC, rowid DESC LIMIT 100", (mkt,)
                 )
             ]
-            decisions = [
+            raw_decisions = [
                 dict(r)
                 for r in conn.execute(
                     "SELECT * FROM live_paper_decisions WHERE market = ? ORDER BY created_at DESC LIMIT 50", (mkt,)
                 )
             ]
+            decisions = []
+            for d in raw_decisions:
+                exp_raw = d.get("explanation_json")
+                exp_parsed = json.loads(exp_raw) if exp_raw else None
+                decisions.append({
+                    **d,
+                    "simulated": True,
+                    "real_money": False,
+                    "execution_mode": "LIVE_MARKET_PAPER",
+                    "mode_label": "LIVE-MARKET PAPER · SIMULATED",
+                    "forecast_produced": bool(d.get("forecast_produced")),
+                    "forecast_consumed": bool(d.get("forecast_consumed")),
+                    "explanation": exp_parsed,
+                })
 
         enriched_positions = []
         market_value = 0.0
@@ -2468,7 +3775,10 @@ class LiveMarketPaperEngine:
             enriched_positions.append({
                 **p,
                 "simulated": True,
+                "real_money": False,
                 "fill_type": "SIMULATED",
+                "execution_mode": "LIVE_MARKET_PAPER",
+                "mode_label": "LIVE-MARKET PAPER · SIMULATED",
                 "market_value": mv,
                 "unrealized_pnl": upnl,
                 "unrealized_pnl_pct": upnl_pct,
@@ -2530,9 +3840,12 @@ class LiveMarketPaperEngine:
                 "fill_type": "SIMULATED",
             },
             "exchange_session": sess,
+            "selected_for_multi": bool(acct.get("selected_for_multi", 1) if acct.get("selected_for_multi") is not None else True),
             "strategy": strat_name,
             "timeframe": acct["timeframe"],
             "watched_symbols": json.loads(acct["symbols_json"]),
+            "effective_symbols": self._effective_symbols_for_market(mkt),
+            "last_analysis": json.loads(acct["last_analysis_json"]) if acct.get("last_analysis_json") else None,
             "account": {
                 "currency": acct["currency"],
                 "starting_cash": self.configs[mkt].starting_cash,
@@ -2563,6 +3876,16 @@ class LiveMarketPaperEngine:
                 "trading_day_pnl": day_pnl,
             },
             "risk_limits": asdict(self.configs[mkt]),
+            "kronos_session": (
+                self.kronos_provider.session_view(self._session_key(mkt))
+                if self.kronos_provider is not None and hasattr(self.kronos_provider, "session_view")
+                else {
+                    "session_key": self._session_key(mkt),
+                    "kronos_configured": bool(acct.get("kronos_enabled")),
+                    "lifecycle_state": "NOT_CONFIGURED",
+                    "failure_policy": str(acct.get("kronos_failure_policy") or "FAIL_CLOSED_NO_ENTRY"),
+                }
+            ),
             "positions": enriched_positions,
             "orders": orders,
             "fills": fills,
@@ -2596,6 +3919,78 @@ class LiveMarketPaperEngine:
             for r in rows
         ]
 
+    def structured_logs(
+        self,
+        *,
+        window: str = "",
+        since: str = "",
+        until: str = "",
+        market: str = "",
+        symbol: str = "",
+        category: str = "",
+        event_type: str = "",
+        severity: str = "",
+        strategy: str = "",
+        session_id: str = "",
+        query: str = "",
+        limit: int = 250,
+        extra_events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return durable, secret-redacted, correlated, filterable structured paper & Kronos logs."""
+        raw_rows = self.audit_log(market=market if market.upper() in MARKETS else "", limit=500)
+        normalized = [
+            normalize_structured_event(
+                event_id=f"lpa-{row['seq']}",
+                seq=int(row["seq"]),
+                timestamp=str(row["created_at"]),
+                event_type=str(row["event_kind"]),
+                market=str(row["market"]),
+                source="LIVE_MARKET_PAPER",
+                payload=dict(row["payload"] or {}),
+                entry_hash=str(row["entry_hash"]),
+            )
+            for row in raw_rows
+        ]
+        if extra_events:
+            seen_ids = {str(e.get("event_id")) for e in normalized}
+            for ev in extra_events:
+                eid = str(ev.get("event_id") or "")
+                if eid and eid not in seen_ids:
+                    normalized.append(ev)
+                    seen_ids.add(eid)
+        filtered = filter_structured_events(
+            normalized,
+            now_utc=_utc_now(self._clock),
+            window=window,
+            since=since,
+            until=until,
+            market=market,
+            symbol=symbol,
+            category=category,
+            event_type=event_type,
+            severity=severity,
+            strategy=strategy,
+            session_id=session_id,
+            query=query,
+            limit=limit,
+        )
+        observed_sessions = sorted({str(e["session_id"]) for e in normalized if e.get("session_id")})
+        observed_strategies = sorted({str(e["strategy"]) for e in normalized if e.get("strategy")})
+        observed_symbols = sorted({str(e["symbol"]) for e in normalized if e.get("symbol")})
+        return {
+            "ok": True,
+            "simulated_paper_scope": True,
+            "real_money_events_included": any(bool(e.get("real_money")) for e in filtered),
+            "total_unfiltered": len(normalized),
+            "total_matching": len(filtered),
+            "returned": len(filtered),
+            "returned_count": len(filtered),
+            "observed_sessions": observed_sessions,
+            "observed_strategies": observed_strategies,
+            "observed_symbols": observed_symbols,
+            "events": filtered,
+        }
+
     def export_audit_bundle(self, *, market: str = "", limit: int = 500) -> dict[str, Any]:
         """Export an auditable SHA-256 chain-verified bundle of paper sessions, fills, and events."""
         now_iso = _utc_now(self._clock).isoformat()
@@ -2617,4 +4012,343 @@ class LiveMarketPaperEngine:
         }
         digest = hashlib.sha256(json.dumps(bundle_core, sort_keys=True).encode("utf-8")).hexdigest()
         return {"bundle_sha256": digest, **bundle_core}
+
+    def advance_selected_markets_concurrently(
+        self,
+        *,
+        markets: list[str] | None = None,
+        only_active: bool = True,
+        market_timeout_seconds: float = 12.0,
+        quotes_by_market: dict[str, dict[str, dict[str, Any]]] | None = None,
+        bars_by_market: dict[str, dict[str, list[Candle]]] | None = None,
+    ) -> dict[str, Any]:
+        """Advance all eligible selected markets concurrently without cross-market blocking.
+
+        Each market executes in an isolated worker with its own timeout so a slow or
+        failing provider on one market never delays or aborts another market's cycle.
+        """
+        t_start = time.perf_counter()
+        now_iso = _utc_now(self._clock).isoformat()
+        target_markets = (
+            [self._validate_market(m) for m in markets]
+            if markets
+            else self.selected_markets()
+        )
+        eligible_states = {"RUNNING", "MARKET_CLOSED_WAITING", "STALE_FEED_PAUSED", "DISCONNECTED_PAUSED"}
+        state_by_mkt: dict[str, str] = {}
+        with self._lock, self._connect() as conn:
+            for mkt in target_markets:
+                row = conn.execute(
+                    "SELECT session_state FROM live_paper_accounts WHERE market = ?",
+                    (mkt,),
+                ).fetchone()
+                state_by_mkt[mkt] = str(row["session_state"]) if row else "STOPPED"
+
+        to_run = [
+            m for m in target_markets
+            if (not only_active) or (state_by_mkt.get(m) in eligible_states)
+        ]
+        # A market routed to the LIVE execution path is never simulated here, not even
+        # for an operator-triggered paper cycle: the two paths stay strictly separate.
+        live_routed: set[str] = set()
+        if self.execution_mode_provider is not None:
+            for m in target_markets:
+                try:
+                    if str(self.execution_mode_provider(m) or "PAPER").upper() == "LIVE":
+                        live_routed.add(m)
+                except (ValueError, RuntimeError):
+                    continue
+        to_run = [m for m in to_run if m not in live_routed]
+        results: dict[str, dict[str, Any]] = {}
+        for m in target_markets:
+            if m not in to_run:
+                if m in live_routed:
+                    results[m] = {
+                        "market": m,
+                        "status": "SKIPPED_LIVE_ROUTED",
+                        "session_state": state_by_mkt.get(m, "STOPPED"),
+                        "detail": "Market execution mode is LIVE; the paper simulator does not run here.",
+                        "wall_ms": 0.0,
+                        "broker_order_api_calls": 0,
+                    }
+                    continue
+                results[m] = {
+                    "market": m,
+                    "status": "SKIPPED_INACTIVE",
+                    "session_state": state_by_mkt.get(m, "STOPPED"),
+                    "wall_ms": 0.0,
+                    "broker_order_api_calls": 0,
+                }
+
+        if to_run:
+            timeout_s = max(0.05, float(market_timeout_seconds))
+            pool = ThreadPoolExecutor(max_workers=len(to_run), thread_name_prefix="axiom-mm")
+            futures_by_mkt = {}
+
+            def _run_single(m_code: str) -> tuple[float, dict[str, Any]]:
+                m_t0 = time.perf_counter()
+                out = self.sync_live_tick(
+                    m_code,
+                    quotes_by_symbol=(quotes_by_market or {}).get(m_code),
+                    bars_by_symbol=(bars_by_market or {}).get(m_code),
+                )
+                return round((time.perf_counter() - m_t0) * 1000.0, 2), out
+
+            try:
+                for m in to_run:
+                    futures_by_mkt[m] = pool.submit(_run_single, m)
+                deadline = time.perf_counter() + timeout_s
+                for m, fut in futures_by_mkt.items():
+                    remaining = max(0.005, deadline - time.perf_counter())
+                    try:
+                        dur_ms, snap_out = fut.result(timeout=remaining)
+                        results[m] = {
+                            "market": m,
+                            "status": "COMPLETED",
+                            "session_state": snap_out.get("session_state"),
+                            "exchange_open": bool((snap_out.get("exchange_session") or {}).get("is_open")),
+                            "wall_ms": dur_ms,
+                            "decisions_count": len(snap_out.get("decisions") or []),
+                            "orders_count": len(snap_out.get("orders") or []),
+                            "last_analysis_counts": ((snap_out.get("last_analysis") or {}).get("counts")),
+                            "snapshot": snap_out,
+                            "broker_order_api_calls": 0,
+                        }
+                    except FuturesTimeoutError:
+                        results[m] = {
+                            "market": m,
+                            "status": "TIMEOUT",
+                            "error": f"{m} provider cycle exceeded {timeout_s:.2f}s timeout; other markets continued independently",
+                            "wall_ms": round(timeout_s * 1000.0, 2),
+                            "broker_order_api_calls": 0,
+                        }
+                    except Exception as exc:
+                        err_clean = str(redact_sensitive_data(str(exc)))[:220]
+                        results[m] = {
+                            "market": m,
+                            "status": "FAILED",
+                            "error": err_clean,
+                            "wall_ms": round((time.perf_counter() - t_start) * 1000.0, 2),
+                            "broker_order_api_calls": 0,
+                        }
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        return {
+            "ok": True,
+            "simulated_only": True,
+            "live_trading_enabled": False,
+            "broker_order_api_calls": 0,
+            "evaluated_at": now_iso,
+            "selected_markets": target_markets,
+            "markets_advanced": to_run,
+            "wall_ms": round((time.perf_counter() - t_start) * 1000.0, 2),
+            "markets": results,
+        }
+
+
+class MultiMarketPaperRunner:
+    """Non-blocking background coordinator advancing all active selected paper markets concurrently.
+
+    Safety invariants:
+    - Local paper simulation only (``live_trading_enabled = False``, ``broker_order_api_calls = 0``).
+    - Never touches ``STOPPED``, ``PAUSED``, ``RECOVERED_PAUSED``, or ``EMERGENCY_STOPPED`` sessions.
+    - Isolates each market with independent asyncio/thread workers and timeouts so a slow or
+      broken provider on NSE never stalls NASDAQ (and vice versa).
+    """
+
+    live_trading_enabled = False
+    broker_order_api_calls = 0
+
+    def __init__(
+        self,
+        engine: LiveMarketPaperEngine,
+        *,
+        interval_seconds: float = 10.0,
+        market_timeout_seconds: float = 12.0,
+        enabled: bool = True,
+        paper_blocked: Callable[[str], bool] | None = None,
+    ) -> None:
+        self.engine = engine
+        self.interval_seconds = max(1.0, float(interval_seconds))
+        self.market_timeout_seconds = max(0.1, float(market_timeout_seconds))
+        self.enabled = bool(enabled)
+        # Markets routed to LIVE execution must never be simulated by this runner.
+        self.paper_blocked = paper_blocked
+        self._task: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._executor = ThreadPoolExecutor(max_workers=len(MARKETS) * 2, thread_name_prefix="axiom-mm-bg")
+        self._in_flight: dict[str, bool] = {m: False for m in MARKETS}
+        self._stats_lock = threading.Lock()
+        self._cycles_total = 0
+        self._last_tick_at: str | None = None
+        self._per_market_telemetry: dict[str, dict[str, Any]] = {
+            m: {
+                "market": m,
+                "cycles_completed": 0,
+                "last_cycle_at": None,
+                "last_duration_ms": None,
+                "last_status": "IDLE",
+                "last_error": None,
+                "in_flight": False,
+            }
+            for m in MARKETS
+        }
+
+    def start(self) -> None:
+        if not self.enabled or (self._task is not None and not self._task.done()):
+            return
+        self._stop_event = asyncio.Event()
+        self._task = asyncio.create_task(self._loop(), name="axiom-multimarket-paper-runner")
+
+    async def stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _advance_one_market(self, mkt: str) -> dict[str, Any]:
+        with self._stats_lock:
+            if self._in_flight.get(mkt):
+                return {"market": mkt, "status": "SKIPPED_IN_FLIGHT", "broker_order_api_calls": 0}
+            self._in_flight[mkt] = True
+            self._per_market_telemetry[mkt]["in_flight"] = True
+
+        t0 = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            snap = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, self.engine.sync_live_tick, mkt),
+                timeout=self.market_timeout_seconds,
+            )
+            dur_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            with self._stats_lock:
+                tel = self._per_market_telemetry[mkt]
+                tel["cycles_completed"] = int(tel["cycles_completed"]) + 1
+                tel["last_cycle_at"] = now_iso
+                tel["last_duration_ms"] = dur_ms
+                tel["last_status"] = str(snap.get("session_state") or "COMPLETED")
+                tel["last_error"] = None
+            return {
+                "market": mkt,
+                "status": "COMPLETED",
+                "session_state": snap.get("session_state"),
+                "wall_ms": dur_ms,
+                "broker_order_api_calls": 0,
+            }
+        except asyncio.TimeoutError:
+            dur_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            err = f"{mkt} cycle timed out after {self.market_timeout_seconds:.1f}s"
+            with self._stats_lock:
+                tel = self._per_market_telemetry[mkt]
+                tel["last_cycle_at"] = now_iso
+                tel["last_duration_ms"] = dur_ms
+                tel["last_status"] = "TIMEOUT"
+                tel["last_error"] = err
+            return {"market": mkt, "status": "TIMEOUT", "error": err, "wall_ms": dur_ms, "broker_order_api_calls": 0}
+        except Exception as exc:
+            dur_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            err = str(redact_sensitive_data(str(exc)))[:220]
+            with self._stats_lock:
+                tel = self._per_market_telemetry[mkt]
+                tel["last_cycle_at"] = now_iso
+                tel["last_duration_ms"] = dur_ms
+                tel["last_status"] = "FAILED"
+                tel["last_error"] = err
+            return {"market": mkt, "status": "FAILED", "error": err, "wall_ms": dur_ms, "broker_order_api_calls": 0}
+        finally:
+            with self._stats_lock:
+                self._in_flight[mkt] = False
+                self._per_market_telemetry[mkt]["in_flight"] = False
+
+    async def run_once(self, *, markets: list[str] | None = None, only_active: bool = True) -> dict[str, Any]:
+        if getattr(self.engine, "_closed", False):
+            return {"ok": False, "reason": "engine_closed", "markets": {}, "broker_order_api_calls": 0}
+        selected = [self.engine._validate_market(m) for m in markets] if markets else self.engine.selected_markets()
+        eligible_states = {"RUNNING", "MARKET_CLOSED_WAITING", "STALE_FEED_PAUSED", "DISCONNECTED_PAUSED"}
+        eligible: list[str] = []
+        skipped: dict[str, dict[str, Any]] = {}
+        for m in selected:
+            if self.paper_blocked is not None:
+                try:
+                    routed_live = bool(self.paper_blocked(m))
+                except (ValueError, RuntimeError):
+                    routed_live = False
+                if routed_live:
+                    skipped[m] = {
+                        "market": m,
+                        "status": "SKIPPED_LIVE_ROUTED",
+                        "detail": "Market execution mode is LIVE; the paper simulator does not run here.",
+                        "broker_order_api_calls": 0,
+                    }
+                    continue
+            snap = self.engine.market_snapshot(m)
+            st = str(snap.get("session_state") or "STOPPED")
+            if (not only_active) or (st in eligible_states):
+                eligible.append(m)
+            else:
+                skipped[m] = {"market": m, "status": "SKIPPED_INACTIVE", "session_state": st, "broker_order_api_calls": 0}
+
+        t0 = time.perf_counter()
+        coros = [self._advance_one_market(m) for m in eligible]
+        ran_list = await asyncio.gather(*coros) if coros else []
+        out_map = {**skipped, **{r["market"]: r for r in ran_list}}
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._stats_lock:
+            self._cycles_total += 1
+            self._last_tick_at = now_iso
+        return {
+            "ok": True,
+            "simulated_only": True,
+            "live_trading_enabled": False,
+            "broker_order_api_calls": 0,
+            "evaluated_at": now_iso,
+            "selected_markets": selected,
+            "markets_advanced": eligible,
+            "wall_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "markets": out_map,
+        }
+
+    async def _loop(self) -> None:
+        assert self._stop_event is not None
+        while not self._stop_event.is_set():
+            interval_elapsed = False
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
+                break
+            except asyncio.TimeoutError:
+                interval_elapsed = True
+            if not interval_elapsed or self._stop_event.is_set() or getattr(self.engine, "_closed", False):
+                break
+            try:
+                await self.run_once(only_active=True)
+            except Exception as exc:
+                _ = exc
+
+    def status(self) -> dict[str, Any]:
+        with self._stats_lock:
+            per_mkt = {k: dict(v) for k, v in self._per_market_telemetry.items()}
+            cycles = self._cycles_total
+            last_at = self._last_tick_at
+        running = self._task is not None and not self._task.done()
+        return {
+            "enabled": self.enabled,
+            "background_loop_running": running,
+            "interval_seconds": self.interval_seconds,
+            "market_timeout_seconds": self.market_timeout_seconds,
+            "cycles_total": cycles,
+            "last_tick_at": last_at,
+            "selected_markets": self.engine.selected_markets() if not getattr(self.engine, "_closed", False) else [],
+            "live_trading_enabled": False,
+            "broker_order_api_calls": 0,
+            "markets": per_mkt,
+        }
+
 
