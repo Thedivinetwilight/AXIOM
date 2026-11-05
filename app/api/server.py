@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 import logging
 import os
 from pathlib import Path
@@ -251,7 +252,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 if not tok:
                     raise RuntimeError("Upstox read-only market-data token is not configured")
                 snap = UpstoxReadOnly(lambda: tok).quote_snapshot(instrument_key)
-                recv_iso = datetime.now(timezone.utc).isoformat()
+                recv_iso = datetime.now(UTC).isoformat()
                 return {
                     "instrument_key": snap.instrument_key,
                     "bid": snap.bid,
@@ -291,18 +292,17 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 creds, _ = resolve_alpaca_data_credentials(app.state.alpaca_data_store, settings)
                 if not creds["api_key"] or not creds["api_secret"]:
                     raise RuntimeError("Alpaca read-only market-data credentials are not configured")
-                from datetime import timedelta as _td
                 from app.data.alpaca import AlpacaHistoricalProvider
 
                 tf_fetch = "1h" if timeframe == "4h" else ("1D" if timeframe in {"1d", "1D"} else timeframe)
                 lookback_days = 240 if tf_fetch == "1D" else (30 if tf_fetch == "1h" else 7)
-                now_utc = datetime.now(timezone.utc)
+                now_utc = datetime.now(UTC)
                 prov = AlpacaHistoricalProvider(creds["api_key"], creds["api_secret"], feed=creds["feed"])
                 try:
                     return prov.get_candles(
                         symbol_or_key.strip().upper(),
                         tf_fetch,
-                        now_utc - _td(days=lookback_days),
+                        now_utc - timedelta(days=lookback_days),
                         now_utc,
                     )
                 finally:
