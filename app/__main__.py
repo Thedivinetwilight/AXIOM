@@ -1044,6 +1044,14 @@ def cmd_lifecycle(args) -> int:
         database.close()
 
 
+BUNDLE_VERIFY_EXIT = {"PASS": 0, "FAIL": 1}
+BUNDLE_REPLAY_EXIT = {
+    "REPRODUCED": 0,
+    "REPRODUCED_WITH_ENVIRONMENT_DRIFT": 0,
+    "DIVERGED": 1,
+    "UNVERIFIED": 3,
+}
+
 QUALIFICATION_EXIT = {"QUALIFIED": 0, "FAIL": 1, "BLOCKED": 1, "UNVERIFIED": 3}
 
 PROVIDER_CHECK_EXIT = {"PASS": 0, "FAIL": 1, "UNVERIFIED": 3}
@@ -1118,12 +1126,7 @@ def cmd_qualify(args) -> int:
             return 2
         from app.model_lab.registry import ModelLabService
 
-        settings = _load_settings()
-        candidates = [Path(settings.data_dir) / "model_lab", Path(settings.data_dir) / "autonomy" / "model_lab"]
-        store = Path(args.store) if args.store else next(
-            (c for c in candidates if (c / "model_lab.sqlite3").is_file()), candidates[0]
-        )
-        service = ModelLabService(store)
+        service = ModelLabService(_resolve_model_lab_store(args.store))
         try:
             run = service.get_run(args.run)
         except KeyError as exc:
@@ -1162,6 +1165,98 @@ def cmd_qualify(args) -> int:
         Path(args.output).write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
         print(f"\nrecord written to {args.output}", flush=True)
     return QUALIFICATION_EXIT.get(str(record.get("status")), 1)
+
+
+def _resolve_model_lab_store(store_arg: str | None) -> "Path":
+    """Locate the Model Lab storage directory used by the API server.
+
+    Read-only: it only stats candidate directories and falls back to the
+    documented default so a missing store produces a clear error later.
+    """
+    settings = _load_settings()
+    candidates = [
+        Path(settings.data_dir) / "model_lab",
+        Path(settings.data_dir) / "autonomy" / "model_lab",
+    ]
+    if store_arg:
+        return Path(store_arg)
+    return next((c for c in candidates if (c / "model_lab.sqlite3").is_file()), candidates[0])
+
+
+def cmd_research_bundle(args) -> int:
+    """Export, verify or replay a portable research-run bundle (offline).
+
+    Read-only with respect to the trading system: export reads the local Model Lab
+    store and the dependency lock, verify touches only bundle bytes, replay re-runs
+    the pinned research pipeline in-process. None of them contacts a provider,
+    submits an order, arms paper execution or grants execution authority.
+    """
+    from app.model_lab import bundle as bundle_mod
+
+    action = args.action
+
+    if action == "export":
+        from app.model_lab.registry import ModelLabService
+
+        service = ModelLabService(_resolve_model_lab_store(args.store))
+        try:
+            document = bundle_mod.export_run_bundle(service, args.run)
+        except bundle_mod.BundleError as exc:
+            print(f"{exc.code}: {exc.detail}", file=sys.stderr)
+            return 2
+        except KeyError as exc:
+            print(f"unknown run: {exc}", file=sys.stderr)
+            return 2
+        destination = args.output or str(
+            Path(_load_settings().data_dir) / "bundles" / f"{args.run}.json"
+        )
+        if args.sealed or (destination.endswith(".json") and not args.archive):
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+            written = target
+        else:
+            written = bundle_mod.write_bundle(document, destination, archive=bool(args.archive))
+        print(
+            f"bundle exported  status={document['qualification']['status']}  "
+            f"artifacts={len(document['artifacts'])}  bundle_sha256={document['bundle_sha256']}",
+            flush=True,
+        )
+        print(f"written to {written}", flush=True)
+        print(
+            "note: a bundle records evidence; it never upgrades a qualification, "
+            "authorizes execution or implies profitability.",
+            flush=True,
+        )
+        return 0
+
+    if action == "verify":
+        report = bundle_mod.verify_bundle(args.bundle)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        else:
+            print(bundle_mod.render_verify_text(report), flush=True)
+        if args.output:
+            Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        return BUNDLE_VERIFY_EXIT.get(str(report.get("status")), 1)
+
+    if action == "replay":
+        report = bundle_mod.replay_bundle(
+            args.bundle,
+            abs_tol=float(args.abs_tol),
+            rel_tol=float(args.rel_tol),
+            strict_environment=bool(args.strict_env),
+        )
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        else:
+            print(bundle_mod.render_replay_text(report), flush=True)
+        if args.output:
+            Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        return BUNDLE_REPLAY_EXIT.get(str(report.get("status")), 1)
+
+    print("action must be export, verify or replay", file=sys.stderr)
+    return 2
 
 
 def cmd_replay(args) -> int:
@@ -1385,6 +1480,25 @@ def parser() -> argparse.ArgumentParser:
 
     mon = sub.add_parser("monitor", help="self-monitoring snapshot (exit 1 on alerts)")
     mon.set_defaults(func=cmd_monitor)
+
+    bundle_cmd = sub.add_parser(
+        "research-bundle",
+        help="portable research-run bundle: export / verify / replay (offline, read-only)",
+    )
+    bundle_cmd.add_argument("action", choices=["export", "verify", "replay"])
+    bundle_cmd.add_argument("--run", default=None, help="completed run_id to export")
+    bundle_cmd.add_argument("--bundle", default=None, help="bundle directory, .zip or sealed .json to verify/replay")
+    bundle_cmd.add_argument("--store", default=None, help="Model Lab storage directory")
+    bundle_cmd.add_argument("--output", default=None, help="destination for export, or a report path")
+    bundle_cmd.add_argument("--archive", action="store_true", help="export a .zip archive instead of a directory")
+    bundle_cmd.add_argument("--sealed", action="store_true", help="export a single sealed .json document")
+    bundle_cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
+    bundle_cmd.add_argument("--abs-tol", type=float, default=1e-9, help="replay absolute tolerance")
+    bundle_cmd.add_argument("--rel-tol", type=float, default=1e-9, help="replay relative tolerance")
+    bundle_cmd.add_argument(
+        "--strict-env", action="store_true", help="treat any environment difference as DIVERGED"
+    )
+    bundle_cmd.set_defaults(func=cmd_research_bundle)
 
     qual = sub.add_parser(
         "research-qualify",

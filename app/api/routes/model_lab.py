@@ -8,10 +8,13 @@ Exposes:
   cancellation, baseline & 2x cost-stress comparison).
 - Model Registry (manual paper-reference promotion, rejection, SHA-256 export/import).
 - Read-only research qualification: published rules, per-run verdicts, records.
+- Portable research-run bundles: export a completed run, verify a bundle offline,
+  replay it from pinned inputs (no network, no orders, no execution authority).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -124,6 +127,19 @@ class ModelActionBody(BaseModel):
 
 class ModelImportBody(BaseModel):
     bundle: dict[str, Any]
+
+
+class ResearchBundleBody(BaseModel):
+    bundle: dict[str, Any] = Field(
+        description="A sealed axiom.research.bundle.v1 document (as returned by the export route)"
+    )
+
+
+class ResearchBundleReplayBody(BaseModel):
+    bundle: dict[str, Any]
+    abs_tol: float | None = Field(default=None, ge=0.0, le=1.0)
+    rel_tol: float | None = Field(default=None, ge=0.0, le=1.0)
+    strict_environment: bool = False
 
 
 def _service(request: Request) -> ModelLabService:
@@ -326,6 +342,87 @@ def capture_live_dataset(body: CaptureLiveDatasetBody, request: Request):
         return {"ok": True, "dataset": meta}
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/bundles/format")
+def research_bundle_format():
+    """Published description of the portable research-bundle format."""
+    from app.model_lab import bundle as bundle_mod
+
+    return {
+        "schema": bundle_mod.BUNDLE_SCHEMA,
+        "format_version": bundle_mod.BUNDLE_FORMAT_VERSION,
+        "supported_format_versions": sorted(bundle_mod.SUPPORTED_FORMAT_VERSIONS),
+        "containers": ["DIRECTORY", "ZIP", "SEALED_JSON"],
+        "required_roles": list(bundle_mod.REQUIRED_ROLES),
+        "optional_roles": list(bundle_mod.OPTIONAL_ROLES),
+        "limits": bundle_mod.DEFAULT_LIMITS.as_dict(),
+        "reason_codes": dict(bundle_mod.REASON_CODES),
+        "tolerance": {
+            "abs": bundle_mod.DEFAULT_ABS_TOL,
+            "rel": bundle_mod.DEFAULT_REL_TOL,
+            "note": "the research pipeline is deterministic; the tolerance only absorbs float noise",
+        },
+        "guarantees": {
+            "offline": True,
+            "network_calls": 0,
+            "broker_order_api_calls": 0,
+            "live_trading": False,
+            "can_upgrade_qualification": False,
+            "grants_execution_authority": False,
+        },
+        "integrity_scope": (
+            "A matching SHA-256 proves the bytes are the bytes that were bundled. It does not "
+            "prove the provider's data is genuine, and it does not turn an operator attestation "
+            "into an independently verified fact."
+        ),
+    }
+
+
+@router.post("/runs/{run_id}/bundle")
+def export_run_bundle(run_id: str, request: Request):
+    """Export one completed run as a sealed bundle document (read-only)."""
+    from app.model_lab import bundle as bundle_mod
+
+    svc = _service(request)
+    try:
+        svc.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    try:
+        return bundle_mod.export_run_bundle(svc, run_id)
+    except bundle_mod.BundleError as exc:
+        status = 404 if exc.code in {"BUNDLE_MANIFEST_MISSING", "QUALIFICATION_RECORD_MISSING"} else 409
+        raise HTTPException(status, f"{exc.code}: {exc.detail}") from exc
+
+
+@router.post("/bundles/verify")
+def verify_research_bundle(body: ResearchBundleBody, request: Request):
+    """Verify a sealed bundle offline and report specific reason codes."""
+    from app.model_lab import bundle as bundle_mod
+
+    _service(request)
+    size = len(json.dumps(body.bundle, default=str).encode("utf-8"))
+    if size > bundle_mod.DEFAULT_LIMITS.max_total_bytes * 2:
+        raise HTTPException(413, "bundle payload is too large")
+    return bundle_mod.verify_bundle(body.bundle)
+
+
+@router.post("/bundles/replay")
+def replay_research_bundle(body: ResearchBundleReplayBody, request: Request):
+    """Replay a verified bundle from its pinned inputs only (deterministic)."""
+    from app.model_lab import bundle as bundle_mod
+
+    _service(request)
+    size = len(json.dumps(body.bundle, default=str).encode("utf-8"))
+    if size > bundle_mod.DEFAULT_LIMITS.max_total_bytes * 2:
+        raise HTTPException(413, "bundle payload is too large")
+    kwargs: dict[str, Any] = {"strict_environment": body.strict_environment}
+    if body.abs_tol is not None:
+        kwargs["abs_tol"] = body.abs_tol
+    if body.rel_tol is not None:
+        kwargs["rel_tol"] = body.rel_tol
+    return bundle_mod.replay_bundle(body.bundle, **kwargs)
 
 
 @router.get("/qualification/rules")
