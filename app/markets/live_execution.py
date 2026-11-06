@@ -53,6 +53,12 @@ from app.autonomy.upstox import (
     UpstoxRejected,
 )
 from app.data.models import parse_timestamp
+from app.markets.broker_capabilities import (
+    CapabilityRefused,
+    capabilities_for,
+    describe_capabilities,
+    idempotency_asymmetry,
+)
 from app.markets.nse_reconciliation import nse_session_status, resolve_nse_instrument_strict
 from app.monitoring.paper_events import redact_sensitive_data, redact_sensitive_text
 
@@ -1640,6 +1646,8 @@ class LiveExecutionCoordinator:
                 "submitted_total": runtime.submitted_total,
                 "rejected_total": runtime.rejected_total,
                 "live_confirmation_phrase": LIVE_CONFIRM_PHRASE,
+                "broker": capabilities_for(mkt).broker,
+                "documented_capabilities_as_of": capabilities_for(mkt).documented_as_of,
             }
         return out if market is None else out[markets[0]]
 
@@ -1674,7 +1682,18 @@ class LiveExecutionCoordinator:
             "missing_dependencies": missing,
             "gate": adapter.gate_status(),
             "live_confirmation_phrase": LIVE_CONFIRM_PHRASE,
+            "documented_capabilities": capabilities_for(mkt).as_dict(),
         }
+
+    def capabilities(self, market: str | None = None):
+        """Documented broker capabilities for one market, or both (reference data only)."""
+        if market is None:
+            return describe_capabilities(None)
+        return describe_capabilities(self._validate_market(market))
+
+    def capability_differences(self) -> dict[str, object]:
+        """State how the two brokers differ where it changes behaviour."""
+        return idempotency_asymmetry()
 
     def arm(self, market: str, *, symbol: str | None = None) -> dict[str, Any]:
         mkt = self._validate_market(market)
