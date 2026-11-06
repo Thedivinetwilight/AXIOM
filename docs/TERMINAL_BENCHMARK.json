@@ -1,0 +1,163 @@
+{
+  "schema": "axiom-terminal-benchmark-v1",
+  "generated_at": "2026-10-25T07:39:23.643471+00:00",
+  "commit": "7c7de22abdf98cef47af53a02f8072342b9e7331",
+  "working_tree_dirty_at_measurement": true,
+  "conditions": {
+    "evidence_class": "FAKE VANTAGE DEMO / LOCAL PROCESS ONLY",
+    "gateway": "tests.mt5_fake.FakeMT5Gateway",
+    "real_mt5_terminal": false,
+    "external_demo_account": false,
+    "live_account_or_orders": false,
+    "network": "none",
+    "database": "in-memory SQLite",
+    "python": "3.11.2",
+    "platform": "Linux-6.1.158+-x86_64-with-glibc2.36",
+    "machine": "x86_64",
+    "logical_cpu_count": 2,
+    "read_workers": 4,
+    "read_requests_per_worker": 60,
+    "sequential_reviewed_demo_fakes": 12,
+    "read_wall_seconds": 1.726044,
+    "browser_gpu_or_raster_measured": false
+  },
+  "http_observations_ms": {
+    "http.chart.update": {
+      "samples": 120,
+      "p50_ms": 28.769,
+      "p95_ms": 39.572,
+      "p99_ms": 45.635,
+      "max_ms": 55.624,
+      "mean_ms": 29.605
+    },
+    "http.feed.quotes": {
+      "samples": 120,
+      "p50_ms": 27.668,
+      "p95_ms": 39.245,
+      "p99_ms": 46.052,
+      "max_ms": 50.12,
+      "mean_ms": 27.445
+    },
+    "http.order.review": {
+      "samples": 12,
+      "p50_ms": 3.781,
+      "p95_ms": 4.455,
+      "p99_ms": 4.622,
+      "max_ms": 4.663,
+      "mean_ms": 3.87
+    },
+    "http.order.submit": {
+      "samples": 12,
+      "p50_ms": 5.211,
+      "p95_ms": 7.166,
+      "p99_ms": 7.672,
+      "max_ms": 7.799,
+      "mean_ms": 5.365
+    },
+    "http.reconcile": {
+      "samples": 6,
+      "p50_ms": 3.799,
+      "p95_ms": 4.324,
+      "p99_ms": 4.394,
+      "max_ms": 4.412,
+      "mean_ms": 3.883
+    }
+  },
+  "instrumented_server_metrics": {
+    "http.request": {
+      "samples": 270,
+      "window_samples": 270,
+      "p50_ms": 15.515,
+      "p95_ms": 26.749,
+      "p99_ms": 28.763,
+      "max_ms": 48.323,
+      "last_ms": 3.434
+    },
+    "vantage.broker.submission_ack": {
+      "samples": 12,
+      "window_samples": 12,
+      "p50_ms": 0.026,
+      "p95_ms": 0.033,
+      "p99_ms": 0.034,
+      "max_ms": 0.034,
+      "last_ms": 0.022
+    },
+    "vantage.chart.backend": {
+      "samples": 120,
+      "window_samples": 120,
+      "p50_ms": 2.969,
+      "p95_ms": 11.239,
+      "p99_ms": 15.16,
+      "max_ms": 19.742,
+      "last_ms": 3.183
+    },
+    "vantage.feed.gateway_receipt": {
+      "samples": 264,
+      "window_samples": 264,
+      "p50_ms": 0.009,
+      "p95_ms": 0.016,
+      "p99_ms": 0.031,
+      "max_ms": 0.046,
+      "last_ms": 0.009
+    },
+    "vantage.feed.observed_source_age": {
+      "samples": 264,
+      "window_samples": 264,
+      "p50_ms": 0.504,
+      "p95_ms": 0.951,
+      "p99_ms": 1.005,
+      "max_ms": 1.028,
+      "last_ms": 0.616
+    },
+    "vantage.order.review_api": {
+      "samples": 12,
+      "window_samples": 12,
+      "p50_ms": 1.257,
+      "p95_ms": 1.667,
+      "p99_ms": 1.685,
+      "max_ms": 1.689,
+      "last_ms": 1.649
+    },
+    "vantage.order.submit_api": {
+      "samples": 12,
+      "window_samples": 12,
+      "p50_ms": 2.199,
+      "p95_ms": 3.613,
+      "p99_ms": 3.912,
+      "max_ms": 3.987,
+      "last_ms": 3.144
+    },
+    "vantage.quotes.api": {
+      "samples": 120,
+      "window_samples": 120,
+      "p50_ms": 0.501,
+      "p95_ms": 13.255,
+      "p99_ms": 17.315,
+      "max_ms": 24.753,
+      "last_ms": 0.168
+    },
+    "vantage.reconciliation": {
+      "samples": 42,
+      "window_samples": 42,
+      "p50_ms": 0.749,
+      "p95_ms": 1.481,
+      "p99_ms": 1.537,
+      "max_ms": 1.558,
+      "last_ms": 1.2
+    }
+  },
+  "assertions": {
+    "order_send_calls": 12,
+    "expected_order_send_calls": 12,
+    "all_fake_orders_reconciled_filled": true,
+    "setup_and_warmup_excluded_from_server_metrics": true
+  },
+  "limitations": [
+    "The fake gateway responds in-process and adds no broker, network, terminal or real-market delay.",
+    "p50/p95/p99 describe this run only; they are not universal latency promises or service-level objectives.",
+    "Broker acknowledgement is separate from broker-confirmed fill state and from full API/reconciliation time.",
+    "Concurrent reads and sequential reviewed writes do not model every operator or market condition.",
+    "Fake/demo performance and fills establish neither profitability nor LIVE readiness.",
+    "Browser canvas render timing is reported separately by the UI benchmark; this Python run does not measure GPU/raster time."
+  ]
+}

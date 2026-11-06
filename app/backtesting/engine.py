@@ -7,6 +7,10 @@ from pathlib import Path
 from uuid import uuid4
 from app.backtesting.costs import ExecutionConfig
 from app.backtesting.metrics import calculate, daily_returns
+from app.data.corporate_actions import (
+    AdjustedSeries,
+    assert_no_double_counting,
+)
 from app.data.validator import validate
 from app.paper_trading.broker import PaperBroker
 
@@ -30,6 +34,7 @@ class BacktestResult:
     position_history: list[dict]
     warnings: list[str]
     execution_config: dict
+    corporate_actions: dict = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self):
@@ -73,9 +78,23 @@ class BacktestEngine:
         self.config = config or ExecutionConfig()
         self.annualization, self.calendar = annualization, calendar
 
-    def run(self, candles, strategy, timeframe="1D", *, warmup=None, label="BACKTEST"):
+    def run(
+        self,
+        candles,
+        strategy,
+        timeframe="1D",
+        *,
+        warmup=None,
+        label="BACKTEST",
+        adjustment: dict | None = None,
+    ):
         if label not in {"BACKTEST", "TRAINING", "VALIDATION", "UNSEEN TEST", "ROBUSTNESS"}:
             raise ValueError("Invalid research label")
+        corporate_actions = dict(adjustment or {})
+        if isinstance(candles, AdjustedSeries):
+            corporate_actions = corporate_actions or dict(candles.provenance)
+            candles = list(candles.bars)
+        assert_no_double_counting(corporate_actions)
         report = validate(candles, timeframe, calendar=self.calendar)
         report.require_valid()
         symbols = {b.symbol for b in candles}
@@ -113,6 +132,26 @@ class BacktestEngine:
         if not snapshots:
             warnings.append("No tradable bars under configured calendar")
         warnings.append("Historical backtest results are not guarantees of future performance")
+        if corporate_actions.get("prices_adjusted"):
+            warnings.append(
+                "Research backtest ran on corporate-action-adjusted prices ("
+                f"{corporate_actions.get('status')}, policy {corporate_actions.get('policy')}): "
+                "fills are simulated on adjusted, not traded, prices — never treat these as "
+                "execution prices."
+            )
+        elif corporate_actions and str(corporate_actions.get("status")) != "RAW":
+            warnings.append(
+                f"Corporate-action basis unverified ({corporate_actions.get('status')}): "
+                "splits/dividends in this window were not adjusted."
+            )
+        if corporate_actions.get("dividends_as_cash") and corporate_actions.get(
+            "cash_dividend_events"
+        ):
+            warnings.append(
+                "Cash dividends are NOT credited by this engine: prices stay raw, so a "
+                "dividend-paying window understates total return unless the research ledger "
+                "credits the recorded dividend cash events exactly once."
+            )
         return BacktestResult(
             uuid4().hex,
             label,
@@ -138,4 +177,5 @@ class BacktestEngine:
             positions,
             warnings,
             asdict(self.config),
+            corporate_actions,
         )

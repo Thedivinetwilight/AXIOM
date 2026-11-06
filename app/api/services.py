@@ -1,4 +1,5 @@
 from fastapi import HTTPException
+from app.data.corporate_actions import assert_raw_candles
 from app.data.historical import CSVProvider
 
 
@@ -12,4 +13,6 @@ def load_dataset(app, body):
     bars = CSVProvider(path, body.timeframe).historical(body.symbol, body.timeframe)
     if len(bars) > 10_000:
         raise HTTPException(413, "API limited to 10000 candles; use CLI")
-    return bars
+    # Paper replay/backtest fills must use RAW traded prices; a research-adjusted
+    # series is refused here rather than silently simulated as execution prices.
+    return assert_raw_candles(bars, context="paper replay dataset")

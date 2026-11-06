@@ -1,0 +1,67 @@
+{
+  "schema": "axiom-terminal-ui-benchmark-v1",
+  "generated_at": "2026-10-25T07:39:26.525Z",
+  "commit": "7c7de22abdf98cef47af53a02f8072342b9e7331",
+  "working_tree_dirty_at_measurement": true,
+  "conditions": {
+    "evidence_class": "FAKE DOM / FAKE CANVAS COMMANDS ONLY",
+    "node": "v22.22.3",
+    "platform": "linux",
+    "arch": "x64",
+    "logical_cpu_count": 2,
+    "cpu_model": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "dom": "jsdom",
+    "canvas": "local command-counting fake 2D context",
+    "real_browser": false,
+    "gpu_or_raster_measured": false,
+    "external_demo_account": false,
+    "live_account_or_orders": false,
+    "render_iterations": 120
+  },
+  "browser_metrics_ms": {
+    "browser.chart.load": {
+      "samples": 6,
+      "p50_ms": 0.186,
+      "p95_ms": 0.368,
+      "p99_ms": 0.4,
+      "max_ms": 0.408
+    },
+    "browser.chart.render": {
+      "samples": 128,
+      "p50_ms": 0.891,
+      "p95_ms": 1.31,
+      "p99_ms": 2.098,
+      "max_ms": 2.948
+    },
+    "browser.paper.submit_roundtrip": {
+      "samples": 2,
+      "p50_ms": 0.107,
+      "p95_ms": 0.122,
+      "p99_ms": 0.123,
+      "max_ms": 0.123
+    },
+    "browser.order.submit_roundtrip": {
+      "samples": 2,
+      "p50_ms": 0.305,
+      "p95_ms": 0.479,
+      "p99_ms": 0.494,
+      "max_ms": 0.498
+    }
+  },
+  "functional_evidence": {
+    "authenticated_fake_api_calls": 85,
+    "canvas_calls": {
+      "fillRect": 6005,
+      "stroke": 7024,
+      "fillText": 1752
+    },
+    "expected_reviewed_order_submissions": 2,
+    "unexpected_order_submissions": 0
+  },
+  "limitations": [
+    "This measures JavaScript and fake canvas command execution, not GPU/raster or human-perceived frame latency.",
+    "The terminal's performance panel measures real browser canvas duration when an owner runs it locally.",
+    "p50/p95/p99 apply only to this run; no universal or zero-latency claim is made.",
+    "Fake DOM/canvas and any later DEMO results establish neither profitability nor LIVE readiness."
+  ]
+}

@@ -45,9 +45,20 @@ def authenticate(request: Request) -> None:
 
 
 def loopback_or_bearer(request: Request) -> None:
-    """Dashboard PAGE gate: local clients read the UI freely; everyone else
-    must present the bearer exactly like any protected endpoint."""
+    """PAGE gate: local clients read the UI freely; everyone else must present
+    the bearer exactly like any protected endpoint.
+
+    When ``UI_ALLOW_PROXY_PAGES`` is enabled the page is served to any client.
+    That is safe in the only sense that matters here: the page carries no
+    secret and no account data — every value it displays comes from a route
+    that still demands the bearer token. The flag exists because a reverse
+    proxy makes every client appear remote, and refusing the page outright
+    would make a proxied deployment unusable.
+    """
     client = request.client.host if request.client is not None else ""
     if client in LOCAL_CLIENTS:
+        return
+    settings = getattr(request.app.state, "settings", None)
+    if getattr(settings, "ui_allow_proxy_pages", False):
         return
     authenticate(request)

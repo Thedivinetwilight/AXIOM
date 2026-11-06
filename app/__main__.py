@@ -26,6 +26,11 @@ Commands:
   research        Parameter experiments: run/status (OOS-gated).
   report          Human-readable weekly report (markdown/pdf).
   maintenance     Run due maintenance jobs once (scheduling-aware).
+  provider-check  READ-ONLY Upstox/Alpaca market-data conformance report.
+                  Offline by default: deterministic HTTP doubles and synthetic
+                  fixtures, zero network calls. `--live` is the only mode that
+                  opens a socket, and it performs one documented GET per
+                  provider (no orders, no writes, no stored credentials).
 
 There is no command that can place a real order. MODE=PAPER and
 LIVE_TRADING=false are hard-enforced by Settings for every command.
@@ -397,10 +402,21 @@ def cmd_paper_test(args) -> int:
 
 
 def cmd_paper_live(args) -> int:
-    """Full paper pipeline over the real data source (existing run.py engine)."""
+    """Full paper pipeline over the real data source (existing run.py engine).
+
+    ``paper-live`` intentionally takes the *remainder* of the command line and
+    forwards it to ``run.py`` verbatim, e.g.::
+
+        python -m app paper-live --delay 0.5 --database sqlite:///paper.db
+
+    which becomes ``run.py --mode paper --source upstox --delay 0.5 ...``. The
+    forwarded tokens come from ``args.passthrough``; there is no module-level
+    ``argv`` to index into (the old ``argv[args.passthrough:]`` raised
+    ``NameError`` for every invocation that carried arguments).
+    """
     from run import main as run_main
 
-    passthrough = argv[args.passthrough:] if args.passthrough else []
+    passthrough = [str(token) for token in (getattr(args, "passthrough", None) or [])]
     run_main(["--mode", "paper", "--source", "upstox", *passthrough])
     return 0
 
@@ -704,60 +720,97 @@ def cmd_universe_screen(args) -> int:
         database.close()
 
 
+def _research_series(store, repository, key: str, args) -> list:
+    """Load one symbol only; never combine instruments in one backtest."""
+    from app.data.models import validate_symbol
+
+    rows = store.read_range(
+        key, args.unit, args.interval, args.from_date, args.to_date
+    )
+    try:
+        instruments = repository.list_instruments(state=None, limit=10000)
+    except Exception:
+        instruments = []
+    match = next((row for row in instruments if row["instrument_key"] == key), None)
+    candidate = (match or {}).get("trading_symbol") or key.split("|")[-1]
+    try:
+        symbol = validate_symbol(candidate)
+    except ValueError:
+        symbol = "RESEARCH"
+    return store.to_candles(rows, symbol)
+
+
+def _research_keys(raw: str) -> list[str]:
+    keys = list(dict.fromkeys(k.strip() for k in raw.split(",") if k.strip()))
+    if not keys:
+        raise ValueError("at least one instrument key is required")
+    return keys
+
+
 def cmd_research(args) -> int:
     settings = _load_settings()
     database, repository, store, _manager = _data_stack(settings)
     try:
         if args.action == "run":
+            from app.backtesting.costs import ExecutionConfig
+            from app.backtesting.engine import BacktestEngine
             from app.learning.experiments import ExperimentEngine
 
-            keys = [k.strip() for k in args.instruments.split(",") if k.strip()]
-            rows = []
-            for key in keys:
-                rows.extend(store.read_range(key, args.unit, args.interval,
-                                             args.from_date, args.to_date))
-            if not rows:
-                print(json.dumps({"ok": False,
-                                  "error": "no local candles for that request; run `history sync` first"},
-                                 indent=2))
+            try:
+                keys = _research_keys(args.instruments)
+            except ValueError as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}))
                 return 2
-            from app.backtesting.costs import ExecutionConfig
-
-            from app.data.models import Candle as CandleModel
-            from app.history.store import parse_ts
-
-            def symbol_for(key: str) -> str:
-                from app.data.models import validate_symbol
-
-                try:
-                    found = repository.list_instruments(state=None, limit=10000)
-                except Exception:
-                    found = []
-                match = next((r for r in found if r["instrument_key"] == key), None)
-                candidate = (match or {}).get("trading_symbol") or key.split("|")[-1]
-                try:
-                    return validate_symbol(candidate)
-                except ValueError:
-                    return "RESEARCH"
-
-            candles = []
+            raw_periods = (args.periods if isinstance(args.periods, str)
+                           else ",".join(str(p) for p in args.periods))
+            try:
+                periods = list(dict.fromkeys(
+                    int(part.strip()) for part in raw_periods.split(",") if part.strip()
+                ))
+            except ValueError:
+                print(json.dumps({"ok": False, "error": "--periods must be comma-separated integers"}))
+                return 2
+            if not periods or any(period < 1 for period in periods):
+                print(json.dumps({"ok": False, "error": "--periods must contain positive integers"}))
+                return 2
+            grid = [{"period": period, "threshold": 0.0} for period in periods]
+            engine = ExperimentEngine(
+                repository,
+                engine=BacktestEngine(ExecutionConfig(**settings.execution_kwargs())),
+            )
+            runs, errors = [], []
             for key in keys:
-                rows = store.read_range(key, args.unit, args.interval,
-                                        args.from_date, args.to_date)
-                candles.extend(CandleModel(parse_ts(r["ts"]), r["open"], r["high"],
-                                           r["low"], r["close"], r["volume"],
-                                           symbol_for(key)) for r in rows)
-            grid = [{"period": p, "threshold": 0.0} for p in args.periods]
-            engine = ExperimentEngine(repository,
-                                      engine=BacktestEngine(ExecutionConfig()))
-            result = engine.run(args.name, candles, "momentum", grid, args.timeframe)
+                candles = _research_series(store, repository, key, args)
+                if len(candles) < 60:
+                    errors.append({"instrument": key, "error": f"only {len(candles)} local candles; need at least 60"})
+                    continue
+                name = args.name if len(keys) == 1 else f"{args.name}:{key}"
+                runs.append(engine.run(name, candles, "momentum", grid, args.timeframe))
+            result = {
+                "ok": bool(runs),
+                "runs": runs,
+                "candidates": sum(run["candidates"] for run in runs),
+                "promoted": sum(run["promoted"] for run in runs),
+                "errors": errors,
+                "research_only": True,
+                "execution_authorized": False,
+                "profitability_claim": "none",
+            }
+            if len(runs) == 1:
+                # Preserve the original single-instrument fields while adding
+                # the explicit run list and aggregate report metadata.
+                result = {**runs[0], **result}
+            if not runs:
+                result["error"] = "no instrument had enough local candles; run history sync first"
         elif args.action == "status":
             result = {"experiments": repository.list_experiments(limit=10),
                       "promoted_candidates": repository.list_candidates(
                           promoted=True, limit=10)}
         else:
             result = {"ok": False, "error": f"unknown action {args.action}"}
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps(result, indent=2, default=str, allow_nan=False))
+        if args.action == "run" and not result.get("ok", False):
+            return 2
         return 0
     finally:
         database.close()
@@ -886,39 +939,80 @@ def cmd_scan(args) -> int:
 
 
 def cmd_discover(args) -> int:
+    """Run controlled, per-instrument research; never authorize execution."""
     settings = _load_settings()
     from app.backtesting.costs import ExecutionConfig
     from app.backtesting.engine import BacktestEngine
-    from app.data.models import Candle as CandleModel
-    from app.history.store import CandleStore, parse_ts
+    from app.history.store import CandleStore
     from app.research.discovery import StrategyDiscoveryEngine, generate_specs
 
     database, repository = _stack_or_none(settings)
     try:
         store = CandleStore(Path(settings.data_dir) / "history",
                             parquet_enabled=settings.parquet_enabled)
-        candles = []
-        for key in [k.strip() for k in args.instruments.split(",") if k.strip()]:
-            for row in store.read_range(key, args.unit, args.interval,
-                                        args.from_date, args.to_date):
-                candles.append(CandleModel(parse_ts(row["ts"]), row["open"],
-                                           row["high"], row["low"], row["close"],
-                                           row["volume"], key.split("|")[-1]))
-        if len(candles) < 60:
-            print(json.dumps({"ok": False,
-                              "error": f"only {len(candles)} local candles; run history sync first"}))
+        try:
+            keys = _research_keys(args.instruments)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
             return 2
+        limit = getattr(args, "max_candidates", None)
+        limit = settings.discovery_max_candidates if limit is None else limit
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            print(json.dumps({"ok": False, "error": "--max-candidates must be a positive integer"}))
+            return 2
+        specs = generate_specs(max_candidates=limit)
         discovery = StrategyDiscoveryEngine(
-            repository, engine=BacktestEngine(ExecutionConfig()))
-        specs = generate_specs(max_candidates=settings.discovery_max_candidates)
-        run = discovery.discover(args.name, candles, args.timeframe, specs=specs)
-        print(json.dumps({"experiment_id": run["experiment_id"],
-                          "candidates": len(run["results"]),
-                          "qualified": len(run["qualified"]),
-                          "qualified_detail": [{k: q.get(k) for k in ("strategy", "parameters", "score", "oos")}
-                                               for q in run["qualified"]]},
-                         indent=2, default=str))
-        return 0
+            repository,
+            settings=settings,
+            engine=BacktestEngine(ExecutionConfig(**settings.execution_kwargs())),
+        )
+        runs, errors = [], []
+        for key in keys:
+            candles = _research_series(store, repository, key, args)
+            if len(candles) < 60:
+                errors.append({"instrument": key, "error": f"only {len(candles)} local candles; need at least 60"})
+                continue
+            name = args.name if len(keys) == 1 else f"{args.name}:{key}"
+            run = discovery.discover(name, candles, args.timeframe, specs=specs)
+            run["instrument"] = key
+            runs.append(run)
+        qualified = []
+        for run in runs:
+            for candidate in run["qualified"]:
+                qualified.append({
+                    "instrument": run["instrument"],
+                    "strategy": candidate["strategy"],
+                    "parameters": candidate["parameters"],
+                    "oos": candidate.get("oos", {}),
+                    "robustness_score": candidate.get("robustness_score"),
+                    "wf_expectancy": candidate.get("wf_expectancy"),
+                    "metrics": candidate.get("metrics", {}),
+                    "research_only": True,
+                })
+        report = {
+            "ok": bool(runs),
+            "experiment_id": runs[0]["experiment_id"] if len(runs) == 1 else None,
+            "experiment_ids": [run["experiment_id"] for run in runs],
+            "candidates": sum(run["evaluated"] for run in runs),
+            "qualified": len(qualified),
+            "qualified_detail": qualified,
+            "runs": runs,
+            "errors": errors,
+            "research_only": True,
+            "execution_authorized": False,
+            "profitability_claim": "none",
+            "note": "Historical research candidates only; no profit guarantee, paper deployment or LIVE eligibility.",
+        }
+        if not runs:
+            report["error"] = "no instrument had enough local candles; run history sync first"
+        output = getattr(args, "output", None)
+        if output:
+            report["output"] = str(output)
+            target = Path(output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(report, indent=2, default=str, allow_nan=False) + "\n")
+        print(json.dumps(report, indent=2, default=str, allow_nan=False))
+        return 0 if runs else 2
     finally:
         database.close()
 
@@ -948,6 +1042,126 @@ def cmd_lifecycle(args) -> int:
         return 0
     finally:
         database.close()
+
+
+QUALIFICATION_EXIT = {"QUALIFIED": 0, "FAIL": 1, "BLOCKED": 1, "UNVERIFIED": 3}
+
+PROVIDER_CHECK_EXIT = {"PASS": 0, "FAIL": 1, "UNVERIFIED": 3}
+
+
+def cmd_provider_check(args) -> int:
+    """Read-only Upstox/Alpaca conformance (offline) or live reachability probe.
+
+    Permissions, by design:
+    * default run: no socket, no credential read, no file write, no database;
+    * ``--live``: one documented read-only GET per provider, using credentials
+      already present in the environment; nothing is printed but verdicts;
+    * ``--output``: writes the JSON report to the given path (the only write).
+    No order, position or account-mutation endpoint is referenced anywhere on
+    these paths, and the command never stores or echoes a credential.
+    """
+    from app.data.conformance import live_probe, render_text, run_conformance
+
+    providers = (
+        ("upstox", "alpaca") if args.provider in ("both", "") else (args.provider,)
+    )
+
+    if args.live:
+        report = live_probe(providers=providers, symbol=args.symbol)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        else:
+            print(f"AXIOM provider live probe  mode=READ-ONLY  status={report['status']}", flush=True)
+            print(f"network calls: {report['network_calls']}   broker order calls: 0", flush=True)
+            for name, entry in report["providers"].items():
+                print(f"  {entry.get('status'):<10} {name}: {entry.get('detail', '')}", flush=True)
+            print("", flush=True)
+            for limitation in report["limitations"]:
+                print(f"  note: {limitation}", flush=True)
+    else:
+        report = run_conformance(providers=providers)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        else:
+            print(render_text(report), flush=True)
+
+    if args.output:
+        Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"\nreport written to {args.output}", flush=True)
+
+    return PROVIDER_CHECK_EXIT.get(str(report.get("status")), 1)
+
+
+def cmd_qualify(args) -> int:
+    """Score a research manifest against the published qualification rules.
+
+    Read-only: reads a manifest JSON file (or a completed run from the local
+    Model Lab store) and prints the verdict. It never re-runs a backtest, never
+    contacts a provider, never submits an order and never enables live trading.
+    """
+    from app.model_lab.qualification import evaluate_qualification, render_text
+
+    manifest: dict | None = None
+    dataset_meta: dict | None = None
+    provenance: dict | None = None
+
+    if args.manifest:
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    if args.dataset_meta:
+        dataset_meta = json.loads(Path(args.dataset_meta).read_text(encoding="utf-8"))
+    if args.provenance:
+        provenance = json.loads(Path(args.provenance).read_text(encoding="utf-8"))
+
+    if manifest is None:
+        if not args.run:
+            print("provide --manifest PATH or --run RUN_ID", file=sys.stderr)
+            return 2
+        from app.model_lab.registry import ModelLabService
+
+        settings = _load_settings()
+        candidates = [Path(settings.data_dir) / "model_lab", Path(settings.data_dir) / "autonomy" / "model_lab"]
+        store = Path(args.store) if args.store else next(
+            (c for c in candidates if (c / "model_lab.sqlite3").is_file()), candidates[0]
+        )
+        service = ModelLabService(store)
+        try:
+            run = service.get_run(args.run)
+        except KeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        manifest = run.get("manifest") or {}
+        if not manifest:
+            print(f"run {args.run} has no manifest yet (status={run.get('status')})", file=sys.stderr)
+            return 2
+        try:
+            stored = service.get_qualification(args.run)
+        except KeyError:
+            stored = None
+        if stored is not None and not args.reevaluate:
+            record = stored
+            if args.json:
+                print(json.dumps(record, indent=2, sort_keys=True), flush=True)
+            else:
+                print(render_text(record), flush=True)
+            if args.output:
+                Path(args.output).write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+            return QUALIFICATION_EXIT.get(str(record.get("status")), 1)
+
+    record = evaluate_qualification(
+        manifest or {},
+        dataset_meta=dataset_meta,
+        recomputed_dataset_sha256=args.recomputed_sha256 or "",
+        provenance=provenance,
+        expected_software_commit=args.expect_commit or "",
+    )
+    if args.json:
+        print(json.dumps(record, indent=2, sort_keys=True), flush=True)
+    else:
+        print(render_text(record), flush=True)
+    if args.output:
+        Path(args.output).write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"\nrecord written to {args.output}", flush=True)
+    return QUALIFICATION_EXIT.get(str(record.get("status")), 1)
 
 
 def cmd_replay(args) -> int:
@@ -1029,6 +1243,8 @@ def parser() -> argparse.ArgumentParser:
     stream.set_defaults(func=cmd_market_stream)
 
     live = sub.add_parser("paper-live", help="full Upstox → candles → strategies → risk → paper pipeline")
+    # Bare tokens after ``paper-live``; unknown ``--flags`` are merged in by
+    # ``main()`` via parse_known_args so run.py receives its own options intact.
     live.add_argument("passthrough", nargs="*", help=argparse.SUPPRESS)
     live.set_defaults(func=cmd_paper_live)
 
@@ -1111,6 +1327,31 @@ def parser() -> argparse.ArgumentParser:
     maint = sub.add_parser("maintenance", help="run due maintenance jobs once")
     maint.set_defaults(func=cmd_maintenance)
 
+    conformance = sub.add_parser(
+        "provider-check",
+        help="READ-ONLY Upstox/Alpaca market-data conformance report (offline by default)",
+    )
+    conformance.add_argument(
+        "--provider", choices=["both", "upstox", "alpaca"], default="both",
+        help="provider to check (default: both)",
+    )
+    conformance.add_argument(
+        "--json", action="store_true", help="emit the machine-readable report instead of text",
+    )
+    conformance.add_argument(
+        "--output", default=None,
+        help="optional path for the JSON report (the only file this command writes)",
+    )
+    conformance.add_argument(
+        "--live", action="store_true",
+        help="EXPLICIT opt-in: one documented read-only GET per provider using credentials "
+             "already in the environment (no orders, no writes, no stored secrets)",
+    )
+    conformance.add_argument(
+        "--symbol", default=None, help="US ticker for the live Alpaca probe (default: first configured)",
+    )
+    conformance.set_defaults(func=cmd_provider_check)
+
     ask = sub.add_parser("ask", help="Command Center: ask about recorded data")
     ask.add_argument("question")
     ask.set_defaults(func=cmd_ask)
@@ -1129,6 +1370,8 @@ def parser() -> argparse.ArgumentParser:
     discover.add_argument("--from-date", default=None)
     discover.add_argument("--to-date", default=None)
     discover.add_argument("--timeframe", default="1D")
+    discover.add_argument("--max-candidates", type=int, default=None)
+    discover.add_argument("--output", default=None, help="optional research JSON report path")
     discover.set_defaults(func=cmd_discover)
 
     life = sub.add_parser("lifecycle", help="strategy pipeline: status/promote/degrade")
@@ -1143,19 +1386,89 @@ def parser() -> argparse.ArgumentParser:
     mon = sub.add_parser("monitor", help="self-monitoring snapshot (exit 1 on alerts)")
     mon.set_defaults(func=cmd_monitor)
 
+    qual = sub.add_parser(
+        "research-qualify",
+        help="score a research manifest against the qualification rules (read-only)",
+    )
+    qual.add_argument("--manifest", default=None, help="path to a research manifest JSON file")
+    qual.add_argument("--run", default=None, help="completed Model Lab run_id to score from the local store")
+    qual.add_argument("--store", default=None, help="Model Lab storage directory (defaults to the configured data dir)")
+    qual.add_argument("--dataset-meta", default=None, help="optional dataset metadata JSON for provenance checks")
+    qual.add_argument("--provenance", default=None, help="optional operator provenance attestation JSON")
+    qual.add_argument("--recomputed-sha256", default=None, help="fresh SHA-256 of the evaluated bars, if re-derived")
+    qual.add_argument("--expect-commit", default=None, help="commit the run must have been produced from")
+    qual.add_argument("--reevaluate", action="store_true", help="recompute the verdict instead of using the stored record")
+    qual.add_argument("--json", action="store_true", help="emit the full qualification record as JSON")
+    qual.add_argument("--output", default=None, help="optional path to write the JSON record")
+    qual.set_defaults(func=cmd_qualify)
+
     bak = sub.add_parser("backup", help="database backup/verify/restore")
     bak.add_argument("action", choices=["backup", "verify", "restore"])
     bak.add_argument("--path", default=None)
     bak.add_argument("--label", default="manual")
     bak.add_argument("--backup-dir", default="backups")
     bak.set_defaults(func=cmd_backup)
+
+    op = sub.add_parser(
+        "operator",
+        help="launch the local AXIOM Operator console (/terminal) in PAPER mode",
+    )
+    op.add_argument("--no-browser", action="store_true", help="do not open a browser window automatically")
+    op.add_argument("--port", type=int, default=0, help="preferred local loopback port (default 8000)")
+    op.add_argument("--check-deps", action="store_true", help="verify required Python dependencies and exit")
+    op.add_argument("--smoke", action="store_true", help="run isolated local /terminal + /health smoke check and exit")
+    op.set_defaults(func=cmd_operator)
     return p
 
 
+def cmd_operator(args) -> int:
+    from app.source_launcher import cli_main
+
+    fwd: list[str] = []
+    if args.check_deps:
+        fwd.append("--check-deps")
+    if args.smoke:
+        fwd.append("--smoke")
+    if args.no_browser:
+        fwd.append("--no-browser")
+    if args.port and int(args.port) > 0:
+        fwd.extend(["--port", str(int(args.port))])
+    return cli_main(fwd)
+
+
+# Commands that hand the remainder of the command line to another entry point
+# verbatim. Their tail must never be parsed here: ``--delay``/``--database``
+# belong to run.py, and argparse would reject or reorder them.
+FULL_LINE_FORWARDERS = frozenset({"paper-live"})
+
+
+def split_forwarded_argv(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split ``argv`` at the first forwarder command into (own, forwarded).
+
+    ``["paper-live", "--delay", "0.5"]`` -> ``(["paper-live"], ["--delay", "0.5"])``
+    """
+    for index, token in enumerate(argv):
+        if token in FULL_LINE_FORWARDERS:
+            return list(argv[: index + 1]), list(argv[index + 1 :])
+    return list(argv), []
+
+
 def main(argv=None) -> None:
-    args = parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    own, forwarded = split_forwarded_argv(raw)
+    args = parser().parse_args(own)
+    if forwarded:
+        args.passthrough = forwarded
     raise SystemExit(args.func(args))
 
 
 if __name__ == "__main__":
+    # Windows runners can default to a legacy charmap code page. Reports and
+    # diagnostics contain Unicode arrows; use UTF-8 instead of crashing after
+    # the work completed. ``replace`` also avoids a secondary print failure for
+    # an unusual unencodable character.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     main()

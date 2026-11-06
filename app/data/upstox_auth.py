@@ -23,6 +23,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import getpass
 import os
 import stat
+import subprocess
+import tempfile
 
 import httpx
 
@@ -199,21 +201,55 @@ def exchange_code_for_token(
     return token
 
 
-def store_token_in_env(token: str, env_path: Path) -> str:
-    """Persist UPSTOX_ACCESS_TOKEN into the gitignored .env (chmod 600).
+def _restrict_windows_token_file(path: Path) -> None:
+    """Remove inherited ACEs and grant only the current Windows user access."""
+    identity = subprocess.run(
+        ["whoami"], capture_output=True, text=True, timeout=10, check=False,
+    )
+    principal = identity.stdout.strip()
+    if identity.returncode != 0 or not principal or any(char in principal for char in "\r\n"):
+        raise UpstoxOAuthError("Could not identify the Windows user for token-file protection")
+    protected = subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(F)"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if protected.returncode != 0:
+        raise UpstoxOAuthError("Could not restrict the Windows token-file ACL")
 
+
+def store_token_in_env(token: str, env_path: Path) -> str:
+    """Atomically persist a token with owner-only POSIX mode or Windows ACL.
+
+    The temporary file is protected while empty, before any secret is written.
     Returns a human-readable outcome that never contains the token itself.
     """
     lines = []
     if env_path.exists():
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             if line.startswith("UPSTOX_ACCESS_TOKEN="):
                 continue
             lines.append(line)
     lines.append(f"UPSTOX_ACCESS_TOKEN={token}")
-    env_path.write_text("\n".join(lines) + "\n")
-    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
-    return f"UPSTOX_ACCESS_TOKEN written to {env_path} (file permissions 600)"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{env_path.name}.", suffix=".tmp", dir=str(env_path.parent),
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        if os.name == "nt":
+            _restrict_windows_token_file(temporary)
+            permission_note = "current-user Windows ACL"
+        else:
+            temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            permission_note = "file permissions 600"
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, env_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return f"UPSTOX_ACCESS_TOKEN written to {env_path} ({permission_note})"
 
 
 def run_login_flow(env_path: Path | None = None, *, transport=None, input=None, capture=None) -> str:

@@ -10,6 +10,7 @@ plus one end-to-end execution-graph proof and static bypass scans.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -660,18 +661,33 @@ class TestHonestCancellation:
 
 class TestFullPromotionGate:
     def _evaluate(self, env, *, evidence, validation_better=True):
+        from unittest.mock import patch
         from app.backtesting.costs import ExecutionConfig
         from app.backtesting.engine import BacktestEngine
         from app.learning.evaluator import evaluate_and_maybe_promote
 
         base = [candle(i % 60, 100.0 + (0.4 if i % 3 else -0.2) * (1 + i * 0.01))
                 for i in range(60)]
-        # on this series period 2 beats period 4 on the validation leg
-        return evaluate_and_maybe_promote(
-            env, base, "momentum", {"period": 4, "threshold": 0.0},
-            BacktestEngine(ExecutionConfig()), "1m",
-            candidate_parameters={"period": 2, "threshold": 0.0},
-            evidence=evidence)
+
+        def validation(candles, strategy_name, parameters, engine, timeframe, **kwargs):
+            is_candidate = parameters["period"] == 2
+            return {
+                "valid": True,
+                "leg": "validation",
+                "oos_trades": 5,
+                "oos_expectancy": ((1.0 if validation_better else -0.25)
+                                   if is_candidate else 0.5),
+                "split": {"chronological": True},
+            }
+
+        # Isolate the evidence gate from indicator warm-up behavior. Actual
+        # chronological warm-up is covered separately by engine regression tests.
+        with patch("app.learning.evaluator.out_of_sample_expectancy", new=validation):
+            return evaluate_and_maybe_promote(
+                env, base, "momentum", {"period": 4, "threshold": 0.0},
+                BacktestEngine(ExecutionConfig()), "1m",
+                candidate_parameters={"period": 2, "threshold": 0.0},
+                evidence=evidence)
 
     def _full_evidence(self, **overrides):
         evidence = {"robustness_score": 0.8,
@@ -696,6 +712,13 @@ class TestFullPromotionGate:
         decision = self._evaluate(env, evidence=self._full_evidence())
         assert decision["promoted"] is True
         assert all(c["passed"] for c in decision["gate"]["checks"].values())
+
+    def test_negative_validation_candidate_never_promotes(self, env):
+        self._approve_lifecycle(env)
+        decision = self._evaluate(env, evidence=self._full_evidence(), validation_better=False)
+        assert decision["promoted"] is False
+        assert decision["gate"]["checks"]["positive_validation_expectancy"]["passed"] is False
+        assert decision["gate"]["checks"]["strict_validation_improvement"]["passed"] is False
 
     def test_missing_robustness_blocks_despite_better_validation(self, env):
         """THE integration proof: validation looks great, another gate fails."""
@@ -886,53 +909,130 @@ class TestFinalExecutionGraph:
 
 
 # ================================================ 8. STATIC BYPASS SCANS ====
+#
+# These scans used to shell out to POSIX ``grep``, which does not exist on
+# Windows (``FileNotFoundError`` -> four Windows-only failures). They now walk
+# the tree in Python with the SAME semantics as the original commands:
+# recursive, ``*.py`` only, ``__pycache__`` excluded, and a path that cannot be
+# read simply contributes no matches. Each scan also reports how many files it
+# inspected, so a mis-pointed root can never make the scan pass vacuously.
+
+APP_PACKAGE = PROJECT_ROOT / "app"
+
+# Directories that never hold first-party sources. The original scans excluded
+# ``__pycache__``; the rest is VCS/virtualenv/cache noise inside a checkout.
+_SCAN_SKIP_DIRS = frozenset({"__pycache__", ".git", ".venv", ".mypy_cache"})
+
+
+def _display_path(path: Path) -> str:
+    """Render a scanned path the way ``grep -rn`` did (relative, "/" separators)."""
+    try:
+        return path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _python_source_files(root: Path) -> list[Path]:
+    """List the ``*.py`` files a ``grep -r --include=*.py`` run would consider."""
+    root = Path(root)
+    if root.is_file():
+        return [root] if root.suffix == ".py" else []
+    if not root.is_dir():
+        return []
+    return sorted(
+        path for path in root.rglob("*.py")
+        if path.is_file() and not _SCAN_SKIP_DIRS.intersection(path.parts)
+    )
+
+
+def _iter_python_sources(root: Path):
+    """Yield ``(path, lines)`` for every ``*.py`` file under *root*.
+
+    Equivalent to ``grep -rn --include=*.py <root>``: recursive, Python sources
+    only, bytecode caches skipped, and a missing root yields nothing. Files are
+    read with universal newlines, so a CRLF checkout scans like an LF one. An
+    unreadable file yields no lines rather than raising, exactly as ``grep``
+    reports no match for it.
+    """
+    for path in _python_source_files(root):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            yield path, []
+            continue
+        yield path, text.splitlines()
+
+
+def _scan_python_sources(root: Path, pattern: str) -> tuple[int, list[str]]:
+    """Return ``(files_scanned, hits)`` for the regex *pattern* under *root*."""
+    matcher = re.compile(pattern)
+    files_scanned = 0
+    hits: list[str] = []
+    for path, lines in _iter_python_sources(root):
+        files_scanned += 1
+        for lineno, line in enumerate(lines, start=1):
+            if matcher.search(line):
+                hits.append(f"{_display_path(path)}:{lineno}:{line}")
+    return files_scanned, hits
+
+
+def _silent_swallow_offenders(root: Path) -> tuple[int, list[str]]:
+    """Return ``(files_scanned, offenders)`` for ``pass`` directly after ``except``.
+
+    Mirrors ``grep -rn -B1 'pass$' <root> --include=*.py``: grep emits the
+    matching line plus the one line of leading context, and the original test
+    treated such a two-line block as an offender when it mentions ``except``
+    unless it is one of the explicitly allowed cancellations.
+    """
+    allowed = ("TimeoutError, StopAsyncIteration",)
+    files_scanned = 0
+    offenders: list[str] = []
+    for path, lines in _iter_python_sources(root):
+        files_scanned += 1
+        previous = ""
+        for lineno, line in enumerate(lines, start=1):
+            block = f"{previous}\n{line}"
+            previous = line
+            if not line.endswith("pass"):
+                continue
+            if "except" not in block:          # the -B1 block never says except
+                continue
+            if any(marker in block for marker in allowed) \
+                    or "CancelledError" in block:
+                continue
+            offenders.append(
+                f"{_display_path(path)}:{lineno}: "
+                f"{' / '.join(part.strip() for part in block.splitlines())}"[:200]
+            )
+    return files_scanned, offenders
+
 
 class TestStaticBypassScans:
     def test_no_or_true_in_app(self):
-        import subprocess
-
-        result = subprocess.run(
-            ["grep", "-rn", "-E", r"or True", "app/", "--include=*.py"],
-            cwd=str(PROJECT_ROOT), capture_output=True, text=True)
-        offenders = [ln for ln in result.stdout.splitlines()
-                     if "__pycache__" not in ln]
+        scanned, offenders = _scan_python_sources(APP_PACKAGE, r"or True")
+        assert scanned, "static scan inspected no Python sources under app/"
         assert offenders == [], f"forbidden `or True`: {offenders}"
 
     def test_no_bare_except(self):
-        import subprocess
-
-        result = subprocess.run(
-            ["grep", "-rn", "-E", r"except\s*:", "app/", "--include=*.py"],
-            cwd=str(PROJECT_ROOT), capture_output=True, text=True)
-        offenders = [ln for ln in result.stdout.splitlines()
-                     if "__pycache__" not in ln]
+        # ``except`` + optional POSIX whitespace + ``:`` — the same expression as
+        # the original ``grep -E 'except\s*:'`` (a line never contains \n).
+        scanned, offenders = _scan_python_sources(
+            APP_PACKAGE, r"except[ \t\v\f\r]*:")
+        assert scanned, "static scan inspected no Python sources under app/"
         assert offenders == [], f"bare except: {offenders}"
 
     def test_no_silent_exception_swallow(self):
-        import subprocess
-
-        result = subprocess.run(
-            ["grep", "-rn", "-B1", "pass$", "app/", "--include=*.py",
-             "-A0"], cwd=str(PROJECT_ROOT), capture_output=True,
-            text=True)
-        allowed = ("TimeoutError, StopAsyncIteration",)
-        offenders = []
-        for block in result.stdout.split("\n--\n"):
-            if "pass" in block and "except" in block:
-                if not any(a in block for a in allowed) \
-                        and "CancelledError" not in block:
-                    offenders.append(block.strip()[:200])
+        scanned, offenders = _silent_swallow_offenders(APP_PACKAGE)
+        assert scanned, "static scan inspected no Python sources under app/"
         assert offenders == [], f"silent swallows: {offenders}"
 
     def test_engine_never_defaults_to_broker_key(self):
-        import subprocess
-
-        result = subprocess.run(
-            ["grep", "-rn", "broker.instrument_key", "app/engine/",
-             "--include=*.py"], cwd=str(PROJECT_ROOT),
-            capture_output=True, text=True)
-        assert result.stdout.strip() == "", \
-            f"engine must never default to the broker key: {result.stdout}"
+        # ``.`` stays a wildcard, exactly as in the original (BRE) grep pattern.
+        scanned, offenders = _scan_python_sources(
+            APP_PACKAGE / "engine", r"broker.instrument_key")
+        assert scanned, "static scan inspected no Python sources under app/engine/"
+        assert offenders == [], \
+            f"engine must never default to the broker key: {offenders}"
 
     def test_unresolved_states_forbid_resubmission(self):
         from app.engine.state import (NO_RESUBMIT_STATES, REMOTE_LOOKUP,

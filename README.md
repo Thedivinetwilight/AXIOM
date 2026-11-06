@@ -1,11 +1,137 @@
-# Arena — Quantitative Research & Trading Platform (FINAL 3.0.5)
+# AXIOM — Quantitative Research & Operator Trading Platform
 
-**Arena is a working, modular Python research and paper-trading platform,
-identified as `arena` version `3.0.5`. Real-money order routing does not exist
-in this project.** Sections below keep the full release history (V0.1 → V0.6 →
-V1 → V2.1 → FINAL 3.0.0); each historical section describes its own release.
+**Current source version: `3.7.0a10`.**
+**Reviewed source branch: `arena/8d3d005e-axiom`.**
 
-**Current release (FINAL 3.0.5) highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
+> **No release has been published.** AXIOM `3.7.0a10` exists only as source on the
+> reviewed branch above; the repository's default branch (`main`) still holds the
+> older Arena `3.0.5` source and does **not** contain this application. There is no
+> installer, no published wheel, and no tagged release for this version. Everything
+> below describes a source checkout of the reviewed branch.
+
+AXIOM runs directly from a cloned Git
+repository (**source-first workflow — no Windows installer required**) and serves
+a loopback-only (`127.0.0.1`) dark multi-market Operator console (`/terminal`,
+workspaces `01`–`12`) for **Indian NSE (`INR ₹` via Upstox)** and **US NASDAQ
+(`USD $` via Alpaca)** alongside independent **LOCAL PAPER** simulation.
+
+All live execution switches (`UPSTOX_LIVE`, `ALPACA_LIVE`, Arm, Activate, and
+unattended execution) start **OFF / DISARMED** by default and are never enabled
+by startup, restart, crash recovery, or research runs. Existing user state under
+`%LOCALAPPDATA%\AXIOM` (`axiom.env`, SQLite journals, Kronos runtime/weights, and
+Windows DPAPI credentials) is preserved intact across source updates.
+
+---
+
+## Quickstart — Source-First Workflow (Windows PowerShell, No Installer Required)
+
+### 1. Clone & Set Up Dependencies
+```powershell
+git clone https://github.com/Thedivinetwilight/AXIOM.git
+Set-Location .\AXIOM
+# Reviewed source branch for AXIOM 3.7.0a10 (NOT the default branch):
+git fetch origin arena/8d3d005e-axiom
+git checkout -B arena/8d3d005e-axiom origin/arena/8d3d005e-axiom
+git log --oneline -1   # confirm the reviewed commit before installing
+
+py -3.11-64 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+
+# Register repo root in .venv site-packages (enables `python -m app operator` from ANY directory)
+.\.venv\Scripts\python.exe .\axiom_launcher.py --register-venv
+
+# Verify required Python packages + IANA timezones (Asia/Kolkata & America/New_York via tzdata)
+.\.venv\Scripts\python.exe .\axiom_launcher.py --check-deps
+```
+
+### 2. Smoke-Check & Launch from Source (Works from Repo Root OR Any Working Directory)
+```powershell
+# Non-destructive loopback smoke check (verifies /health & /terminal with 0 broker calls)
+.\Start-Axiom.ps1 -Smoke
+
+# Launch AXIOM Operator Console on http://127.0.0.1:8765/terminal
+.\Start-Axiom.ps1
+```
+Supported equivalent source-launch commands (no manual `PYTHONPATH` needed):
+- From inside the repository: `.\Start-Axiom.ps1`, `.\.venv\Scripts\python.exe .\axiom_launcher.py`, `.\.venv\Scripts\python.exe -m app operator`, `.\.venv\Scripts\python.exe .\run.py --mode operator`, or `.\.venv\Scripts\python.exe packaging\windows\axiom_launcher.py`.
+- From **any other working directory** (`C:\Users\you`, `D:\work`, `/tmp`, etc.):
+  ```powershell
+  & C:\path\to\AXIOM\Start-Axiom.ps1
+  # or:
+  C:\path\to\AXIOM\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py
+  # or (after --register-venv):
+  C:\path\to\AXIOM\.venv\Scripts\python.exe -m app operator
+  ```
+
+### 3. Stop & Update Source Checkout
+- **Stop:** Press `Ctrl+C` in the PowerShell terminal running AXIOM (cleanly closes Uvicorn and SQLite WAL handles; `0` broker orders touched).
+- **Update:**
+  ```powershell
+  Set-Location C:\path\to\AXIOM
+  git fetch origin arena/8d3d005e-axiom
+  git merge --ff-only origin/arena/8d3d005e-axiom
+  .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+  .\Start-Axiom.ps1 -CheckDeps
+  ```
+  `requirements-lock.txt` pins `fastapi==0.162.0`, `starlette==1.10.0` and
+  `certifi==2026.10.23`; that set is audited (`pip-audit`: no known
+  vulnerabilities) and is the only supported dependency set for this source.
+
+### 4. Troubleshooting Source Startup
+- **`Missing required Python dependencies` / `ZoneInfoNotFoundError` on Windows:** Run the exact install command printed by preflight (`.\.venv\Scripts\python.exe -m pip install -r C:\path\to\AXIOM\requirements-lock.txt`, which installs `tzdata==2026.6` on Windows for `Asia/Kolkata` and `America/New_York`).
+- **`No module named 'app'` when running `python -m app operator` outside the repo:** Run `.\.venv\Scripts\python.exe C:\path\to\AXIOM\axiom_launcher.py --register-venv` once (writes `axiom_source.pth` into `.venv`), or invoke `Start-Axiom.ps1` / `axiom_launcher.py` directly by path.
+- **Browser asks for local `API_TOKEN`:** Open `%LOCALAPPDATA%\AXIOM\axiom.env` (Windows) or `~/.local/share/axiom/axiom.env` (Linux) and copy the value after `API_TOKEN=`. This local bearer token protects loopback API routes only and is never printed to stdout.
+- **Port `8765` busy:** `axiom_launcher.py` automatically falls back to a free ephemeral `127.0.0.1` port unless `--port` is pinned (`.\Start-Axiom.ps1 -Port 8770`).
+
+---
+
+## Multi-Market Architecture & Unambiguous PAPER Modes
+
+| Mode | Market-Data Source | Execution Destination | Automation State | Fill Type | P&L Attribution |
+|---|---|---|---|---|---|
+| **`1 · LOCAL_REPLAY_PAPER` (`AXIOM_PAPER`)** | Labeled bundled sample CSV (`data/sample*.csv` — **not** live market data) | Local SQLite paper broker (`0` external calls) | `moving_average` replay automation ON (or manual) | **`SIMULATED`** | Current-run P&L isolated from persisted account history |
+| **`2 · LIVE_MARKET_LOCAL_PAPER`** | Real read-only Upstox (`NSE_EQ`) & Alpaca (`IEX` single-venue / paid `SIP` consolidated tape; **zero** sample fallback) | Local SQLite simulator (`live_market_paper.sqlite3`, `0` broker order calls) | Manual or completed-bar strategy (`manual_only`, `ema_crossover`, `rsi_mean_reversion`, `parallel_ensemble`) | **`SIMULATED`** | `current_session_total_pnl` strictly separated from `persisted_historical_realized_pnl` |
+| **`3 · ALPACA_BROKER_PAPER`** | Isolated `ALPACA_MARKET_DATA` read-only slot | `https://paper-api.alpaca.markets` via isolated `ALPACA_BROKER_PAPER` slot | Explicit operator submit only (`ALPACA_BROKER_ENABLED=true`) | **`BROKER_PAPER_SANDBOX_CONFIRMED`** | Tracked separately from local SQLite paper & live accounts |
+
+- **NSE (`INR ₹` via Upstox)**: Exact Upstox `instrument_key` (`NSE_EQ|INE002A01018`) and exchange (`NSE`) are preserved end-to-end across BOD `complete.json.gz` reconciliation (`CASH_EQUITY_OR_ETF` strictly separated from `DERIVATIVE` and watch-only `INDEX`), search, watchlists, quotes, candles, charts, and `LIVE-MARKET PAPER` orders. Separate default-OFF `UPSTOX_LIVE` execution via `/autonomy` requires `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, SEBI static IP registration, bounded INR risk limits, and separate **Arm** and **Activate** confirmations.
+- **NASDAQ (`USD $` via Alpaca)**: Explicitly distinguishes **`iex`** (single-venue IEX feed, ~2–3% US volume — **not** consolidated US tape), **`sip`** (paid consolidated US SIP tape), and **`delayed_sip`** (15-min delayed SIP — blocked for live-market PAPER entries). Separate default-OFF `ALPACA_BROKER_LIVE` execution requires `ALPACA_BROKER_ENABLED=true`, distinct live keys, bounded USD risk limits, passing readiness checks, **Arm**, and phrase-confirmed **Activate**.
+- **AI & Model Lab (`10`), Read-Only Live Trade Monitor (`11`), and Ensemble & Allocation (`12`)**:
+  Manifest-pinned optional CPU `NeoQuasar/Kronos-small` (advisory-only, `0` mock fallbacks), strictly read-only `11 Live Trade Monitor` (`0` order-mutation actions), and `12 Ensemble & Allocation` (`1,024+` bounded strategy variants routed through a single per-market `PortfolioRiskAllocator` with `0` allocator bypass paths). Bundled fixture ablations are explicitly labeled **`SYNTHETIC ENGINEERING EVIDENCE — NOT EXPECTED RETURNS OR LIVE READINESS`**.
+
+Optional Windows frozen packaging (`packaging/windows/build_windows.ps1`, retaining Version 3.5.0a2's Error 4551 loaderless Inno / onedir portable layout) remains tested in CI as build verification only and is **not** required to develop or run AXIOM.
+
+> **No profitability or live-readiness claim.** Automated tests, synthetic fixture benchmarks, simulated paper fills, and read-only connection checks establish neither profitability nor real-money readiness. No live login or real broker order is permitted in CI.
+
+- **Operator manual:** [`USER_MANUAL.md`](USER_MANUAL.md)
+- **Owner setup & architecture guide:** [`docs/OWNER_SETUP_GUIDE.md`](docs/OWNER_SETUP_GUIDE.md)
+- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
+- **Ensemble & strategy audit evidence:** [`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`](docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md)
+- **Legacy Vantage/MT5 removal & isolation audit (the `/api/trading` live API is no longer mounted):** [`docs/VANTAGE_MT5_ISOLATION_AUDIT.md`](docs/VANTAGE_MT5_ISOLATION_AUDIT.md)
+- **Paper-release audit (changes, exact test results, remaining limitations):** [`docs/PAPER_RELEASE_AUDIT.md`](docs/PAPER_RELEASE_AUDIT.md)
+- **Corporate actions (splits + cash dividends, scope and limits):** [`docs/CORPORATE_ACTIONS.md`](docs/CORPORATE_ACTIONS.md)
+- **Daily Upstox autonomy:** [`docs/AUTONOMY.md`](docs/AUTONOMY.md)
+- **AI & Model Lab manual:** [`docs/AI_MODEL_LAB_MANUAL.md`](docs/AI_MODEL_LAB_MANUAL.md)
+- **Research candidates and evidence limits:** [`docs/RESEARCH_CANDIDATES.md`](docs/RESEARCH_CANDIDATES.md)
+- **Optional Windows packaging manual:** [`packaging/windows/WINDOWS_INSTALL_MANUAL.md`](packaging/windows/WINDOWS_INSTALL_MANUAL.md)
+- **Error 4551 / App Control boundary:** [`docs/WINDOWS_APP_CONTROL.md`](docs/WINDOWS_APP_CONTROL.md)
+- **Redesign audit/acceptance:** [`docs/TERMINAL_REDESIGN_PLAN.md`](docs/TERMINAL_REDESIGN_PLAN.md)
+- **Performance definitions and benchmark conditions:** [`docs/TERMINAL_PERFORMANCE.md`](docs/TERMINAL_PERFORMANCE.md)
+- **Listed-share/ETF provider boundary:** [`docs/LISTED_ASSETS.md`](docs/LISTED_ASSETS.md)
+- **US-paper feed/risk evidence:** [`docs/US_EQUITIES_PAPER.md`](docs/US_EQUITIES_PAPER.md)
+
+Do not paste local tokens, Upstox/Alpaca credentials, or DPAPI files into issues or chat.
+
+---
+
+# Historical Arena 3.0.5 documentation
+
+The remainder preserves earlier release history (V0.1 → V0.6 → V1 → V2.1 →
+FINAL 3.0.5). Statements such as “real-money order routing does not exist” describe
+those historical paper/sandbox releases, not the current gated Upstox/Alpaca Operator.
+The read-only Alpaca US-equities feed with local simulated fills remains paper-only.
+
+**Historical Arena 3.0.5 highlights:** Market Event Listener — public-internet intelligence for war/escalation/ceasefire, sanctions, tariffs (incl. US-China), policy/central-bank, oil/gas, shipping, regulatory, geopolitical events; impact assessed via transmission paths (not simplistic sell), decides IGNORE/MONITOR/EVALUATE/NO_TRADE and provides context to the existing Strategy Router; hard-risk/Router/STOP/broker/auth/LIVE gates never bypassed, never places orders directly; multi-source dedup, reputable-source validation, timeout/retry/backoff/rate-limit/cache/isolation, no eval/exec; dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, sanitized, no secrets); observational learning memory records price/vol/volume per 5m/30m/1h/1d/3d/5d — additive, no external live dependency; plus continuous strategy discovery
 
 **FINAL 3.0.5 (additive — Market Event Listener):** internet news ingestion (public sources, wars/escalations/ceasefires, sanctions/relief, tariffs/trade incl. US-China, policy/central-bank, oil/gas, shipping, regulatory, geopolitical) with relevance detection, source validation, normalization/dedup (fingerprint, multi-source merge, conflict reduces confidence, preserves conflict), impact assessment via transmission paths, decision IGNORE/MONITOR/EVALUATE/NO_TRADE with context to Strategy Router + hard-risk gate; never directly trades, never bypasses Router/lifecycle/portfolio-risk/hard-risk/STOP/broker/auth/LIVE; persisted event_id/timestamp/source/headline/summary/type/countries/markets/assets/sectors/confidence/relevance/effect/response/action/strategy/instruments/result; reputable→primary sources, dedup, unavailable→Arena continues; timeout/retry/backoff/rate-limit/cache/dedup/isolation; no eval/exec/shell; learning memory records price/vol/volume/sector response per 5m/30m/1h/1d/3d/5d via existing market-data infra (observational); dashboard Market Events panel (EVENT/WHY/AFFECTED/CONFIDENCE/RESPONSE/ACTION/RESULT, escaped, no secrets) — additive, no external live dependency; 20 deterministic tests.
 
@@ -227,6 +353,15 @@ hard risk stays outside learning:
   `desktop/run_windows.bat`; requires PySide6 (`requirements-desktop.txt`).
   DESKTOP STATUS: source-verified (Qt cannot boot in this sandbox — no
   display/libxkbcommon); see ARENA_FINAL_VERIFICATION.md.
+- **Chart terminal + manual paper ticket** (`/chart`, linked from the
+  dashboard): a self-contained canvas chart — candles, volume, SMA 20/50,
+  EMA 200, RSI, zoom/pan, trade markers from real paper fills, working-limit
+  lines and entry/stop/target levels — plus a ticket that places **simulated**
+  market or limit orders in the local paper broker. Aggregation is honest:
+  intraday timeframes are built only from complete, contiguous source bars and
+  daily bars are never synthesised. Shorting is refused (no borrow model);
+  every configured hard limit applies; the page cannot reach a broker.
+  Documented in USER_MANUAL §5.1.
 - **Security**: MODE=PAPER + LIVE_TRADING=false enforced in Settings
   (BROKER=LIVE raises); `tools/security_scan.py` scans first-party code for
   hardcoded secrets and packaging hygiene (clean); .env gitignored; API auth

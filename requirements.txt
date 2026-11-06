@@ -1,4 +1,4 @@
-fastapi>=0.115,<1
+fastapi>=0.162,<1
 pydantic>=2.9,<3
 uvicorn>=0.30,<1
 httpx>=0.27,<1
@@ -7,8 +7,13 @@ websockets>=14,<16
 # app/data/upstox_proto, generated with protoc from the 5.29 line).
 protobuf>=5.29,<7
 python-dotenv>=1,<2
+# GHSA-6q48-6c7w-9gw2 / PYSEC-2026-4320: 2026.10.18 dropped the revoked emSign
+# roots, 2026.10.19 restored the unaffected ones. Never resolve below 2026.10.19.
+certifi>=2026.10.19
 pytest>=8,<10
-# Keep the tested httpx-based TestClient; Starlette 1.x changes its client stack.
-starlette>=0.46,<1
+# Starlette 0.5x carries unpatched advisories (PYSEC-2026-161/-248/-249/-2280/-2281);
+# every fix lands in the 1.x line, so the floor is the first fully patched 1.x
+# release. The httpx-based TestClient was re-verified against 1.10.0 by the full suite.
+starlette>=1.3.1,<2
 # Windows doesn't normally ship an IANA timezone database for zoneinfo.
 tzdata>=2024.1; platform_system == "Windows"

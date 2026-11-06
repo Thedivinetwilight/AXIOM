@@ -1,0 +1,7 @@
+# Build-only dependencies for the Windows installer/executable.
+# Pinned: the frozen bundle is verified against exactly these versions.
+pyinstaller==6.16.0
+pyinstaller-hooks-contrib==2025.9
+# Official terminal-hosted MT5 integration; never installed or faked on Linux.
+MetaTrader5==5.0.6231; sys_platform == "win32"
+numpy==2.2.6; sys_platform == "win32"

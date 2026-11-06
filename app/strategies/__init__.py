@@ -5,6 +5,7 @@ from app.strategies.breakout import BreakoutStrategy
 from app.strategies.rsi import RSIStrategy
 from app.strategies.macd import MACDStrategy
 from app.strategies.bollinger import BollingerStrategy
+from app.strategies.manual_only import ManualOnlyStrategy
 
 REGISTRY = {
     cls.name: cls
@@ -16,6 +17,7 @@ REGISTRY = {
         RSIStrategy,
         MACDStrategy,
         BollingerStrategy,
+        ManualOnlyStrategy,
     )
 }
 
