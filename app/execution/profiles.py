@@ -11,9 +11,10 @@ Documentation read on 2026-11-07 (see ``SOURCES``):
 * Upstox — order placement, order details/history by ``order_id`` or ``tag``,
   modify, cancel, the order-status appendix, and the ``api-hft.upstox.com``
   enhanced order URL announcement.
-* Alpaca — Trading API v2 order object and statuses, ``POST /v2/orders``
-  parameters (``client_order_id`` length and duplicate rejection), and the
-  ``GET /v2/orders:by_client_order_id`` lookup.
+* Alpaca — Trading API v2 order object and statuses, the Create-an-Order
+  parameters (``client_order_id`` length and documented duplicate rejection),
+  and the get-order-by-client-order-id lookup. Exact endpoint paths stay in
+  ``app/alpaca_broker/client.py``, the only module allowed to name them.
 
 Where a broker documents a feature AXIOM deliberately does not enable (F&O,
 MTF, AMO, extended hours, notional orders, bracket/OCO/OTO, trailing stops) it
@@ -235,17 +236,20 @@ _ALPACA = BrokerProfile(
         "GET /v2/positions",
         "GET /v2/account/activities",
     ),
+    # Endpoint strings are deliberately NOT repeated here: the repository guard
+    # confines the Alpaca order surface to app/alpaca_broker/client.py, which
+    # documents the exact paths. Operations are named instead.
     order_operations=(
-        "POST /v2/orders",
-        "GET /v2/orders",
-        "GET /v2/orders:by_client_order_id",
-        "DELETE /v2/orders/{order_id}",
-        "PATCH /v2/orders/{order_id}",
+        "Create an Order (Trading API v2)",
+        "List Orders",
+        "Get an Order by Client Order Id",
+        "Cancel an Order",
+        "Replace an Order",
     ),
     idempotency=IdempotencySpec(
         field="client_order_id",
         max_length=128,
-        query_by_key="GET /v2/orders:by_client_order_id?client_order_id=<id>",
+        query_by_key="Get an Order by Client Order Id (Alpaca Trading API v2)",
         rejects_duplicates=True,
         documented="client_order_id is a client-supplied unique identifier; Alpaca documents that "
         "a duplicate submission with the same client_order_id is rejected, and the order can be "
@@ -264,8 +268,9 @@ _ALPACA = BrokerProfile(
     notes=(
         "AXIOM's STOP type maps to Alpaca stop_limit (stop_price + limit_price); AXIOM's "
         "STOP_MARKET type maps to Alpaca 'stop'. Alpaca has no separate stop-limit flag.",
-        "The paper environment (paper-api.alpaca.markets) is the official non-live environment; "
-        "it is a separate host from the live environment and fills at the broker, not on a real exchange.",
+        "Alpaca documents a separate paper environment that is the official non-live environment; "
+        "it is a different host from the live environment and fills at the broker, not on a real exchange. "
+        "The exact hosts are pinned in app/alpaca_broker/client.py, the only module allowed to name them.",
     ),
     sources=SOURCES[BROKER_ALPACA],
 )
