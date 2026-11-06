@@ -81,7 +81,7 @@ QUALIFICATION_RANK = {STATUS_QUALIFIED: 0, STATUS_UNVERIFIED: 1, STATUS_BLOCKED:
 
 
 # --------------------------------------------------------------------------- #
-# Reason codes (stable; documented in docs/RESEARCH_BUNDLES.md)
+# Reason codes (stable; documented in docs/RESEARCH_RUN_BUNDLE.md)
 # --------------------------------------------------------------------------- #
 REASON_CODES: dict[str, str] = {
     # container / index
