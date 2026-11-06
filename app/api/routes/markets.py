@@ -1899,6 +1899,18 @@ def live_execution_audit(
     }
 
 
+@router.get("/live/readiness")
+def live_readiness_report(request: Request):
+    """One operator readiness report for both markets (no broker contact, no secrets)."""
+    from app.markets.live_readiness import build_readiness_report
+
+    coordinator = _live_coordinator(request)
+    try:
+        return build_readiness_report(coordinator)
+    except (ValueError, RuntimeError) as exc:
+        raise _live_http_error(exc) from exc
+
+
 @router.get("/live/{market}/readiness")
 def live_readiness(market: str, request: Request, symbol: str | None = Query(default=None)):
     coordinator = _live_coordinator(request)

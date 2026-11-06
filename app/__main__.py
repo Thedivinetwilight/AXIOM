@@ -1183,6 +1183,69 @@ def _resolve_model_lab_store(store_arg: str | None) -> "Path":
     return next((c for c in candidates if (c / "model_lab.sqlite3").is_file()), candidates[0])
 
 
+def cmd_live_readiness(args) -> int:
+    """Operator readiness report for NSE/Upstox and NASDAQ/Alpaca LIVE execution.
+
+    Read-only and offline by default: the report is built in-process against the
+    configured settings, with a temporary data dir, so it never writes to the
+    operator's live journal and never contacts a broker. ``--base-url`` asks a
+    running AXIOM instance instead, which is the only way to see that process's
+    (process-local) gate state. No credential value is ever printed.
+    """
+    from app.markets.live_readiness import render_readiness_text
+
+    if args.base_url:
+        import httpx
+
+        token = _load_settings().api_token
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            with httpx.Client(base_url=args.base_url.rstrip("/"), timeout=10.0) as client:
+                response = client.get("/api/markets/live/readiness", headers=headers)
+        except httpx.HTTPError as exc:
+            print(f"readiness query failed: {type(exc).__name__}", file=sys.stderr)
+            return 2
+        if response.status_code != 200:
+            print(f"readiness query failed: HTTP {response.status_code}", file=sys.stderr)
+            return 2
+        report = response.json()
+    else:
+        import tempfile
+        from dataclasses import replace
+
+        from fastapi.testclient import TestClient
+
+        from app.api.server import create_app
+
+        settings = replace(_load_settings(), api_token="local-readiness-probe")
+        with tempfile.TemporaryDirectory(prefix="axiom-readiness-") as scratch:
+            with TestClient(create_app(settings, data_dir=Path(scratch))) as web:
+                response = web.get(
+                    "/api/markets/live/readiness",
+                    headers={"Authorization": "Bearer local-readiness-probe"},
+                )
+            if response.status_code != 200:
+                print(f"readiness failed: HTTP {response.status_code}", file=sys.stderr)
+                return 2
+            report = response.json()
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+    else:
+        print(render_readiness_text(report), flush=True)
+    notes = ["note: no broker order endpoint was contacted; this report is not live verification."]
+    if not args.base_url:
+        notes.insert(
+            0,
+            "note: gates are process-local; a running instance reports its own state via "
+            "GET /api/markets/live/readiness (or --base-url).",
+        )
+    # Notes always go to stderr so ``--json`` stays machine-readable.
+    for note in notes:
+        print(note, file=sys.stderr, flush=True)
+    return 0
+
+
 def cmd_research_bundle(args) -> int:
     """Export, verify or replay a portable research-run bundle (offline).
 
@@ -1480,6 +1543,18 @@ def parser() -> argparse.ArgumentParser:
 
     mon = sub.add_parser("monitor", help="self-monitoring snapshot (exit 1 on alerts)")
     mon.set_defaults(func=cmd_monitor)
+
+    readiness_cmd = sub.add_parser(
+        "live-readiness",
+        help="operator readiness report for NSE/Upstox and NASDAQ/Alpaca LIVE (offline, read-only)",
+    )
+    readiness_cmd.add_argument("--json", action="store_true", help="emit the report as JSON")
+    readiness_cmd.add_argument(
+        "--base-url",
+        default=None,
+        help="query a running instance (e.g. http://127.0.0.1:8000) instead of building in-process",
+    )
+    readiness_cmd.set_defaults(func=cmd_live_readiness)
 
     bundle_cmd = sub.add_parser(
         "research-bundle",
