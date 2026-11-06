@@ -20,6 +20,7 @@ from app.alpaca_broker.client import (
     AlpacaReadOnlyClient,
     AlpacaTradingClient,
     BrokerError,
+    BrokerRateLimited,
     BrokerRejected,
     utc_now,
 )
@@ -746,6 +747,15 @@ class AlpacaBrokerService:
                         symbol=payload["symbol"], reason=str(exc)[:200])
             return {"ok": False, "client_order_id": client_order_id,
                     "rejected": "broker", "detail": str(exc)[:300]}
+        except BrokerRateLimited as exc:
+            # A documented rate-limit answer: nothing was accepted, so this is not an
+            # unknown outcome. Drop the intent and report it separately.
+            if self.journal is not None:
+                self.journal.remove_rejected_intent(client_order_id)
+            self._audit("ALPACA_ORDER_RATE_LIMITED", client_order_id=client_order_id,
+                        symbol=payload["symbol"], reason=str(exc)[:200])
+            return {"ok": False, "client_order_id": client_order_id,
+                    "rejected": "rate_limited", "detail": str(exc)[:300]}
         except BrokerError as exc:
             reason = f"{type(exc).__name__}: {str(exc)[:180]}"
             self.unresolved_intents[client_order_id] = reason

@@ -51,6 +51,10 @@ class BrokerError(RuntimeError):
     """Sanitized broker failure. Messages never include secrets or raw bodies."""
 
 
+class BrokerRateLimited(BrokerError):
+    """The broker answered with a documented rate-limit status; nothing was placed."""
+
+
 class BrokerRejected(BrokerError):
     """The broker refused an order/request and reported why."""
 
@@ -148,6 +152,10 @@ class AlpacaTradingClient:
         except Exception:
             message = ""
         detail = message[:200] if message else f"HTTP {response.status_code}"
+        if response.status_code == 429:
+            raise BrokerRateLimited(
+                f"Alpaca rate-limited {action} (HTTP 429); nothing was accepted, wait before retrying"
+            )
         if response.status_code == 422:
             raise BrokerRejected(f"Alpaca rejected {action}: {detail}")
         if response.status_code in {401, 403}:

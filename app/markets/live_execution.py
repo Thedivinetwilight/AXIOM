@@ -52,6 +52,7 @@ from app.autonomy.upstox import (
     UpstoxError,
     UpstoxRejected,
 )
+from app.alpaca_broker.client import BrokerRateLimited
 from app.data.models import parse_timestamp
 from app.markets.broker_capabilities import (
     CapabilityRefused,
@@ -70,6 +71,8 @@ MODE_LIVE = "LIVE"
 EXECUTION_MODES: tuple[str, ...] = (MODE_OFF, MODE_PAPER, MODE_LIVE)
 
 LIVE_CONFIRM_PHRASE = "ACTIVATE LIVE REAL-MONEY TRADING"
+#: Cooldown after a documented rate-limit answer; new submissions wait it out.
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 PERMIT_TTL_SECONDS = 300.0
 
 
@@ -79,6 +82,16 @@ class LiveExecutionError(RuntimeError):
 
 class LiveGateRefused(LiveExecutionError):
     """The per-market gate is not ACTIVE / readiness failed / kill switch engaged."""
+
+
+class LiveRateLimited(LiveExecutionError):
+    """The broker rate-limited the request and no order was accepted.
+
+    Distinct from a rejection and from an ambiguous outcome: the broker answered,
+    the answer was "slow down", and nothing was placed. The coordinator still
+    removes the intent, records the event and refuses new submissions for that
+    market until the cooldown expires - it never retries the same intent.
+    """
 
 
 class LiveBrokerRejected(LiveExecutionError):
@@ -975,12 +988,18 @@ class NasdaqLiveAdapter(LiveMarketAdapter):
                 limit_price=limit_price,
                 reference_price=limit_price,
             )
+        except BrokerRateLimited as exc:
+            raise LiveRateLimited(str(exc)[:300]) from None
         except Exception as exc:  # noqa: BLE001 - unknown outcome must fail closed
             raise LiveSubmissionUncertain(
                 f"Alpaca submission outcome is unknown ({type(exc).__name__}); reconcile before retry"
             ) from None
         if not isinstance(result, dict):
             raise LiveSubmissionUncertain("Alpaca returned an unreadable submission result")
+        if result.get("rejected") == "rate_limited":
+            raise LiveRateLimited(
+                str(result.get("detail") or "Alpaca rate-limited the submission; nothing was placed")
+            )
         if result.get("rejected") == "uncertain":
             raise LiveSubmissionUncertain(
                 str(result.get("detail") or "Alpaca submission outcome is uncertain")
@@ -1382,7 +1401,12 @@ class NseLiveAdapter(LiveMarketAdapter):
                 f"Upstox acknowledgement is ambiguous ({redact_sensitive_text(str(exc))[:160]})"
             ) from None
         except UpstoxRejected as exc:
-            raise LiveBrokerRejected(redact_sensitive_text(str(exc))[:300]) from None
+            detail = redact_sensitive_text(str(exc))[:300]
+            if "rate limit" in detail.lower():
+                # Upstox refused the write with a documented rate-limit answer; nothing
+                # was placed. Surface it as such instead of a generic rejection.
+                raise LiveRateLimited(detail) from None
+            raise LiveBrokerRejected(detail) from None
         except ReconciliationFailure as exc:
             raise LiveSubmissionUncertain(
                 f"Upstox reconciliation could not confirm the order ({redact_sensitive_text(str(exc))[:160]})"
@@ -1465,6 +1489,8 @@ class _MarketRuntime:
     cycles_completed: int = 0
     submitted_total: int = 0
     rejected_total: int = 0
+    rate_limited_total: int = 0
+    rate_limited_until: float | None = None
 
 
 class LiveExecutionCoordinator:
@@ -1810,6 +1836,30 @@ class LiveExecutionCoordinator:
             )
             return {"market": mkt, **result}
 
+    # -- rate limiting ------------------------------------------------------
+    def _rate_limit_remaining(self, mkt: str) -> float:
+        until = self._runtime[mkt].rate_limited_until
+        if until is None:
+            return 0.0
+        return max(0.0, float(until) - self.now().timestamp())
+
+    def _start_rate_limit_cooldown(self, mkt: str) -> None:
+        self._runtime[mkt].rate_limited_until = (
+            self.now().timestamp() + RATE_LIMIT_COOLDOWN_SECONDS
+        )
+
+    def rate_limit_state(self, market: str | None = None) -> dict[str, Any]:
+        """Per-market rate-limit cooldown (read-only, no broker call)."""
+        markets = [self._validate_market(market)] if market else list(self.adapters)
+        return {
+            mkt: {
+                "cooling_down": self._rate_limit_remaining(mkt) > 0,
+                "remaining_seconds": round(self._rate_limit_remaining(mkt), 3),
+                "rate_limited_total": self._runtime[mkt].rate_limited_total,
+            }
+            for mkt in markets
+        }
+
     # -- risk gate ---------------------------------------------------------
     def _quote_snapshot(
         self, mkt: str, symbol: str, limits: LiveRiskLimits, now: datetime
@@ -2128,6 +2178,25 @@ class LiveExecutionCoordinator:
                     "bar_timestamp": bar_ts,
                 },
             )
+            cooling = self._rate_limit_remaining(mkt)
+            if cooling > 0:
+                self.journal.remove_intent(mkt, cid)
+                self._daily_dates[mkt].pop(cid, None)
+                self.journal.audit(
+                    mkt,
+                    "LIVE_ORDER_RATE_LIMITED",
+                    {"client_order_id": cid, "symbol": symbol, "reason": "cooldown",
+                     "cooldown_seconds": round(cooling, 3)},
+                )
+                return {
+                    "market": mkt,
+                    "symbol": symbol,
+                    "status": "RATE_LIMITED",
+                    "client_order_id": cid,
+                    "cooldown_seconds": round(cooling, 3),
+                    "reasons": ["rate-limit cooldown active; no broker call was made"],
+                    "broker_order_api_calls": 0,
+                }
             try:
                 result = self.adapters[mkt].submit(
                     client_order_id=cid,
@@ -2157,6 +2226,26 @@ class LiveExecutionCoordinator:
                     "status": "SUBMISSION_UNCERTAIN",
                     "client_order_id": cid,
                     "reconcile_required": True,
+                    "reasons": [str(exc)[:300]],
+                    "broker_order_api_calls": 1,
+                }
+            except LiveRateLimited as exc:
+                self.journal.remove_intent(mkt, cid)
+                self._daily_dates[mkt].pop(cid, None)
+                self._runtime[mkt].rate_limited_total += 1
+                self._start_rate_limit_cooldown(mkt)
+                self.journal.audit(
+                    mkt,
+                    "LIVE_ORDER_RATE_LIMITED",
+                    {"client_order_id": cid, "symbol": symbol, "reason": str(exc)[:240],
+                     "cooldown_seconds": RATE_LIMIT_COOLDOWN_SECONDS},
+                )
+                return {
+                    "market": mkt,
+                    "symbol": symbol,
+                    "status": "RATE_LIMITED",
+                    "client_order_id": cid,
+                    "cooldown_seconds": RATE_LIMIT_COOLDOWN_SECONDS,
                     "reasons": [str(exc)[:300]],
                     "broker_order_api_calls": 1,
                 }
