@@ -403,7 +403,7 @@ the run does not exist; `413` means the request body exceeds the size limit.
 
 ## Tests
 
-`tests/test_research_bundles.py` — 65 offline tests:
+`tests/test_research_bundles.py` — 66 offline tests:
 
 | Group | Covers |
 | --- | --- |
@@ -414,6 +414,6 @@ the run does not exist; `413` means the request body exceeds the size limit.
 | traversal | `..`, absolute, percent-encoded, backslash, zip-slip member, symlink, non-content-addressed path |
 | versions | newer `format_version`, foreign schema, limits (artifact size, count, total), missing path, directory without index |
 | qualification | synthetic stays `BLOCKED`, forged `QUALIFIED` (naive and fully re-signed), authority claim, attestation level preserved |
-| replay | reproduced manifest, no upgrade, environment drift, verification gate, substituted bars, tolerance, Kronos → `UNVERIFIED` |
+| replay | reproduced manifest, no upgrade, environment drift, strict mode without drift, verification gate, substituted bars, tolerance, Kronos → `UNVERIFIED` |
 | isolation | zero sockets during export/verify/replay, no order surface in the module |
 | interfaces | CLI round trip and failure exit code, API export/verify/replay and `404` |

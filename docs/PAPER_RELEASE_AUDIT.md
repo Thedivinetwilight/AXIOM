@@ -836,7 +836,7 @@ that remains in the record's `open_reviews`. The document states this in
 
 ### 14.3 Tests (deterministic, offline)
 
-`tests/test_research_bundles.py` — 65 tests: deterministic export; a complete
+`tests/test_research_bundles.py` — 66 tests: deterministic export; a complete
 artifact table with sizes and hashes; the pinned inputs re-checked; no
 credential-shaped payload can be exported (`SECRET_DETECTED`, masked);
 verification across sealed, directory and zip containers and after a round trip
@@ -859,7 +859,7 @@ module; and CLI/API round trips including the failure exit code and the `404`.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Bundle tests | `python -m pytest -q tests/test_research_bundles.py` | 65 passed |
+| Bundle tests | `python -m pytest -q tests/test_research_bundles.py` | 66 passed |
 | Export from a real run | bundled synthetic dataset, `async_execution=False` | 10 artifacts, sealed document, `bundle_sha256` `5e4e9aa1…` (first export) |
 | Verify | `python -m app research-bundle verify --bundle <dir>` | `PASS`, 10 artifacts, record `042a8730…` re-derived `match=True` |
 | Replay | `python -m app research-bundle replay --bundle <dir>` | identical manifest `54030b3d…`, `BLOCKED` → `BLOCKED`, `upgraded: false` |

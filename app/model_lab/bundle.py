@@ -1705,8 +1705,8 @@ def replay_bundle(
     hard_failures = [item for item in findings if item["code"] in {"REPLAY_MANIFEST_MISMATCH", "REPLAY_METRIC_DRIFT"}]
     if hard_failures:
         report["status"] = "DIVERGED"
-    elif env_drift or strict_environment:
-        report["status"] = "DIVERGED" if (strict_environment and env_drift) else "REPRODUCED_WITH_ENVIRONMENT_DRIFT"
+    elif env_drift:
+        report["status"] = "DIVERGED" if strict_environment else "REPRODUCED_WITH_ENVIRONMENT_DRIFT"
     else:
         report["status"] = "REPRODUCED"
     for item in env_drift:

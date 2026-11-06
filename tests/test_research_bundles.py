@@ -609,6 +609,18 @@ def test_replay_reports_environment_drift(document):
         assert strict["status"] in {"REPRODUCED", "REPRODUCED_WITH_ENVIRONMENT_DRIFT"}
 
 
+def test_strict_replay_without_drift_is_still_reproduced(document, monkeypatch):
+    """strict_environment only escalates *existing* drift; a clean machine stays REPRODUCED."""
+    import app.model_lab.provenance as provenance
+
+    pinned = json_of(document, "software_fingerprint")
+    monkeypatch.setattr(provenance, "software_fingerprint", lambda: dict(pinned))
+    report = B.replay_bundle(document, strict_environment=True)
+    assert report["environment"]["drift"] == []
+    assert report["status"] == "REPRODUCED"
+    assert report["qualification"]["effective_status"] == "BLOCKED"
+
+
 def test_replay_refuses_a_bundle_that_does_not_verify(document):
     broken = with_artifact_bytes(document, "run_manifest", b"{}\n")
     report = B.replay_bundle(broken)
