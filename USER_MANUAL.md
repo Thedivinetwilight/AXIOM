@@ -159,6 +159,12 @@ Stopping and recovery:
 - A failed protective stop on NASDAQ latches `PROTECTION_FAILED` and disarms the market for operator action.
 - Restarting AXIOM, recovering from a crash, or a background-cycle timeout leaves the market **disarmed** (`DISABLED` / `CYCLE_TIMEOUT_RECONCILE_REQUIRED`) and requires readiness, Arm, and Activate again.
 
+**Readiness report and documented capabilities.** `GET /api/markets/live/readiness` (or `python -m app live-readiness [--json]`) returns one report for both markets: the broker, mode, gate state, every failed check by name, the required credentials **by name only**, account permissions, offline platform checks, the numbered acceptance steps and the documented capability record for that broker. It also states the open-order policy of the kill switch and labels its own coverage (`mock_or_fake_transport_only`, `live_verified: false`, `windows_acceptance: NOT_RUN`). The report never contacts a broker and never prints a secret. Full detail, including what each broker documents and what AXIOM refuses to send, is in `docs/LIVE_EXECUTION_READINESS.md`.
+
+**Rate limits are their own outcome.** A broker 429 answer means nothing was placed: the intent is removed, `LIVE_ORDER_RATE_LIMITED` is audited, and that market refuses new submissions for 60 seconds without another broker call (`rate_limit_state()` shows the remaining cooldown). A rate limit never latches an unresolved intent and never changes another market's gate.
+
+**Emergency stop and open orders.** The kill switch blocks new orders for that market only. Working orders are left alone unless `cancel_working=true` is passed, in which case a documented cancel is attempted for each and every failure is recorded. A cancel after a partial fill leaves the filled quantity filled; positions come from broker-reported positions on the next cycle. Clearing the kill switch requires an explicit acknowledgement and returns the gate to `DISABLED`, not `ACTIVE`, and it does not clear unresolved intents — those still need Reconcile.
+
 Safety limits of this implementation: NSE live routing uses the existing **protected multi-leg GTT v3** integration, so it only sends `BUY` entries that carry both a stop and a target; `SELL` exits must be placed manually in Upstox (the adapter refuses and audits `exit_route_unsupported`). NASDAQ routing uses the existing gated Alpaca Trading v2 client (limit entry + a separate protective stop order); the status of both orders is reported per submission.
 
 ---

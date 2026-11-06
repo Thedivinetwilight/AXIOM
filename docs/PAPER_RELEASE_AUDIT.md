@@ -885,3 +885,79 @@ tests and the documentation landed as local commit `ca6f53f` on
 `python -m app research-bundle export --run <completed run_id> --store <model_lab dir> --output ./b && python -m app research-bundle verify --bundle ./b && python -m app research-bundle replay --bundle ./b`.
 Nothing was pushed, merged, tagged or published; no provider was contacted and
 live trading stayed disabled.
+
+## 15. Live execution readiness for Upstox/NSE and Alpaca/US (2026-11-07)
+
+### 15.1 Merge of the two lineages
+
+The local branch and `origin/arena/8d3d005e-axiom` had diverged at `0314db2`:
+7 local commits (the restored snapshot plus corporate-actions, provider
+conformance, research qualification, research bundle and the first execution
+work) against 116 remote commits (multi-market live execution, Kronos runtime and
+provider fixes, terminal/ensemble work, Windows packaging iteration). They were
+integrated with a `--no-ff` merge commit `cd35c3b`; nothing was rebased,
+force-pushed or replaced. 39 files conflicted and were resolved file by file:
+the local side was kept where it is a verified superset of the remote change, and
+`tests/test_vantage_api.py` was dropped again because it exercises the legacy
+`/api/trading` Vantage order API that this lineage deliberately unmounted.
+
+### 15.2 Consolidation (no second execution boundary)
+
+An interim `app/execution/` package was removed. Its only distinct content —
+the documented capability registry — now lives in
+`app/markets/broker_capabilities.py`, inside the existing LIVE boundary, and is
+surfaced by `LiveExecutionCoordinator.capabilities()`,
+`capability_differences()` and the `documented_capabilities` block of
+`readiness()`. The existing per-market gate, order journal, risk limits,
+kill switch and adapters were not modified by that consolidation.
+
+### 15.3 Gaps found and closed in the live path
+
+* **Rate limits.** An Alpaca 429 was classified as an unknown outcome (latching
+  `UNRESOLVED_ORDER_INTENT` and disarming the market) and an Upstox 429 as a
+  plain rejection. Both are wrong: the broker answered and nothing was placed.
+  `BrokerRateLimited` / `LiveRateLimited` now remove the intent, audit
+  `LIVE_ORDER_RATE_LIMITED`, start a 60 s per-market cooldown and refuse further
+  submissions without another broker call. A rate limit is not an ambiguity.
+* **Cross-broker readiness.** Only per-market readiness existed. The new
+  `app/markets/live_readiness.py` adds one report for both brokers with
+  credentials by name, account permissions, offline platform checks, acceptance
+  steps, kill-switch/open-order policy and explicit coverage labels; exposed as
+  `GET /api/markets/live/readiness` and `python -m app live-readiness`.
+* **Documented capabilities.** Nothing in the tree stated what each broker
+  documents. That is now recorded with source URLs and a read date, including the
+  idempotency asymmetry (Upstox `tag` does not reject duplicates; Alpaca
+  `client_order_id` does).
+
+### 15.4 Tests added (deterministic fakes, no broker contact)
+
+* `tests/test_live_broker_capabilities.py` (18): profile fidelity for both
+  brokers, non-equivalence, the idempotency asymmetry, refusal codes, the guard
+  that the capability data names no broker order host, and coordinator wiring.
+* `tests/test_live_execution_adversarial.py` (21): default-off posture,
+  unconfigured limits, rate limit (one call, cooldown, expiry, per-market
+  isolation), ambiguous submission and reconciliation, partial fills (journaled,
+  cancellable, no duplicate resubmit), every risk limit plus stale/delayed quotes,
+  broker rejection, kill switch and restart.
+* `tests/test_live_readiness_report.py` (11): both brokers, credentials by name
+  with dummy secret values asserted absent, readiness != live-enabled, activated
+  and kill-switch states, open-order policy, API auth and CLI JSON.
+
+### 15.5 Validation executed (Linux, CPython 3.11.9, branch `arena/8d3d005e-axiom`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Focused live suites | `pytest tests/test_live_market_live_trading.py tests/test_live_execution_gates.py tests/test_upstox_live.py tests/test_alpaca_broker*.py tests/test_live_execution_adversarial.py tests/test_live_broker_capabilities.py tests/test_live_readiness_report.py` | 132 passed |
+| Full suite | `python -m pytest -q` | **1409 passed, 5 skipped** |
+| Readiness CLI | `python -m app live-readiness` / `--json` | report for both markets, blocking by default, no secrets |
+
+### 15.6 Still not claimed
+
+* No broker order endpoint was contacted and no credential was used. Both brokers
+  remain **live-unverified**: mock/fake transports prove wiring and refusal
+  behaviour, not broker behaviour in production.
+* No native Windows packaging or acceptance run was possible here; the readiness
+  CLI and the packaging scripts are unverified on Windows.
+* NSE live routing still only sends protected `BUY` GTT entries; `SELL` exits
+  remain manual in Upstox (`exit_route_unsupported`).
+* A readiness report that passes is not evidence that live trading works.
