@@ -129,6 +129,19 @@ The command is read-only: it reads JSON files and the local Model Lab SQLite
 store, never contacts a provider, never submits an order, never writes anything
 except an explicit `--output` path and never prints a credential.
 
+## Taking a record with you
+
+A qualification record travels inside a **portable research-run bundle**
+(`axiom.research.bundle.v1`): `python -m app research-bundle export --run <id>`
+writes the manifest, the bars, the corporate-action sidecar, the config, the
+fingerprints and this record, all content-addressed.
+`python -m app research-bundle verify --bundle <path>` checks it offline — and
+re-derives this record to prove it was not edited — and
+`python -m app research-bundle replay --bundle <path>` re-runs the pipeline from
+the pinned inputs. Neither can upgrade a verdict: the replay report's
+`effective_status` is the worse of the bundled and the re-derived status, and
+`upgraded` is always `false`. See `docs/RESEARCH_RUN_BUNDLE.md`.
+
 ## Limitations (also embedded in every record)
 
 1. A passed gate is a *documentation* claim, not a market claim: it never

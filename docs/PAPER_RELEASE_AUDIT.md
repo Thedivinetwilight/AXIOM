@@ -775,3 +775,113 @@ descendant of `d434cc5`. Re-run
 (expect `BLOCKED` with `SYNTHETIC_DATA` for a bundled fixture, exit 1) and
 `GET /api/model-lab/qualification/rules`. Nothing was pushed, merged, tagged or
 published; no provider was contacted and live trading stayed disabled.
+
+## 14. Portable research-run bundles (2026-11-07)
+
+### 14.1 What exists now
+
+A completed run can leave the machine with its evidence intact and be checked
+by somebody who does not have AXIOM's store, its dataset directory, or a
+network connection.
+
+* `app/model_lab/bundle.py` — `export_run_bundle`, `write_bundle`,
+  `verify_bundle`, `replay_bundle`, three containers (`DirectoryContainer`,
+  `ZipContainer`, `SealedContainer`), a single published `REASON_CODES` table
+  and `BundleLimits`.
+* Content addressing: every payload is stored as `artifacts/<sha256>.<ext>`;
+  the index enumerates each file's role, path, SHA-256, size, media type and
+  requiredness, and `bundle_sha256` covers the entire index.
+* The bundle pins the canonical run manifest, dataset identity and bars, the
+  corporate-action sidecar (when the dataset has one), run config, feature
+  schema, benchmark, universe, folds and variant definitions, dependency lock,
+  software commit/cleanliness, run outputs, provider-conformance evidence,
+  qualification inputs and the qualification record.
+* Verification is offline and total: a single finding fails the bundle. It
+  re-derives the manifest digest, the bars hash and the **whole qualification
+  record**, and rejects missing, duplicate, unreferenced, oversized,
+  traversing, symlinked, non-content-addressed and credential-bearing
+  artifacts with specific reason codes.
+* Replay re-runs `execute_research_pipeline` in-process from the bundle's own
+  artifacts, reports `REPRODUCED` / `REPRODUCED_WITH_ENVIRONMENT_DRIFT` /
+  `DIVERGED` / `UNVERIFIED` at a documented tolerance (default `1e-9`), lists
+  environment drift field by field, and refuses to replay Kronos-evaluated runs
+  rather than substituting a mock.
+* Surfaces: `python -m app research-bundle export|verify|replay`;
+  `GET /api/model-lab/bundles/format`, `POST /api/model-lab/runs/{id}/bundle`,
+  `POST /api/model-lab/bundles/verify`, `POST /api/model-lab/bundles/replay`.
+* `docs/RESEARCH_RUN_BUNDLE.md` — the format, the compatibility rules, the full
+  reason-code table, the attack models that are rejected, the commands and the
+  limits.
+
+This is an extension of the existing research pipeline, qualification gate,
+corporate-action sidecars and software provenance. It introduces no second
+research engine and no second qualification rules: verification calls
+`evaluate_qualification` and compares the result with the bundled record.
+
+### 14.2 What a bundle cannot do
+
+A bundle never upgrades a qualification, never grants execution authority, never
+arms paper trading, never places an order, never contacts a provider, and never
+claims profitability. The replay report carries
+`qualification.effective_status = worse_of(bundled, re-derived)`,
+`upgraded: false`, `execution_authority: "NONE"` and `live_trading: false`. A
+bundled synthetic fixture exports, verifies and replays as `BLOCKED`
+(`SYNTHETIC_DATA`, `STALE_DATA`) at every step.
+
+Hashes are integrity evidence: they prove the bytes are the bytes that were
+bundled. They do not prove the provider's data is genuine, and they do not
+upgrade `OPERATOR_ATTESTED_NOT_INDEPENDENTLY_VERIFIED` to an independent review —
+that remains in the record's `open_reviews`. The document states this in
+`integrity_scope` so no reader has to infer it.
+
+### 14.3 Tests (deterministic, offline)
+
+`tests/test_research_bundles.py` — 65 tests: deterministic export; a complete
+artifact table with sizes and hashes; the pinned inputs re-checked; no
+credential-shaped payload can be exported (`SECRET_DETECTED`, masked);
+verification across sealed, directory and zip containers and after a round trip
+through disk; raw tampering with **every required role** plus the optional
+corporate-action sidecar; re-signed tampering of the manifest, the bars, the run
+config, the software fingerprint, a section pin and the index run block; missing
+roles, missing files, duplicate roles/paths and unreferenced files; path
+traversal (`..`, absolute, percent-encoded, backslash), a zip-slip member, a
+symlinked artifact and a non-content-addressed path; newer `format_version` and
+a foreign schema; artifact-size, artifact-count and total-size limits; a forged
+`QUALIFIED` record both naive and fully re-signed (still `QUALIFICATION_ALTERED`);
+a record claiming execution authority; the preserved attestation level; replay
+reproducing the pinned digest, never upgrading, reporting drift, refusing an
+unverified bundle, catching substituted bars, honouring tolerance and returning
+`REPLAY_REQUIRES_KRONOS` for a Kronos run; zero sockets during export, verify and
+replay (with `socket.connect` patched to raise) and no order surface in the
+module; and CLI/API round trips including the failure exit code and the `404`.
+
+### 14.4 Validation executed (Linux, CPython 3.11.9, branch `arena/8d3d005e-axiom`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Bundle tests | `python -m pytest -q tests/test_research_bundles.py` | 65 passed |
+| Export from a real run | bundled synthetic dataset, `async_execution=False` | 10 artifacts, sealed document, `bundle_sha256` `5e4e9aa1…` (first export) |
+| Verify | `python -m app research-bundle verify --bundle <dir>` | `PASS`, 10 artifacts, record `042a8730…` re-derived `match=True` |
+| Replay | `python -m app research-bundle replay --bundle <dir>` | identical manifest `54030b3d…`, `BLOCKED` → `BLOCKED`, `upgraded: false` |
+| CLI/API | `research-bundle export/verify/replay`, `POST /api/model-lab/bundles/*` | round trip OK, `404` for an unknown run, `413` for an oversized body |
+
+### 14.5 What is still not claimed
+
+* No real provider dataset was bundled. Every bundle in this pass came from the
+  bundled synthetic fixture, which is ineligible by design; a real bundle would
+  still be `UNVERIFIED` until the operator supplies an attested capture.
+* Replay reproduces the research pipeline, not the original database; it cannot
+  validate a claim that the capture was honest.
+* Bundle integrity depends on the recipient learning `bundle_sha256` out of
+  band. There is no signing key and no bundle-level PKI.
+* Kronos-evaluated runs remain unreplayable offline.
+* Native Windows packaging of the new commands is unverified; only Linux was
+  exercised. The commands use the standard library plus the existing app.
+
+**Verification for the next reader:** the module, the CLI, the API routes, the
+tests and the documentation landed as local commit `ca6f53f` on
+`arena/8d3d005e-axiom`, on top of `d912770`. Re-run
+`python -m pytest -q tests/test_research_bundles.py`, then
+`python -m app research-bundle export --run <completed run_id> --store <model_lab dir> --output ./b && python -m app research-bundle verify --bundle ./b && python -m app research-bundle replay --bundle ./b`.
+Nothing was pushed, merged, tagged or published; no provider was contacted and
+live trading stayed disabled.
