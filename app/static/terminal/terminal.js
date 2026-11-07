@@ -27,6 +27,7 @@ const state = {
   chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
   chartSymbolsLoaded: false, chartRequest: 0,
   performance: { backend: null, browser: {} }, listedAssets: null, alpacaBroker: null, ticketReview: null,
+  liveSwitch: {},
   mm: {
     available: false, activeVenue: "NSE", overview: null, catalogItems: [],
     side: "BUY", chartFeed: "SESSION", lastPreview: null,
@@ -63,6 +64,7 @@ const ROUTES = Object.freeze({
   engineStop: "/engine/stop",
   engineResume: "/engine/resume",
   multiMarketOverview: "/api/markets/overview",
+  liveReadinessReport: "/api/markets/live/readiness",   // read-only: blockers + exit facts, no broker order call
   listings: "/api/listed-assets/status",
   alpacaBrokerStatus: "/api/alpaca-broker/status",
 });
@@ -1502,6 +1504,7 @@ function bindEvents() {
   if (globalThis.ResizeObserver) new ResizeObserver(() => drawChart()).observe($("terminal-chart"));
   bindMultiMarketEvents();
   bindLiveExecutionEvents();
+  bindPaperLiveSwitchEvents();
 }
 
 /* ============================================================================
@@ -1839,6 +1842,7 @@ function renderMultiMarketDesk() {
   }
 
   renderLiveExecutionPanel(ov);
+  renderPaperLiveSwitch(ov);
 
   const kStatus = ov.kronos || state.ml.overview?.kronos || {};
   renderKronosPaperSection(kStatus, nse, nasdaq);
@@ -2682,6 +2686,553 @@ function bindLiveExecutionEvents() {
       await loadMultiMarketOverview();
     }));
   }
+}
+
+/* ============================================================================
+ * PAPER / LIVE switch — one deliberate switch per market
+ *
+ * This is a *client* for the single existing execution boundary
+ * (app.markets.live_execution). It adds no endpoint and no order route, and it
+ * never widens a gate:
+ *
+ *   1. Read readiness (GET only) — every blocker and the documented exit route.
+ *   2. Select LIVE mode  — POST .../mode {mode: LIVE}; the gate stays DISARMED.
+ *   3. Arm               — POST .../arm; refused by the server while any check fails.
+ *   4. Acknowledge risk + optional no-exit acknowledgement + typed phrase,
+ *      then Activate     — POST .../activate; the server re-checks everything.
+ *
+ * Returning to PAPER is one POST .../mode {mode: PAPER}: the server disarms the
+ * gate and revokes the permit, and nothing here cancels or changes a working
+ * order or a protective exit. No strategy is started or resumed by any step.
+ * ==========================================================================*/
+
+const SWITCH_MARKETS = Object.freeze([
+  { market: "NSE", key: "nse", currency: "INR", money: "INR ₹" },
+  { market: "NASDAQ", key: "nasdaq", currency: "USD", money: "USD $" },
+]);
+const SWITCH_PHRASE = "ACTIVATE LIVE REAL-MONEY TRADING";
+/* The one readiness check this switch performs itself: it is False until step 2
+ * sets mode=LIVE, so it is shown as a step and never counted as a blocker. */
+const SWITCH_MODE_STEP_CHECK = "mode_is_live";
+/* Operator-facing meaning of every readiness check the server can report. */
+const SWITCH_BLOCKER_MEANING = Object.freeze({
+  configuration_complete: "Required broker/account configuration is missing for this market (see Missing dependencies).",
+  risk_limits_configured: "All eight per-market risk limits must be positive; a partial or zero limit set fails closed.",
+  no_unresolved_intents: "An earlier live order outcome is unresolved; reconcile before enabling LIVE.",
+  not_blocked: "This market is latched after an unknown outcome; reconcile before enabling LIVE.",
+  kill_switch_not_engaged: "The per-market kill switch is engaged; reset it with an explicit operator acknowledgement first.",
+  readiness_probe: "The server's broker readiness probe raised an error; LIVE stays blocked.",
+  readiness_probe_error: "The broker readiness probe returned an error; LIVE stays blocked.",
+  live_master_flag: "AUTONOMY_LIVE_ENABLED is not set on the host, so NSE live execution is off at the master flag.",
+  separate_live_credential: "The separate UPSTOX_LIVE_ACCESS_TOKEN is missing; PAPER/read-only keys cannot unlock LIVE.",
+  algo_name_configured: "UPSTOX_ALGO_NAME is not configured (and the SEBI static IP is not registered).",
+  static_ip_configured: "No SEBI static IP is configured for the Upstox live account.",
+  catalog_authoritative_today: "The NSE instrument catalog is not authoritative for today.",
+  market_session_open: "The exchange session is closed right now.",
+  calendar_session_open: "The exchange calendar says the session is closed.",
+  account_verified: "The broker account could not be read with the configured credentials.",
+  account_trading_allowed: "The broker reports this account as blocked from trading.",
+  account_currency_inr: "The NSE account is not an INR account.",
+  account_currency_usd: "The NASDAQ account is not a USD account.",
+  market_quote_available: "No live quote is available for the requested symbol.",
+  broker_enabled: "The Alpaca broker service is disabled on this server.",
+  alpaca_broker_configured: "No Alpaca live broker service is bound to this server.",
+  service_unblocked: "The Alpaca broker service is latched after an unknown outcome; reconcile first.",
+  reconciliation_ok: "The last broker reconciliation did not succeed.",
+  environment_is_live: "The Alpaca service is bound to PAPER keys, not the separate live keys.",
+  clock_synced: "The server clock is outside the allowed skew from the broker clock.",
+  daily_loss_within_limit: "The account's daily loss has reached the configured live limit.",
+});
+
+function switchSpec(market) {
+  const wanted = String(market || "").toUpperCase();
+  return SWITCH_MARKETS.find((spec) => spec.market === wanted) || null;
+}
+
+function switchStateFor(market) {
+  if (!state.liveSwitch || typeof state.liveSwitch !== "object") state.liveSwitch = {};
+  const mkt = String(market || "").toUpperCase();
+  if (!state.liveSwitch[mkt]) {
+    state.liveSwitch[mkt] = {
+      report: null,          // readiness evidence from the last explicit read
+      readAt: 0,             // ms timestamp of that read
+      modeChangedAt: 0,      // any mode change invalidates the evidence above
+      error: "",
+      busy: false,
+    };
+  }
+  return state.liveSwitch[mkt];
+}
+
+function switchBlockers(report) {
+  const failed = (report && report.failed) || [];
+  return failed.filter((name) => name !== SWITCH_MODE_STEP_CHECK);
+}
+
+function switchBlockerText(name) {
+  if (SWITCH_BLOCKER_MEANING[name]) return SWITCH_BLOCKER_MEANING[name];
+  const human = String(name || "").replace(/_/g, " ").trim();
+  return `Server check "${human}" did not pass.`;
+}
+
+function switchEvidenceFresh(st) {
+  return Boolean(st.report) && Number(st.readAt || 0) > Number(st.modeChangedAt || 0);
+}
+
+function switchOverviewRow(market) {
+  const exec = state.mm.overview?.live_execution?.markets;
+  return (exec && exec[String(market).toUpperCase()]) || null;
+}
+
+function switchMode(market) {
+  const row = switchOverviewRow(market);
+  const modes = state.mm.overview?.execution_modes || {};
+  return String((row && row.mode) || modes[String(market).toUpperCase()] || "PAPER").toUpperCase();
+}
+
+function switchGateState(market) {
+  const row = switchOverviewRow(market);
+  return String((row && row.gate && row.gate.state) || "DISABLED").toUpperCase();
+}
+
+function switchExitAckRequired(report) {
+  return Boolean(report && report.exitRoute && report.exitRoute.routed === false);
+}
+
+function setSwitchOutput(message, tone) {
+  const el = $("mm-switch-output");
+  if (!el) return;
+  el.className = `inline-status top-space ${tone || ""}`.trim();
+  el.textContent = message;
+}
+
+function switchLimitsSummary(row) {
+  const limits = (row && row.risk_limits) || {};
+  if (!limits.configured) {
+    return "NOT configured — all eight per-market limits must be positive before LIVE can be armed.";
+  }
+  return [
+    `order ≤ ${fmt(limits.max_order_value, 0)}`,
+    `${fmt(limits.max_daily_orders, 0)} orders/day`,
+    `daily loss ≤ ${fmt(limits.max_daily_loss, 0)}`,
+    `open ≤ ${fmt(limits.max_open_positions, 0)}`,
+    `symbol exposure ≤ ${fmt(limits.max_symbol_exposure, 0)}`,
+    `total exposure ≤ ${fmt(limits.max_total_exposure, 0)}`,
+    `quote age ≤ ${fmt(limits.max_quote_age_seconds, 0)}s`,
+    `deviation ≤ ${fmt(limits.max_price_deviation_bps, 0)} bps`,
+  ].join(" · ");
+}
+
+function switchAccountSummary(market, report) {
+  const creds = (report && report.credentials) || [];
+  const present = creds.filter((row) => row.configured).map((row) => row.name);
+  const missing = creds.filter((row) => !row.configured).map((row) => row.name);
+  const parts = [];
+  if (market === "NASDAQ") {
+    const account = state.alpacaBroker?.account;
+    const number = account && (account.account_number || account.id);
+    if (number) parts.push(`Alpaca account ••••${String(number).slice(-4)}`);
+    else parts.push("Alpaca account identity not returned by the current status route");
+  } else {
+    parts.push("Upstox account identity is not exposed by any current read-only route");
+  }
+  if (present.length) parts.push(`credentials present: ${present.join(", ")}`);
+  if (missing.length) parts.push(`credentials missing: ${missing.join(", ")}`);
+  if (!creds.length) parts.push("credential presence is read by the readiness step");
+  return parts.join(" · ");
+}
+
+function switchOpenOrderPolicyText(report) {
+  const policy = (report && report.openOrderPolicy) || null;
+  if (!policy || !policy.blocks_new_orders) {
+    return "Read by the readiness step: a kill switch blocks new orders and leaves working orders alone unless cancel_working is explicitly true.";
+  }
+  return [
+    `kill switch blocks new orders: ${policy.blocks_new_orders ? "yes" : "no"}`,
+    `working orders: ${policy.working_orders}`,
+    `unresolved intents: ${policy.unresolved_intents}`,
+    `reset: ${policy.reset}`,
+  ].join(" · ");
+}
+
+function switchExitHtml(spec, report) {
+  const key = spec.key;
+  if (!report) {
+    return `<div class="switch-exit" id="mm-switch-exit-${key}">Exit route: not read yet. Step 1 reads this market's documented exit route (read-only); LIVE stays blocked until it has been read.</div>`;
+  }
+  const route = report.exitRoute;
+  if (!route) {
+    return `<div class="switch-exit" id="mm-switch-exit-${key}">Exit route: the server reported no exit route for this market. Treat LIVE as having no programmatic exit.</div>`;
+  }
+  if (route.routed) {
+    return `<div class="switch-exit ok" id="mm-switch-exit-${key}"><b>Exit route: routed.</b> ${escapeHtml(route.summary || "")}</div>`;
+  }
+  return `<div class="switch-exit" id="mm-switch-exit-${key}"><b>NO ROUTED EXIT — AXIOM cannot close a ${spec.market} position.</b>
+    ${escapeHtml(route.summary || "")}
+    Closing path: ${escapeHtml((route.closing_paths || []).join(" · ") || "none documented")}
+    Operator fallback: ${escapeHtml(route.operator_fallback || "none documented")}
+    No exit order is offered or sent from this page, so a live ${spec.market} position must be closed by you, not by this switch.</div>`;
+}
+
+function switchBlockerListHtml(spec, report) {
+  const key = spec.key;
+  if (!report) {
+    return `<ul class="switch-blockers" id="mm-switch-blockers-${key}"><li>No readiness read yet — LIVE is disabled until the server reports no blocking check.</li></ul>`;
+  }
+  const blockers = switchBlockers(report);
+  const missing = report.missing || [];
+  if (!blockers.length && !missing.length) {
+    return `<ul class="switch-blockers" id="mm-switch-blockers-${key}"><li>No blocking check. ${report.checks?.[SWITCH_MODE_STEP_CHECK] ? "mode is already LIVE." : "mode=LIVE is the only remaining readiness step and this switch performs it at step 2."}</li></ul>`;
+  }
+  const items = blockers.map((name) => `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(switchBlockerText(name))}</li>`);
+  for (const dep of missing) items.push(`<li>Missing dependency — ${escapeHtml(dep)}</li>`);
+  return `<ul class="switch-blockers" id="mm-switch-blockers-${key}">${items.join("")}</ul>`;
+}
+
+function switchStepsHtml(spec, ctx) {
+  const { st, mode, gateState, fresh, blockers, report } = ctx;
+  const key = spec.key;
+  const modeLive = mode === "LIVE";
+  const armed = gateState === "ARMED";
+  const active = gateState === "ACTIVE";
+  const canRead = !st.busy;
+  const canMode = !st.busy && Boolean(report) && blockers.length === 0 && !modeLive;
+  const canArm = !st.busy && modeLive && !armed && !active && fresh && blockers.length === 0;
+  const step = (index, done, current, title, detail, control) => `
+    <div class="switch-step ${done ? "done" : current ? "current" : "pending"}">
+      <span class="step-index">${done ? "✓" : index}</span>
+      <span class="step-text"><b>${escapeHtml(title)}</b> — ${escapeHtml(detail)}</span>
+      ${control || ""}
+    </div>`;
+
+  const readDetail = !report
+    ? "readiness has not been read"
+    : fresh
+      ? `${blockers.length} blocking check(s) · mode ${mode}`
+      : "mode changed since the last read; read again";
+  const armDetail = !modeLive
+    ? "mode must be LIVE first"
+    : active
+      ? "gate is already ACTIVE"
+      : armed
+        ? "gate is ARMED"
+        : fresh && blockers.length === 0
+          ? "ready to arm (the server re-checks everything)"
+          : "readiness must be read again with no blocker";
+
+  return `
+    <div class="switch-step ${report ? "done" : "current"}">
+      <span class="step-index">${report ? "✓" : 1}</span>
+      <span class="step-text"><b>Read readiness</b> — ${escapeHtml(readDetail)}</span>
+      <button type="button" class="button secondary xs" id="mm-switch-check-${key}"
+        data-switch-action="check" data-switch-market="${spec.market}" ${canRead ? "" : "disabled"}>Read readiness (GET only)</button>
+    </div>
+    <div class="switch-step ${modeLive ? "done" : report && blockers.length === 0 ? "current" : "pending"}">
+      <span class="step-index">${modeLive ? "✓" : 2}</span>
+      <span class="step-text"><b>Select LIVE mode</b> — sets mode=LIVE only; the gate stays DISARMED</span>
+      <button type="button" class="button warning xs" id="mm-switch-mode-${key}"
+        data-switch-action="mode-live" data-switch-market="${spec.market}" ${canMode ? "" : "disabled"}>2. Set mode LIVE</button>
+    </div>
+    ${step(3, armed || active, modeLive && !armed && !active, "Arm the gate", armDetail,
+      `<button type="button" class="button warning xs" id="mm-switch-arm-${key}" data-switch-action="arm" data-switch-market="${spec.market}" ${canArm ? "" : "disabled"}>3. Arm</button>`)}
+    ${step(4, active, armed, "Acknowledge risk, type the phrase, activate",
+      active ? "gate is ACTIVE — real-money orders may route while it stays ACTIVE" : "each control below is required; nothing activates on its own",
+      `<button type="button" class="button danger xs" id="mm-switch-activate-${key}" data-switch-action="activate" data-switch-market="${spec.market}" disabled>4. Activate LIVE</button>`)}
+  `;
+}
+
+function renderPaperLiveSwitch(ov) {
+  const host = $("mm-switch-cards");
+  if (!host) return;
+  /* Re-rendering must never eat what the operator typed: snapshot first. */
+  const typed = {};
+  for (const spec of SWITCH_MARKETS) {
+    typed[spec.key] = {
+      phrase: $(`mm-switch-phrase-${spec.key}`)?.value || "",
+      risk: Boolean($(`mm-switch-ack-${spec.key}`)?.checked),
+      exit: Boolean($(`mm-switch-exit-ack-${spec.key}`)?.checked),
+    };
+  }
+
+  const exec = (ov && ov.live_execution && ov.live_execution.markets) || null;
+  const modes = (ov && ov.execution_modes) || {};
+  const summary = {};
+
+  const cards = SWITCH_MARKETS.map((spec) => {
+    const st = switchStateFor(spec.market);
+    const row = (exec && exec[spec.market]) || null;
+    const mode = String((row && row.mode) || modes[spec.market] || "PAPER").toUpperCase();
+    const gate = (row && row.gate) || {};
+    const gateState = String(gate.state || "DISABLED").toUpperCase();
+    const report = st.report;
+    const blockers = switchBlockers(report);
+    const fresh = switchEvidenceFresh(st);
+    const modeLive = mode === "LIVE";
+    const active = gateState === "ACTIVE";
+    const liveEnabled = Boolean(report) && fresh && blockers.length === 0 && !modeLive;
+    const exitAckNeeded = switchExitAckRequired(report);
+    summary[spec.market] = { mode, gateState, liveEnabled };
+
+    let liveReason;
+    if (modeLive && active) liveReason = "LIVE is ACTIVE for this market. PAPER disarms the gate and revokes the permit; no working order or protective exit is touched.";
+    else if (modeLive) liveReason = "mode=LIVE but the gate is not ARMED — LIVE is not active until steps 3 and 4 are completed.";
+    else if (!report) liveReason = "LIVE is disabled: run step 1 (readiness) first. Nothing here changes the mode before every check passes.";
+    else if (!fresh) liveReason = "LIVE is disabled: the mode changed since the last readiness read — read readiness again (step 1).";
+    else if (blockers.length) liveReason = `LIVE is disabled by ${blockers.length} blocking readiness check(s): ${blockers.join(", ")}. A click here changes nothing.`;
+    else liveReason = "LIVE can be selected: every blocking check passes. Steps 2-4 still run one at a time.";
+
+    const stateLabel = `${spec.market} · ${mode}${active ? " · ACTIVE" : ""}`;
+    const stateTone = active ? "err" : modeLive ? "warn" : "info";
+
+    return `
+      <div class="provider-card mode-switch" id="mm-switch-card-${spec.key}" data-switch-market="${spec.market}">
+        <div class="panel-head" style="margin-bottom:4px">
+          <strong>${escapeHtml(spec.market)} · ${escapeHtml(spec.money)}</strong>
+          <span class="status-pill ${stateTone}" id="mm-switch-state-${spec.key}">${escapeHtml(stateLabel)}</span>
+        </div>
+        <div class="mode-switch-track" role="group" aria-label="${escapeHtml(spec.market)} execution mode">
+          <button type="button" class="mode-switch-choice" id="mm-switch-paper-${spec.key}"
+            data-switch-action="paper" data-switch-market="${spec.market}"
+            aria-pressed="${mode === "PAPER" ? "true" : "false"}" ${mode === "PAPER" ? "disabled" : ""}>PAPER · simulated</button>
+          <button type="button" class="mode-switch-choice live" id="mm-switch-live-${spec.key}"
+            data-switch-action="live" data-switch-market="${spec.market}"
+            aria-pressed="${modeLive ? "true" : "false"}" ${liveEnabled || modeLive ? "" : "disabled"}>LIVE · real money</button>
+        </div>
+        <div class="muted small" id="mm-switch-live-reason-${spec.key}">${escapeHtml(liveReason)}</div>
+        <div class="switch-facts" id="mm-switch-facts-${spec.key}">
+          <span>Broker: <b>${escapeHtml((row && row.broker) || (report && report.brokerLabel) || "—")}</b>${row && row.destination_label ? ` · ${escapeHtml(row.destination_label)}` : ""}</span>
+          <span>Account / credentials: <b>${escapeHtml(switchAccountSummary(spec.market, report))}</b></span>
+          <span>Gate: <b id="mm-switch-gate-${spec.key}">${escapeHtml(gateState)}</b> · kill switch: <b>${escapeHtml(gate.kill_engaged ? `ENGAGED (${gate.kill_reason || "reason not reported"})` : "not engaged")}</b></span>
+          <span>Configured limits: <b>${escapeHtml(switchLimitsSummary(row))}</b></span>
+          <span>Open-order policy: ${escapeHtml(switchOpenOrderPolicyText(report))}</span>
+          <span>Readiness: <b>${escapeHtml(report ? `${blockers.length} blocking check(s) · read ${timeText(report.readAtIso)}` : "not read yet — LIVE disabled")}</b></span>
+        </div>
+        ${switchExitHtml(spec, report)}
+        ${switchBlockerListHtml(spec, report)}
+        <div class="switch-steps" id="mm-switch-steps-${spec.key}">
+          ${switchStepsHtml(spec, { st, mode, gateState, fresh, blockers, report })}
+        </div>
+        <div class="field">
+          <label class="muted small"><input type="checkbox" id="mm-switch-ack-${spec.key}"> I acknowledge ${escapeHtml(spec.market)} live orders use real ${escapeHtml(spec.currency)}</label>
+          ${exitAckNeeded ? `<label class="muted small"><input type="checkbox" id="mm-switch-exit-ack-${spec.key}"> I understand AXIOM routes no ${escapeHtml(spec.market)} exit; I must close any position myself</label>` : ""}
+          <label class="muted small" for="mm-switch-phrase-${spec.key}">Type ${escapeHtml(SWITCH_PHRASE)} to enable Activate</label>
+          <input id="mm-switch-phrase-${spec.key}" type="text" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(SWITCH_PHRASE)}">
+        </div>
+        <div class="muted small" id="mm-switch-activate-hint-${spec.key}"></div>
+      </div>`;
+  });
+
+  host.innerHTML = cards.join("");
+
+  /* Restore anything the operator had already entered. */
+  for (const spec of SWITCH_MARKETS) {
+    const saved = typed[spec.key] || {};
+    const phrase = $(`mm-switch-phrase-${spec.key}`);
+    if (phrase && document.activeElement !== phrase) phrase.value = saved.phrase || "";
+    const risk = $(`mm-switch-ack-${spec.key}`);
+    if (risk) risk.checked = Boolean(saved.risk);
+    const exit = $(`mm-switch-exit-ack-${spec.key}`);
+    if (exit) exit.checked = Boolean(saved.exit);
+    switchSyncActivate(spec);
+  }
+
+  for (const spec of SWITCH_MARKETS) {
+    const pill = $(`mm-switch-summary-${spec.key}`);
+    const state = summary[spec.market] || {};
+    if (!pill) continue;
+    pill.textContent = `${spec.market} · ${state.mode || "PAPER"}${state.gateState === "ACTIVE" ? " · LIVE ACTIVE" : ""}`;
+    pill.className = `status-pill ${state.gateState === "ACTIVE" ? "err" : state.mode === "LIVE" ? "warn" : "info"}`;
+  }
+}
+
+function switchActivateChecks(spec) {
+  const key = spec.key;
+  const st = switchStateFor(spec.market);
+  const mode = switchMode(spec.market);
+  const gateState = switchGateState(spec.market);
+  const exitNeeded = switchExitAckRequired(st.report);
+  const phrase = ($(`mm-switch-phrase-${key}`)?.value || "").trim();
+  const risk = Boolean($(`mm-switch-ack-${key}`)?.checked);
+  const exitOk = !exitNeeded || Boolean($(`mm-switch-exit-ack-${key}`)?.checked);
+  const reasons = [];
+  if (mode !== "LIVE") reasons.push("mode is not LIVE yet (step 2)");
+  if (gateState === "ACTIVE") reasons.push("the gate is already ACTIVE");
+  else if (gateState !== "ARMED") reasons.push("the gate is not ARMED yet (step 3)");
+  if (!risk) reasons.push("the risk acknowledgement is required");
+  if (!exitOk) reasons.push("the no-routed-exit acknowledgement is required for this market");
+  if (phrase !== SWITCH_PHRASE) reasons.push(`the exact phrase "${SWITCH_PHRASE}" is required`);
+  return { enabled: reasons.length === 0, reasons };
+}
+
+function switchSyncActivate(spec) {
+  const button = $(`mm-switch-activate-${spec.key}`);
+  if (!button) return;
+  const { enabled, reasons } = switchActivateChecks(spec);
+  button.disabled = !enabled || switchStateFor(spec.market).busy;
+  const hint = $(`mm-switch-activate-hint-${spec.key}`);
+  if (hint) hint.textContent = enabled ? "Activate is enabled: one click sends the existing activation request." : `Activate locked — ${reasons.join("; ")}.`;
+}
+
+async function switchReadReadiness(spec) {
+  const st = switchStateFor(spec.market);
+  const [report, market] = await Promise.all([
+    api(ROUTES.liveReadinessReport, { keepAuth: true }),
+    liveAction(spec.market, "readiness"),
+  ]);
+  const row = ((report && report.markets) || []).find(
+    (entry) => String(entry.market || "").toUpperCase() === spec.market,
+  ) || {};
+  st.report = {
+    ok: Boolean(market && market.ok),
+    failed: (market && market.failed) || [],
+    checks: (market && market.checks) || {},
+    missing: (market && market.missing_dependencies) || [],
+    gate: (market && market.gate) || {},
+    exitRoute: row.exit_route || (market && market.documented_capabilities && market.documented_capabilities.exit_route) || null,
+    openOrderPolicy: (report && report.open_order_policy) || null,
+    credentials: row.credential_requirements || [],
+    brokerLabel: row.broker_label || "",
+    readAtIso: new Date().toISOString(),
+  };
+  st.readAt = Date.now();
+  st.error = "";
+  const blockers = switchBlockers(st.report);
+  const exitNote = switchExitAckRequired(st.report)
+    ? " No routed exit for this market: the exit facts above must be acknowledged before Activate."
+    : "";
+  if (blockers.length) {
+    setSwitchOutput(`${spec.market} readiness read: ${blockers.length} blocking check(s) — ${blockers.join(", ")}. LIVE stays disabled; a click on LIVE changes nothing.${exitNote}`, "err");
+  } else {
+    setSwitchOutput(`${spec.market} readiness read: no blocking check (mode=LIVE is the step this switch performs). Select LIVE at step 2; Arm and the typed Activate still run separately.${exitNote}`, "warn");
+  }
+}
+
+async function switchReturnToPaper(spec) {
+  const st = switchStateFor(spec.market);
+  const res = await liveAction(spec.market, "mode", { mode: "PAPER" });
+  st.modeChangedAt = Date.now();
+  st.report = null;     // the old readiness evidence described the previous mode
+  st.error = "";
+  setSwitchOutput(
+    `${spec.market} is back on PAPER (mode=${res.mode || "PAPER"}). The server disarmed the gate and revoked the live permit. ` +
+    "No working order and no protective exit was cancelled, modified, or tested by this switch.",
+    "ok",
+  );
+  await loadMultiMarketOverview();
+}
+
+async function switchSetLiveMode(spec) {
+  const st = switchStateFor(spec.market);
+  const res = await liveAction(spec.market, "mode", { mode: "LIVE" });
+  st.modeChangedAt = Date.now();
+  st.report = null;     // mode is one of the readiness checks: the evidence is now stale
+  st.error = "";
+  setSwitchOutput(
+    `${spec.market} execution mode is now ${res.mode || "LIVE"}. The gate is still DISARMED: read readiness again (step 1), then Arm, ` +
+    "then the risk acknowledgement + exact phrase + Activate. No order can be routed in between.",
+    "warn",
+  );
+  await loadMultiMarketOverview();
+}
+
+async function switchArmGate(spec) {
+  const st = switchStateFor(spec.market);
+  const res = await liveAction(spec.market, "arm");
+  st.error = "";
+  setSwitchOutput(
+    `${spec.market} gate is ${res.gate?.state || "ARMED"}. Nothing has been sent to the broker: the typed phrase and Activate are still required, ` +
+    "and no strategy was started.",
+    "warn",
+  );
+  await loadMultiMarketOverview();
+}
+
+async function switchActivateLive(spec) {
+  const st = switchStateFor(spec.market);
+  const { enabled, reasons } = switchActivateChecks(spec);
+  if (!enabled) throw new Error(reasons.join("; "));
+  const phrase = ($(`mm-switch-phrase-${spec.key}`)?.value || "").trim();
+  const risk = Boolean($(`mm-switch-ack-${spec.key}`)?.checked);
+  const res = await liveAction(spec.market, "activate", {
+    confirm_live_trading: phrase,
+    acknowledge_risk: risk,
+  });
+  const phraseInput = $(`mm-switch-phrase-${spec.key}`);
+  if (phraseInput) phraseInput.value = "";
+  const riskInput = $(`mm-switch-ack-${spec.key}`);
+  if (riskInput) riskInput.checked = false;
+  const exitInput = $(`mm-switch-exit-ack-${spec.key}`);
+  if (exitInput) exitInput.checked = false;
+  setSwitchOutput(
+    `${spec.market} LIVE gate is ${res.gate?.state || "ACTIVE"}. Real-money orders may be routed by the existing coordinator while the gate stays ACTIVE. ` +
+    "This switch did not start or resume a strategy; Emergency Stop remains below in the live execution panel.",
+    "err",
+  );
+  /* Deliberately no strategy/paper-session call here: activating LIVE must not
+   * start or resume trading, and this console has no such call in this path. */
+  await loadMultiMarketOverview();
+}
+
+async function switchAction(spec, action) {
+  if (action === "check") return switchReadReadiness(spec);
+  if (action === "paper") return switchReturnToPaper(spec);
+  if (action === "mode-live") return switchSetLiveMode(spec);
+  if (action === "arm") return switchArmGate(spec);
+  if (action === "activate") return switchActivateLive(spec);
+  if (action === "live") {
+    const st = switchStateFor(spec.market);
+    const blockers = switchBlockers(st.report);
+    if (!st.report || !switchEvidenceFresh(st) || blockers.length) {
+      throw new Error("LIVE is disabled until a fresh readiness read reports no blocking check");
+    }
+    setSwitchOutput(
+      `${spec.market}: LIVE chosen for review only — no execution mode changed and no gate was armed. ` +
+      "Complete steps 1-4 below; each one is a separate deliberate click.",
+      "warn",
+    );
+    return undefined;
+  }
+  throw new Error(`unknown switch action ${action}`);
+}
+
+function bindPaperLiveSwitchEvents() {
+  const host = $("mm-switch-cards");
+  if (!host) return;
+  // Idempotent: a second bind would double-submit a real-money action.
+  if (host.dataset.switchBound === "1") return;
+  host.dataset.switchBound = "1";
+
+  host.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-switch-action]");
+    if (!button || button.disabled) return;
+    const spec = switchSpec(button.dataset.switchMarket);
+    if (!spec) return;
+    const st = switchStateFor(spec.market);
+    if (st.busy) return;
+    st.busy = true;
+    button.disabled = true;
+    try {
+      await switchAction(spec, button.dataset.switchAction);
+    } catch (err) {
+      st.error = `${spec.market} ${button.dataset.switchAction} failed: ${err.message}`;
+      setSwitchOutput(st.error, "err");
+      // Any failed or refused answer invalidates the displayed evidence: the card
+      // must never keep claiming a passing check that the server did not confirm.
+      st.report = null;
+    } finally {
+      st.busy = false;
+      renderPaperLiveSwitch(state.mm.overview);
+    }
+  });
+
+  // Typing or ticking never re-renders: it only re-evaluates the Activate lock.
+  const sync = (event) => {
+    const card = event.target.closest("[data-switch-market]");
+    const spec = card ? switchSpec(card.dataset.switchMarket) : null;
+    if (spec) switchSyncActivate(spec);
+  };
+  host.addEventListener("input", sync);
+  host.addEventListener("change", sync);
 }
 
 function bindMultiMarketEvents() {

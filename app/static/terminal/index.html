@@ -734,6 +734,26 @@
           <div class="inline-status top-space" id="mm-alpaca-gate-output">Alpaca Broker execution is OFF by default. Readiness checks run via GET-only preflight before any LivePermit can be minted.</div>
         </article>
 
+        <article class="panel accent-live" id="mm-mode-switch-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">ONE DELIBERATE SWITCH PER MARKET · PAPER BY DEFAULT · LIVE IS GATED</p><h3>PAPER / LIVE Execution Switch (NSE and NASDAQ are separate)</h3></div>
+            <div class="button-row">
+              <span class="status-pill" id="mm-switch-summary-nse">NSE · PAPER</span>
+              <span class="status-pill" id="mm-switch-summary-nasdaq">NASDAQ · PAPER</span>
+            </div>
+          </div>
+          <div class="inline-status warn top-space" id="mm-switch-warning">
+            There is no "enable both markets" control: each card below changes exactly one market. LIVE is never the default,
+            a restart returns every market to PAPER with its gate DISABLED, and returning to PAPER disarms that market and revokes
+            its live permit without cancelling or altering working broker orders or protective exits. This console's API token is
+            separate from every broker credential and no broker secret is shown here.
+          </div>
+          <div class="content-grid two top-space" id="mm-switch-cards">
+            <div class="empty-state">Mode cards render from the server's own live-execution state. Unlock the console against a running AXIOM server to see each market.</div>
+          </div>
+          <div class="inline-status top-space" id="mm-switch-output">Switch idle. No execution mode has been changed from this page.</div>
+        </article>
+
         <article class="panel accent-live" id="mm-live-execution-panel">
           <div class="panel-head">
             <div><p class="eyebrow">SEPARATE REAL-MONEY EXECUTION PATH · PER-MARKET GATE · DISARMED AFTER RESTART</p><h3>Per-Market Live Execution Coordinator (NSE INR · NASDAQ USD)</h3></div>
