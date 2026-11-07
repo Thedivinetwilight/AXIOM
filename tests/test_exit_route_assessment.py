@@ -122,9 +122,36 @@ def test_nse_capability_records_the_specific_opening_risks() -> None:
     assert "settled" in text
 
 
+def test_edis_finding_names_the_only_documented_holdings_read() -> None:
+    """EDIS cannot be read through any documented endpoint; the record must say so.
+
+    `GET /v2/portfolio/long-term-holdings` is the only documented holdings read.
+    It carries t1_quantity / cnc_used_quantity (settlement) but no EDIS field, so
+    the record must not claim settlement is the sole reason, and must not claim a
+    queryable authorisation exists.
+    """
+    details = dict(le.NSE_EXIT_BLOCKERS)
+    settlement = details["settlement_availability_not_exposed"]
+    assert "/v2/portfolio/long-term-holdings" in settlement
+    assert "t1_quantity" in settlement and "cnc_used_quantity" in settlement
+    assert "no EDIS field" in settlement
+
+    edis = details["edis_authorisation_not_verifiable"]
+    assert "no API" in edis or "no documented API" in edis
+
+    route = CAPABILITIES["NSE"].exit_route
+    joined = " ".join(route.opening_risks)
+    assert "/v2/portfolio/long-term-holdings" in joined
+    assert "no EDIS field" in joined
+    # The route stays disabled on this evidence, not merely under-documented.
+    assert route.routed is False
+
+
 def test_readiness_document_states_the_limitation() -> None:
     doc = (ROOT / "docs" / "LIVE_EXECUTION_READINESS.md").read_text(encoding="utf-8")
     lowered = doc.lower()
     assert "exit" in lowered
     assert "edis" in lowered
     assert "not routed" in lowered or "no exit route" in lowered
+    assert "long-term-holdings" in doc
+    assert "no edis field" in lowered

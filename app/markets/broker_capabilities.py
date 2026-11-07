@@ -252,7 +252,8 @@ _NSE = MarketCapabilities(
             "a position is open, so the position would be unprotected between the two calls",
             "holdings cannot bound the quantity: /v2/portfolio/short-term-positions reports net "
             "quantity and does not distinguish settled, EDIS-authorised holdings from same-day "
-            "unsettled buys",
+            "unsettled buys, and /v2/portfolio/long-term-holdings exposes t1_quantity and "
+            "cnc_used_quantity but no EDIS field, so authorisation stays unreadable",
         ),
         operator_fallback=(
             "close the position manually in the Upstox app, then run the AXIOM reconcile step so "

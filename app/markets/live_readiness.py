@@ -253,14 +253,17 @@ def _upstox_preflight() -> list[dict[str, Any]]:
         {
             "step": "edis_and_settlement_state",
             "what": "confirm holdings an exit would sell are EDIS-authorised and settled",
-            "how": "Upstox web/iOS/Android app only (there is no documented API); compare against "
-            "the holdings the app shows as authorised for delivery",
+            "how": "Upstox web/iOS/Android app only: GET /v2/portfolio/long-term-holdings was "
+            "checked and returns isin, quantity, t1_quantity, cnc_used_quantity, collateral "
+            "quantities and prices - no EDIS or DDPI authorisation field - so this step must be "
+            "confirmed in the app against what it shows as authorised for delivery",
             "expect": "operator confirms the app shows the holdings as authorised",
             "read_only": True,
             "writes_orders": False,
             "level": "READ_ONLY_LIVE",
-            "failure_means": "no exit route exists in AXIOM anyway (readiness doc section 3), so "
-            "this is an operator-manual control, not an AXIOM gate",
+            "failure_means": "no exit route exists in AXIOM anyway (readiness doc section 3); "
+            "because EDIS state is unreadable through the documented API, any route depending on "
+            "it stays disabled rather than trusting an attestation",
         },
         {
             "step": "market_and_session_eligibility",

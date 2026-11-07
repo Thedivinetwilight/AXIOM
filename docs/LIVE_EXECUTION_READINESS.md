@@ -129,8 +129,18 @@ before it touches the gate, the catalog or the broker client, and
 | `gtt_legs_are_the_close` | A protected GTT that has executed keeps its `STOPLOSS` and `TARGET` legs live as **SELL** orders for the same quantity. Those legs are the supported close. A separate exit order would be a second independent sell of the same holding — the legs are mutually exclusive only *inside one GTT*. |
 | `cancel_protection_refused_with_open_position` | The only safe ordering is *cancel protection → place exit*. `app.autonomy.upstox.UpstoxLiveBroker.cancel_gtt` refuses to cancel while a position exists, because that would leave the position unprotected. |
 | `edis_authorisation_not_verifiable` | Upstox requires **EDIS** authorisation (done once in the Upstox web/iOS/Android app) for any GTT `SELL` leg, and documents no API to read EDIS state. AXIOM cannot verify it, and an operator attestation is not verification. |
-| `settlement_availability_not_exposed` | `/v2/portfolio/short-term-positions` reports net quantity; it does not distinguish settled, EDIS-authorised holdings from same-day unsettled buys, so "holdings ≥ quantity" cannot be established from the documented reads AXIOM has. |
+| `settlement_availability_not_exposed` | `/v2/portfolio/short-term-positions` reports net quantity and does not distinguish settled, EDIS-authorised holdings from same-day unsettled buys. The documented `/v2/portfolio/long-term-holdings` endpoint *does* expose `t1_quantity` and `cnc_used_quantity` (so settlement could be bounded), but it exposes **no EDIS field**, so quantity and authorisation still cannot be checked together. |
 | `single_leg_sell_cannot_be_proven_closing` | A `SINGLE`-rule GTT with `transaction_type: SELL` has the same fields whether it closes a holding or opens a short (`product: I`). The existence of a documented SELL field is not evidence that the request can only close. |
+
+**EDIS check (this session).** `GET /v2/portfolio/long-term-holdings` — the
+only documented holdings read — returns `isin`, `quantity`, `t1_quantity`,
+`cnc_used_quantity`, `collateral_quantity`, `collateral_update_quantity`,
+`haircut`, `product`, prices, P&L and `instrument_token`. There is **no
+authorisation-status field**, and Upstox documents EDIS authorisation as a
+one-time action performed in the web/iOS/Android app, with no read endpoint to
+query it. Confirmed EDIS state therefore cannot be obtained through an
+officially supported read-only API, so every route that depends on it stays
+disabled.
 
 Documented SELL paths reviewed, and the verdict for each:
 
@@ -262,6 +272,11 @@ requires exercising a full cycle against the Alpaca **paper** environment first.
 | Alpaca close-only exit | verified against fakes only; the held-long guard is unit-tested, no live order exists |
 | Windows packaging / acceptance of the readiness CLI | **NOT RUN** — no Windows host; `uname` reports Linux `e2b.local`, and `wine`, `pwsh`/`powershell` and `makensis` are all absent, so no Windows substitute was attempted |
 | Research qualification authorizing execution | impossible by design; qualification grants no authority |
+
+The dated record of the last read-only verification attempt — which credentials
+were present (none), which endpoints were contacted (none), and why — is
+`docs/BROKER_VERIFICATION_EVIDENCE.md`. Windows probes are recorded in
+`docs/WINDOWS_ACCEPTANCE_STATUS.md`.
 
 Nicknames matter here: "live-capable", "gated", "readiness passing" and "tests
 green" are all weaker than "verified against the broker". Only an operator-run

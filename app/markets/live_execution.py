@@ -1172,8 +1172,10 @@ NSE_EXIT_BLOCKERS: tuple[tuple[str, str], ...] = (
     (
         "settlement_availability_not_exposed",
         "/v2/portfolio/short-term-positions reports net quantity but does not distinguish "
-        "settled, EDIS-authorized holdings from same-day unsettled buys, so 'holdings >= qty' "
-        "cannot be established from the documented reads AXIOM has.",
+        "settled, EDIS-authorized holdings from same-day unsettled buys. The documented "
+        "/v2/portfolio/long-term-holdings endpoint does expose t1_quantity and "
+        "cnc_used_quantity, which could bound settlement, but it exposes no EDIS field at all, "
+        "so 'holdings >= qty' still cannot be paired with an authorisation check.",
     ),
     (
         "single_leg_sell_cannot_be_proven_closing",

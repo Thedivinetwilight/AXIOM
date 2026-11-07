@@ -65,7 +65,9 @@ def test_preflight_covers_the_five_owner_questions(market: str) -> None:
 def test_nse_preflight_states_the_edis_and_static_ip_requirements() -> None:
     steps = {step["step"]: step for step in broker_preflight("NSE")}
     edis = steps["edis_and_settlement_state"]
-    assert "no documented api" in edis["how"].lower()
+    assert "long-term-holdings" in edis["how"]
+    assert "no edis" in edis["how"].lower()
+    assert "t1_quantity" in edis["how"]
     assert "app" in edis["how"].lower()
     platform = steps["platform_acceptance"]
     assert "static ip" in platform["what"].lower()
