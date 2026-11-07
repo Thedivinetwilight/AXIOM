@@ -36,6 +36,7 @@ COVERAGE = {
     "mock_or_fake_transport_only": True,
     "live_verified": False,
     "windows_acceptance": "NOT_RUN",
+    "windows_acceptance_evidence": "docs/WINDOWS_ACCEPTANCE_STATUS.md",
     "note": "tests and readiness prove wiring and refusal behaviour, not broker behaviour in production",
 }
 
@@ -195,6 +196,194 @@ def _acceptance_steps(market: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Owner-run, read-only broker preflight
+# --------------------------------------------------------------------------- #
+#: Evidence ladder. A market only moves up a level with evidence recorded for
+#: that level; nothing here can be inferred from a lower level.
+VERIFICATION_LEVELS: tuple[tuple[str, str], ...] = (
+    ("MOCK", "deterministic fake-transport tests in this repository"),
+    ("PAPER_SANDBOX", "the broker's own paper/sandbox environment, real API calls, no real money"),
+    ("READ_ONLY_LIVE", "live credentials against documented read endpoints only, no order call"),
+    ("ORDER_PATH_LIVE", "a real accepted order on the live account, operator-run"),
+)
+
+FORBIDDEN_IN_PREFLIGHT: tuple[str, ...] = (
+    "placing, modifying or cancelling any order",
+    "contacting an order, multi-order or GTT write endpoint",
+    "printing, logging or persisting a credential value, token or account number",
+    "switching a market to LIVE or arming a gate",
+    "treating a passing preflight as evidence that the order path works",
+)
+
+
+def _upstox_preflight() -> list[dict[str, Any]]:
+    return [
+        {
+            "step": "credential_configuration_status",
+            "what": "confirm which required names are present without reading their values",
+            "how": "python -m app live-readiness --json | jq '.markets[0].credential_requirements'",
+            "expect": "configured=true for the names you set; the report never echoes a value",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "MOCK",
+            "failure_means": "the adapter stays DISABLED; do not paste a token into a ticket or chat",
+        },
+        {
+            "step": "account_identity",
+            "what": "confirm the token belongs to the intended Upstox account",
+            "how": "GET /v2/user/profile with the same token AXIOM uses; record only a masked "
+            "identifier and the returned user_name/exchanges",
+            "expect": "the expected account, and an exchanges list containing NSE",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "wrong account or token: stop, do not activate",
+        },
+        {
+            "step": "permissions_and_funding",
+            "what": "confirm the account may place orders and is funded",
+            "how": "GET /v3/user/get-funds-and-margin (Api-Version 3.0) and "
+            "GET /v2/portfolio/short-term-positions",
+            "expect": "available_to_trade.total > 0, no trading block reported, positions readable",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "readiness fails and Arm is refused; AXIOM does not try to fix funding",
+        },
+        {
+            "step": "edis_and_settlement_state",
+            "what": "confirm holdings an exit would sell are EDIS-authorised and settled",
+            "how": "Upstox web/iOS/Android app only (there is no documented API); compare against "
+            "the holdings the app shows as authorised for delivery",
+            "expect": "operator confirms the app shows the holdings as authorised",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "no exit route exists in AXIOM anyway (readiness doc section 3), so "
+            "this is an operator-manual control, not an AXIOM gate",
+        },
+        {
+            "step": "market_and_session_eligibility",
+            "what": "confirm the NSE session is open and today is a trading day",
+            "how": "python -m app live-readiness, then compare the printed session window with "
+            "app.markets.nse_reconciliation.nse_session_status for the current time",
+            "expect": "session OPEN, trading_day equal to the loaded BOD catalog day",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "MOCK",
+            "failure_means": "submissions are refused outside the regular session",
+        },
+        {
+            "step": "platform_acceptance",
+            "what": "confirm the SEBI static IP and algo name are registered for this account",
+            "how": "Upstox console / SEBI registration records; compare with "
+            "AXIOM_UPSTOX_EXPECTED_PUBLIC_IP and UPSTOX_ALGO_NAME",
+            "expect": "both registered and identical to the configured values",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "AXIOM refuses orders from an unregistered IP; do not activate",
+        },
+    ]
+
+
+def _alpaca_preflight() -> list[dict[str, Any]]:
+    return [
+        {
+            "step": "credential_configuration_status",
+            "what": "confirm which required names are present without reading their values",
+            "how": "python -m app live-readiness --json | jq '.markets[1].credential_requirements'",
+            "expect": "configured=true for ALPACA_BROKER_API_KEY / _SECRET; values never printed",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "MOCK",
+            "failure_means": "the adapter path stays disabled",
+        },
+        {
+            "step": "account_identity",
+            "what": "confirm the key pair belongs to the intended Alpaca account",
+            "how": "GET /v2/account; record only a masked account_number and the status",
+            "expect": "status ACTIVE and the expected account",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "wrong account: stop, do not activate",
+        },
+        {
+            "step": "permissions_and_blocks",
+            "what": "confirm trading permission and that the account is not blocked",
+            "how": "the same GET /v2/account response: trading_blocked, account_blocked, "
+            "pattern_day_trader and buying_power",
+            "expect": "trading_blocked=false, account_blocked=false, buying_power > 0",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "readiness fails and Arm is refused",
+        },
+        {
+            "step": "market_and_session_eligibility",
+            "what": "take session state from the broker, not the local clock",
+            "how": "GET /v2/clock and GET /v2/calendar",
+            "expect": "is_open agrees with the intended session; next_open/next_close sane",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "submissions are refused outside the session",
+        },
+        {
+            "step": "platform_acceptance",
+            "what": "exercise a full cycle on the paper host before any live claim",
+            "how": "set ALPACA_BROKER_ENVIRONMENT=paper, run the same readiness and preflight, "
+            "and expect real API calls against the documented paper host",
+            "expect": "paper cycle completes; this proves the transport, not the live order path",
+            "read_only": False,
+            "writes_orders": True,
+            "level": "PAPER_SANDBOX",
+            "failure_means": "do not attempt live until the paper cycle is clean",
+        },
+        {
+            "step": "position_read_for_the_symbol",
+            "what": "confirm the held long an exit would close",
+            "how": "GET /v2/positions (read only) for the symbol the coordinator would sell",
+            "expect": "qty >= the intended exit quantity, side long",
+            "read_only": True,
+            "writes_orders": False,
+            "level": "READ_ONLY_LIVE",
+            "failure_means": "the coordinator refuses the SELL as a naked short",
+        },
+    ]
+
+
+def broker_preflight(market: str) -> list[dict[str, Any]]:
+    """Ordered, read-only, owner-run steps. Never places, changes or cancels an order."""
+    key = str(getattr(market, "value", market)).upper()
+    if key == "NSE":
+        return _upstox_preflight()
+    if key == "NASDAQ":
+        return _alpaca_preflight()
+    return []
+
+
+def verification_state(market: str) -> dict[str, Any]:
+    """Where the evidence actually stops for this market."""
+    levels = []
+    for name, meaning in VERIFICATION_LEVELS:
+        if name == "MOCK":
+            state, evidence = "achieved", "pytest suite (deterministic fakes)"
+        elif name == "PAPER_SANDBOX":
+            state, evidence = "not_achieved", "no broker paper/sandbox session was run here"
+        else:
+            state, evidence = "not_achieved", "no live broker session, credential or order"
+        levels.append({"level": name, "state": state, "meaning": meaning, "evidence": evidence})
+    return {
+        "current_level": "MOCK",
+        "levels": levels,
+        "order_path_verified": False,
+        "note": "a level is only achieved with evidence recorded for that level",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 def build_readiness_report(
@@ -235,6 +424,9 @@ def build_readiness_report(
                 "platform_checks": _platform_checks(),
                 "acceptance_steps": _acceptance_steps(market),
                 "documented_capabilities": capabilities.as_dict(),
+                "exit_route": capabilities.exit_route.as_dict(),
+                "broker_preflight": broker_preflight(market),
+                "verification": verification_state(market),
                 "kill_switch": _kill_switch_state(coordinator, market),
             }
         )
@@ -254,6 +446,12 @@ def build_readiness_report(
         "all_markets_live_enabled": not blocking,
         "coverage": dict(COVERAGE),
         "open_order_policy": open_order_policy(),
+        "verification_levels": [name for name, _ in VERIFICATION_LEVELS],
+        "preflight_rules": {
+            "read_only_required": True,
+            "forbidden": list(FORBIDDEN_IN_PREFLIGHT),
+            "owner_run": "these steps are for the operator on their own account; AXIOM never runs them",
+        },
         "notes": [
             "No credential value is included: every entry reports presence only.",
             "This report is read-only and never places, modifies or cancels an order.",
@@ -307,6 +505,19 @@ def render_readiness_text(report: dict[str, Any]) -> str:
             lines.append(f"  missing credentials: {', '.join(row['credentials_missing'])}")
         for item in row["missing_requirements"]:
             lines.append(f"  requirement: {item}")
+        exit_route = row.get("exit_route") or {}
+        lines.append(
+            f"  exit route: routed={exit_route.get('routed')} - {exit_route.get('summary', '')}"
+        )
+        lines.append(f"  verification level: {row['verification']['current_level']} "
+                     f"(order path verified: {row['verification']['order_path_verified']})")
+        if exit_route.get("operator_fallback"):
+            lines.append(f"  exit fallback: {exit_route['operator_fallback']}")
+        steps = row.get("broker_preflight") or []
+        if steps:
+            reads = sum(1 for step in steps if step["read_only"] and not step["writes_orders"])
+            lines.append(f"  broker preflight: {len(steps)} owner-run steps, "
+                         f"{reads} read-only / no order writes")
         lines.append(f"  documented order types: {', '.join(row['documented_capabilities']['order_types'])}")
         lines.append(
             "  idempotency: "
