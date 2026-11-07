@@ -58,3 +58,29 @@ Verification: `tests/test_vantage_live_api_removal.py` (21 tests) — no path un
 `/api/trading`, all legacy GET/POST paths `404`, package importable but unmounted,
 and the supported surfaces (`/health`, `/api/markets/live/status`, `/paper/status`,
 `/api/performance`) still answer with live execution OFF.
+
+## 4. Follow-up (2026-11-07): the console client is now on those routes too
+
+Removing the server routes left `app/static/terminal/terminal.js` still calling
+them, so unlocking the terminal failed with "Not Found" (`/api/trading/status`
+first). The console now calls only routes that exist, and
+`tests/test_console_route_contract.py` enforces it:
+
+- token validation uses `GET /paper/status` (authenticated, read-only); `401`
+  (wrong token), `503` (no `API_TOKEN` configured) and `404` (route missing) stay
+  distinguishable in the UI and in the token-update form;
+- the workspace is composed client-side from `/paper/status`, `/paper/account`,
+  `/paper/positions`, `/paper/orders`, `/paper/trades` and `/dashboard/data` —
+  no aggregate or order route was added;
+- activity uses `/api/markets/paper/audit/events`, performance uses
+  `/api/performance`, the protected-store badge uses
+  `/api/connections/alpaca/credentials`;
+- emergency set/clear use `/engine/stop`, `/api/markets/emergency-stop`,
+  `/api/markets/emergency-stop/reset` (typed phrase) and `/engine/resume`;
+- unresolved-intent counting, the bulk quote map and a reconciliation timestamp
+  have no current endpoint, so they render as **unavailable with a reason**
+  instead of a zero, and an uncertain outcome is never auto-cleared from them.
+
+Verified read-only against a real in-process server: every console path answers
+`200`, every `/api/trading/*` path answers `404`, and live readiness stays
+blocking with both market gates `DISABLED`.
