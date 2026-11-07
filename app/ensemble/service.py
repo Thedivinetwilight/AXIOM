@@ -46,7 +46,11 @@ from app.ensemble.registry import (
     evaluate_variant_on_context,
     normalize_timeframe,
 )
-from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
+from app.markets.fetch_gate import (
+    MARKET_ENDPOINT_CATEGORIES,
+    FetchGateConfig,
+    ProviderFetchGate,
+)
 from app.markets.live_paper import _round_to_tick, estimate_market_fees
 from app.markets.nse_reconciliation import nse_session_status
 from app.markets.us_calendar import USEquitiesCalendar
@@ -205,6 +209,21 @@ class StrategyEnsembleService:
             "NSE": nse_fetch_gate or ProviderFetchGate(FetchGateConfig()),
             "NASDAQ": nasdaq_fetch_gate or ProviderFetchGate(FetchGateConfig()),
         }
+        # Charge every provider call to its documented endpoint category. The
+        # engine wraps its own copies against the same gate objects, so engine and
+        # ensemble traffic draw on one quota per provider rather than doubling it.
+        for _mkt, _cat in MARKET_ENDPOINT_CATEGORIES.items():
+            _gate = self.fetch_gates[_mkt]
+            _quote = self.nse_quote_provider if _mkt == "NSE" else self.nasdaq_quote_provider
+            _bars = self.nse_bars_provider if _mkt == "NSE" else self.nasdaq_bars_provider
+            if _quote is not None:
+                _quote = _gate.guarded(_cat["quote"], _quote)
+            if _bars is not None:
+                _bars = _gate.guarded(_cat["bars"], _bars)
+            if _mkt == "NSE":
+                self.nse_quote_provider, self.nse_bars_provider = _quote, _bars
+            else:
+                self.nasdaq_quote_provider, self.nasdaq_bars_provider = _quote, _bars
 
         self.preset: str = "compact"
         self.enabled_families: list[str] = sorted(STRATEGY_FAMILIES.keys())
@@ -657,7 +676,7 @@ class StrategyEnsembleService:
         if pending_bar_syms and bar_fn is not None:
             bar_api_calls += len(pending_bar_syms)
             bar_outcomes = gate.map(
-                pending_bar_syms, lambda sym: bar_fn(ref_by_sym.get(sym, sym), tf)
+                pending_bar_syms, lambda sym: bar_fn(ref_by_sym.get(sym, sym), tf), paced=False
             )
             for sym in pending_bar_syms:
                 outcome = bar_outcomes.get(sym)
@@ -693,7 +712,7 @@ class StrategyEnsembleService:
                 lookup_key = ikey if (mkt == "NSE" and ikey) else sym
                 return quote_fn(lookup_key)
 
-            quote_outcomes = gate.map(pending_quote_syms, _quote_lookup)
+            quote_outcomes = gate.map(pending_quote_syms, _quote_lookup, paced=False)
             for sym in pending_quote_syms:
                 outcome = quote_outcomes.get(sym)
                 if outcome is None:

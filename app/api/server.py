@@ -349,9 +349,16 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
             # the paper engine and the ensemble service so a cycle's quotes and
             # bar history draw on a single request budget. Bounds come from
             # MARKET_DATA_FETCH_* settings (never from a trading limit).
-            from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
+            from dataclasses import replace as _dc_replace
 
-            _fetch_cfg = FetchGateConfig(
+            from app.markets.fetch_gate import (
+                FetchGateConfig,
+                ProviderFetchGate,
+                alpaca_market_data_policies,
+                upstox_standard_policies,
+            )
+
+            _base_fetch_cfg = FetchGateConfig(
                 max_workers=int(getattr(settings, "market_data_fetch_workers", 8)),
                 max_requests_per_second=float(getattr(settings, "market_data_fetch_max_rps", 50.0)),
                 burst=max(1, int(getattr(settings, "market_data_fetch_max_rps", 50.0))),
@@ -359,9 +366,31 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                     getattr(settings, "market_data_fetch_batch_timeout_seconds", 45.0)
                 ),
             )
+            # The documented windows are enforced per endpoint category. They are
+            # not a trading limit and never widen one; they only pace requests.
+            _quota_on = str(getattr(settings, "market_data_quota_profile", "documented")).lower() != "off"
+            _alpaca_plan = str(getattr(settings, "alpaca_market_data_plan", "basic")).strip().lower()
+            _nse_cfg = (
+                _dc_replace(
+                    _base_fetch_cfg,
+                    quota_policies=upstox_standard_policies(),
+                    quota_profile="upstox_standard",
+                )
+                if _quota_on
+                else _base_fetch_cfg
+            )
+            _nasdaq_cfg = (
+                _dc_replace(
+                    _base_fetch_cfg,
+                    quota_policies=alpaca_market_data_policies(_alpaca_plan),
+                    quota_profile=f"alpaca_{_alpaca_plan}",
+                )
+                if _quota_on
+                else _base_fetch_cfg
+            )
             _fetch_gates = {
-                "NSE": ProviderFetchGate(_fetch_cfg),
-                "NASDAQ": ProviderFetchGate(_fetch_cfg),
+                "NSE": ProviderFetchGate(_nse_cfg),
+                "NASDAQ": ProviderFetchGate(_nasdaq_cfg),
             }
             app.state.market_data_fetch_gates = _fetch_gates
 

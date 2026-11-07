@@ -376,6 +376,9 @@ class TestNoOrderSurfaceWasPorted:
         assert not {name for name in names if "alpaca" in name} - {
             "alpaca_api_key", "alpaca_api_secret", "alpaca_data_feed",
             "alpaca_symbols",
+            # Documented market-data plan (quota windows only: 200/min Basic,
+            # 10,000/min Algo Trader Plus). It carries no order capability.
+            "alpaca_market_data_plan",
             "alpaca_broker_enabled", "alpaca_broker_environment",
             "alpaca_broker_api_key", "alpaca_broker_api_secret",
             "alpaca_broker_max_order_value", "alpaca_broker_max_open_positions",

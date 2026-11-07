@@ -964,81 +964,155 @@ kill switch and adapters were not modified by that consolidation.
 
 ---
 
-## 16. 100-symbol single-cycle scan capacity (2026-11-07)
+## 16. 100-symbol scan capacity and documented provider quota windows (2026-11-07)
 
-**Request.** Assess — and, if it falls short, improve — the capacity to scan `100`
-selected symbols in one cycle, without raising any trading limit.
+**Request.** (1) Assess — and, if it falls short, improve — the capacity to scan
+`100` selected symbols in one cycle, without raising any trading limit.
+(2) Audit and correct the fetch gate so it respects every *documented* provider
+quota window, not only requests per second.
 
-**Limits before and after.** Unchanged: `max_open_positions = 8` (allocator
-`max_pos_cap` binds before the engine's `10`), `max_daily_orders = 40`, symbol
-exposure `25 %` of equity, total exposure `80 %` of equity, and live execution
-still **OFF**. The watchlist itself is unbounded (SQLite rows), so selecting `100`
-symbols was always possible; the open question was whether one cycle could *fetch
-and evaluate* them inside the interval — and whether the portfolio layer would then
-obey its own caps. It does: `100` evaluated → `6` orders → `6` positions.
+### 16.1 Limits before and after (unchanged)
 
-**What was wrong.** Per-symbol provider callables executed sequentially: a
-`100`-symbol cycle cost `2 × 100 × RTT` (`20.2 s` at a simulated `100 ms` round
-trip), more than the cycle interval at any realistic latency.
+`max_open_positions = 8` (the allocator's `max_pos_cap` binds before the engine's
+`10`), `max_daily_orders = 40`, symbol exposure `25 %` of equity, total exposure
+`80 %` of equity, live execution still **OFF**. The watchlist is unbounded (SQLite
+rows), so selecting `100` symbols was always possible; the questions were whether
+one cycle can *fetch and evaluate* them inside the documented quotas, and whether
+the portfolio layer still obeys its own caps. It does: `100` evaluated →
+`6` orders → `6` positions.
 
-**What changed (bounded, rate-limit-aware, no new limits).**
+### 16.2 Quota defect found and corrected
 
-* New `app/markets/fetch_gate.py` (`ProviderFetchGate` / `FetchGateConfig`):
-  worker bound (default `8`), request budget (`50 rps`, burst `50`), shared
-  exponential cooldown on a provider `429` (one bounded retry), AIMD budget
-  (halve per throttle window, `+10 %` of the ceiling per `25` clean successes),
-  per-symbol isolation and a whole-batch deadline so a hung call becomes a
-  per-symbol `FETCH_TIMEOUT`.
-* Wired into the scan path and the tick cycle in `app/markets/live_paper.py`, into
-  `app/ensemble/service.py` (one gate per provider, engine and ensemble sharing
-  it) and into the API (`app/api/server.py`); settings
-  `MARKET_DATA_FETCH_MAX_WORKERS` / `MARKET_DATA_FETCH_MAX_RPS` /
-  `MARKET_DATA_FETCH_TIMEOUT_SECONDS` (defaults `8` / `50` / `45`).
-* `_probe_symbol` now re-raises a provider throttle so the gate — not the
-  individual symbol — owns the backoff; without this the gate never saw the `429`
-  and `89/100` symbols were lost in the throttled arm.
-* Existing behaviour preserved: per-symbol `MISSING_DATA` / `STALE_DATA` /
-  `FAILED` classification, fail-closed decisions, deterministic per-symbol
-  results, no retry of an ambiguous *order* outcome.
+The gate added in this session enforced only a **per-second** token bucket. Every
+provider AXIOM uses also publishes longer windows, so a burst that satisfied
+`50 rps` could still exceed `2,000 requests per 30 minutes` (Upstox) or
+`200 per minute` (Alpaca Basic) — and the previous capacity report effectively
+presented a 15-second cadence for 100 symbols as achievable, which is **~6x over**
+the documented Upstox 30-minute budget.
 
-**Evidence (offline, deterministic, zero network and zero broker calls).**
+Documented windows now modelled (read 2026-11-07; source URL and provider wording
+carried in code and in the JSON artifact):
 
-* `scripts/benchmark_market_scan.py --symbols 100` →
-  `docs/market_scan_capacity_100.json` (schema
-  `axiom.market_scan_capacity.v1`), six arms, `2 vCPU` / CPython 3.11.
-* Scan of `100` symbols: `20,244 ms` sequential → **`2,746 ms`** bounded
-  (`27.5 ms`/symbol, `50 rps`, `8` workers, `100 ms` round trip); full cycle
-  `26,840 / 20,277 ms` → **`8,734 / 4,015 ms`** (cold / warm).
-* Throttled provider (`20 rps` entitlement, `50 rps` configured): `100/100`
-  symbols analysed, `44` throttles, effective budget converged to `21.5 rps`,
-  cycle `23,911 / 16,660 ms`; **no data loss and no stray orders**.
-* Determinism: identical decision fingerprint across independent stacks
-  (`284a5a3f3ebcde49`) and identical results between bounded and sequential scans.
-* Failure isolation: `15` injected failures flag exactly `15` symbols, `0`
-  healthy symbols affected, the other `85` results identical to the clean run.
-* Memory: `tracemalloc` peak `14.0 MB`, RSS delta `26.3 MB`; `broker_order_api_calls
-  = 0` in every arm; the live execution boundary is never constructed.
-* New tests: `tests/test_market_scan_capacity.py` (`14`): worker bound, pacing,
-  one bad symbol cannot affect others, `429` → cooldown → bounded retry → clean
-  recovery, hung provider hits the deadline, `200` requests for `100` symbols,
-  bounded scan ≥ `2×` faster than sequential with identical results, portfolio
-  caps respected (`≤ 8` positions, `≤ 40` orders/day), determinism, partial
-  failure isolation, correlated-cluster refusal, and no broker order call.
+| Endpoint category | Windows | Source | Pool |
+| --- | --- | --- | --- |
+| Upstox `GET /v2/market-quote/quotes` | `50/s`, `500/min`, `2,000/30 min` | Upstox rate-limits page, "Other Standard APIs" | own pool |
+| Upstox `GET /v3/historical-candle` (+ `/intraday`) | `50/s`, `500/min`, `2,000/30 min` | same | own pool |
+| Alpaca market data, **Basic** (§`/v2/stocks/bars`, `/v2/stocks/{symbol}/snapshot`) | `200/min` | Alpaca market-data subscription plans | one shared pool |
+| Alpaca market data, **Algo Trader Plus** | `10,000/min` | same | one shared pool |
 
-**Still not claimed.** No perfect timing, no perfect fills, no profitability.
-Real latency and real rate limits depend on the owner's broker plan, region and
-credentials; the entitlement table in
-`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md` §3.1.4 shows that a
-100-symbol cycle is provider-bound below roughly `15 rps`, and that no amount of
-local concurrency creates provider capacity. Live execution stayed disabled and
-no order endpoint was contacted.
+Upstox documents its limits "on a per-API, per-user basis", so the quote and candle
+endpoints are separate pools. Alpaca publishes one market-data figure per plan and
+no per-second or 30-minute window, so its two endpoints share that single figure
+and no extra window is invented. The Alpaca plan is an explicit setting
+(`ALPACA_MARKET_DATA_PLAN`, default `basic` = the documented default plan); an
+unknown plan name raises instead of guessing an entitlement.
+
+### 16.3 What changed in the gate
+
+* `QuotaWindow` / `QuotaPolicy` + `DOCUMENTED_QUOTAS`, with source URL, the
+  provider's own wording and the read date on every policy.
+* `ProviderFetchGate.admit(category)` enforces, in one admission: no active
+  provider cooldown, the per-second token bucket (AIMD), and **every** documented
+  rolling window of the request's endpoint category (deque per window, all must
+  admit). A `429` halves the per-second budget and starts a cooldown — it never
+  clears, widens or skips a rolling window.
+* `QuotaDeferred`: if the required wait would cross the batch deadline the request
+  is **not sent** and the symbol reports `QUOTA_DEFERRED`. An abandoned cycle can
+  therefore never fire its requests later or consume another cycle's quota.
+* `gate.guarded(category, provider)` wraps the engine's and the ensemble's
+  providers, so every HTTP request is charged exactly once to its documented
+  category (one symbol = two charges), and no call site can fetch outside quota.
+  `map(..., paced=False)` prevents double charging where providers are guarded.
+* `MARKET_DATA_QUOTA_PROFILE` (default `documented`; `off` disables windows) and
+  `ALPACA_MARKET_DATA_PLAN` (default `basic`) settings; the API builds one gate per
+  market with the matching policy set.
+* No credential, host or account rotation exists or was added: one gate = one
+  credential set, and a test asserts that surface is absent.
+
+### 16.4 Measured (offline, deterministic, zero network and zero broker calls)
+
+`scripts/benchmark_market_scan.py --symbols 100` →
+`docs/market_scan_capacity_100.json` (schema `axiom.market_scan_capacity.v2`),
+`2 vCPU` / CPython 3.11, six single-cycle arms plus six 30-minute schedule
+simulations on a virtual clock.
+
+Single cycle, documented windows enforced:
+
+* Scan of `100` symbols: `20,309 ms` sequential → **`3,258 ms`** bounded
+  (`32.6 ms`/symbol, `8` workers, `100 ms` round trip); full cycle
+  `26,523 / 20,275 ms` → **`9,161 / 3,682 ms`** (cold / warm).
+* Per-endpoint quota accounting for that scan: `100` quote + `100` candle
+  requests, peak `1 s` window `40/50`, peak `1 min` `100/500`, peak `30 min`
+  `100/2,000`, `69` admissions waited (`3.8 s`), `0` deferred, `0` breaches.
+* Throttled provider (`20 rps` while configured at `50`): `100/100` symbols
+  analysed, `41–48` throttles (cooldown/AIMD timing varies per run), `0` deferred,
+  `0` quota breaches — the AIMD cut never bypassed a window.
+* Determinism, failure isolation, memory and `broker_order_api_calls = 0` are
+  unchanged (decision fingerprint identical across independent stacks; `15`
+  injected failures flag exactly those `15` symbols, `0` healthy symbols
+  affected; `14.0 MB` tracemalloc peak; `0` broker order calls in every arm).
+
+30-minute schedules (virtual clock; "cycles with data" = cycles that fetched,
+deferred cycles never sent a request):
+
+| Schedule | Requested | With data | Deferred | Latency `p50`/`p95` | Throttles | Held? |
+| --- | ---: | ---: | ---: | --- | ---: | --- |
+| 100 symbols / 15 s | 120 | **21** | 93 | `5.00` / `5.00 s` | 0 | **no** |
+| 100 symbols / 60 s | 30 | 21 | 9 | `5.00` / `5.00 s` | 0 | no |
+| 100 symbols / 90 s | 20 | **20** | 0 | `5.00` / `5.00 s` | 0 | **yes** |
+| 100 symbols / 15 s, provider 20 rps | 120 | 21 | 86 | `19.13` / `37.29 s` | 77 | no |
+| **16 symbols / 15 s** | 120 | **120** | 0 | `0.80` / `0.80 s` | 0 | **yes** |
+| 100 NASDAQ / 15 s (Alpaca Basic) | 120 | 31 | 0 | `60.0` / `60.0 s` | 0 | no |
+
+Every per-endpoint window stayed at or below its documented maximum in all six
+schedules: Upstox quote and candle each `2,100` requests at `15 s` cadence with
+peaks `23–24/50` (1 s), `402–404/500` (1 min) and `2,000/2,000` (30 min); `2,000`
+at the `90 s` cadence with peaks `100/500` and `100/500` and no waits; Alpaca
+Basic `6,200` requests with a peak `1 min` of exactly `200/200`.
+
+### 16.5 Supported cadence (corrected claim)
+
+* **100 NSE symbols: 90 s cadence.** `2,000 per 30 minutes` per endpoint is the
+  binding window (`1,800 s x 100 / 2,000 = 90 s`).
+* **15 s cadence on Upstox standard APIs supports 16 symbols** per cycle (not 100).
+* A 60 s cadence supports 66 Upstox symbols per cycle.
+* **100 NASDAQ symbols: 60 s** on Alpaca **Basic** (`200/min`, two requests per
+  symbol in one pool); 15 s supports 25 symbols there.
+* Alpaca **Algo Trader Plus** (`10,000/min`, documented) supports 100 symbols at
+  15 s (minimum interval `1.2 s`).
+
+**The previous record's implication that 100 symbols every 15 seconds is
+supportable is withdrawn.** At 15 s the gate defers `9,300` symbol fetches and
+delivers 21 of 120 scheduled cycles; the honest statement is 100 symbols per
+90 seconds (or 16 symbols per 15 seconds) on Upstox standard APIs.
+
+### 16.6 Tests added
+
+* `tests/test_fetch_gate_quotas.py` (`15`): documented numbers transcribed
+  exactly (50/500/2,000 and 200/10,000) with source/date present; per-minute and
+  30-minute windows bind independently of the per-second budget; quote and candle
+  pools are independent; a `429` neither resets nor bypasses a window; guarded
+  providers charge exactly one request per call and retry once; a throttled symbol
+  cannot burn another symbol's quota; `paced` vs `paced=False` accounting; the real
+  engine scan charges the documented categories and stays inside every window;
+  30-minute schedules break 15 s and hold 90 s; 16 symbols at 15 s stays inside
+  quota; and the gate exposes no credential/account rotation surface.
+
+### 16.7 Still not claimed
+
+No perfect timing, no perfect fills, no profitability, no broker behaviour. Real
+latency, real entitlements and provider-side burst behaviour depend on the owner's
+plan, region and credentials; a plan smaller than the documented default cannot be
+inferred from here, which is why the Alpaca plan is an explicit setting and the
+Upstox default uses the published standard-API figures. Live execution stayed
+disabled and no order endpoint was contacted.
 
 **Validation** (Linux, CPython 3.11, branch `arena/8d3d005e-axiom`).
 
 | Check | Command | Result |
 | --- | --- | --- |
-| New capacity suite | `pytest -q tests/test_market_scan_capacity.py` | `14 passed` |
-| Paper / ensemble / allocator suites | `pytest -q tests/test_live_market_paper_and_unified_api.py tests/test_parallel_ensemble_and_allocator.py tests/test_concurrent_multimarket_paper.py tests/test_us_equities_paper.py tests/test_kronos_paper_lifecycle_and_logs.py` | `36 passed` |
-| Static hardening gate | `pytest -q tests/test_v3_0_2_hardening.py` | `43 passed` |
-| Full suite | `python -m pytest -q` | **1469 passed, 5 skipped** |
-| Capacity benchmark | `python scripts/benchmark_market_scan.py --symbols 100 --json docs/market_scan_capacity_100.json` | six arms, exit `0`, `0` network calls, `0` broker calls |
+| Quota suite | `pytest -q tests/test_fetch_gate_quotas.py` | `15 passed` |
+| Capacity suite | `pytest -q tests/test_market_scan_capacity.py` | `14 passed` |
+| Paper / ensemble / allocator suites | `pytest -q tests/test_live_market_paper_and_unified_api.py tests/test_parallel_ensemble_and_allocator.py tests/test_concurrent_multimarket_paper.py tests/test_us_equities_paper.py tests/test_kronos_paper_lifecycle_and_logs.py tests/test_source_first_and_live_paper_audit.py` | `46 passed` |
+| Full suite | `python -m pytest -q` | **1484 passed, 5 skipped** |
+| Capacity benchmark | `python scripts/benchmark_market_scan.py --symbols 100 --json docs/market_scan_capacity_100.json` | six arms + six schedules, exit `0`, `0` network calls, `0` broker calls |

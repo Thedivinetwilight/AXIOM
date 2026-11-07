@@ -11,7 +11,7 @@
         "worker_bound": 1
       },
       "cycle": {
-        "cold_wall_ms": 26839.5,
+        "cold_wall_ms": 26523.3,
         "decisions": {
           "blocked_by_check": {
             "calibrated_confidence_and_oos_evidence": 3,
@@ -31,12 +31,12 @@
         },
         "fingerprint": "f33e5d31d3fee5d4",
         "memory": {
-          "rss_after_mb": 78.2,
-          "rss_before_mb": 43.7,
-          "rss_delta_mb": 34.5,
-          "tracemalloc_peak_mb": 14.01
+          "rss_after_mb": 79.2,
+          "rss_before_mb": 44.9,
+          "rss_delta_mb": 34.2,
+          "tracemalloc_peak_mb": 14.02
         },
-        "per_symbol_ms": 268.395,
+        "per_symbol_ms": 265.233,
         "provider": {
           "bar_requests": 300,
           "fake_failures_served": 0,
@@ -51,12 +51,182 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 200.0,
               "max_workers": 1,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
             "cooldowns": 0,
+            "deferred": 0,
             "effective_requests_per_second": 200.0,
             "errors": 0,
             "peak_inflight": 1,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 0.0,
+                  "quota_waits": 0,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 8,
+                      "limit": 50,
+                      "peak": 10,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 0.0,
+                  "quota_waits": 0,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 229,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 0,
+                      "limit": 50,
+                      "peak": 10,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 0.0,
+            "quota_waits": 0,
             "rate_limited_events": 0,
             "requests": 600,
             "retries": 0,
@@ -67,9 +237,9 @@
           },
           "latency": {
             "count": 600,
-            "max_ms": 119.385,
-            "p50_ms": 100.691,
-            "p95_ms": 107.582
+            "max_ms": 114.155,
+            "p50_ms": 100.708,
+            "p95_ms": 107.3
           },
           "peak_inflight": 1,
           "quote_requests": 300,
@@ -83,9 +253,9 @@
           "rejected_instruments": {}
         },
         "symbols": 100,
-        "throughput_symbols_per_s": 3.73,
+        "throughput_symbols_per_s": 3.77,
         "warm_fingerprint": "83a4db363d28ccb7",
-        "warm_wall_ms": 20277.3
+        "warm_wall_ms": 20275.3
       },
       "name": "sequential-reference-100ms",
       "note": "one worker, no pacing: the pre-change fan-out shape (sequential loops)",
@@ -109,47 +279,217 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 200.0,
             "max_workers": 1,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 200.0,
           "errors": 0,
           "peak_inflight": 1,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 5,
+                    "limit": 50,
+                    "peak": 5,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 4,
+                    "limit": 50,
+                    "peak": 5,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
           "wait_seconds": 0.0,
           "workers_used": 1
         },
-        "per_symbol_ms": 202.441,
+        "per_symbol_ms": 203.094,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 1,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 1
         },
         "stale_or_rejected": [],
-        "throughput_symbols_per_s": 4.94,
+        "throughput_symbols_per_s": 4.92,
         "transport": {
           "bar_requests": 100,
           "fake_failures_served": 0,
           "latency": {
             "count": 200,
-            "max_ms": 108.948,
-            "p50_ms": 100.696,
-            "p95_ms": 101.156
+            "max_ms": 128.111,
+            "p50_ms": 100.692,
+            "p95_ms": 101.592
           },
           "peak_inflight": 1,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 20244.1
+        "wall_ms": 20309.4
       },
       "sequential_reference": {
         "counts": {
@@ -171,26 +511,196 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 200.0,
             "max_workers": 1,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 200.0,
           "errors": 0,
           "peak_inflight": 1,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 4,
+                    "limit": 50,
+                    "peak": 5,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 4,
+                    "limit": 50,
+                    "peak": 5,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
           "wait_seconds": 0.0,
           "workers_used": 1
         },
-        "per_symbol_ms": 202.709,
+        "per_symbol_ms": 202.634,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 1,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 1
@@ -202,16 +712,16 @@
           "fake_failures_served": 0,
           "latency": {
             "count": 200,
-            "max_ms": 120.55,
-            "p50_ms": 100.511,
-            "p95_ms": 101.167
+            "max_ms": 113.283,
+            "p50_ms": 100.69,
+            "p95_ms": 101.157
           },
           "peak_inflight": 1,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 20270.9
+        "wall_ms": 20263.4
       }
     },
     {
@@ -225,7 +735,7 @@
         "worker_bound": 8
       },
       "cycle": {
-        "cold_wall_ms": 8734.3,
+        "cold_wall_ms": 9161.3,
         "decisions": {
           "blocked_by_check": {
             "calibrated_confidence_and_oos_evidence": 3,
@@ -245,12 +755,12 @@
         },
         "fingerprint": "f33e5d31d3fee5d4",
         "memory": {
-          "rss_after_mb": 111.3,
-          "rss_before_mb": 84.9,
-          "rss_delta_mb": 26.3,
-          "tracemalloc_peak_mb": 14.01
+          "rss_after_mb": 111.6,
+          "rss_before_mb": 87.8,
+          "rss_delta_mb": 23.8,
+          "tracemalloc_peak_mb": 14.02
         },
-        "per_symbol_ms": 87.343,
+        "per_symbol_ms": 91.613,
         "provider": {
           "bar_requests": 300,
           "fake_failures_served": 0,
@@ -265,25 +775,195 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 50.0,
               "max_workers": 8,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
             "cooldowns": 0,
+            "deferred": 0,
             "effective_requests_per_second": 50.0,
             "errors": 0,
             "peak_inflight": 8,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 8.746,
+                  "quota_waits": 94,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 70,
+                      "current": 50,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 8.827,
+                  "quota_waits": 40,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 40,
+                      "current": 0,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 17.573,
+            "quota_waits": 134,
             "rate_limited_events": 0,
             "requests": 600,
             "retries": 0,
             "symbols": 600,
             "timeouts": 0,
-            "wait_seconds": 14.97060366896668,
+            "wait_seconds": 17.573,
             "workers_used": 8
           },
           "latency": {
             "count": 600,
-            "max_ms": 173.38,
-            "p50_ms": 100.67,
-            "p95_ms": 115.895
+            "max_ms": 157.842,
+            "p50_ms": 100.71,
+            "p95_ms": 128.217
           },
           "peak_inflight": 8,
           "quote_requests": 300,
@@ -297,9 +977,9 @@
           "rejected_instruments": {}
         },
         "symbols": 100,
-        "throughput_symbols_per_s": 11.45,
+        "throughput_symbols_per_s": 10.92,
         "warm_fingerprint": "83a4db363d28ccb7",
-        "warm_wall_ms": 4015.4
+        "warm_wall_ms": 3681.8
       },
       "name": "bounded-8w-50rps-100ms",
       "note": "bounded fan-out + request budget at a realistic round trip",
@@ -323,47 +1003,217 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 50.0,
             "max_workers": 8,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 50.0,
           "errors": 0,
           "peak_inflight": 8,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 1.894,
+                "quota_waits": 36,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 21,
+                    "limit": 50,
+                    "peak": 40,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 1.933,
+                "quota_waits": 33,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 17,
+                    "limit": 50,
+                    "peak": 40,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 3.827,
+          "quota_waits": 69,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
-          "wait_seconds": 0.0,
+          "wait_seconds": 3.827,
           "workers_used": 8
         },
-        "per_symbol_ms": 27.461,
+        "per_symbol_ms": 32.578,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 8,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 8
         },
         "stale_or_rejected": [],
-        "throughput_symbols_per_s": 36.42,
+        "throughput_symbols_per_s": 30.7,
         "transport": {
           "bar_requests": 100,
           "fake_failures_served": 0,
           "latency": {
             "count": 200,
-            "max_ms": 120.814,
-            "p50_ms": 100.486,
-            "p95_ms": 104.623
+            "max_ms": 120.188,
+            "p50_ms": 100.405,
+            "p95_ms": 104.296
           },
           "peak_inflight": 8,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 2746.1
+        "wall_ms": 3257.8
       },
       "sequential_reference": null
     },
@@ -378,7 +1228,7 @@
         "worker_bound": 8
       },
       "cycle": {
-        "cold_wall_ms": 12428.6,
+        "cold_wall_ms": 12322.0,
         "decisions": {
           "blocked_by_check": {
             "calibrated_confidence_and_oos_evidence": 3,
@@ -398,12 +1248,12 @@
         },
         "fingerprint": "f33e5d31d3fee5d4",
         "memory": {
-          "rss_after_mb": 128.7,
-          "rss_before_mb": 112.9,
-          "rss_delta_mb": 15.9,
-          "tracemalloc_peak_mb": 14.01
+          "rss_after_mb": 132.1,
+          "rss_before_mb": 112.5,
+          "rss_delta_mb": 19.6,
+          "tracemalloc_peak_mb": 14.02
         },
-        "per_symbol_ms": 124.286,
+        "per_symbol_ms": 123.22,
         "provider": {
           "bar_requests": 300,
           "fake_failures_served": 0,
@@ -418,12 +1268,182 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 50.0,
               "max_workers": 8,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
             "cooldowns": 0,
+            "deferred": 0,
             "effective_requests_per_second": 50.0,
             "errors": 0,
             "peak_inflight": 8,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 0.0,
+                  "quota_waits": 0,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 20,
+                      "limit": 50,
+                      "peak": 32,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 0.0,
+                  "quota_waits": 0,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 0,
+                      "limit": 50,
+                      "peak": 32,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 0.0,
+            "quota_waits": 0,
             "rate_limited_events": 0,
             "requests": 600,
             "retries": 0,
@@ -434,9 +1454,9 @@
           },
           "latency": {
             "count": 600,
-            "max_ms": 334.124,
-            "p50_ms": 250.747,
-            "p95_ms": 280.782
+            "max_ms": 338.537,
+            "p50_ms": 250.728,
+            "p95_ms": 284.249
           },
           "peak_inflight": 8,
           "quote_requests": 300,
@@ -450,9 +1470,9 @@
           "rejected_instruments": {}
         },
         "symbols": 100,
-        "throughput_symbols_per_s": 8.05,
+        "throughput_symbols_per_s": 8.12,
         "warm_fingerprint": "83a4db363d28ccb7",
-        "warm_wall_ms": 6724.4
+        "warm_wall_ms": 6704.5
       },
       "name": "bounded-8w-50rps-250ms",
       "note": "slow provider: latency-bound, budget has headroom",
@@ -476,47 +1496,217 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 50.0,
             "max_workers": 8,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 50.0,
           "errors": 0,
           "peak_inflight": 8,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 12,
+                    "limit": 50,
+                    "peak": 16,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 0.0,
+                "quota_waits": 0,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 4,
+                    "limit": 50,
+                    "peak": 16,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
           "wait_seconds": 0.0,
           "workers_used": 8
         },
-        "per_symbol_ms": 66.303,
+        "per_symbol_ms": 66.817,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 8,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 8
         },
         "stale_or_rejected": [],
-        "throughput_symbols_per_s": 15.08,
+        "throughput_symbols_per_s": 14.97,
         "transport": {
           "bar_requests": 100,
           "fake_failures_served": 0,
           "latency": {
             "count": 200,
-            "max_ms": 287.149,
-            "p50_ms": 250.66,
-            "p95_ms": 257.909
+            "max_ms": 299.419,
+            "p50_ms": 250.701,
+            "p95_ms": 262.492
           },
           "peak_inflight": 8,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 6630.3
+        "wall_ms": 6681.7
       },
       "sequential_reference": null
     },
@@ -531,7 +1721,7 @@
         "worker_bound": 8
       },
       "cycle": {
-        "cold_wall_ms": 23911.4,
+        "cold_wall_ms": 30741.3,
         "decisions": {
           "blocked_by_check": {
             "calibrated_confidence_and_oos_evidence": 3,
@@ -551,19 +1741,19 @@
         },
         "fingerprint": "f33e5d31d3fee5d4",
         "memory": {
-          "rss_after_mb": 138.7,
-          "rss_before_mb": 128.6,
-          "rss_delta_mb": 10.1,
-          "tracemalloc_peak_mb": 14.01
+          "rss_after_mb": 148.9,
+          "rss_before_mb": 132.0,
+          "rss_delta_mb": 16.9,
+          "tracemalloc_peak_mb": 14.02
         },
-        "per_symbol_ms": 239.114,
+        "per_symbol_ms": 307.413,
         "provider": {
-          "bar_requests": 322,
+          "bar_requests": 318,
           "fake_failures_served": 0,
           "gate": {
             "batches": 6,
-            "budget_increases": 17,
-            "budget_reductions": 11,
+            "budget_increases": 16,
+            "budget_reductions": 13,
             "config": {
               "batch_timeout_seconds": 120.0,
               "burst": 50,
@@ -571,31 +1761,201 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 50.0,
               "max_workers": 8,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
-            "cooldowns": 11,
-            "effective_requests_per_second": 21.51,
+            "cooldowns": 13,
+            "deferred": 0,
+            "effective_requests_per_second": 6.59,
             "errors": 0,
             "peak_inflight": 8,
-            "rate_limited_events": 44,
-            "requests": 644,
-            "retries": 44,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 225.719,
+                  "quota_waits": 253,
+                  "rate_limited_events": 18,
+                  "requests": 318,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 318,
+                      "limit": 500,
+                      "peak": 318,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 6,
+                      "limit": 50,
+                      "peak": 27,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 318,
+                      "limit": 2000,
+                      "peak": 318,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 204.977,
+                  "quota_waits": 226,
+                  "rate_limited_events": 30,
+                  "requests": 330,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 222,
+                      "limit": 500,
+                      "peak": 330,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 0,
+                      "current": 0,
+                      "limit": 50,
+                      "peak": 28,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 330,
+                      "limit": 2000,
+                      "peak": 330,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 430.696,
+            "quota_waits": 479,
+            "rate_limited_events": 48,
+            "requests": 648,
+            "retries": 48,
             "symbols": 600,
             "timeouts": 0,
-            "wait_seconds": 409.23604587171104,
+            "wait_seconds": 430.696,
             "workers_used": 8
           },
           "latency": {
-            "count": 644,
-            "max_ms": 118.874,
-            "p50_ms": 25.653,
-            "p95_ms": 36.798
+            "count": 648,
+            "max_ms": 97.38,
+            "p50_ms": 25.695,
+            "p95_ms": 33.386
           },
           "peak_inflight": 8,
-          "quote_requests": 322,
-          "rate_limited_429": 44,
-          "requests": 644,
-          "requests_per_symbol": 6.44
+          "quote_requests": 330,
+          "rate_limited_429": 48,
+          "requests": 648,
+          "requests_per_symbol": 6.48
         },
         "status": {
           "broker_order_api_calls": 0,
@@ -603,9 +1963,9 @@
           "rejected_instruments": {}
         },
         "symbols": 100,
-        "throughput_symbols_per_s": 4.18,
+        "throughput_symbols_per_s": 3.25,
         "warm_fingerprint": "83a4db363d28ccb7",
-        "warm_wall_ms": 16659.8
+        "warm_wall_ms": 18149.5
       },
       "name": "provider-429-at-20rps",
       "note": "provider throttles above 20 req/s: the gate must back off centrally, not per worker",
@@ -620,7 +1980,7 @@
         "fingerprint": "9711c39db3f38c18",
         "gate": {
           "batches": 1,
-          "budget_increases": 2,
+          "budget_increases": 4,
           "budget_reductions": 5,
           "config": {
             "batch_timeout_seconds": 120.0,
@@ -629,47 +1989,217 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 50.0,
             "max_workers": 8,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 5,
+          "deferred": 0,
           "effective_requests_per_second": 6.56,
           "errors": 0,
           "peak_inflight": 8,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 59.624,
+                "quota_waits": 70,
+                "rate_limited_events": 16,
+                "requests": 116,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 116,
+                    "limit": 500,
+                    "peak": 116,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 10,
+                    "limit": 50,
+                    "peak": 14,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 116,
+                    "limit": 2000,
+                    "peak": 116,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 74.418,
+                "quota_waits": 66,
+                "rate_limited_events": 14,
+                "requests": 114,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 114,
+                    "limit": 500,
+                    "peak": 114,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 5,
+                    "limit": 50,
+                    "peak": 16,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 114,
+                    "limit": 2000,
+                    "peak": 114,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 134.042,
+          "quota_waits": 136,
           "rate_limited_events": 30,
-          "requests": 130,
+          "requests": 230,
           "retries": 30,
           "symbols": 100,
           "timeouts": 0,
-          "wait_seconds": 153.56757297153018,
+          "wait_seconds": 134.042,
           "workers_used": 8
         },
-        "per_symbol_ms": 204.692,
+        "per_symbol_ms": 179.196,
         "provider_fetch": {
           "cooldowns": 5,
           "peak_inflight": 8,
           "rate_limited_events": 30,
-          "requests": 130,
+          "requests": 230,
           "retries": 30,
           "timeouts": 0,
           "workers_used": 8
         },
         "stale_or_rejected": [],
-        "throughput_symbols_per_s": 4.89,
+        "throughput_symbols_per_s": 5.58,
         "transport": {
           "bar_requests": 116,
           "fake_failures_served": 0,
           "latency": {
-            "count": 246,
-            "max_ms": 32.968,
-            "p50_ms": 25.383,
-            "p95_ms": 29.444
+            "count": 230,
+            "max_ms": 30.45,
+            "p50_ms": 25.646,
+            "p95_ms": 28.598
           },
           "peak_inflight": 8,
-          "quote_requests": 130,
+          "quote_requests": 114,
           "rate_limited_429": 30,
-          "requests": 246
+          "requests": 230
         },
-        "wall_ms": 20469.2
+        "wall_ms": 17919.6
       },
       "sequential_reference": null
     },
@@ -684,7 +2214,7 @@
         "worker_bound": 8
       },
       "cycle": {
-        "cold_wall_ms": 8516.4,
+        "cold_wall_ms": 8516.3,
         "decisions": {
           "blocked_by_check": {
             "concentration_and_correlation": 99
@@ -700,12 +2230,12 @@
         },
         "fingerprint": "df0073f8c84e6faf",
         "memory": {
-          "rss_after_mb": 156.2,
-          "rss_before_mb": 139.4,
-          "rss_delta_mb": 16.8,
-          "tracemalloc_peak_mb": 13.94
+          "rss_after_mb": 165.5,
+          "rss_before_mb": 149.5,
+          "rss_delta_mb": 16.1,
+          "tracemalloc_peak_mb": 13.95
         },
-        "per_symbol_ms": 85.164,
+        "per_symbol_ms": 85.163,
         "provider": {
           "bar_requests": 300,
           "fake_failures_served": 0,
@@ -720,25 +2250,195 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 50.0,
               "max_workers": 8,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
             "cooldowns": 0,
+            "deferred": 0,
             "effective_requests_per_second": 50.0,
             "errors": 0,
             "peak_inflight": 8,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 39.736,
+                  "quota_waits": 289,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 148,
+                      "current": 44,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 28.158,
+                  "quota_waits": 112,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 68,
+                      "current": 0,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 67.893,
+            "quota_waits": 401,
             "rate_limited_events": 0,
             "requests": 600,
             "retries": 0,
             "symbols": 600,
             "timeouts": 0,
-            "wait_seconds": 67.0789156909351,
+            "wait_seconds": 67.893,
             "workers_used": 8
           },
           "latency": {
             "count": 600,
-            "max_ms": 21.815,
-            "p50_ms": 10.567,
-            "p95_ms": 16.061
+            "max_ms": 45.809,
+            "p50_ms": 10.589,
+            "p95_ms": 16.101
           },
           "peak_inflight": 8,
           "quote_requests": 300,
@@ -754,7 +2454,7 @@
         "symbols": 100,
         "throughput_symbols_per_s": 11.74,
         "warm_fingerprint": "83a4db363d28ccb7",
-        "warm_wall_ms": 4001.3
+        "warm_wall_ms": 4013.8
       },
       "name": "correlated-cluster-100syms",
       "note": "100 perfectly correlated names: the portfolio correlation gate must refuse to hold them all",
@@ -778,47 +2478,217 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 50.0,
             "max_workers": 8,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 50.0,
           "errors": 0,
           "peak_inflight": 8,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 6.065,
+                "quota_waits": 76,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 25,
+                    "limit": 50,
+                    "peak": 50,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 14.506,
+                "quota_waits": 71,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 7,
+                    "current": 20,
+                    "limit": 50,
+                    "peak": 50,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 20.571,
+          "quota_waits": 147,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
-          "wait_seconds": 5.387915812989631,
+          "wait_seconds": 20.571,
           "workers_used": 8
         },
-        "per_symbol_ms": 11.501,
+        "per_symbol_ms": 31.075,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 8,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 8
         },
         "stale_or_rejected": [],
-        "throughput_symbols_per_s": 86.95,
+        "throughput_symbols_per_s": 32.18,
         "transport": {
           "bar_requests": 100,
           "fake_failures_served": 0,
           "latency": {
             "count": 200,
-            "max_ms": 15.601,
-            "p50_ms": 10.547,
-            "p95_ms": 12.211
+            "max_ms": 15.062,
+            "p50_ms": 10.394,
+            "p95_ms": 12.085
           },
           "peak_inflight": 8,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 1150.1
+        "wall_ms": 3107.5
       },
       "sequential_reference": null
     },
@@ -849,7 +2719,7 @@
         "worker_bound": 8
       },
       "cycle": {
-        "cold_wall_ms": 8373.4,
+        "cold_wall_ms": 8749.0,
         "decisions": {
           "blocked_by_check": {
             "calibrated_confidence_and_oos_evidence": 3,
@@ -870,12 +2740,12 @@
         },
         "fingerprint": "284a5a3f3ebcde49",
         "memory": {
-          "rss_after_mb": 158.7,
-          "rss_before_mb": 156.1,
-          "rss_delta_mb": 2.6,
-          "tracemalloc_peak_mb": 12.38
+          "rss_after_mb": 167.5,
+          "rss_before_mb": 165.5,
+          "rss_delta_mb": 2.0,
+          "tracemalloc_peak_mb": 12.39
         },
-        "per_symbol_ms": 83.734,
+        "per_symbol_ms": 87.49,
         "provider": {
           "bar_requests": 300,
           "fake_failures_served": 123,
@@ -890,25 +2760,195 @@
               "max_cooldown_seconds": 30.0,
               "max_requests_per_second": 50.0,
               "max_workers": 8,
+              "quota_policies": [
+                {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              ],
+              "quota_profile": "upstox_standard",
               "retries_after_rate_limit": 1
             },
             "cooldowns": 0,
+            "deferred": 0,
             "effective_requests_per_second": 50.0,
             "errors": 72,
             "peak_inflight": 8,
+            "quota": {
+              "categories": {
+                "upstox.historical_candle": {
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "quota_wait_seconds": 23.242,
+                  "quota_waits": 192,
+                  "rate_limited_events": 0,
+                  "requests": 300,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 500,
+                      "peak": 300,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 100,
+                      "current": 32,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 300,
+                      "limit": 2000,
+                      "peak": 300,
+                      "seconds": 1800.0
+                    }
+                  }
+                },
+                "upstox.market_quote": {
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "quota_wait_seconds": 21.676,
+                  "quota_waits": 132,
+                  "rate_limited_events": 0,
+                  "requests": 333,
+                  "tightest_requests_per_second": 1.111,
+                  "windows": {
+                    "1m": {
+                      "blocks": 0,
+                      "current": 333,
+                      "limit": 500,
+                      "peak": 333,
+                      "seconds": 60.0
+                    },
+                    "1s": {
+                      "blocks": 79,
+                      "current": 11,
+                      "limit": 50,
+                      "peak": 50,
+                      "seconds": 1.0
+                    },
+                    "30m": {
+                      "blocks": 0,
+                      "current": 333,
+                      "limit": 2000,
+                      "peak": 333,
+                      "seconds": 1800.0
+                    }
+                  }
+                }
+              },
+              "policies": {
+                "upstox.historical_candle": {
+                  "category": "upstox.historical_candle",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                },
+                "upstox.market_quote": {
+                  "category": "upstox.market_quote",
+                  "checked_on": "2026-11-07",
+                  "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                  "label": "Upstox GET /v2/market-quote/quotes",
+                  "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                  "windows": [
+                    {
+                      "limit": 50,
+                      "name": "1s",
+                      "seconds": 1.0
+                    },
+                    {
+                      "limit": 500,
+                      "name": "1m",
+                      "seconds": 60.0
+                    },
+                    {
+                      "limit": 2000,
+                      "name": "30m",
+                      "seconds": 1800.0
+                    }
+                  ]
+                }
+              }
+            },
+            "quota_wait_seconds": 44.917,
+            "quota_waits": 324,
             "rate_limited_events": 0,
             "requests": 633,
             "retries": 0,
             "symbols": 633,
             "timeouts": 0,
-            "wait_seconds": 45.86082407017653,
+            "wait_seconds": 44.917,
             "workers_used": 8
           },
           "latency": {
             "count": 633,
-            "max_ms": 62.027,
-            "p50_ms": 50.232,
-            "p95_ms": 57.447
+            "max_ms": 111.97,
+            "p50_ms": 50.559,
+            "p95_ms": 70.813
           },
           "peak_inflight": 8,
           "quote_requests": 333,
@@ -971,9 +3011,9 @@
           }
         },
         "symbols": 100,
-        "throughput_symbols_per_s": 11.94,
+        "throughput_symbols_per_s": 11.43,
         "warm_fingerprint": "c33f04618e04096c",
-        "warm_wall_ms": 4205.7
+        "warm_wall_ms": 4200.6
       },
       "name": "partial-failures",
       "note": "5 error + 3 timeout + 4 empty + 3 stale symbols; every other symbol must match the clean run",
@@ -997,26 +3037,196 @@
             "max_cooldown_seconds": 30.0,
             "max_requests_per_second": 50.0,
             "max_workers": 8,
+            "quota_policies": [
+              {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            ],
+            "quota_profile": "upstox_standard",
             "retries_after_rate_limit": 1
           },
           "cooldowns": 0,
+          "deferred": 0,
           "effective_requests_per_second": 50.0,
           "errors": 0,
           "peak_inflight": 8,
+          "quota": {
+            "categories": {
+              "upstox.historical_candle": {
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "quota_wait_seconds": 5.251,
+                "quota_waits": 67,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 0,
+                    "current": 22,
+                    "limit": 50,
+                    "peak": 50,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              },
+              "upstox.market_quote": {
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "quota_wait_seconds": 7.586,
+                "quota_waits": 61,
+                "rate_limited_events": 0,
+                "requests": 100,
+                "tightest_requests_per_second": 1.111,
+                "windows": {
+                  "1m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 500,
+                    "peak": 100,
+                    "seconds": 60.0
+                  },
+                  "1s": {
+                    "blocks": 5,
+                    "current": 20,
+                    "limit": 50,
+                    "peak": 50,
+                    "seconds": 1.0
+                  },
+                  "30m": {
+                    "blocks": 0,
+                    "current": 100,
+                    "limit": 2000,
+                    "peak": 100,
+                    "seconds": 1800.0
+                  }
+                }
+              }
+            },
+            "policies": {
+              "upstox.historical_candle": {
+                "category": "upstox.historical_candle",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v3/historical-candle (and /intraday)",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              },
+              "upstox.market_quote": {
+                "category": "upstox.market_quote",
+                "checked_on": "2026-11-07",
+                "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+                "label": "Upstox GET /v2/market-quote/quotes",
+                "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+                "windows": [
+                  {
+                    "limit": 50,
+                    "name": "1s",
+                    "seconds": 1.0
+                  },
+                  {
+                    "limit": 500,
+                    "name": "1m",
+                    "seconds": 60.0
+                  },
+                  {
+                    "limit": 2000,
+                    "name": "30m",
+                    "seconds": 1800.0
+                  }
+                ]
+              }
+            }
+          },
+          "quota_wait_seconds": 12.837,
+          "quota_waits": 128,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "symbols": 100,
           "timeouts": 0,
-          "wait_seconds": 0.0,
+          "wait_seconds": 12.837,
           "workers_used": 8
         },
-        "per_symbol_ms": 14.055,
+        "per_symbol_ms": 31.654,
         "provider_fetch": {
           "cooldowns": 0,
           "peak_inflight": 8,
           "rate_limited_events": 0,
-          "requests": 100,
+          "requests": 200,
           "retries": 0,
           "timeouts": 0,
           "workers_used": 8
@@ -1038,22 +3248,22 @@
           "SYN062",
           "SYN064"
         ],
-        "throughput_symbols_per_s": 71.15,
+        "throughput_symbols_per_s": 31.59,
         "transport": {
           "bar_requests": 100,
           "fake_failures_served": 30,
           "latency": {
             "count": 200,
-            "max_ms": 60.924,
-            "p50_ms": 50.201,
-            "p95_ms": 52.798
+            "max_ms": 58.549,
+            "p50_ms": 50.268,
+            "p95_ms": 52.97
           },
           "peak_inflight": 8,
           "quote_requests": 100,
           "rate_limited_429": 0,
           "requests": 200
         },
-        "wall_ms": 1405.5
+        "wall_ms": 3165.4
       },
       "sequential_reference": null
     }
@@ -1063,6 +3273,70 @@
     "first_run_fingerprint": "284a5a3f3ebcde49",
     "identical": true,
     "second_run_fingerprint": "284a5a3f3ebcde49"
+  },
+  "documented_quotas": {
+    "alpaca.market_data": {
+      "category": "alpaca.market_data",
+      "checked_on": "2026-11-07",
+      "documented_as": "Market Data API subscription plan algo_trader_plus: historical/market-data API calls 10000/min (per owner). No per-second or 30-minute window is documented for this product.",
+      "label": "Alpaca market data (algo_trader_plus: 10000/min)",
+      "source_url": "https://docs.alpaca.markets/us/docs/about-market-data-api#subscription-plans",
+      "windows": [
+        {
+          "limit": 10000,
+          "name": "1m",
+          "seconds": 60.0
+        }
+      ]
+    },
+    "upstox.historical_candle": {
+      "category": "upstox.historical_candle",
+      "checked_on": "2026-11-07",
+      "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+      "label": "Upstox GET /v3/historical-candle (and /intraday)",
+      "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+      "windows": [
+        {
+          "limit": 50,
+          "name": "1s",
+          "seconds": 1.0
+        },
+        {
+          "limit": 500,
+          "name": "1m",
+          "seconds": 60.0
+        },
+        {
+          "limit": 2000,
+          "name": "30m",
+          "seconds": 1800.0
+        }
+      ]
+    },
+    "upstox.market_quote": {
+      "category": "upstox.market_quote",
+      "checked_on": "2026-11-07",
+      "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+      "label": "Upstox GET /v2/market-quote/quotes",
+      "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+      "windows": [
+        {
+          "limit": 50,
+          "name": "1s",
+          "seconds": 1.0
+        },
+        {
+          "limit": 500,
+          "name": "1m",
+          "seconds": 60.0
+        },
+        {
+          "limit": 2000,
+          "name": "30m",
+          "seconds": 1800.0
+        }
+      ]
+    }
   },
   "environment": {
     "cpu_count": 2,
@@ -1095,7 +3369,7 @@
     ],
     "isolated": true
   },
-  "generated_at": "2026-11-07T15:41:10.881904+00:00",
+  "generated_at": "2026-11-07T16:26:11.093035+00:00",
   "limits": {
     "daily_orders_cap": 40,
     "note": "selecting 100 symbols is not permission to hold or trade 100 instruments",
@@ -1119,5 +3393,1362 @@
     "timeframe": "5m",
     "transport": "local fake provider (deterministic synthetic OHLCV/quotes, injectable latency/failures)"
   },
-  "schema": "axiom.market_scan_capacity.v1"
+  "schedule_simulation": [
+    {
+      "arm": "schedule-100syms-every-15s",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 15.0,
+        "symbols": 100,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 15.0,
+        "cadence_held": false,
+        "completed": 114,
+        "cycle_latency_s": {
+          "max": 110.026,
+          "p50": 5.0,
+          "p95": 5.0
+        },
+        "cycles_fully_deferred": 93,
+        "cycles_with_data": 21,
+        "min_interval_s": 15.0,
+        "requested": 120,
+        "slipped_past_cadence": 1,
+        "symbols_deferred": 9300,
+        "symbols_failed": 0,
+        "symbols_failed_pct": 0.0,
+        "symbols_missing_total": 9300,
+        "symbols_requested": 11400
+      },
+      "documented_cadence": {
+        "market": "NSE",
+        "max_symbols_at_15s": 16,
+        "max_symbols_at_60s": 66,
+        "min_interval_seconds": 90.0,
+        "per_category": {
+          "upstox.historical_candle": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          },
+          "upstox.market_quote": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "upstox.historical_candle": 100,
+          "upstox.market_quote": 100
+        },
+        "symbols": 100
+      },
+      "gate": {
+        "budget_increases": 0,
+        "budget_reductions": 0,
+        "cooldowns": 0,
+        "deferred": 9300,
+        "effective_requests_per_second": 50.0,
+        "peak_inflight": 8,
+        "quota_wait_seconds": 105.026,
+        "quota_waits": 2,
+        "rate_limited_events": 0,
+        "requests": 4200,
+        "retries": 0,
+        "timeouts": 0
+      },
+      "market": "NSE",
+      "note": "intended cadence: 100 NSE symbols every 15 s against the documented Upstox windows",
+      "per_endpoint": {
+        "upstox.historical_candle": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 403,
+            "1s": 24,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 105.001,
+          "quota_waits": 1,
+          "rate_limited_429": 0,
+          "requests": 2100,
+          "requests_per_minute": 70.0,
+          "requests_per_second": 1.1667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 1
+          },
+          "within_documented_limits": true
+        },
+        "upstox.market_quote": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 403,
+            "1s": 23,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 0.025,
+          "quota_waits": 1,
+          "rate_limited_429": 0,
+          "requests": 2100,
+          "requests_per_minute": 70.0,
+          "requests_per_second": 1.1667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 1
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 2100,
+        "peak_inflight": 6,
+        "quote_requests": 2100,
+        "rate_limited_429": 0,
+        "requests": 4200
+      },
+      "quota_policies": [
+        {
+          "category": "upstox.market_quote",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        },
+        {
+          "category": "upstox.historical_candle",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "upstox_standard"
+    },
+    {
+      "arm": "schedule-100syms-every-60s",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 60.0,
+        "symbols": 100,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 60.0,
+        "cadence_held": false,
+        "completed": 30,
+        "cycle_latency_s": {
+          "max": 65.026,
+          "p50": 5.0,
+          "p95": 5.0
+        },
+        "cycles_fully_deferred": 9,
+        "cycles_with_data": 21,
+        "min_interval_s": 60.0,
+        "requested": 30,
+        "slipped_past_cadence": 1,
+        "symbols_deferred": 900,
+        "symbols_failed": 0,
+        "symbols_failed_pct": 0.0,
+        "symbols_missing_total": 900,
+        "symbols_requested": 3000
+      },
+      "documented_cadence": {
+        "market": "NSE",
+        "max_symbols_at_15s": 16,
+        "max_symbols_at_60s": 66,
+        "min_interval_seconds": 90.0,
+        "per_category": {
+          "upstox.historical_candle": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          },
+          "upstox.market_quote": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "upstox.historical_candle": 100,
+          "upstox.market_quote": 100
+        },
+        "symbols": 100
+      },
+      "gate": {
+        "budget_increases": 0,
+        "budget_reductions": 0,
+        "cooldowns": 0,
+        "deferred": 900,
+        "effective_requests_per_second": 50.0,
+        "peak_inflight": 8,
+        "quota_wait_seconds": 60.026,
+        "quota_waits": 2,
+        "rate_limited_events": 0,
+        "requests": 4200,
+        "retries": 0,
+        "timeouts": 0
+      },
+      "market": "NSE",
+      "note": "60 s cadence: still above the 30-minute window's sustainable rate",
+      "per_endpoint": {
+        "upstox.historical_candle": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 103,
+            "1s": 23,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 60.026,
+          "quota_waits": 2,
+          "rate_limited_429": 0,
+          "requests": 2100,
+          "requests_per_minute": 70.0,
+          "requests_per_second": 1.1667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 2
+          },
+          "within_documented_limits": true
+        },
+        "upstox.market_quote": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 102,
+            "1s": 23,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
+          "rate_limited_429": 0,
+          "requests": 2100,
+          "requests_per_minute": 70.0,
+          "requests_per_second": 1.1667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 0
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 2100,
+        "peak_inflight": 6,
+        "quote_requests": 2100,
+        "rate_limited_429": 0,
+        "requests": 4200
+      },
+      "quota_policies": [
+        {
+          "category": "upstox.market_quote",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        },
+        {
+          "category": "upstox.historical_candle",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "upstox_standard"
+    },
+    {
+      "arm": "schedule-100syms-every-90s",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 90.0,
+        "symbols": 100,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 90.0,
+        "cadence_held": true,
+        "completed": 20,
+        "cycle_latency_s": {
+          "max": 5.0,
+          "p50": 5.0,
+          "p95": 5.0
+        },
+        "cycles_fully_deferred": 0,
+        "cycles_with_data": 20,
+        "min_interval_s": 90.0,
+        "requested": 20,
+        "slipped_past_cadence": 0,
+        "symbols_deferred": 0,
+        "symbols_failed": 0,
+        "symbols_failed_pct": 0.0,
+        "symbols_missing_total": 0,
+        "symbols_requested": 2000
+      },
+      "documented_cadence": {
+        "market": "NSE",
+        "max_symbols_at_15s": 16,
+        "max_symbols_at_60s": 66,
+        "min_interval_seconds": 90.0,
+        "per_category": {
+          "upstox.historical_candle": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          },
+          "upstox.market_quote": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "upstox.historical_candle": 100,
+          "upstox.market_quote": 100
+        },
+        "symbols": 100
+      },
+      "gate": {
+        "budget_increases": 0,
+        "budget_reductions": 0,
+        "cooldowns": 0,
+        "deferred": 0,
+        "effective_requests_per_second": 50.0,
+        "peak_inflight": 8,
+        "quota_wait_seconds": 0.0,
+        "quota_waits": 0,
+        "rate_limited_events": 0,
+        "requests": 4000,
+        "retries": 0,
+        "timeouts": 0
+      },
+      "market": "NSE",
+      "note": "90 s cadence: the interval the 2,000/30 min window actually supports for 100 symbols",
+      "per_endpoint": {
+        "upstox.historical_candle": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 100,
+            "1s": 27,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
+          "rate_limited_429": 0,
+          "requests": 2000,
+          "requests_per_minute": 66.67,
+          "requests_per_second": 1.1111,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 0
+          },
+          "within_documented_limits": true
+        },
+        "upstox.market_quote": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 100,
+            "1s": 23,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
+          "rate_limited_429": 0,
+          "requests": 2000,
+          "requests_per_minute": 66.67,
+          "requests_per_second": 1.1111,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 0
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 2000,
+        "peak_inflight": 8,
+        "quote_requests": 2000,
+        "rate_limited_429": 0,
+        "requests": 4000
+      },
+      "quota_policies": [
+        {
+          "category": "upstox.market_quote",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        },
+        {
+          "category": "upstox.historical_candle",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "upstox_standard"
+    },
+    {
+      "arm": "schedule-100syms-every-15s-throttled",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 20.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 15.0,
+        "symbols": 100,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 15.954,
+        "cadence_held": false,
+        "completed": 107,
+        "cycle_latency_s": {
+          "max": 120.009,
+          "p50": 19.133,
+          "p95": 37.291
+        },
+        "cycles_fully_deferred": 86,
+        "cycles_with_data": 21,
+        "min_interval_s": 15.0,
+        "requested": 120,
+        "slipped_past_cadence": 21,
+        "symbols_deferred": 8692,
+        "symbols_failed": 1,
+        "symbols_failed_pct": 0.009,
+        "symbols_missing_total": 8693,
+        "symbols_requested": 10700
+      },
+      "documented_cadence": {
+        "market": "NSE",
+        "max_symbols_at_15s": 16,
+        "max_symbols_at_60s": 66,
+        "min_interval_seconds": 90.0,
+        "per_category": {
+          "upstox.historical_candle": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          },
+          "upstox.market_quote": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 2.0,
+                "requests_per_cycle": 100,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 12.0,
+                "requests_per_cycle": 100,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 90.0,
+                "requests_per_cycle": 100,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "upstox.historical_candle": 100,
+          "upstox.market_quote": 100
+        },
+        "symbols": 100
+      },
+      "gate": {
+        "budget_increases": 121,
+        "budget_reductions": 71,
+        "cooldowns": 72,
+        "deferred": 8692,
+        "effective_requests_per_second": 21.0,
+        "peak_inflight": 8,
+        "quota_wait_seconds": 414.41,
+        "quota_waits": 2962,
+        "rate_limited_events": 77,
+        "requests": 4106,
+        "retries": 76,
+        "timeouts": 0
+      },
+      "market": "NSE",
+      "note": "provider additionally throttles above 20 req/s: AIMD must not bypass the windows",
+      "per_endpoint": {
+        "upstox.historical_candle": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 353,
+            "1s": 16,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 254.079,
+          "quota_waits": 1491,
+          "rate_limited_429": 33,
+          "requests": 2055,
+          "requests_per_minute": 68.5,
+          "requests_per_second": 1.1417,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 2
+          },
+          "within_documented_limits": true
+        },
+        "upstox.market_quote": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 353,
+            "1s": 13,
+            "30m": 2000
+          },
+          "quota_wait_seconds": 160.331,
+          "quota_waits": 1471,
+          "rate_limited_429": 44,
+          "requests": 2051,
+          "requests_per_minute": 68.37,
+          "requests_per_second": 1.1394,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 4
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 2055,
+        "peak_inflight": 5,
+        "quote_requests": 2051,
+        "rate_limited_429": 77,
+        "requests": 4106
+      },
+      "quota_policies": [
+        {
+          "category": "upstox.market_quote",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        },
+        {
+          "category": "upstox.historical_candle",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "upstox_standard"
+    },
+    {
+      "arm": "schedule-16syms-every-15s",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 15.0,
+        "symbols": 16,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 15.0,
+        "cadence_held": true,
+        "completed": 120,
+        "cycle_latency_s": {
+          "max": 0.8,
+          "p50": 0.8,
+          "p95": 0.8
+        },
+        "cycles_fully_deferred": 0,
+        "cycles_with_data": 120,
+        "min_interval_s": 15.0,
+        "requested": 120,
+        "slipped_past_cadence": 0,
+        "symbols_deferred": 0,
+        "symbols_failed": 0,
+        "symbols_failed_pct": 0.0,
+        "symbols_missing_total": 0,
+        "symbols_requested": 1920
+      },
+      "documented_cadence": {
+        "market": "NSE",
+        "max_symbols_at_15s": 16,
+        "max_symbols_at_60s": 66,
+        "min_interval_seconds": 14.4,
+        "per_category": {
+          "upstox.historical_candle": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 0.32,
+                "requests_per_cycle": 16,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 1.92,
+                "requests_per_cycle": 16,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 14.4,
+                "requests_per_cycle": 16,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          },
+          "upstox.market_quote": {
+            "windows": [
+              {
+                "limit": 50,
+                "min_interval_s": 0.32,
+                "requests_per_cycle": 16,
+                "seconds": 1.0,
+                "window": "1s"
+              },
+              {
+                "limit": 500,
+                "min_interval_s": 1.92,
+                "requests_per_cycle": 16,
+                "seconds": 60.0,
+                "window": "1m"
+              },
+              {
+                "limit": 2000,
+                "min_interval_s": 14.4,
+                "requests_per_cycle": 16,
+                "seconds": 1800.0,
+                "window": "30m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "upstox.historical_candle": 16,
+          "upstox.market_quote": 16
+        },
+        "symbols": 16
+      },
+      "gate": {
+        "budget_increases": 0,
+        "budget_reductions": 0,
+        "cooldowns": 0,
+        "deferred": 0,
+        "effective_requests_per_second": 50.0,
+        "peak_inflight": 1,
+        "quota_wait_seconds": 0.0,
+        "quota_waits": 0,
+        "rate_limited_events": 0,
+        "requests": 3840,
+        "retries": 0,
+        "timeouts": 0
+      },
+      "market": "NSE",
+      "note": "the symbol count a 15 s cadence does support on Upstox standard APIs",
+      "per_endpoint": {
+        "upstox.historical_candle": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 65,
+            "1s": 16,
+            "30m": 1920
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
+          "rate_limited_429": 0,
+          "requests": 1920,
+          "requests_per_minute": 64.0,
+          "requests_per_second": 1.0667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 0
+          },
+          "within_documented_limits": true
+        },
+        "upstox.market_quote": {
+          "horizon_seconds": 1800.0,
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "limit_in_window": {
+            "1m": 500,
+            "1s": 50,
+            "30m": 2000
+          },
+          "peak_in_window": {
+            "1m": 65,
+            "1s": 16,
+            "30m": 1920
+          },
+          "quota_wait_seconds": 0.0,
+          "quota_waits": 0,
+          "rate_limited_429": 0,
+          "requests": 1920,
+          "requests_per_minute": 64.0,
+          "requests_per_second": 1.0667,
+          "window_blocks": {
+            "1m": 0,
+            "1s": 0,
+            "30m": 0
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 1920,
+        "peak_inflight": 1,
+        "quote_requests": 1920,
+        "rate_limited_429": 0,
+        "requests": 3840
+      },
+      "quota_policies": [
+        {
+          "category": "upstox.market_quote",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v2/market-quote/quotes",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        },
+        {
+          "category": "upstox.historical_candle",
+          "checked_on": "2026-11-07",
+          "documented_as": "Other Standard APIs (holdings, positions, funds, historical candles etc.): per second 50 requests, per minute 500 requests, per 30 minutes 2000 requests; rate limits are enforced on a per-API, per-user basis",
+          "label": "Upstox GET /v3/historical-candle (and /intraday)",
+          "source_url": "https://upstox.com/developer/api-documentation/rate-limiting/#other-standard-apis",
+          "windows": [
+            {
+              "limit": 50,
+              "name": "1s",
+              "seconds": 1.0
+            },
+            {
+              "limit": 500,
+              "name": "1m",
+              "seconds": 60.0
+            },
+            {
+              "limit": 2000,
+              "name": "30m",
+              "seconds": 1800.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "upstox_standard"
+    },
+    {
+      "arm": "schedule-100syms-every-15s-alpaca-basic",
+      "broker_order_api_calls": 0,
+      "config": {
+        "minutes": 30.0,
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "requested_cadence_s": 15.0,
+        "symbols": 100,
+        "time_source": "virtual clock (latency + quota waits advance it)",
+        "worker_bound": 8
+      },
+      "cycles": {
+        "achieved_mean_interval_s": 58.176,
+        "cadence_held": false,
+        "completed": 31,
+        "cycle_latency_s": {
+          "max": 60.101,
+          "p50": 60.001,
+          "p95": 60.051
+        },
+        "cycles_fully_deferred": 0,
+        "cycles_with_data": 31,
+        "min_interval_s": 15.0,
+        "requested": 120,
+        "slipped_past_cadence": 30,
+        "symbols_deferred": 0,
+        "symbols_failed": 0,
+        "symbols_failed_pct": 0.0,
+        "symbols_missing_total": 0,
+        "symbols_requested": 3100
+      },
+      "documented_cadence": {
+        "market": "NASDAQ",
+        "max_symbols_at_15s": 25,
+        "max_symbols_at_60s": 100,
+        "min_interval_seconds": 60.0,
+        "per_category": {
+          "alpaca.market_data": {
+            "windows": [
+              {
+                "limit": 200,
+                "min_interval_s": 60.0,
+                "requests_per_cycle": 200,
+                "seconds": 60.0,
+                "window": "1m"
+              }
+            ]
+          }
+        },
+        "requests_per_cycle_per_category": {
+          "alpaca.market_data": 200
+        },
+        "symbols": 100
+      },
+      "gate": {
+        "budget_increases": 0,
+        "budget_reductions": 0,
+        "cooldowns": 0,
+        "deferred": 0,
+        "effective_requests_per_second": 50.0,
+        "peak_inflight": 8,
+        "quota_wait_seconds": 1640.279,
+        "quota_waits": 230,
+        "rate_limited_events": 0,
+        "requests": 6200,
+        "retries": 0,
+        "timeouts": 0
+      },
+      "market": "NASDAQ",
+      "note": "100 NASDAQ symbols every 15 s on the documented Alpaca Basic 200/min limit",
+      "per_endpoint": {
+        "alpaca.market_data": {
+          "horizon_seconds": 1800.0,
+          "label": "Alpaca market data (basic: 200/min)",
+          "limit_in_window": {
+            "1m": 200
+          },
+          "peak_in_window": {
+            "1m": 200
+          },
+          "quota_wait_seconds": 1640.279,
+          "quota_waits": 230,
+          "rate_limited_429": 0,
+          "requests": 6200,
+          "requests_per_minute": 206.67,
+          "requests_per_second": 3.4444,
+          "window_blocks": {
+            "1m": 230
+          },
+          "within_documented_limits": true
+        }
+      },
+      "provider_transport": {
+        "bar_requests": 3100,
+        "peak_inflight": 7,
+        "quote_requests": 3100,
+        "rate_limited_429": 0,
+        "requests": 6200
+      },
+      "quota_policies": [
+        {
+          "category": "alpaca.market_data",
+          "checked_on": "2026-11-07",
+          "documented_as": "Market Data API subscription plan basic: historical/market-data API calls 200/min (per owner). No per-second or 30-minute window is documented for this product.",
+          "label": "Alpaca market data (basic: 200/min)",
+          "source_url": "https://docs.alpaca.markets/us/docs/about-market-data-api#subscription-plans",
+          "windows": [
+            {
+              "limit": 200,
+              "name": "1m",
+              "seconds": 60.0
+            }
+          ]
+        }
+      ],
+      "quota_profile": "alpaca_basic"
+    }
+  ],
+  "schema": "axiom.market_scan_capacity.v2",
+  "sustainable_cadence": {
+    "alpaca_algo_trader_plus": {
+      "market": "NASDAQ",
+      "max_symbols_at_15s": 1250,
+      "max_symbols_at_60s": 5000,
+      "min_interval_seconds": 1.2,
+      "per_category": {
+        "alpaca.market_data": {
+          "windows": [
+            {
+              "limit": 10000,
+              "min_interval_s": 1.2,
+              "requests_per_cycle": 200,
+              "seconds": 60.0,
+              "window": "1m"
+            }
+          ]
+        }
+      },
+      "requests_per_cycle_per_category": {
+        "alpaca.market_data": 200
+      },
+      "symbols": 100
+    },
+    "alpaca_basic": {
+      "market": "NASDAQ",
+      "max_symbols_at_15s": 25,
+      "max_symbols_at_60s": 100,
+      "min_interval_seconds": 60.0,
+      "per_category": {
+        "alpaca.market_data": {
+          "windows": [
+            {
+              "limit": 200,
+              "min_interval_s": 60.0,
+              "requests_per_cycle": 200,
+              "seconds": 60.0,
+              "window": "1m"
+            }
+          ]
+        }
+      },
+      "requests_per_cycle_per_category": {
+        "alpaca.market_data": 200
+      },
+      "symbols": 100
+    },
+    "upstox_standard": {
+      "market": "NSE",
+      "max_symbols_at_15s": 16,
+      "max_symbols_at_60s": 66,
+      "min_interval_seconds": 90.0,
+      "per_category": {
+        "upstox.historical_candle": {
+          "windows": [
+            {
+              "limit": 50,
+              "min_interval_s": 2.0,
+              "requests_per_cycle": 100,
+              "seconds": 1.0,
+              "window": "1s"
+            },
+            {
+              "limit": 500,
+              "min_interval_s": 12.0,
+              "requests_per_cycle": 100,
+              "seconds": 60.0,
+              "window": "1m"
+            },
+            {
+              "limit": 2000,
+              "min_interval_s": 90.0,
+              "requests_per_cycle": 100,
+              "seconds": 1800.0,
+              "window": "30m"
+            }
+          ]
+        },
+        "upstox.market_quote": {
+          "windows": [
+            {
+              "limit": 50,
+              "min_interval_s": 2.0,
+              "requests_per_cycle": 100,
+              "seconds": 1.0,
+              "window": "1s"
+            },
+            {
+              "limit": 500,
+              "min_interval_s": 12.0,
+              "requests_per_cycle": 100,
+              "seconds": 60.0,
+              "window": "1m"
+            },
+            {
+              "limit": 2000,
+              "min_interval_s": 90.0,
+              "requests_per_cycle": 100,
+              "seconds": 1800.0,
+              "window": "30m"
+            }
+          ]
+        }
+      },
+      "requests_per_cycle_per_category": {
+        "upstox.historical_candle": 100,
+        "upstox.market_quote": 100
+      },
+      "symbols": 100
+    }
+  }
 }

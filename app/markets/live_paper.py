@@ -35,7 +35,11 @@ from typing import Any, Callable
 import uuid
 
 from app.data.models import Candle, parse_timestamp
-from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
+from app.markets.fetch_gate import (
+    MARKET_ENDPOINT_CATEGORIES,
+    FetchGateConfig,
+    ProviderFetchGate,
+)
 from app.markets.kronos_decision import build_forecast_summary, combine_paper_strategy_decision
 from app.markets.nse_reconciliation import nse_session_status, tick_precision_decimals
 from app.markets.us_calendar import USEquitiesCalendar
@@ -376,6 +380,28 @@ class LiveMarketPaperEngine:
             "NSE": nse_fetch_gate or ProviderFetchGate(FetchGateConfig()),
             "NASDAQ": nasdaq_fetch_gate or ProviderFetchGate(FetchGateConfig()),
         }
+        # Every provider call is admitted by its market's gate under the endpoint
+        # category the provider documents (Upstox quote vs candle are separate
+        # quota pools; Alpaca market data is one pool). Wrapping here means the
+        # quota is charged once per HTTP request even when a caller fetches
+        # outside a batch, and no call site can bypass it.
+        self._provider_gates_guarded: dict[str, bool] = {}
+        for _mkt, _cat in MARKET_ENDPOINT_CATEGORIES.items():
+            _gate = self.fetch_gates[_mkt]
+            _quote = self.nse_quote_provider if _mkt == "NSE" else self.nasdaq_quote_provider
+            _bars = self.nse_bars_provider if _mkt == "NSE" else self.nasdaq_bars_provider
+            guarded_any = False
+            if _quote is not None:
+                _quote = _gate.guarded(_cat["quote"], _quote)
+                guarded_any = True
+            if _bars is not None:
+                _bars = _gate.guarded(_cat["bars"], _bars)
+                guarded_any = True
+            if _mkt == "NSE":
+                self.nse_quote_provider, self.nse_bars_provider = _quote, _bars
+            else:
+                self.nasdaq_quote_provider, self.nasdaq_bars_provider = _quote, _bars
+            self._provider_gates_guarded[_mkt] = guarded_any
         self.us_calendar = USEquitiesCalendar()
         self._last_quote_ts_by_key: dict[tuple[str, str], datetime] = {}
 
@@ -939,6 +965,10 @@ class LiveMarketPaperEngine:
         # class names are stable, so map them before falling back to text matching:
         # an illiquid snapshot is NOT a disconnect and must not be labelled one.
         exc_name = type(exc).__name__
+        # A request that was deferred for provider quota was never sent: it is
+        # not a disconnect and must not be retried into the same window.
+        if exc_name == "QuotaDeferred":
+            return "QUOTA_DEFERRED", f"{market} market-data request deferred for provider quota: {msg[:180]}"
         if exc_name == "NoTradedQuote":
             return "NO_TRADED_PRICE", f"{market} market-data returned no traded price: {msg[:180]}"
         if exc_name == "InvalidQuote":
@@ -1524,8 +1554,11 @@ class LiveMarketPaperEngine:
                         ec, ed = self._classify_fetch_exception(mkt, exc)
                         # A throttle must reach the provider gate so it can back
                         # the whole market off; swallowing it here would make
-                        # every worker retry into the same 429.
-                        if raise_rate_limit and ec == "RATE_LIMITED":
+                        # every worker retry into the same 429. When the provider
+                        # callable is already gate-guarded, the backoff has been
+                        # applied there and re-raising would re-fetch the other
+                        # endpoint and charge the quota twice.
+                        if raise_rate_limit and ec == "RATE_LIMITED" and not self._provider_gates_guarded.get(mkt):
                             raise
                         q_status = ec
                         q_reason = str(redact_sensitive_data(ed))[:180]
@@ -1557,7 +1590,7 @@ class LiveMarketPaperEngine:
                         raw_bars = bar_fetcher(raw_sym, timeframe)
                     except Exception as exc:
                         ec, ed = self._classify_fetch_exception(mkt, exc)
-                        if raise_rate_limit and ec == "RATE_LIMITED":
+                        if raise_rate_limit and ec == "RATE_LIMITED" and not self._provider_gates_guarded.get(mkt):
                             raise
                         b_err_code = ec
                         b_err_detail = str(redact_sensitive_data(ed))[:200]
@@ -1653,8 +1686,12 @@ class LiveMarketPaperEngine:
                 # Bounded + paced fan-out: one slow or throttled symbol must not
                 # serialise the whole watchlist, and one 429 must not be retried
                 # by every worker at once.
+                # The providers are gate-guarded, so admission is charged per
+                # request (two endpoints per symbol) rather than per symbol.
                 outcomes = gate.map(
-                    eff_syms, lambda raw_sym: _probe_symbol(raw_sym, raise_rate_limit=True)
+                    eff_syms,
+                    lambda raw_sym: _probe_symbol(raw_sym, raise_rate_limit=True),
+                    paced=False,
                 )
                 for raw_sym in eff_syms:
                     outcome = outcomes.get(raw_sym)
@@ -2960,6 +2997,7 @@ class LiveMarketPaperEngine:
                 pending_quote_syms,
                 _fetch_quote_for,
                 classify=lambda exc: self._classify_fetch_exception(mkt, exc),
+                paced=False,
             )
             if pending_quote_syms
             else {}
@@ -3093,6 +3131,7 @@ class LiveMarketPaperEngine:
                     target_strategy_syms,
                     lambda raw_sym: bar_fetcher(raw_sym, timeframe),
                     classify=lambda exc: self._classify_fetch_exception(mkt, exc),
+                    paced=False,
                 )
                 for sym in target_strategy_syms:
                     canon_b = sym.split("|")[-1].upper()

@@ -59,7 +59,14 @@ if str(ROOT) not in sys.path:  # pragma: no cover - script convenience
 
 from app.data.models import Candle  # noqa: E402
 from app.ensemble.service import StrategyEnsembleService  # noqa: E402
-from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate  # noqa: E402
+from app.markets.fetch_gate import (  # noqa: E402
+    MARKET_ENDPOINT_CATEGORIES,
+    FetchGateConfig,
+    ProviderFetchGate,
+    QuotaPolicy,
+    alpaca_market_data_policies,
+    upstox_standard_policies,
+)
 from app.markets.live_paper import LiveMarketPaperEngine  # noqa: E402
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -98,13 +105,19 @@ class FakeMarketData:
         provider_rps: float = 0.0,
         failures: dict[str, str] | None = None,
         trend: str = "up",
+        sleep_fn: Callable[[float], None] | None = None,
+        clock_fn: Callable[[], float] | None = None,
     ) -> None:
         self.latency = max(0.0, float(latency_ms)) / 1000.0
         self.provider_rps = float(provider_rps or 0.0)
         self.failures = dict(failures or {})
+        # Injectable time source: the 30-minute schedule simulation runs on a
+        # virtual clock so 30 simulated minutes cost seconds of real time.
+        self._sleep = sleep_fn or time.sleep
+        self._now = clock_fn or time.monotonic
         self.trend = trend
         self._lock = threading.Lock()
-        self._window_start = time.monotonic()
+        self._window_start = self._now()
         self._window_count = 0
         self.calls = 0
         self.quote_calls = 0
@@ -130,7 +143,7 @@ class FakeMarketData:
             self.per_symbol_calls[canon] = self.per_symbol_calls.get(canon, 0) + 1
             throttled = False
             if self.provider_rps > 0:
-                now = time.monotonic()
+                now = self._now()
                 if now - self._window_start >= 1.0:
                     self._window_start = now
                     self._window_count = 0
@@ -149,7 +162,7 @@ class FakeMarketData:
     def _exit(self, started: float) -> None:
         with self._lock:
             self.inflight -= 1
-            self.latencies_ms.append((time.monotonic() - started) * 1000.0)
+            self.latencies_ms.append(max(0.0, (self._now() - started) * 1000.0))
 
     # -- data --------------------------------------------------------------
     def _bars(self, symbol: str) -> list[Candle]:
@@ -214,10 +227,10 @@ class FakeMarketData:
     # -- provider callables ------------------------------------------------
     def quote(self, symbol: str) -> dict[str, Any]:
         mode, _ = self._enter(symbol, "quote")
-        started = time.monotonic()
+        started = self._now()
         try:
             if self.latency:
-                time.sleep(self.latency)
+                self._sleep(self.latency)
             if mode == "rate_limit":
                 raise RuntimeError("HTTP 429 Too Many Requests (synthetic provider throttle)")
             if mode in {"error", "timeout"}:
@@ -230,10 +243,10 @@ class FakeMarketData:
 
     def bars(self, symbol: str, timeframe: str) -> list[Candle]:
         mode, _ = self._enter(symbol, "bars")
-        started = time.monotonic()
+        started = self._now()
         try:
             if self.latency:
-                time.sleep(self.latency)
+                self._sleep(self.latency)
             if mode == "rate_limit":
                 raise RuntimeError("HTTP 429 Too Many Requests (synthetic provider throttle)")
             if mode == "empty_bars":
@@ -295,6 +308,20 @@ def _rss_mb() -> float:
 # --------------------------------------------------------------------------
 # Benchmark arms
 # --------------------------------------------------------------------------
+def quota_policies_for(profile: str) -> tuple[QuotaPolicy, ...]:
+    """Documented quota policies for a named profile (empty = no windows)."""
+    key = (profile or "").strip().lower()
+    if not key:
+        return ()
+    if key == "upstox_standard":
+        return upstox_standard_policies()
+    if key == "alpaca_basic":
+        return alpaca_market_data_policies("basic")
+    if key == "alpaca_algo_trader_plus":
+        return alpaca_market_data_policies("algo_trader_plus")
+    raise SystemExit(f"unknown quota profile {profile!r}")
+
+
 @dataclass
 class Arm:
     name: str
@@ -306,6 +333,10 @@ class Arm:
     failures: dict[str, str] = field(default_factory=dict)
     trend: str = "diverse"
     note: str = ""
+    # Schedule simulation (30 simulated minutes at a target cadence).
+    cadence_s: float = 0.0
+    quota_profile: str = ""
+    market: str = "NSE"
 
     def gate_config(self, *, sequential: bool = False) -> FetchGateConfig:
         return FetchGateConfig(
@@ -313,6 +344,8 @@ class Arm:
             max_requests_per_second=1000.0 if sequential else self.rps,
             burst=1000 if sequential else max(1, int(self.rps)),
             batch_timeout_seconds=120.0,
+            quota_policies=quota_policies_for(self.quota_profile),
+            quota_profile=self.quota_profile or "none",
         )
 
 
@@ -551,27 +584,334 @@ def _arm_report(arm: Arm, *, repeat: int = 2) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------
+# Quota-bound 30-minute schedule simulation (virtual clock, no sleeping)
+# --------------------------------------------------------------------------
+class VirtualClock:
+    """Monotonic virtual time: 30 simulated minutes cost seconds of real time."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._t = float(start)
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        with self._lock:
+            return self._t
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self._t += max(0.0, float(seconds))
+
+    def advance_to(self, when: float) -> None:
+        with self._lock:
+            self._t = max(self._t, float(when))
+
+
+def requests_per_category(symbols: int, market: str) -> dict[str, int]:
+    """Requests a cycle of ``symbols`` puts into each quota category.
+
+    A symbol costs one bar request and one quote request; when both endpoints
+    map to the same documented category (Alpaca market data) a symbol therefore
+    costs two requests from one pool.
+    """
+    endpoints = MARKET_ENDPOINT_CATEGORIES.get(market, MARKET_ENDPOINT_CATEGORIES["NSE"])
+    counts: dict[str, int] = {}
+    for category in endpoints.values():
+        counts[category] = counts.get(category, 0) + symbols
+    return counts
+
+
+def sustainable_cadence(
+    symbols: int, policies: tuple[QuotaPolicy, ...], *, market: str = "NSE"
+) -> dict[str, Any]:
+    """Minimum interval supported by the documented windows for ``symbols``.
+
+    A cycle needs ``seconds * requests / limit`` seconds in every window, so the
+    longest window usually binds (Upstox: the 2,000-per-30-minutes window).
+    """
+    per_cycle = requests_per_category(symbols, market)
+
+    def _max_at(seconds_available: float, policy: QuotaPolicy, window) -> int:
+        # Requests per symbol in this category: 1 for a per-endpoint pool
+        # (Upstox quote / candle), 2 when both endpoints share one pool (Alpaca).
+        factor = max(1, per_cycle.get(policy.category, symbols)) / max(1, symbols)
+        return int((window.limit * seconds_available) / (window.seconds * factor))
+
+    per_policy: dict[str, Any] = {}
+    binding = 0.0
+    symbols_at_15s: list[int] = []
+    for policy in policies:
+        rows = []
+        count = max(1, per_cycle.get(policy.category, symbols))
+        for window in policy.windows:
+            need = (window.seconds * count) / max(1, window.limit)
+            rows.append(
+                {
+                    "window": window.name,
+                    "seconds": window.seconds,
+                    "limit": window.limit,
+                    "requests_per_cycle": count,
+                    "min_interval_s": round(need, 3),
+                }
+            )
+            binding = max(binding, need)
+            symbols_at_15s.append(_max_at(15.0, policy, window))
+        per_policy[policy.category] = {"windows": rows}
+    return {
+        "symbols": symbols,
+        "market": market,
+        "requests_per_cycle_per_category": per_cycle,
+        "min_interval_seconds": round(binding, 3),
+        "max_symbols_at_15s": min(symbols_at_15s) if symbols_at_15s else None,
+        "max_symbols_at_60s": (
+            min(int(_max_at(60.0, p, w)) for p in policies for w in p.windows) if policies else None
+        ),
+        "per_category": per_policy,
+    }
+
+
+def simulate_schedule(arm: Arm, *, minutes: float = 30.0) -> dict[str, Any]:
+    """Run ``minutes`` of a virtual schedule at ``arm.cadence_s`` and audit quotas.
+
+    One cycle issues one bar request and one quote request per symbol, exactly as
+    ``analyze_market`` does, through the same :class:`ProviderFetchGate` and the
+    same fake transport. The clock is virtual (provider latency and quota waits
+    advance it), so a 30-minute schedule completes in seconds while the quota
+    windows, AIMD budget and cooldowns behave exactly as they do in production.
+    A cycle starts on the cadence grid, or immediately when the previous cycle
+    overran it - that overrun is what "cannot hold this cadence" looks like.
+    """
+    cadence = float(arm.cadence_s or 15.0)
+    vclock = VirtualClock()
+    transport = FakeMarketData(
+        latency_ms=arm.latency_ms,
+        provider_rps=arm.provider_rps,
+        failures=arm.failures,
+        trend=arm.trend,
+        sleep_fn=vclock.sleep,
+        clock_fn=vclock.now,
+    )
+    gate = ProviderFetchGate(
+        FetchGateConfig(
+            max_workers=arm.workers,
+            max_requests_per_second=arm.rps,
+            burst=max(1, int(arm.rps)),
+            batch_timeout_seconds=120.0,
+            quota_policies=quota_policies_for(arm.quota_profile),
+            quota_profile=arm.quota_profile or "none",
+        ),
+        clock=vclock.now,
+        sleep=vclock.sleep,
+    )
+    cats = MARKET_ENDPOINT_CATEGORIES.get(arm.market, MARKET_ENDPOINT_CATEGORIES["NSE"])
+    bars = gate.guarded(cats["bars"], lambda sym: transport.bars(sym, BENCH_TF))
+    quotes = gate.guarded(cats["quote"], transport.quote)
+    symbols = [f"SYN{i:03d}" for i in range(arm.symbols)]
+
+    def _one_symbol(sym: str) -> int:
+        rows = bars(sym)
+        quotes(sym)
+        return len(rows)
+
+    def _one_cycle() -> dict[str, Any]:
+        started = vclock.now()
+        outcomes = gate.map(symbols, _one_symbol, paced=False)
+        finished = vclock.now()
+        ok = sum(1 for o in outcomes.values() if o.ok)
+        codes: dict[str, int] = {}
+        for o in outcomes.values():
+            if not o.ok:
+                codes[o.error_code] = codes.get(o.error_code, 0) + 1
+        return {
+            "start_s": round(started, 3),
+            "finish_s": round(finished, 3),
+            "latency_s": round(finished - started, 3),
+            "symbols_ok": ok,
+            "symbols_missing": len(outcomes) - ok,
+            "symbols_deferred": codes.get("QUOTA_DEFERRED", 0),
+            "fully_deferred": ok == 0 and codes.get("QUOTA_DEFERRED", 0) > 0,
+            "error_codes": codes,
+        }
+
+    horizon = float(minutes) * 60.0
+    cycles: list[dict[str, Any]] = []
+    next_start = 0.0
+    slipped = 0
+    while next_start < horizon:
+        vclock.advance_to(next_start)
+        cycle = _one_cycle()
+        cycles.append(cycle)
+        planned_next = next_start + cadence
+        if cycle["finish_s"] > planned_next:
+            slipped += 1
+            next_start = cycle["finish_s"]
+        else:
+            next_start = planned_next
+
+    stats = gate.stats()
+    quota = stats.get("quota") or {}
+    # Cycles whose scheduled start falls inside the horizon (ceil, so a 10-minute
+    # run at a 90 s cadence schedules 7, not 6).
+    requested_cycles = int(math.ceil(horizon / cadence))
+    cycles_with_data = sum(1 for c in cycles if c["symbols_ok"] > 0)
+    cycles_fully_deferred = sum(1 for c in cycles if c["fully_deferred"])
+    # Deferred cycles return almost instantly by design; latency is reported for
+    # the cycles that actually fetched data.
+    latencies = sorted(c["latency_s"] for c in cycles if c["symbols_ok"] > 0) or [0.0]
+
+    def _pct(values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        idx = min(len(values) - 1, max(0, int(round(q * (len(values) - 1)))))
+        return round(values[idx], 3)
+
+    per_category: dict[str, Any] = {}
+    for category, cat in (quota.get("categories") or {}).items():
+        windows = cat.get("windows") or {}
+        per_category[category] = {
+            "label": cat.get("label"),
+            "requests": cat.get("requests"),
+            "requests_per_second": round(cat.get("requests", 0) / horizon, 4),
+            "requests_per_minute": round(cat.get("requests", 0) / (horizon / 60.0), 2),
+            "horizon_seconds": horizon,
+            "peak_in_window": {name: w["peak"] for name, w in windows.items()},
+            "limit_in_window": {name: w["limit"] for name, w in windows.items()},
+            "window_blocks": {name: w["blocks"] for name, w in windows.items()},
+            "quota_waits": cat.get("quota_waits"),
+            "quota_wait_seconds": cat.get("quota_wait_seconds"),
+            "rate_limited_429": cat.get("rate_limited_events"),
+            "within_documented_limits": all(
+                w["peak"] <= w["limit"] for w in windows.values()
+            ),
+        }
+
+    total_symbols = len(cycles) * arm.symbols
+    deferred_symbols = sum(c["symbols_deferred"] for c in cycles)
+    missing_symbols = sum(c["symbols_missing"] for c in cycles) - deferred_symbols
+    return {
+        "arm": arm.name,
+        "note": arm.note,
+        "market": arm.market,
+        "quota_profile": arm.quota_profile or "none",
+        "quota_policies": [p.to_dict() for p in quota_policies_for(arm.quota_profile)],
+        "config": {
+            "symbols": arm.symbols,
+            "requested_cadence_s": cadence,
+            "minutes": minutes,
+            "worker_bound": arm.workers,
+            "request_budget_rps": arm.rps,
+            "provider_latency_ms": arm.latency_ms,
+            "provider_enforced_rps": arm.provider_rps,
+            "time_source": "virtual clock (latency + quota waits advance it)",
+        },
+        "cycles": {
+            "requested": requested_cycles,
+            "completed": len(cycles),
+            # "Held" means every scheduled cycle actually produced data; a cycle
+            # that was deferred for quota did not hold the cadence.
+            "cadence_held": cycles_with_data == requested_cycles and slipped == 0,
+            "cycles_with_data": cycles_with_data,
+            "cycles_fully_deferred": cycles_fully_deferred,
+            "slipped_past_cadence": slipped,
+            "achieved_mean_interval_s": round(
+                (cycles[-1]["start_s"] - cycles[0]["start_s"]) / (len(cycles) - 1), 3
+            )
+            if len(cycles) > 1
+            else None,
+            "min_interval_s": round(
+                min(b["start_s"] - a["start_s"] for a, b in zip(cycles, cycles[1:])), 3
+            )
+            if len(cycles) > 1
+            else None,
+            "cycle_latency_s": {
+                "p50": _pct(latencies, 0.50),
+                "p95": _pct(latencies, 0.95),
+                "max": _pct(latencies, 1.0),
+            },
+            "symbols_requested": total_symbols,
+            "symbols_failed": missing_symbols,
+            "symbols_deferred": deferred_symbols,
+            "symbols_missing_total": missing_symbols + deferred_symbols,
+            "symbols_failed_pct": round(100.0 * missing_symbols / max(1, total_symbols), 3),
+        },
+        "per_endpoint": per_category,
+        "gate": {
+            key: stats.get(key)
+            for key in (
+                "requests",
+                "retries",
+                "rate_limited_events",
+                "cooldowns",
+                "timeouts",
+                "budget_reductions",
+                "budget_increases",
+                "effective_requests_per_second",
+                "quota_waits",
+                "quota_wait_seconds",
+                "deferred",
+                "peak_inflight",
+            )
+        },
+        "provider_transport": {
+            "requests": transport.calls,
+            "quote_requests": transport.quote_calls,
+            "bar_requests": transport.bar_calls,
+            "rate_limited_429": transport.rate_limited,
+            "peak_inflight": transport.peak_inflight,
+        },
+        "documented_cadence": sustainable_cadence(
+            arm.symbols, quota_policies_for(arm.quota_profile), market=arm.market
+        ),
+        "broker_order_api_calls": 0,
+    }
+
+
+def schedule_arms(symbols: int) -> list[Arm]:
+    """30-minute schedules: the intended cadence, below it, and the throttled case."""
+    return [
+        Arm("schedule-100syms-every-15s", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0,
+            cadence_s=15.0, quota_profile="upstox_standard",
+            note="intended cadence: 100 NSE symbols every 15 s against the documented Upstox windows"),
+        Arm("schedule-100syms-every-60s", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0,
+            cadence_s=60.0, quota_profile="upstox_standard",
+            note="60 s cadence: still above the 30-minute window's sustainable rate"),
+        Arm("schedule-100syms-every-90s", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0,
+            cadence_s=90.0, quota_profile="upstox_standard",
+            note="90 s cadence: the interval the 2,000/30 min window actually supports for 100 symbols"),
+        Arm("schedule-100syms-every-15s-throttled", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0,
+            provider_rps=20.0, cadence_s=15.0, quota_profile="upstox_standard",
+            note="provider additionally throttles above 20 req/s: AIMD must not bypass the windows"),
+        Arm("schedule-16syms-every-15s", symbols=16, latency_ms=25.0, workers=8, rps=50.0,
+            cadence_s=15.0, quota_profile="upstox_standard",
+            note="the symbol count a 15 s cadence does support on Upstox standard APIs"),
+        Arm("schedule-100syms-every-15s-alpaca-basic", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0,
+            cadence_s=15.0, quota_profile="alpaca_basic", market="NASDAQ",
+            note="100 NASDAQ symbols every 15 s on the documented Alpaca Basic 200/min limit"),
+    ]
+
+
 def default_arms(symbols: int, *, quick: bool = False) -> list[Arm]:
     if quick:
         return [
             Arm("bounded-8w-50rps-25ms", symbols=min(symbols, 100), latency_ms=25.0, workers=8, rps=50.0,
-                note="bounded fan-out, local fake latency"),
+                quota_profile="upstox_standard",
+                note="bounded fan-out, local fake latency, documented Upstox windows"),
             Arm("partial-failures", symbols=min(symbols, 100), latency_ms=10.0, workers=8, rps=50.0,
                 failures={f"SYN{i:03d}": mode for i, mode in zip(range(0, 12, 2), ["error", "error", "timeout", "empty_bars", "stale_quote", "rate_limit"])},
                 note="6 of N symbols fail; the rest must be identical to the clean run"),
         ]
     return [
-        Arm("sequential-reference-100ms", symbols=symbols, latency_ms=100.0, workers=1, rps=1000.0,
+        Arm("sequential-reference-100ms", symbols=symbols, latency_ms=100.0, workers=1, rps=1000.0, quota_profile="upstox_standard",
             note="one worker, no pacing: the pre-change fan-out shape (sequential loops)"),
-        Arm("bounded-8w-50rps-100ms", symbols=symbols, latency_ms=100.0, workers=8, rps=50.0,
+        Arm("bounded-8w-50rps-100ms", symbols=symbols, latency_ms=100.0, workers=8, rps=50.0, quota_profile="upstox_standard",
             note="bounded fan-out + request budget at a realistic round trip"),
-        Arm("bounded-8w-50rps-250ms", symbols=symbols, latency_ms=250.0, workers=8, rps=50.0,
+        Arm("bounded-8w-50rps-250ms", symbols=symbols, latency_ms=250.0, workers=8, rps=50.0, quota_profile="upstox_standard",
             note="slow provider: latency-bound, budget has headroom"),
-        Arm("provider-429-at-20rps", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0, provider_rps=20.0,
+        Arm("provider-429-at-20rps", symbols=symbols, latency_ms=25.0, workers=8, rps=50.0, provider_rps=20.0, quota_profile="upstox_standard",
             note="provider throttles above 20 req/s: the gate must back off centrally, not per worker"),
-        Arm("correlated-cluster-100syms", symbols=symbols, latency_ms=10.0, workers=8, rps=50.0, trend="up",
+        Arm("correlated-cluster-100syms", symbols=symbols, latency_ms=10.0, workers=8, rps=50.0, trend="up", quota_profile="upstox_standard",
             note="100 perfectly correlated names: the portfolio correlation gate must refuse to hold them all"),
-        Arm("partial-failures", symbols=symbols, latency_ms=50.0, workers=8, rps=50.0,
+        Arm("partial-failures", symbols=symbols, latency_ms=50.0, workers=8, rps=50.0, quota_profile="upstox_standard",
             failures={
                 **{f"SYN{i:03d}": "error" for i in range(0, 10, 2)},
                 **{f"SYN{i:03d}": "timeout" for i in range(20, 26, 2)},
@@ -588,6 +928,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=str, default="")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--arms", type=str, default="", help="comma-separated arm names to run")
+    parser.add_argument(
+        "--schedule",
+        type=str,
+        default="auto",
+        choices=("auto", "on", "off"),
+        help="30-minute quota-bound schedule simulation (auto: on unless --quick)",
+    )
+    parser.add_argument("--schedule-minutes", type=float, default=30.0)
     args = parser.parse_args(argv)
 
     symbols = max(1, min(500, args.symbols))
@@ -597,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
         arms = [a for a in arms if a.name in wanted]
 
     report: dict[str, Any] = {
-        "schema": "axiom.market_scan_capacity.v1",
+        "schema": "axiom.market_scan_capacity.v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "python": platform.python_version(),
@@ -665,6 +1013,37 @@ def main(argv: list[str] | None = None) -> int:
                 "expected_healthy": clean_scan["counts"].get("succeeded", 0) - len(injected),
                 "isolated": not healthy,
             }
+
+    run_schedule = args.schedule == "on" or (args.schedule == "auto" and not args.quick)
+    if run_schedule:
+        report["schedule_simulation"] = []
+        for sarm in schedule_arms(symbols):
+            print(
+                f"simulating {sarm.name}: {sarm.symbols} symbols every {sarm.cadence_s:g}s "
+                f"over {args.schedule_minutes:g} virtual minutes "
+                f"({sarm.quota_profile or 'no quota'} ...)",
+                file=sys.stderr,
+                flush=True,
+            )
+            report["schedule_simulation"].append(
+                simulate_schedule(sarm, minutes=args.schedule_minutes)
+            )
+        report["documented_quotas"] = {
+            policy.category: policy.to_dict()
+            for profile in ("upstox_standard", "alpaca_basic", "alpaca_algo_trader_plus")
+            for policy in quota_policies_for(profile)
+        }
+        report["sustainable_cadence"] = {
+            "upstox_standard": sustainable_cadence(
+                symbols, quota_policies_for("upstox_standard"), market="NSE"
+            ),
+            "alpaca_basic": sustainable_cadence(
+                symbols, quota_policies_for("alpaca_basic"), market="NASDAQ"
+            ),
+            "alpaca_algo_trader_plus": sustainable_cadence(
+                symbols, quota_policies_for("alpaca_algo_trader_plus"), market="NASDAQ"
+            ),
+        }
 
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.json:

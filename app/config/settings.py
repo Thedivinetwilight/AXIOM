@@ -121,6 +121,14 @@ class Settings:
     market_data_fetch_workers: int = 8
     market_data_fetch_max_rps: float = 50.0
     market_data_fetch_batch_timeout_seconds: float = 45.0
+    # Documented quota windows (see app/markets/fetch_gate.py): Upstox standard
+    # APIs are 50/s, 500/min and 2,000/30 min per API per user; Alpaca market data
+    # is 200/min on Basic and 10,000/min on Algo Trader Plus. Set the Alpaca plan
+    # to what the account actually pays for - the free Basic figure is the default
+    # because it is the documented default plan. "off" disables the rolling-window
+    # budgets and keeps only the per-second pacing (not recommended).
+    market_data_quota_profile: str = "documented"
+    alpaca_market_data_plan: str = "basic"
     # Alpaca is used only for read-only US equity market data. The paper
     # execution path remains the local PaperBroker; no Alpaca trading client is
     # configured or constructed.
