@@ -111,6 +111,16 @@ class Settings:
     market_data_mode: str = "ltpc"
     market_data_access_token: str = field(default="", repr=False)
     market_data_authorize_url: str = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+    # --- Per-symbol market-data fan-out bounds (scan capacity) ---
+    # Providers here are per-symbol callables, so one watchlist cycle costs two
+    # requests per selected symbol. These bound the fan-out: the worker count,
+    # the per-provider request budget (paced, not fired), and the whole-batch
+    # deadline that keeps a hung provider from stalling a cycle. They are a
+    # conservative local default, not a claim about any broker's entitlement; set
+    # MARKET_DATA_FETCH_MAX_RPS below what your plan actually allows.
+    market_data_fetch_workers: int = 8
+    market_data_fetch_max_rps: float = 50.0
+    market_data_fetch_batch_timeout_seconds: float = 45.0
     # Alpaca is used only for read-only US equity market data. The paper
     # execution path remains the local PaperBroker; no Alpaca trading client is
     # configured or constructed.

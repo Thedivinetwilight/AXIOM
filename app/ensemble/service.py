@@ -46,6 +46,7 @@ from app.ensemble.registry import (
     evaluate_variant_on_context,
     normalize_timeframe,
 )
+from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
 from app.markets.live_paper import _round_to_tick, estimate_market_fees
 from app.markets.nse_reconciliation import nse_session_status
 from app.markets.us_calendar import USEquitiesCalendar
@@ -178,6 +179,8 @@ class StrategyEnsembleService:
         nse_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         nasdaq_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         clock: Callable[[], datetime] | None = None,
+        nse_fetch_gate: ProviderFetchGate | None = None,
+        nasdaq_fetch_gate: ProviderFetchGate | None = None,
     ) -> None:
         self.db_path = str(db_path)
         self._lock = threading.RLock()
@@ -196,6 +199,12 @@ class StrategyEnsembleService:
         self.nasdaq_bars_provider = nasdaq_bars_provider
         self.nse_instrument_resolver = nse_instrument_resolver
         self.nasdaq_instrument_resolver = nasdaq_instrument_resolver
+        # Same bounded provider gates the paper engine uses: pass the engine's
+        # gates so a cycle's quote + bar traffic shares one request budget.
+        self.fetch_gates: dict[str, ProviderFetchGate] = {
+            "NSE": nse_fetch_gate or ProviderFetchGate(FetchGateConfig()),
+            "NASDAQ": nasdaq_fetch_gate or ProviderFetchGate(FetchGateConfig()),
+        }
 
         self.preset: str = "compact"
         self.enabled_families: list[str] = sorted(STRATEGY_FAMILIES.keys())
@@ -615,50 +624,86 @@ class StrategyEnsembleService:
         bar_api_calls = 0
         quote_api_calls = 0
 
+        bar_fn = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
+        quote_fn = self.nse_quote_provider if mkt == "NSE" else self.nasdaq_quote_provider
+        gate = self.fetch_gates[mkt]
+        ref_by_sym = {sym: raw_lookup_by_sym.get(sym, sym) for sym in target_syms}
+        ikey_by_sym = {sym: str((sym_meta_map.get(sym) or {}).get("instrument_key") or "") for sym in target_syms}
+
+        def _override_keys(sym: str) -> list[str]:
+            keys = [sym, ref_by_sym.get(sym, sym)]
+            ikey = ikey_by_sym.get(sym) or ""
+            if ikey:
+                keys.append(ikey)
+            return keys
+
+        # Bars: one provider request per symbol that has no override, issued as a
+        # bounded, paced fan-out instead of a sequential loop.
+        pending_bar_syms: list[str] = []
         for sym in target_syms:
-            raw_ref = raw_lookup_by_sym.get(sym, sym)
-            inst = sym_meta_map[sym]
-            ikey = str(inst.get("instrument_key") or "")
-            if bars_override is not None and (sym in bars_override or raw_ref in bars_override or (ikey and ikey in bars_override)):
-                found_bars = (
-                    bars_override.get(sym)
-                    if sym in bars_override
-                    else (bars_override.get(raw_ref) if raw_ref in bars_override else bars_override.get(ikey))
-                )
+            override = bars_override
+            if override is not None and any(key in override for key in _override_keys(sym)):
+                found_bars = next((override[key] for key in _override_keys(sym) if override.get(key)), None)
                 if found_bars:
                     bars_map[sym] = found_bars
-            elif sym not in fetch_errors:
-                bar_fn = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
-                if bar_fn is not None:
-                    try:
-                        bar_api_calls += 1
-                        fetched_b = bar_fn(raw_ref, tf)
-                        if fetched_b:
-                            bars_map[sym] = fetched_b
-                        else:
-                            fetch_errors.setdefault(sym, f"Empty {tf} bar history returned by provider")
-                    except Exception as exc:  # noqa: BLE001
-                        fetch_errors[sym] = f"Bar fetch failed: {str(exc)[:160]}"
-                else:
-                    fetch_errors.setdefault(sym, f"No historical bar provider configured for {mkt}")
+                continue
+            if sym in fetch_errors:
+                continue
+            if bar_fn is None:
+                fetch_errors.setdefault(sym, f"No historical bar provider configured for {mkt}")
+                continue
+            pending_bar_syms.append(sym)
 
-            if quotes_override is not None and (sym in quotes_override or raw_ref in quotes_override or (ikey and ikey in quotes_override)):
-                found_q = (
-                    quotes_override.get(sym)
-                    if sym in quotes_override
-                    else (quotes_override.get(raw_ref) if raw_ref in quotes_override else quotes_override.get(ikey))
-                )
+        if pending_bar_syms and bar_fn is not None:
+            bar_api_calls += len(pending_bar_syms)
+            bar_outcomes = gate.map(
+                pending_bar_syms, lambda sym: bar_fn(ref_by_sym.get(sym, sym), tf)
+            )
+            for sym in pending_bar_syms:
+                outcome = bar_outcomes.get(sym)
+                if outcome is None:
+                    continue
+                if not outcome.ok:
+                    fetch_errors.setdefault(
+                        sym, f"Bar fetch failed: [{outcome.error_code}] {outcome.error_detail}"[:200]
+                    )
+                elif outcome.value:
+                    bars_map[sym] = outcome.value
+                else:
+                    fetch_errors.setdefault(sym, f"Empty {tf} bar history returned by provider")
+
+        # Quotes: same bounded fan-out.
+        pending_quote_syms: list[str] = []
+        for sym in target_syms:
+            override = quotes_override
+            if override is not None and any(key in override for key in _override_keys(sym)):
+                found_q = next((override[key] for key in _override_keys(sym) if override.get(key)), None)
                 if found_q:
                     quotes_map[sym] = found_q
-            else:
-                q_fn = self.nse_quote_provider if mkt == "NSE" else self.nasdaq_quote_provider
-                if q_fn is not None:
-                    try:
-                        quote_api_calls += 1
-                        lookup_key = ikey if (mkt == "NSE" and ikey) else sym
-                        quotes_map[sym] = q_fn(lookup_key)
-                    except Exception as exc:  # noqa: BLE001
-                        fetch_errors.setdefault(sym, f"Quote fetch failed: {str(exc)[:160]}")
+                continue
+            if quote_fn is None:
+                continue
+            pending_quote_syms.append(sym)
+
+        if pending_quote_syms and quote_fn is not None:
+            quote_api_calls += len(pending_quote_syms)
+
+            def _quote_lookup(sym: str) -> dict[str, Any]:
+                ikey = ikey_by_sym.get(sym) or ""
+                lookup_key = ikey if (mkt == "NSE" and ikey) else sym
+                return quote_fn(lookup_key)
+
+            quote_outcomes = gate.map(pending_quote_syms, _quote_lookup)
+            for sym in pending_quote_syms:
+                outcome = quote_outcomes.get(sym)
+                if outcome is None:
+                    continue
+                if not outcome.ok:
+                    fetch_errors.setdefault(
+                        sym, f"Quote fetch failed: [{outcome.error_code}] {outcome.error_detail}"[:200]
+                    )
+                elif outcome.value:
+                    quotes_map[sym] = outcome.value
 
         with self._lock:
             variants = self.registry.list_variants(enabled_only=False)

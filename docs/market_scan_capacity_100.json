@@ -1,0 +1,1123 @@
+{
+  "arms": [
+    {
+      "config": {
+        "injected_failures": {},
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 100.0,
+        "request_budget_rps": 1000.0,
+        "symbols": 100,
+        "synthetic_series": "diverse",
+        "worker_bound": 1
+      },
+      "cycle": {
+        "cold_wall_ms": 26839.5,
+        "decisions": {
+          "blocked_by_check": {
+            "calibrated_confidence_and_oos_evidence": 3,
+            "concentration_and_correlation": 81,
+            "risk_budget_position_sizing": 86,
+            "signal_consensus": 1,
+            "symbol_and_total_exposure": 83
+          },
+          "blocked_by_risk_or_signal": 94,
+          "candidates_buy_or_sell": 6,
+          "evaluated": 100,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 6,
+          "orders_submitted": 6,
+          "working_orders_after": 6
+        },
+        "fingerprint": "f33e5d31d3fee5d4",
+        "memory": {
+          "rss_after_mb": 78.2,
+          "rss_before_mb": 43.7,
+          "rss_delta_mb": 34.5,
+          "tracemalloc_peak_mb": 14.01
+        },
+        "per_symbol_ms": 268.395,
+        "provider": {
+          "bar_requests": 300,
+          "fake_failures_served": 0,
+          "gate": {
+            "batches": 6,
+            "budget_increases": 0,
+            "budget_reductions": 0,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 200,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 200.0,
+              "max_workers": 1,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 0,
+            "effective_requests_per_second": 200.0,
+            "errors": 0,
+            "peak_inflight": 1,
+            "rate_limited_events": 0,
+            "requests": 600,
+            "retries": 0,
+            "symbols": 600,
+            "timeouts": 0,
+            "wait_seconds": 0.0,
+            "workers_used": 1
+          },
+          "latency": {
+            "count": 600,
+            "max_ms": 119.385,
+            "p50_ms": 100.691,
+            "p95_ms": 107.582
+          },
+          "peak_inflight": 1,
+          "quote_requests": 300,
+          "rate_limited_429": 0,
+          "requests": 600,
+          "requests_per_symbol": 6.0
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {}
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 3.73,
+        "warm_fingerprint": "83a4db363d28ccb7",
+        "warm_wall_ms": 20277.3
+      },
+      "name": "sequential-reference-100ms",
+      "note": "one worker, no pacing: the pre-change fan-out shape (sequential loops)",
+      "scan": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 200,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 200.0,
+            "max_workers": 1,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 200.0,
+          "errors": 0,
+          "peak_inflight": 1,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 0.0,
+          "workers_used": 1
+        },
+        "per_symbol_ms": 202.441,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 1,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 1
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 4.94,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 200,
+            "max_ms": 108.948,
+            "p50_ms": 100.696,
+            "p95_ms": 101.156
+          },
+          "peak_inflight": 1,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 20244.1
+      },
+      "sequential_reference": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 200,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 200.0,
+            "max_workers": 1,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 200.0,
+          "errors": 0,
+          "peak_inflight": 1,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 0.0,
+          "workers_used": 1
+        },
+        "per_symbol_ms": 202.709,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 1,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 1
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 4.93,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 200,
+            "max_ms": 120.55,
+            "p50_ms": 100.511,
+            "p95_ms": 101.167
+          },
+          "peak_inflight": 1,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 20270.9
+      }
+    },
+    {
+      "config": {
+        "injected_failures": {},
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 100.0,
+        "request_budget_rps": 50.0,
+        "symbols": 100,
+        "synthetic_series": "diverse",
+        "worker_bound": 8
+      },
+      "cycle": {
+        "cold_wall_ms": 8734.3,
+        "decisions": {
+          "blocked_by_check": {
+            "calibrated_confidence_and_oos_evidence": 3,
+            "concentration_and_correlation": 81,
+            "risk_budget_position_sizing": 86,
+            "signal_consensus": 1,
+            "symbol_and_total_exposure": 83
+          },
+          "blocked_by_risk_or_signal": 94,
+          "candidates_buy_or_sell": 6,
+          "evaluated": 100,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 6,
+          "orders_submitted": 6,
+          "working_orders_after": 6
+        },
+        "fingerprint": "f33e5d31d3fee5d4",
+        "memory": {
+          "rss_after_mb": 111.3,
+          "rss_before_mb": 84.9,
+          "rss_delta_mb": 26.3,
+          "tracemalloc_peak_mb": 14.01
+        },
+        "per_symbol_ms": 87.343,
+        "provider": {
+          "bar_requests": 300,
+          "fake_failures_served": 0,
+          "gate": {
+            "batches": 6,
+            "budget_increases": 0,
+            "budget_reductions": 0,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 50,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 50.0,
+              "max_workers": 8,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 0,
+            "effective_requests_per_second": 50.0,
+            "errors": 0,
+            "peak_inflight": 8,
+            "rate_limited_events": 0,
+            "requests": 600,
+            "retries": 0,
+            "symbols": 600,
+            "timeouts": 0,
+            "wait_seconds": 14.97060366896668,
+            "workers_used": 8
+          },
+          "latency": {
+            "count": 600,
+            "max_ms": 173.38,
+            "p50_ms": 100.67,
+            "p95_ms": 115.895
+          },
+          "peak_inflight": 8,
+          "quote_requests": 300,
+          "rate_limited_429": 0,
+          "requests": 600,
+          "requests_per_symbol": 6.0
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {}
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 11.45,
+        "warm_fingerprint": "83a4db363d28ccb7",
+        "warm_wall_ms": 4015.4
+      },
+      "name": "bounded-8w-50rps-100ms",
+      "note": "bounded fan-out + request budget at a realistic round trip",
+      "scan": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 50,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 50.0,
+            "max_workers": 8,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 50.0,
+          "errors": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 0.0,
+          "workers_used": 8
+        },
+        "per_symbol_ms": 27.461,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 8
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 36.42,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 200,
+            "max_ms": 120.814,
+            "p50_ms": 100.486,
+            "p95_ms": 104.623
+          },
+          "peak_inflight": 8,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 2746.1
+      },
+      "sequential_reference": null
+    },
+    {
+      "config": {
+        "injected_failures": {},
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 250.0,
+        "request_budget_rps": 50.0,
+        "symbols": 100,
+        "synthetic_series": "diverse",
+        "worker_bound": 8
+      },
+      "cycle": {
+        "cold_wall_ms": 12428.6,
+        "decisions": {
+          "blocked_by_check": {
+            "calibrated_confidence_and_oos_evidence": 3,
+            "concentration_and_correlation": 81,
+            "risk_budget_position_sizing": 86,
+            "signal_consensus": 1,
+            "symbol_and_total_exposure": 83
+          },
+          "blocked_by_risk_or_signal": 94,
+          "candidates_buy_or_sell": 6,
+          "evaluated": 100,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 6,
+          "orders_submitted": 6,
+          "working_orders_after": 6
+        },
+        "fingerprint": "f33e5d31d3fee5d4",
+        "memory": {
+          "rss_after_mb": 128.7,
+          "rss_before_mb": 112.9,
+          "rss_delta_mb": 15.9,
+          "tracemalloc_peak_mb": 14.01
+        },
+        "per_symbol_ms": 124.286,
+        "provider": {
+          "bar_requests": 300,
+          "fake_failures_served": 0,
+          "gate": {
+            "batches": 6,
+            "budget_increases": 0,
+            "budget_reductions": 0,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 50,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 50.0,
+              "max_workers": 8,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 0,
+            "effective_requests_per_second": 50.0,
+            "errors": 0,
+            "peak_inflight": 8,
+            "rate_limited_events": 0,
+            "requests": 600,
+            "retries": 0,
+            "symbols": 600,
+            "timeouts": 0,
+            "wait_seconds": 0.0,
+            "workers_used": 8
+          },
+          "latency": {
+            "count": 600,
+            "max_ms": 334.124,
+            "p50_ms": 250.747,
+            "p95_ms": 280.782
+          },
+          "peak_inflight": 8,
+          "quote_requests": 300,
+          "rate_limited_429": 0,
+          "requests": 600,
+          "requests_per_symbol": 6.0
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {}
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 8.05,
+        "warm_fingerprint": "83a4db363d28ccb7",
+        "warm_wall_ms": 6724.4
+      },
+      "name": "bounded-8w-50rps-250ms",
+      "note": "slow provider: latency-bound, budget has headroom",
+      "scan": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 50,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 50.0,
+            "max_workers": 8,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 50.0,
+          "errors": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 0.0,
+          "workers_used": 8
+        },
+        "per_symbol_ms": 66.303,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 8
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 15.08,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 200,
+            "max_ms": 287.149,
+            "p50_ms": 250.66,
+            "p95_ms": 257.909
+          },
+          "peak_inflight": 8,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 6630.3
+      },
+      "sequential_reference": null
+    },
+    {
+      "config": {
+        "injected_failures": {},
+        "provider_enforced_rps": 20.0,
+        "provider_latency_ms": 25.0,
+        "request_budget_rps": 50.0,
+        "symbols": 100,
+        "synthetic_series": "diverse",
+        "worker_bound": 8
+      },
+      "cycle": {
+        "cold_wall_ms": 23911.4,
+        "decisions": {
+          "blocked_by_check": {
+            "calibrated_confidence_and_oos_evidence": 3,
+            "concentration_and_correlation": 81,
+            "risk_budget_position_sizing": 86,
+            "signal_consensus": 1,
+            "symbol_and_total_exposure": 83
+          },
+          "blocked_by_risk_or_signal": 94,
+          "candidates_buy_or_sell": 6,
+          "evaluated": 100,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 6,
+          "orders_submitted": 6,
+          "working_orders_after": 6
+        },
+        "fingerprint": "f33e5d31d3fee5d4",
+        "memory": {
+          "rss_after_mb": 138.7,
+          "rss_before_mb": 128.6,
+          "rss_delta_mb": 10.1,
+          "tracemalloc_peak_mb": 14.01
+        },
+        "per_symbol_ms": 239.114,
+        "provider": {
+          "bar_requests": 322,
+          "fake_failures_served": 0,
+          "gate": {
+            "batches": 6,
+            "budget_increases": 17,
+            "budget_reductions": 11,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 50,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 50.0,
+              "max_workers": 8,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 11,
+            "effective_requests_per_second": 21.51,
+            "errors": 0,
+            "peak_inflight": 8,
+            "rate_limited_events": 44,
+            "requests": 644,
+            "retries": 44,
+            "symbols": 600,
+            "timeouts": 0,
+            "wait_seconds": 409.23604587171104,
+            "workers_used": 8
+          },
+          "latency": {
+            "count": 644,
+            "max_ms": 118.874,
+            "p50_ms": 25.653,
+            "p95_ms": 36.798
+          },
+          "peak_inflight": 8,
+          "quote_requests": 322,
+          "rate_limited_429": 44,
+          "requests": 644,
+          "requests_per_symbol": 6.44
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {}
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 4.18,
+        "warm_fingerprint": "83a4db363d28ccb7",
+        "warm_wall_ms": 16659.8
+      },
+      "name": "provider-429-at-20rps",
+      "note": "provider throttles above 20 req/s: the gate must back off centrally, not per worker",
+      "scan": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 2,
+          "budget_reductions": 5,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 50,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 50.0,
+            "max_workers": 8,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 5,
+          "effective_requests_per_second": 6.56,
+          "errors": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 30,
+          "requests": 130,
+          "retries": 30,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 153.56757297153018,
+          "workers_used": 8
+        },
+        "per_symbol_ms": 204.692,
+        "provider_fetch": {
+          "cooldowns": 5,
+          "peak_inflight": 8,
+          "rate_limited_events": 30,
+          "requests": 130,
+          "retries": 30,
+          "timeouts": 0,
+          "workers_used": 8
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 4.89,
+        "transport": {
+          "bar_requests": 116,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 246,
+            "max_ms": 32.968,
+            "p50_ms": 25.383,
+            "p95_ms": 29.444
+          },
+          "peak_inflight": 8,
+          "quote_requests": 130,
+          "rate_limited_429": 30,
+          "requests": 246
+        },
+        "wall_ms": 20469.2
+      },
+      "sequential_reference": null
+    },
+    {
+      "config": {
+        "injected_failures": {},
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 10.0,
+        "request_budget_rps": 50.0,
+        "symbols": 100,
+        "synthetic_series": "up",
+        "worker_bound": 8
+      },
+      "cycle": {
+        "cold_wall_ms": 8516.4,
+        "decisions": {
+          "blocked_by_check": {
+            "concentration_and_correlation": 99
+          },
+          "blocked_by_risk_or_signal": 99,
+          "candidates_buy_or_sell": 1,
+          "evaluated": 100,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 1,
+          "orders_submitted": 1,
+          "working_orders_after": 1
+        },
+        "fingerprint": "df0073f8c84e6faf",
+        "memory": {
+          "rss_after_mb": 156.2,
+          "rss_before_mb": 139.4,
+          "rss_delta_mb": 16.8,
+          "tracemalloc_peak_mb": 13.94
+        },
+        "per_symbol_ms": 85.164,
+        "provider": {
+          "bar_requests": 300,
+          "fake_failures_served": 0,
+          "gate": {
+            "batches": 6,
+            "budget_increases": 0,
+            "budget_reductions": 0,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 50,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 50.0,
+              "max_workers": 8,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 0,
+            "effective_requests_per_second": 50.0,
+            "errors": 0,
+            "peak_inflight": 8,
+            "rate_limited_events": 0,
+            "requests": 600,
+            "retries": 0,
+            "symbols": 600,
+            "timeouts": 0,
+            "wait_seconds": 67.0789156909351,
+            "workers_used": 8
+          },
+          "latency": {
+            "count": 600,
+            "max_ms": 21.815,
+            "p50_ms": 10.567,
+            "p95_ms": 16.061
+          },
+          "peak_inflight": 8,
+          "quote_requests": 300,
+          "rate_limited_429": 0,
+          "requests": 600,
+          "requests_per_symbol": 6.0
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {}
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 11.74,
+        "warm_fingerprint": "83a4db363d28ccb7",
+        "warm_wall_ms": 4001.3
+      },
+      "name": "correlated-cluster-100syms",
+      "note": "100 perfectly correlated names: the portfolio correlation gate must refuse to hold them all",
+      "scan": {
+        "counts": {
+          "failed": 0,
+          "missing_data": 0,
+          "selected_symbols": 100,
+          "stale_data": 0,
+          "succeeded": 100
+        },
+        "fingerprint": "9711c39db3f38c18",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 50,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 50.0,
+            "max_workers": 8,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 50.0,
+          "errors": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 5.387915812989631,
+          "workers_used": 8
+        },
+        "per_symbol_ms": 11.501,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 8
+        },
+        "stale_or_rejected": [],
+        "throughput_symbols_per_s": 86.95,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 0,
+          "latency": {
+            "count": 200,
+            "max_ms": 15.601,
+            "p50_ms": 10.547,
+            "p95_ms": 12.211
+          },
+          "peak_inflight": 8,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 1150.1
+      },
+      "sequential_reference": null
+    },
+    {
+      "config": {
+        "injected_failures": {
+          "SYN000": "error",
+          "SYN002": "error",
+          "SYN004": "error",
+          "SYN006": "error",
+          "SYN008": "error",
+          "SYN020": "timeout",
+          "SYN022": "timeout",
+          "SYN024": "timeout",
+          "SYN040": "empty_bars",
+          "SYN041": "empty_bars",
+          "SYN042": "empty_bars",
+          "SYN043": "empty_bars",
+          "SYN060": "stale_quote",
+          "SYN062": "stale_quote",
+          "SYN064": "stale_quote"
+        },
+        "provider_enforced_rps": 0.0,
+        "provider_latency_ms": 50.0,
+        "request_budget_rps": 50.0,
+        "symbols": 100,
+        "synthetic_series": "diverse",
+        "worker_bound": 8
+      },
+      "cycle": {
+        "cold_wall_ms": 8373.4,
+        "decisions": {
+          "blocked_by_check": {
+            "calibrated_confidence_and_oos_evidence": 3,
+            "concentration_and_correlation": 65,
+            "quote_freshness": 3,
+            "risk_budget_position_sizing": 78,
+            "signal_consensus": 1,
+            "symbol_and_total_exposure": 76
+          },
+          "blocked_by_risk_or_signal": 83,
+          "candidates_buy_or_sell": 5,
+          "evaluated": 88,
+          "max_daily_orders_limit": 40,
+          "max_open_positions_limit": 10,
+          "open_positions_after": 5,
+          "orders_submitted": 5,
+          "working_orders_after": 5
+        },
+        "fingerprint": "284a5a3f3ebcde49",
+        "memory": {
+          "rss_after_mb": 158.7,
+          "rss_before_mb": 156.1,
+          "rss_delta_mb": 2.6,
+          "tracemalloc_peak_mb": 12.38
+        },
+        "per_symbol_ms": 83.734,
+        "provider": {
+          "bar_requests": 300,
+          "fake_failures_served": 123,
+          "gate": {
+            "batches": 9,
+            "budget_increases": 0,
+            "budget_reductions": 0,
+            "config": {
+              "batch_timeout_seconds": 120.0,
+              "burst": 50,
+              "cooldown_seconds": 2.0,
+              "max_cooldown_seconds": 30.0,
+              "max_requests_per_second": 50.0,
+              "max_workers": 8,
+              "retries_after_rate_limit": 1
+            },
+            "cooldowns": 0,
+            "effective_requests_per_second": 50.0,
+            "errors": 72,
+            "peak_inflight": 8,
+            "rate_limited_events": 0,
+            "requests": 633,
+            "retries": 0,
+            "symbols": 633,
+            "timeouts": 0,
+            "wait_seconds": 45.86082407017653,
+            "workers_used": 8
+          },
+          "latency": {
+            "count": 633,
+            "max_ms": 62.027,
+            "p50_ms": 50.232,
+            "p95_ms": 57.447
+          },
+          "peak_inflight": 8,
+          "quote_requests": 333,
+          "rate_limited_429": 0,
+          "requests": 633,
+          "requests_per_symbol": 6.33
+        },
+        "status": {
+          "broker_order_api_calls": 0,
+          "engine_broker_order_api_calls": 0,
+          "rejected_instruments": {
+            "SYN000": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider error for SYN000"
+            },
+            "SYN002": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider error for SYN002"
+            },
+            "SYN004": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider error for SYN004"
+            },
+            "SYN006": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider error for SYN006"
+            },
+            "SYN008": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider error for SYN008"
+            },
+            "SYN020": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider timeout for SYN020"
+            },
+            "SYN022": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider timeout for SYN022"
+            },
+            "SYN024": {
+              "code": "FETCH_ERROR",
+              "reason": "[DISCONNECTED] live NSE market data unavailable: synthetic provider timeout for SYN024"
+            },
+            "SYN040": {
+              "code": "MISSING_DATA",
+              "reason": "Empty 5m bar history returned by provider"
+            },
+            "SYN041": {
+              "code": "MISSING_DATA",
+              "reason": "Empty 5m bar history returned by provider"
+            },
+            "SYN042": {
+              "code": "MISSING_DATA",
+              "reason": "Empty 5m bar history returned by provider"
+            },
+            "SYN043": {
+              "code": "MISSING_DATA",
+              "reason": "Empty 5m bar history returned by provider"
+            }
+          }
+        },
+        "symbols": 100,
+        "throughput_symbols_per_s": 11.94,
+        "warm_fingerprint": "c33f04618e04096c",
+        "warm_wall_ms": 4205.7
+      },
+      "name": "partial-failures",
+      "note": "5 error + 3 timeout + 4 empty + 3 stale symbols; every other symbol must match the clean run",
+      "scan": {
+        "counts": {
+          "failed": 8,
+          "missing_data": 4,
+          "selected_symbols": 100,
+          "stale_data": 3,
+          "succeeded": 85
+        },
+        "fingerprint": "1b389c601d555b6c",
+        "gate": {
+          "batches": 1,
+          "budget_increases": 0,
+          "budget_reductions": 0,
+          "config": {
+            "batch_timeout_seconds": 120.0,
+            "burst": 50,
+            "cooldown_seconds": 2.0,
+            "max_cooldown_seconds": 30.0,
+            "max_requests_per_second": 50.0,
+            "max_workers": 8,
+            "retries_after_rate_limit": 1
+          },
+          "cooldowns": 0,
+          "effective_requests_per_second": 50.0,
+          "errors": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "symbols": 100,
+          "timeouts": 0,
+          "wait_seconds": 0.0,
+          "workers_used": 8
+        },
+        "per_symbol_ms": 14.055,
+        "provider_fetch": {
+          "cooldowns": 0,
+          "peak_inflight": 8,
+          "rate_limited_events": 0,
+          "requests": 100,
+          "retries": 0,
+          "timeouts": 0,
+          "workers_used": 8
+        },
+        "stale_or_rejected": [
+          "SYN000",
+          "SYN002",
+          "SYN004",
+          "SYN006",
+          "SYN008",
+          "SYN020",
+          "SYN022",
+          "SYN024",
+          "SYN040",
+          "SYN041",
+          "SYN042",
+          "SYN043",
+          "SYN060",
+          "SYN062",
+          "SYN064"
+        ],
+        "throughput_symbols_per_s": 71.15,
+        "transport": {
+          "bar_requests": 100,
+          "fake_failures_served": 30,
+          "latency": {
+            "count": 200,
+            "max_ms": 60.924,
+            "p50_ms": 50.201,
+            "p95_ms": 52.798
+          },
+          "peak_inflight": 8,
+          "quote_requests": 100,
+          "rate_limited_429": 0,
+          "requests": 200
+        },
+        "wall_ms": 1405.5
+      },
+      "sequential_reference": null
+    }
+  ],
+  "determinism": {
+    "arm": "partial-failures",
+    "first_run_fingerprint": "284a5a3f3ebcde49",
+    "identical": true,
+    "second_run_fingerprint": "284a5a3f3ebcde49"
+  },
+  "environment": {
+    "cpu_count": 2,
+    "platform": "Linux-6.1.158+-x86_64-with-glibc2.36",
+    "python": "3.11.2"
+  },
+  "failure_isolation": {
+    "clean_scan_succeeded": 100,
+    "expected_healthy": 85,
+    "healthy_scan_succeeded": 85,
+    "healthy_symbols_flagged": [],
+    "healthy_symbols_flagged_count": 0,
+    "injected_count": 15,
+    "injected_symbols": [
+      "SYN000",
+      "SYN002",
+      "SYN004",
+      "SYN006",
+      "SYN008",
+      "SYN020",
+      "SYN022",
+      "SYN024",
+      "SYN040",
+      "SYN041",
+      "SYN042",
+      "SYN043",
+      "SYN060",
+      "SYN062",
+      "SYN064"
+    ],
+    "isolated": true
+  },
+  "generated_at": "2026-11-07T15:41:10.881904+00:00",
+  "limits": {
+    "daily_orders_cap": 40,
+    "note": "selecting 100 symbols is not permission to hold or trade 100 instruments",
+    "open_positions_cap": 8,
+    "symbols_per_cycle": "all selected symbols; no per-cycle cap, only provider budget and deadline",
+    "watchlist_symbols": "unbounded by code (SQLite rows, no cap in add_watchlist_symbol)"
+  },
+  "method": {
+    "bars_per_symbol": 220,
+    "broker_order_api_calls": 0,
+    "ensemble_variants_per_symbol": 24,
+    "execution_boundary_constructed": false,
+    "network_calls": 0,
+    "paths": [
+      "LiveMarketPaperEngine.analyze_market (scan: fetch + ensemble preview)",
+      "LiveMarketPaperEngine.sync_live_tick (cycle: fetch -> evaluate -> allocate -> paper order plan)",
+      "StrategyEnsembleService.evaluate_watchlist_cycle",
+      "PortfolioRiskAllocator.allocate_symbol"
+    ],
+    "session_clock": "2026-01-05T10:00:00+05:30",
+    "timeframe": "5m",
+    "transport": "local fake provider (deterministic synthetic OHLCV/quotes, injectable latency/failures)"
+  },
+  "schema": "axiom.market_scan_capacity.v1"
+}

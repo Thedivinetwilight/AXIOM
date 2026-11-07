@@ -35,6 +35,7 @@ from typing import Any, Callable
 import uuid
 
 from app.data.models import Candle, parse_timestamp
+from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
 from app.markets.kronos_decision import build_forecast_summary, combine_paper_strategy_decision
 from app.markets.nse_reconciliation import nse_session_status, tick_precision_decimals
 from app.markets.us_calendar import USEquitiesCalendar
@@ -343,6 +344,8 @@ class LiveMarketPaperEngine:
         nasdaq_instrument_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         execution_mode_provider: Callable[[str], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        nse_fetch_gate: ProviderFetchGate | None = None,
+        nasdaq_fetch_gate: ProviderFetchGate | None = None,
     ) -> None:
         self._in_memory = str(db_path) == ":memory:"
         self.db_path = Path(":memory:") if self._in_memory else Path(db_path)
@@ -365,6 +368,14 @@ class LiveMarketPaperEngine:
         # LIVE-mode markets are executed only by app.markets.live_execution; the
         # local paper engine must never simulate fills for a market routed LIVE.
         self.execution_mode_provider = execution_mode_provider
+        # One bounded, rate-limit-aware gate per provider: every per-symbol fetch
+        # in this engine (scan probes, quote marks, bar history) shares it, so a
+        # 100-symbol cycle is paced instead of fired and one 429 backs the whole
+        # provider off instead of being retried by every worker.
+        self.fetch_gates: dict[str, ProviderFetchGate] = {
+            "NSE": nse_fetch_gate or ProviderFetchGate(FetchGateConfig()),
+            "NASDAQ": nasdaq_fetch_gate or ProviderFetchGate(FetchGateConfig()),
+        }
         self.us_calendar = USEquitiesCalendar()
         self._last_quote_ts_by_key: dict[tuple[str, str], datetime] = {}
 
@@ -1485,7 +1496,7 @@ class LiveMarketPaperEngine:
             bar_fetcher = self.nse_bars_provider if mkt == "NSE" else self.nasdaq_bars_provider
             quote_fetcher = self.nse_quote_provider if mkt == "NSE" else self.nasdaq_quote_provider
 
-            def _probe_symbol(raw_sym: str) -> dict[str, Any]:
+            def _probe_symbol(raw_sym: str, *, raise_rate_limit: bool = False) -> dict[str, Any]:
                 try:
                     inst = self._resolve_instrument(mkt, raw_sym)
                 except Exception as exc:
@@ -1511,6 +1522,11 @@ class LiveMarketPaperEngine:
                         q_obj = self._fetch_live_quote(mkt, inst)
                     except Exception as exc:
                         ec, ed = self._classify_fetch_exception(mkt, exc)
+                        # A throttle must reach the provider gate so it can back
+                        # the whole market off; swallowing it here would make
+                        # every worker retry into the same 429.
+                        if raise_rate_limit and ec == "RATE_LIMITED":
+                            raise
                         q_status = ec
                         q_reason = str(redact_sensitive_data(ed))[:180]
                 if q_obj is not None:
@@ -1541,6 +1557,8 @@ class LiveMarketPaperEngine:
                         raw_bars = bar_fetcher(raw_sym, timeframe)
                     except Exception as exc:
                         ec, ed = self._classify_fetch_exception(mkt, exc)
+                        if raise_rate_limit and ec == "RATE_LIMITED":
+                            raise
                         b_err_code = ec
                         b_err_detail = str(redact_sensitive_data(ed))[:200]
                 else:
@@ -1630,10 +1648,32 @@ class LiveMarketPaperEngine:
                 }
 
             probed_rows: list[dict[str, Any]] = []
+            gate = self.fetch_gates[mkt]
             if len(eff_syms) > 1 and bars_by_symbol is None and quotes_by_symbol is None:
-                max_w = min(4, len(eff_syms))
-                with ThreadPoolExecutor(max_workers=max_w) as pool:
-                    probed_rows = list(pool.map(_probe_symbol, eff_syms))
+                # Bounded + paced fan-out: one slow or throttled symbol must not
+                # serialise the whole watchlist, and one 429 must not be retried
+                # by every worker at once.
+                outcomes = gate.map(
+                    eff_syms, lambda raw_sym: _probe_symbol(raw_sym, raise_rate_limit=True)
+                )
+                for raw_sym in eff_syms:
+                    outcome = outcomes.get(raw_sym)
+                    if outcome is None:
+                        continue
+                    if outcome.ok:
+                        probed_rows.append(outcome.value)
+                    else:
+                        probed_rows.append(
+                            {
+                                "symbol": str(raw_sym).split("|")[-1].upper(),
+                                "instrument_key": str(raw_sym),
+                                "status": "FAILED",
+                                "code": outcome.error_code,
+                                "reason": outcome.error_detail,
+                                "bars": [],
+                                "quote": None,
+                            }
+                        )
             else:
                 probed_rows = [_probe_symbol(s) for s in eff_syms]
 
@@ -1754,6 +1794,7 @@ class LiveMarketPaperEngine:
                 "symbols": symbol_reports,
                 "simulated_only": True,
                 "broker_order_api_calls": 0,
+                "provider_fetch": gate.stats(),
             }
 
             with self._lock, self._connect() as conn:
@@ -2890,17 +2931,66 @@ class LiveMarketPaperEngine:
         quote_errors_by_symbol: dict[str, str] = {}
         disconnect_error: str | None = None
 
+        def _quotes_overridden(raw_sym: str) -> bool:
+            if not quotes_by_symbol:
+                return False
+            try:
+                probe_inst = self._resolve_instrument(
+                    mkt, ikey_by_sym.get(raw_sym, raw_sym) if mkt == "NSE" else raw_sym
+                )
+            except Exception:  # noqa: BLE001 - resolution failures are reported below
+                return False
+            probe_canon = str(probe_inst.get("trading_symbol") or probe_inst.get("symbol") or raw_sym).upper()
+            return any(
+                quotes_by_symbol.get(key)
+                for key in (raw_sym, probe_canon, str(probe_inst.get("instrument_key") or ""))
+                if key
+            )
+
+        def _fetch_quote_for(raw_sym: str) -> dict[str, Any]:
+            lookup_ref = ikey_by_sym.get(raw_sym, raw_sym) if mkt == "NSE" else raw_sym
+            return self._fetch_live_quote(mkt, self._resolve_instrument(mkt, lookup_ref))
+
+        # One bounded fan-out per cycle: quotes for positions, working orders and
+        # the whole watchlist are fetched concurrently but paced by the provider
+        # gate, so a 100-symbol market no longer costs 100 sequential round trips.
+        pending_quote_syms = [s for s in active_symbols if not _quotes_overridden(s)]
+        quote_outcomes = (
+            self.fetch_gates[mkt].map(
+                pending_quote_syms,
+                _fetch_quote_for,
+                classify=lambda exc: self._classify_fetch_exception(mkt, exc),
+            )
+            if pending_quote_syms
+            else {}
+        )
+
         for sym in active_symbols:
             try:
                 lookup_ref = ikey_by_sym.get(sym, sym) if mkt == "NSE" else sym
                 inst = self._resolve_instrument(mkt, lookup_ref)
                 canon_sym = str(inst.get("trading_symbol") or inst.get("symbol") or sym).upper()
-                q = (
+                explicit_quote = (
                     (quotes_by_symbol or {}).get(sym)
                     or (quotes_by_symbol or {}).get(canon_sym)
                     or (quotes_by_symbol or {}).get(str(inst.get("instrument_key") or ""))
-                    or self._fetch_live_quote(mkt, inst)
                 )
+                if explicit_quote:
+                    q = explicit_quote
+                else:
+                    outcome = quote_outcomes.get(sym)
+                    if outcome is None or not outcome.ok:
+                        # Keep the gate's own code: re-classifying here would
+                        # relabel a rate limit as a disconnect.
+                        err_code = outcome.error_code if outcome is not None else "NO_FETCH_OUTCOME"
+                        err_detail = (
+                            outcome.error_detail if outcome is not None
+                            else f"no quote fetch outcome for {sym}"
+                        )
+                        disconnect_error = f"[{err_code}] {err_detail}"
+                        quote_errors_by_symbol[sym.split("|")[-1].upper()] = disconnect_error
+                        continue
+                    q = outcome.value
                 q_val = self._validate_quote_for_paper(
                     mkt,
                     inst,
@@ -2997,18 +3087,28 @@ class LiveMarketPaperEngine:
         if curr_state == "RUNNING" and sess["is_open"] and strategy != "manual_only" and resolved_bars_map is None:
             if bar_fetcher is not None:
                 auto_bars: dict[str, list[Candle]] = {}
+                # Same bounded, paced fan-out as the quotes: 100 symbols = 100
+                # requests, not 100 sequential round trips.
+                bar_outcomes = self.fetch_gates[mkt].map(
+                    target_strategy_syms,
+                    lambda raw_sym: bar_fetcher(raw_sym, timeframe),
+                    classify=lambda exc: self._classify_fetch_exception(mkt, exc),
+                )
                 for sym in target_strategy_syms:
                     canon_b = sym.split("|")[-1].upper()
-                    try:
-                        fetched_bars = bar_fetcher(sym, timeframe)
-                        if fetched_bars:
-                            auto_bars[sym] = fetched_bars
-                        else:
-                            missing_bar_syms.append(canon_b)
-                            bar_errors_by_symbol[canon_b] = f"Empty {timeframe} bar history returned by provider"
-                    except Exception as exc:
-                        ec, ed = self._classify_fetch_exception(mkt, exc)
-                        bar_errors_by_symbol[canon_b] = f"[{ec}] {redact_sensitive_data(ed)}"
+                    outcome = bar_outcomes.get(sym)
+                    if outcome is None or not outcome.ok:
+                        missing_bar_syms.append(canon_b)
+                        bar_errors_by_symbol[canon_b] = (
+                            f"[{outcome.error_code}] {redact_sensitive_data(outcome.error_detail)}"
+                            if outcome is not None
+                            else f"No result for {canon_b}"
+                        )
+                    elif outcome.value:
+                        auto_bars[sym] = outcome.value
+                    else:
+                        missing_bar_syms.append(canon_b)
+                        bar_errors_by_symbol[canon_b] = f"Empty {timeframe} bar history returned by provider"
                 resolved_bars_map = auto_bars
             else:
                 for sym in target_strategy_syms:

@@ -30,3 +30,6 @@ packaging/windows/TERMINAL_UI_BENCHMARK.json
 packaging/windows/dist-onedir/
 packaging/windows/build-onedir/
 packaging/windows/package-staging/
+
+# Runtime single-instance lock written by the autonomy service and its tests
+autonomy/*.lock

@@ -345,12 +345,34 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 repo_data_dir=ROOT / "data",
             )
 
+            # One bounded, rate-limit-aware provider gate per market, shared by
+            # the paper engine and the ensemble service so a cycle's quotes and
+            # bar history draw on a single request budget. Bounds come from
+            # MARKET_DATA_FETCH_* settings (never from a trading limit).
+            from app.markets.fetch_gate import FetchGateConfig, ProviderFetchGate
+
+            _fetch_cfg = FetchGateConfig(
+                max_workers=int(getattr(settings, "market_data_fetch_workers", 8)),
+                max_requests_per_second=float(getattr(settings, "market_data_fetch_max_rps", 50.0)),
+                burst=max(1, int(getattr(settings, "market_data_fetch_max_rps", 50.0))),
+                batch_timeout_seconds=float(
+                    getattr(settings, "market_data_fetch_batch_timeout_seconds", 45.0)
+                ),
+            )
+            _fetch_gates = {
+                "NSE": ProviderFetchGate(_fetch_cfg),
+                "NASDAQ": ProviderFetchGate(_fetch_cfg),
+            }
+            app.state.market_data_fetch_gates = _fetch_gates
+
             app.state.live_paper_engine = LiveMarketPaperEngine(
                 ":memory:" if runtime_base is None else (runtime_base / "live_market_paper.sqlite3"),
                 nse_quote_provider=_nse_live_quote_lookup,
                 nasdaq_quote_provider=_nasdaq_live_quote_lookup,
                 nse_bars_provider=_nse_live_bars_lookup,
                 nasdaq_bars_provider=_nasdaq_live_bars_lookup,
+                nse_fetch_gate=_fetch_gates["NSE"],
+                nasdaq_fetch_gate=_fetch_gates["NASDAQ"],
                 kronos_provider=app.state.kronos_provider,
                 nse_instrument_resolver=_resolve_nse_instrument,
                 nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
@@ -366,6 +388,8 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 nasdaq_bars_provider=_nasdaq_live_bars_lookup,
                 nse_instrument_resolver=_resolve_nse_instrument,
                 nasdaq_instrument_resolver=_resolve_nasdaq_instrument,
+                nse_fetch_gate=_fetch_gates["NSE"],
+                nasdaq_fetch_gate=_fetch_gates["NASDAQ"],
             )
             app.state.live_paper_engine.ensemble_service = app.state.ensemble_service
             # Live execution is a SEPARATE path from local paper. It starts fully

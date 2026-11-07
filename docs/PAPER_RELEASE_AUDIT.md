@@ -961,3 +961,84 @@ kill switch and adapters were not modified by that consolidation.
 * NSE live routing still only sends protected `BUY` GTT entries; `SELL` exits
   remain manual in Upstox (`exit_route_unsupported`).
 * A readiness report that passes is not evidence that live trading works.
+
+---
+
+## 16. 100-symbol single-cycle scan capacity (2026-11-07)
+
+**Request.** Assess — and, if it falls short, improve — the capacity to scan `100`
+selected symbols in one cycle, without raising any trading limit.
+
+**Limits before and after.** Unchanged: `max_open_positions = 8` (allocator
+`max_pos_cap` binds before the engine's `10`), `max_daily_orders = 40`, symbol
+exposure `25 %` of equity, total exposure `80 %` of equity, and live execution
+still **OFF**. The watchlist itself is unbounded (SQLite rows), so selecting `100`
+symbols was always possible; the open question was whether one cycle could *fetch
+and evaluate* them inside the interval — and whether the portfolio layer would then
+obey its own caps. It does: `100` evaluated → `6` orders → `6` positions.
+
+**What was wrong.** Per-symbol provider callables executed sequentially: a
+`100`-symbol cycle cost `2 × 100 × RTT` (`20.2 s` at a simulated `100 ms` round
+trip), more than the cycle interval at any realistic latency.
+
+**What changed (bounded, rate-limit-aware, no new limits).**
+
+* New `app/markets/fetch_gate.py` (`ProviderFetchGate` / `FetchGateConfig`):
+  worker bound (default `8`), request budget (`50 rps`, burst `50`), shared
+  exponential cooldown on a provider `429` (one bounded retry), AIMD budget
+  (halve per throttle window, `+10 %` of the ceiling per `25` clean successes),
+  per-symbol isolation and a whole-batch deadline so a hung call becomes a
+  per-symbol `FETCH_TIMEOUT`.
+* Wired into the scan path and the tick cycle in `app/markets/live_paper.py`, into
+  `app/ensemble/service.py` (one gate per provider, engine and ensemble sharing
+  it) and into the API (`app/api/server.py`); settings
+  `MARKET_DATA_FETCH_MAX_WORKERS` / `MARKET_DATA_FETCH_MAX_RPS` /
+  `MARKET_DATA_FETCH_TIMEOUT_SECONDS` (defaults `8` / `50` / `45`).
+* `_probe_symbol` now re-raises a provider throttle so the gate — not the
+  individual symbol — owns the backoff; without this the gate never saw the `429`
+  and `89/100` symbols were lost in the throttled arm.
+* Existing behaviour preserved: per-symbol `MISSING_DATA` / `STALE_DATA` /
+  `FAILED` classification, fail-closed decisions, deterministic per-symbol
+  results, no retry of an ambiguous *order* outcome.
+
+**Evidence (offline, deterministic, zero network and zero broker calls).**
+
+* `scripts/benchmark_market_scan.py --symbols 100` →
+  `docs/market_scan_capacity_100.json` (schema
+  `axiom.market_scan_capacity.v1`), six arms, `2 vCPU` / CPython 3.11.
+* Scan of `100` symbols: `20,244 ms` sequential → **`2,746 ms`** bounded
+  (`27.5 ms`/symbol, `50 rps`, `8` workers, `100 ms` round trip); full cycle
+  `26,840 / 20,277 ms` → **`8,734 / 4,015 ms`** (cold / warm).
+* Throttled provider (`20 rps` entitlement, `50 rps` configured): `100/100`
+  symbols analysed, `44` throttles, effective budget converged to `21.5 rps`,
+  cycle `23,911 / 16,660 ms`; **no data loss and no stray orders**.
+* Determinism: identical decision fingerprint across independent stacks
+  (`284a5a3f3ebcde49`) and identical results between bounded and sequential scans.
+* Failure isolation: `15` injected failures flag exactly `15` symbols, `0`
+  healthy symbols affected, the other `85` results identical to the clean run.
+* Memory: `tracemalloc` peak `14.0 MB`, RSS delta `26.3 MB`; `broker_order_api_calls
+  = 0` in every arm; the live execution boundary is never constructed.
+* New tests: `tests/test_market_scan_capacity.py` (`14`): worker bound, pacing,
+  one bad symbol cannot affect others, `429` → cooldown → bounded retry → clean
+  recovery, hung provider hits the deadline, `200` requests for `100` symbols,
+  bounded scan ≥ `2×` faster than sequential with identical results, portfolio
+  caps respected (`≤ 8` positions, `≤ 40` orders/day), determinism, partial
+  failure isolation, correlated-cluster refusal, and no broker order call.
+
+**Still not claimed.** No perfect timing, no perfect fills, no profitability.
+Real latency and real rate limits depend on the owner's broker plan, region and
+credentials; the entitlement table in
+`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md` §3.1.4 shows that a
+100-symbol cycle is provider-bound below roughly `15 rps`, and that no amount of
+local concurrency creates provider capacity. Live execution stayed disabled and
+no order endpoint was contacted.
+
+**Validation** (Linux, CPython 3.11, branch `arena/8d3d005e-axiom`).
+
+| Check | Command | Result |
+| --- | --- | --- |
+| New capacity suite | `pytest -q tests/test_market_scan_capacity.py` | `14 passed` |
+| Paper / ensemble / allocator suites | `pytest -q tests/test_live_market_paper_and_unified_api.py tests/test_parallel_ensemble_and_allocator.py tests/test_concurrent_multimarket_paper.py tests/test_us_equities_paper.py tests/test_kronos_paper_lifecycle_and_logs.py` | `36 passed` |
+| Static hardening gate | `pytest -q tests/test_v3_0_2_hardening.py` | `43 passed` |
+| Full suite | `python -m pytest -q` | **1469 passed, 5 skipped** |
+| Capacity benchmark | `python scripts/benchmark_market_scan.py --symbols 100 --json docs/market_scan_capacity_100.json` | six arms, exit `0`, `0` network calls, `0` broker calls |
