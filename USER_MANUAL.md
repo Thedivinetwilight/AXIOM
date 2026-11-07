@@ -103,7 +103,7 @@ The persistent header displays active market switchers (`NSE · INR ₹` and `NA
 | **`02 Watchlists & search`** | Unified NSE & NASDAQ catalog search, **Refresh NSE BOD master**, **Sync NASDAQ universe**, subclass filters (`EQUITY`, `COMMON_STOCK`, `ETF`, `TRADE_FOR_TRADE`, `SME_EQUITY`, `INDEX`), and pinned multi-market watchlists. |
 | **`03 Supercharts & ticket`** | Dark HTML5 candlestick canvas (`Local Paper / Replay`, `NSE Live Read-Only (Upstox)`, `NASDAQ Live Read-Only (Alpaca)`), timeframe shortcuts, zoom/pan, crosshair OHLC readout, `EMA 20` / `SMA 50`, horizontal/trend drawings, and dual-tab order ticket (`Local Paper Ticket` + `NSE / NASDAQ Paper` with itemized fee preview). |
 | **`04 Orders & positions`** | NSE & NASDAQ SQLite paper positions (SL/TP edit & close), working orders (cancel), fills & regulatory fee ledger, `Reconcile NSE & NASDAQ SQLite`, plus local paper positions/orders/fills. |
-| **`05 Strategies & automation`** | Completed-bar paper strategy sessions (`ema_crossover`, `rsi_mean_reversion`, `manual_only`) per market, Alpaca NASDAQ `PAPER` / `LIVE` gate controls (`Run Readiness`, `Arm Gate`, phrase `Activate LIVE`, `Disarm`, `Recover`), and Upstox NSE Live boundary link (`/autonomy`). |
+| **`05 Strategies & automation`** | Completed-bar paper strategy sessions (`ema_crossover`, `rsi_mean_reversion`, `manual_only`) per market, Per-market **PAPER / LIVE switch** (§4.3.1) above the raw gate controls, Alpaca NASDAQ `PAPER` / `LIVE` gate controls (`Run Readiness`, `Arm Gate`, phrase `Activate LIVE`, `Disarm`, `Recover`), and Upstox NSE Live boundary link (`/autonomy`). |
 | **`06 Risk & live gates`** | Positive server-side NSE (`INR ₹`) and NASDAQ (`USD $`) paper bounds, Alpaca Broker hard limits, local paper pause/stop, and durable emergency stop clear. |
 | **`07 Connections`** | Windows DPAPI credential forms and harmless read-only GET verification probes for Upstox NSE market data, Alpaca NASDAQ market data (`iex` / `sip` / `delayed_sip`), Alpaca Broker (`paper` / `live`), and Upstox Live token. |
 | **`08 Activity & audit`** | Tamper-evident SHA-256 hash-chained NSE & NASDAQ paper audit log plus redacted local session activity and JSON export. |
@@ -135,7 +135,62 @@ The persistent header displays active market switchers (`NSE · INR ₹` and `NA
 - **NASDAQ via Alpaca (`05 Strategies & automation` + `06 Risk & live gates` + `07 Connections`)**: Save `ALPACA_BROKER_PAPER` or `ALPACA_BROKER_LIVE` keys in slot 3 on `07 Connections`, save positive USD hard limits on `06 Risk & live gates`, run **Test /v2/account + /v2/clock (Read-Only)**, then on `05 Strategies & automation` run **Readiness**, **Arm Gate**, and (only when `ALPACA_BROKER_ENABLED=true` and deliberately intended) enter the exact confirmation phrase to **Activate**.
 - **NSE via Upstox (`/autonomy`)**: Save `UPSTOX_LIVE_ACCESS_TOKEN` in slot 3 on `07 Connections`, configure `AUTONOMY_LIVE_ENABLED=true`, `UPSTOX_ALGO_NAME`, and SEBI static IP registration, and complete daily readiness, **Arm**, and **Activate** on `/autonomy` (documented in `docs/AUTONOMY.md` / `/autonomy/manual`).
 
-#### 4.3.1 Per-market LIVE execution coordinator (manual, per market, disarmed after every restart)
+#### 4.3.1 The console PAPER / LIVE switch (one market at a time)
+
+`05 Strategies & automation` opens with **PAPER / LIVE Execution Switch**, above the detailed coordinator panel. It exists to make the *safe* direction (LIVE → PAPER) one click, while the *risky* direction (PAPER → LIVE) stays a guided walk through every gate the server already enforces. It is a client for `app.markets.live_execution`: no new endpoint, no second execution boundary, no order route, and no "enable both markets" control.
+
+**Two cards, never one switch.** `NSE · INR ₹` and `NASDAQ · USD $` each have their own switch, their own readiness, their own limits, and their own gate. A card shows: the selected market and currency, the broker and destination label, account/credential **presence** (never a secret, never a full account number), the eight configured limits or `NOT configured`, the current gate state and kill-switch state, the open-order policy, and the exit route.
+
+**States you can see:**
+
+| Card state | Meaning | What the switch allows |
+|---|---|---|
+| `PAPER` (default after every start) | Local simulated fills on live read-only data | *LIVE* disabled until readiness is read and passes |
+| `LIVE` (mode=LIVE, gate still `DISABLED`) | Mode intent only — no order can route | *PAPER*, or continue to Arm → Activate |
+| `LIVE · ACTIVE` | Gate `ACTIVE` with a 300-second permit | *PAPER* (disarm + revoke), Emergency Stop below |
+| `LIVE` disabled + reason | A blocking readiness check, a stale read, or no read yet | Nothing: the control is disabled and a click contacts no endpoint |
+
+**PAPER → LIVE is four deliberate clicks.** Each one is a separate state on screen and none of them is skipped or implied:
+
+1. **Read readiness (GET only)** — `GET /api/markets/live/{market}/readiness` plus the report `GET /api/markets/live/readiness`. Prints every blocker by name with its meaning, the documented exit route, and the open-order policy. This step never changes a mode and never arms anything.
+2. **Set mode LIVE** — `POST /api/markets/live/{market}/mode {mode: LIVE}`. The gate stays `DISARMED`; a mode alone can never place an order. The cached readiness read is discarded at this point, because `mode_is_live` is itself a readiness check.
+3. **Arm** — `POST /api/markets/live/{market}/arm`, offered only after a *fresh* passing read. The server re-runs readiness and refuses with `409` if anything fails.
+4. **Acknowledge + phrase + Activate** — the risk acknowledgement checkbox, the exact phrase `ACTIVATE LIVE REAL-MONEY TRADING`, and (where the market routes no exit) the no-exit acknowledgement. Only then does **4. Activate LIVE** enable, and it sends `POST /api/markets/live/{market}/activate`.
+
+Activating LIVE **does not start or resume a strategy** and does not start a paper session: the switch makes no such call, and the coordinator only executes what a strategy independently signals.
+
+**LIVE → PAPER is one click and changes nothing else.** It sends `POST /api/markets/live/{market}/mode {mode: PAPER}`; the server disarms the gate and revokes the permit. The switch never cancels, modifies, or test-submits a working order and never touches a protective exit — the only control that can attempt a cancel is *Emergency Stop* with `cancel_working=true`, which this switch does not use.
+
+**Why a switch can be disabled, in the operator's words.** Every name below is the server's own check name; the console prints the name and this meaning.
+
+| Check | Meaning when it fails |
+|---|---|
+| `configuration_complete` | A required broker/account dependency is missing (listed as *Missing dependency*). |
+| `risk_limits_configured` | Fewer than all eight per-market limits are positive — partial or zero limits fail closed. |
+| `no_unresolved_intents` | An earlier live order outcome is unresolved; **Reconcile** first. |
+| `not_blocked` | The market is latched after an unknown outcome; **Reconcile** first. |
+| `kill_switch_not_engaged` | Emergency Stop is engaged; **Reset kill switch** (explicit acknowledgement) returns the gate to `DISABLED`. |
+| `live_master_flag` | `AUTONOMY_LIVE_ENABLED` is not set on the host. |
+| `separate_live_credential` | The separate `UPSTOX_LIVE_ACCESS_TOKEN` is missing (paper/read-only keys cannot unlock LIVE). |
+| `algo_name_configured` / `static_ip_configured` | `UPSTOX_ALGO_NAME` / SEBI static IP registration is missing. |
+| `catalog_authoritative_today` | Today's Upstox BOD instrument catalog is not authoritative. |
+| `market_session_open` / `calendar_session_open` | The exchange session is closed. |
+| `account_verified` / `account_trading_allowed` | The account cannot be read, or the broker reports it blocked from trading. |
+| `account_currency_inr` / `account_currency_usd` | The account currency does not match the market. |
+| `market_quote_available` | No live quote for the requested symbol. |
+| `broker_enabled` / `alpaca_broker_configured` | The Alpaca broker service is disabled or not bound. |
+| `environment_is_live` | Alpaca is bound to PAPER keys, not the separate live keys. |
+| `service_unblocked` / `reconciliation_ok` | The broker service is latched, or the last reconciliation failed. |
+| `clock_synced` / `daily_loss_within_limit` | Server clock skew, or the daily live-loss limit is reached. |
+| `mode_is_live` | **Not a blocker.** It is the step the switch performs at step 2; it is listed separately until the mode is LIVE. |
+
+Any answer the server cannot give — timeout, `409` refusal, unexpected error — invalidates the displayed readiness evidence and re-locks LIVE. A refused Arm never leaves the card claiming a passing check. Nothing about the mode is stored in the browser: a reload or restart shows the server's own state, and every start begins at `PAPER` / `DISABLED`.
+
+**The NSE exit limitation stays on screen.** For NSE the card prints **NO ROUTED EXIT — AXIOM cannot close an NSE position**, the documented closing path (the GTT `STOPLOSS`/`TARGET` legs placed with the entry), and the manual fallback (close in the Upstox app, then Reconcile). LIVE cannot be activated for NSE until that is acknowledged with a checkbox of its own; the switch offers no exit control, because the adapter refuses any NSE exit with `exit_route_unsupported` before a broker call.
+
+**What this switch is not.** It is not a readiness claim for either broker. In this build both markets report blocking checks and stay `PAPER` / `DISABLED`; the switch only shows what the server already says. The console's local `API_TOKEN` remains separate from every broker credential, and no broker secret is displayed, typed into, or stored by the switch.
+
+#### 4.3.2 Per-market LIVE execution coordinator (manual, per market, disarmed after every restart)
 
 `LIVE-MARKET LIVE` is a **separate execution path** from `LIVE-MARKET PAPER`: it has its own per-market SQLite journal, order intents, audit hash chain, risk limits, and broker clients. It never converts a paper session, and a market set to `LIVE` is refused by every paper endpoint (`409`, mode separation). Both markets start as `PAPER` with the gate `DISABLED` on every process start, crash recovery, and restart — nothing about live trading is persisted except the mode *intent*, the journal, and the limits.
 
@@ -159,7 +214,7 @@ Stopping and recovery:
 - A failed protective stop on NASDAQ latches `PROTECTION_FAILED` and disarms the market for operator action.
 - Restarting AXIOM, recovering from a crash, or a background-cycle timeout leaves the market **disarmed** (`DISABLED` / `CYCLE_TIMEOUT_RECONCILE_REQUIRED`) and requires readiness, Arm, and Activate again.
 
-#### 4.3.2 Terminal console ↔ server routes (nothing calls a removed route)
+#### 4.3.3 Terminal console ↔ server routes (nothing calls a removed route)
 
 The `/terminal` console is an authenticated HTML page and calls only routes this build actually exposes. It previously called the removed Vantage order surface, which is why unlocking the terminal failed with **"Not Found"**.
 
