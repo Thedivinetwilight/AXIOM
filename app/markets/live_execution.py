@@ -707,6 +707,15 @@ class LiveMarketAdapter:
     broker_name = ""
     destination_label = ""
     supports_short_entry = False
+    supports_exit = False
+
+    def exit_route(self) -> dict[str, Any]:
+        """Why this adapter can or cannot route an exit order (no broker call)."""
+        return {
+            "supported": bool(self.supports_exit),
+            "reason": "" if self.supports_exit else f"{self.market} adapter has no exit route",
+            "blockers": [] if self.supports_exit else ["no exit route implemented"],
+        }
 
     def missing_dependencies(self) -> list[str]:
         return ["adapter is not implemented"]
@@ -777,6 +786,24 @@ class NasdaqLiveAdapter(LiveMarketAdapter):
     broker_name = "Alpaca Trading API v2"
     destination_label = "NASDAQ · ALPACA LIVE · REAL MONEY"
     supports_short_entry = True
+    # A close-side SELL is routed here, but only through the coordinator's
+    # held-long guard: app.markets.live_execution.LiveExecutionCoordinator.submit
+    # refuses a SELL without protective prices unless the broker position covers
+    # the quantity, before any adapter call. Upstox/NSE has no equivalent proof,
+    # which is why NseLiveAdapter keeps supports_exit = False.
+    supports_exit = True
+
+    def exit_route(self) -> dict[str, Any]:
+        return {
+            "supported": True,
+            "route": "close_only_sell",
+            "reason": (
+                "SELL is routed through the shared submit path; the coordinator refuses it "
+                "unless the broker position covers the quantity (no naked shorts)"
+            ),
+            "blockers": [],
+            "requires": ["held long position from the broker, qty <= held"],
+        }
 
     def __init__(
         self,
@@ -1118,6 +1145,45 @@ class NasdaqLiveAdapter(LiveMarketAdapter):
         return svc.cancel_order(client_order_id)
 
 
+#: Blockers that keep the NSE exit route disabled. Each one is a documented
+#: broker constraint or an app-level constraint, not a guess; they are surfaced
+#: in the readiness report so an operator can see exactly what would have to
+#: change before an exit route could be enabled.
+NSE_EXIT_BLOCKERS: tuple[tuple[str, str], ...] = (
+    (
+        "gtt_legs_are_the_close",
+        "Upstox documents that once a protected GTT entry executes, its STOPLOSS and TARGET "
+        "legs are live SELL orders for the same quantity. An additional exit order would be a "
+        "second independent sell of the same holding; the legs are only mutually exclusive "
+        "inside one GTT.",
+    ),
+    (
+        "cancel_protection_refused_with_open_position",
+        "The safe ordering (cancel protection, then place the exit) is refused by "
+        "app/autonomy/upstox.py: cancel_gtt refuses to remove protection while a position is "
+        "open, because that would leave the position unprotected.",
+    ),
+    (
+        "edis_authorisation_not_verifiable",
+        "Upstox requires EDIS authorisation for any GTT SELL leg and documents no API to query "
+        "EDIS state, so AXIOM cannot verify it; accepting an operator attestation would be an "
+        "unverified precondition for a real sell.",
+    ),
+    (
+        "settlement_availability_not_exposed",
+        "/v2/portfolio/short-term-positions reports net quantity but does not distinguish "
+        "settled, EDIS-authorized holdings from same-day unsettled buys, so 'holdings >= qty' "
+        "cannot be established from the documented reads AXIOM has.",
+    ),
+    (
+        "single_leg_sell_cannot_be_proven_closing",
+        "A documented SINGLE GTT with transaction_type SELL has the same fields whether it "
+        "closes a holding or opens a short (product I); proving it can only close would require "
+        "a broker-side guarantee AXIOM cannot obtain.",
+    ),
+)
+
+
 class NseLiveAdapter(LiveMarketAdapter):
     """NSE/INR live routing through Upstox protected multi-leg GTT v3 orders."""
 
@@ -1126,6 +1192,21 @@ class NseLiveAdapter(LiveMarketAdapter):
     broker_name = "Upstox (Protected Multi-Leg GTT v3)"
     destination_label = "NSE · UPSTOX LIVE · REAL MONEY"
     supports_short_entry = False
+    supports_exit = False  # see NSE_EXIT_BLOCKERS and docs/LIVE_EXECUTION_READINESS.md
+
+    def exit_route(self) -> dict[str, Any]:
+        return {
+            "supported": False,
+            "route": "none",
+            "reason": (
+                "NSE live exits are not routed: the protected GTT legs already sell the position "
+                "and every documented standalone exit path cannot be shown to close rather than "
+                "open exposure"
+            ),
+            "blockers": [name for name, _ in NSE_EXIT_BLOCKERS],
+            "blocker_details": {name: detail for name, detail in NSE_EXIT_BLOCKERS},
+            "operator_action": "exit the position manually in the Upstox app and reconcile",
+        }
 
     def __init__(
         self,
@@ -1345,8 +1426,11 @@ class NseLiveAdapter(LiveMarketAdapter):
     ) -> dict[str, Any]:
         if side.upper() != "BUY":
             raise LiveBrokerRejected(
-                "exit_route_unsupported: NSE live exits are not routed through the protected-GTT "
-                "adapter; exit the position manually in Upstox (no new order endpoint was added)"
+                "exit_route_unsupported: NSE live exits are not routed. The protected GTT legs "
+                "already sell the position, cancel_gtt refuses to remove protection from an open "
+                "position, EDIS authorisation cannot be verified through a documented API, and "
+                "the position read does not distinguish settled holdings; exit manually in the "
+                "Upstox app and reconcile (see NSE_EXIT_BLOCKERS / docs/LIVE_EXECUTION_READINESS.md)"
             )
         permit = self.gate.permit()
         if permit is None:

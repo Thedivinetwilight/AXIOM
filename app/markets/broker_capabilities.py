@@ -84,6 +84,31 @@ class IdempotencyFacts:
 
 
 @dataclass(frozen=True)
+class ExitRouteFacts:
+    """What the documented broker surface offers for closing a position.
+
+    Recorded separately from entry capabilities because a documented ``SELL``
+    field is not evidence that a request can only *close* exposure. Only paths
+    AXIOM can prove are close-only are counted as closing.
+    """
+
+    routed: bool
+    summary: str
+    closing_paths: tuple[str, ...]
+    opening_risks: tuple[str, ...]
+    operator_fallback: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "routed": self.routed,
+            "summary": self.summary,
+            "closing_paths": list(self.closing_paths),
+            "opening_risks": list(self.opening_risks),
+            "operator_fallback": self.operator_fallback,
+        }
+
+
+@dataclass(frozen=True)
 class MarketCapabilities:
     market: str
     broker: str
@@ -98,6 +123,7 @@ class MarketCapabilities:
     account_operations: tuple[str, ...]
     order_operations: tuple[str, ...]
     unsupported: tuple[str, ...]
+    exit_route: ExitRouteFacts
     notes: tuple[str, ...]
     sources: tuple[str, ...]
     documented_as_of: str = DOCUMENTED_AS_OF
@@ -117,6 +143,7 @@ class MarketCapabilities:
             "account_operations": list(self.account_operations),
             "order_operations": list(self.order_operations),
             "unsupported": list(self.unsupported),
+            "exit_route": self.exit_route.as_dict(),
             "notes": list(self.notes),
             "sources": list(self.sources),
             "documented_as_of": self.documented_as_of,
@@ -205,6 +232,33 @@ _NSE = MarketCapabilities(
         "after-market orders (is_amo) — documented, not enabled: AXIOM requires an open session",
         "multi/slice order endpoints — documented, not enabled in AXIOM",
     ),
+    exit_route=ExitRouteFacts(
+        routed=False,
+        summary=(
+            "No NSE exit is routed. Every documented SELL path is either executable while flat "
+            "or cannot be verified as closing from inside AXIOM."
+        ),
+        closing_paths=(
+            "the STOPLOSS / TARGET legs of the protected GTT that opened the position — these "
+            "are live SELL orders for the same quantity and are the supported way the position "
+            "closes; they are placed with the entry, not on operator demand",
+        ),
+        opening_risks=(
+            "a standalone SELL GTT: an ENTRY rule with transaction_type SELL is executable while "
+            "flat and would open a short position",
+            "a SINGLE-rule SELL GTT: the documented fields are identical whether it closes a "
+            "holding or opens a short (product I), so it cannot be shown to be close-only",
+            "cancel-then-sell: app.autonomy.upstox.cancel_gtt refuses to remove protection while "
+            "a position is open, so the position would be unprotected between the two calls",
+            "holdings cannot bound the quantity: /v2/portfolio/short-term-positions reports net "
+            "quantity and does not distinguish settled, EDIS-authorised holdings from same-day "
+            "unsettled buys",
+        ),
+        operator_fallback=(
+            "close the position manually in the Upstox app, then run the AXIOM reconcile step so "
+            "the journal records the broker's state"
+        ),
+    ),
     notes=(
         "Order, modify and cancel calls target the documented enhanced order host; "
         "authentication and all other calls use the standard API host.",
@@ -266,6 +320,23 @@ _NASDAQ = MarketCapabilities(
         "bracket / OCO / OTO order classes — documented, not enabled in AXIOM",
         "extended_hours — documented for limit+day, not enabled in AXIOM",
         "fractional quantities — documented for market+day, not enabled in AXIOM",
+    ),
+    exit_route=ExitRouteFacts(
+        routed=True,
+        summary=(
+            "Alpaca documents plain close-side orders, and AXIOM's coordinator already refuses a "
+            "SELL that would exceed the held long, so the exit shares the entry's gates."
+        ),
+        closing_paths=(
+            "a SELL order against a held long, validated by the coordinator against the broker "
+            "position and bounded by the held quantity",
+        ),
+        opening_risks=(
+            "a SELL with no held position — refused by the coordinator's naked-short guard before "
+            "any broker call",
+            "a SELL larger than the held quantity — refused by the same guard",
+        ),
+        operator_fallback="cancel and reconcile through the existing endpoints if the exit is refused",
     ),
     notes=(
         "The paper environment is a separate documented host from the live environment: it "
