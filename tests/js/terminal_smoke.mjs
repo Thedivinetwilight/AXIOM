@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { arch, cpus, platform } from "node:os";
 import { JSDOM } from "jsdom";
+import { consoleReadRoutes, consoleWriteRoutes } from "./console_routes.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const benchmarkOutput = process.env.AXIOM_UI_BENCHMARK_OUTPUT || "";
@@ -138,6 +139,13 @@ async function fetchFake(url, options = {}) {
   const path = String(url); const method = options.method || "GET";
   const body = options.body ? JSON.parse(options.body) : null;
   calls.push({ path, method, body, headers: options.headers || {} });
+  const projected = consoleReadRoutes(path, current, { events: [{ seq: 1, market: "NSE", event_kind: "FAKE_AUDIT", payload: { safe: true }, created_at: now(), entry_hash: "fake-hash" }] });
+  if (projected !== undefined) return response(projected);
+  const emergency = consoleWriteRoutes(path, method, body, {
+    halt: () => { current.status.emergency_stop = true; },
+    clear: () => { current.status.emergency_stop = false; },
+  });
+  if (emergency !== undefined) return response(emergency);
   if (path === "/api/trading/status") return response(current.status);
   if (path === "/api/trading/performance") return response({
     unit: "milliseconds", sample_capacity_per_metric: 512,

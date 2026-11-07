@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { consoleReadRoutes, consoleWriteRoutes } from "./console_routes.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const html = readFileSync(resolve(root, "app/static/terminal/index.html"), "utf8");
@@ -233,6 +234,11 @@ async function fakeFetch(input, options = {}) {
       end_timestamp: "2026-10-29T20:00:00Z", estimated_missing_bars: 0, real_market_data: true,
       sha256: "b".repeat(64),
     };
+
+  const projected = consoleReadRoutes(url.pathname, makeLegacyWorkspace(), { events: [{ seq: 1, market: "NSE", event_kind: "FAKE_AUDIT", payload: { safe: true }, created_at: now(), entry_hash: "fake-hash" }] });
+  if (projected !== undefined) return json(projected);
+  const emergency = consoleWriteRoutes(url.pathname, method, body, {});
+  if (emergency !== undefined) return json(emergency);
     datasets.push(ds);
     return json({ ok: true, dataset: ds });
   }

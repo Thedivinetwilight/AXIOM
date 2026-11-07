@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { consoleReadRoutes, consoleWriteRoutes } from "./console_routes.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const html = readFileSync(resolve(root, "app/static/terminal/index.html"), "utf8");
@@ -248,6 +249,10 @@ async function fetchFake(input, init = {}) {
     positions: [], open_orders: [], order_history: [], deals: [], quotes: [], audit: [],
     risk_rejections: [], reconciliation: [], strategies: [],
   };
+  const projected = consoleReadRoutes(url.pathname, legacyWs, { events: [{ seq: 1, market: "NSE", event_kind: "FAKE_AUDIT", payload: { safe: true }, created_at: now(), entry_hash: "fake-hash" }] });
+  if (projected !== undefined) return json(projected);
+  const emergency = consoleWriteRoutes(url.pathname, method, body, {});
+  if (emergency !== undefined) return json(emergency);
   if (url.pathname === "/api/trading/workspace" || url.pathname === "/api/terminal/workspace") return json(legacyWs);
   if (url.pathname === "/api/trading/status") return json(legacyWs.status);
   if (url.pathname === "/api/trading/activity") return json({ events: [] });
@@ -423,7 +428,10 @@ assert.ok($("mm-paper-fill-rows").textContent.includes("SIMULATED"));
 assert.ok($("mm-paper-position-rows").textContent.includes("PAPER"), "the ledger stays labelled PAPER");
 
 // 14. Absolutely no paper/broker order endpoint was ever contacted by the panel.
-assert.equal(apiCalls.filter((c) => /paper\/orders|alpaca-broker\/order/.test(c.path)).length, 0);
+assert.equal(
+  apiCalls.filter((c) => /paper\/orders|alpaca-broker\/order/.test(c.path) && c.method !== "GET").length, 0,
+  "reading the paper order book is not an order; no order write may occur",
+);
 assert.equal(apiCalls.filter((c) => c.path.startsWith("/api/markets/live/") && c.method === "POST" && /approved|submit|order/.test(c.path)).length, 0);
 
 console.log(`live_execution_panel_smoke (jsdom): PASS (${liveCalls.length} live API calls, 0 order endpoints)`);

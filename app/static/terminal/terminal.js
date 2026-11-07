@@ -39,6 +39,68 @@ const state = {
   submissionUncertain: false, lastError: null,
 };
 
+/* Every path this console calls, in one place.
+ *
+ * The legacy broker order surface was removed from the server; calling its
+ * routes produced "Not Found" during token unlock. Each entry below is an
+ * existing, authenticated route on the current server, and nothing here adds an
+ * order endpoint: the console composes read-only paper/state views client-side
+ * from routes the server already exposes.
+ */
+const ROUTES = Object.freeze({
+  authProbe: "/paper/status",                   // authenticated + read-only; no broker call
+  paperStatus: "/paper/status",
+  paperAccount: "/paper/account",
+  paperPositions: "/paper/positions",
+  paperOrders: "/paper/orders?limit=200",
+  paperTrades: "/paper/trades?limit=200",
+  localHaltState: "/dashboard/data",            // durable legacy halt flag (read-only)
+  auditEvents: "/api/markets/paper/audit/events?limit=150",
+  performance: "/api/performance",
+  credentialStore: "/api/connections/alpaca/credentials",   // presence + backend only
+  emergencyStop: "/api/markets/emergency-stop",
+  emergencyReset: "/api/markets/emergency-stop/reset",
+  engineStop: "/engine/stop",
+  engineResume: "/engine/resume",
+  multiMarketOverview: "/api/markets/overview",
+  listings: "/api/listed-assets/status",
+  alpacaBrokerStatus: "/api/alpaca-broker/status",
+});
+
+/* Data the current server cannot supply to this console. Shown in the UI so a
+ * gap is never rendered as a zero, a blank, or a fresh value. */
+const UNAVAILABLE_DATA = Object.freeze({
+  intents: "No order-intent feed endpoint exists on the current server, so unresolved intents cannot be counted or auto-cleared here.",
+  quotes: "No bulk quote-map endpoint exists on the current server; read quotes on Supercharts or Watchlists.",
+  reconciled: "The current server exposes no reconciliation timestamp for this paper workspace.",
+});
+
+/* Turn a failed auth probe into a distinct, actionable message. The three cases
+ * below must never collapse into one another or into a generic failure. */
+function authFailure(error) {
+  const status = Number(error?.status || 0);
+  const detail = String(error?.message || "").slice(0, 400);
+  if (error?.network) {
+    return { kind: "unreachable", message: "The local AXIOM server is not reachable. Start it, then unlock again." };
+  }
+  if (status === 401) {
+    return { kind: "wrong_token", message: "The API token was rejected (401). Check the API_TOKEN value configured on the server." };
+  }
+  if (status === 503) {
+    return {
+      kind: "token_not_configured",
+      message: "This server has no API_TOKEN configured (503), so protected routes are closed. Set API_TOKEN and restart AXIOM.",
+    };
+  }
+  if (status === 404) {
+    return {
+      kind: "route_missing",
+      message: `This server build does not expose ${ROUTES.authProbe} (404). The console and server versions differ; update the installed AXIOM.`,
+    };
+  }
+  return { kind: "other", message: detail || "Token check failed." };
+}
+
 class ApiError extends Error {
   constructor(message, status = 0, network = false) {
     super(message);
@@ -196,8 +258,10 @@ function showAuth(message = "") {
 async function unlock(token) {
   state.token = token;
   try {
-    await api("/api/trading/status", { keepAuth: true });
-    storageSet("axiom-api-token", token);
+    // Validated against an authenticated, read-only route: success proves only
+    // that API_TOKEN is accepted. It never arms, activates or orders anything.
+    await api(ROUTES.authProbe, { keepAuth: true });
+    storageSet("axiom-api-token", token);   // this browser tab's sessionStorage only
     $("auth-token").value = ""; $("auth-error").textContent = "";
     $("auth-gate").hidden = true; $("app").hidden = false;
     await refreshAll();
@@ -205,7 +269,8 @@ async function unlock(token) {
   } catch (error) {
     state.token = ""; storageSet("axiom-api-token", "");
     $("auth-gate").hidden = false; $("app").hidden = true;
-    $("auth-error").textContent = error.message;
+    state.authFailure = authFailure(error);
+    $("auth-error").textContent = state.authFailure.message;
   }
 }
 
@@ -258,17 +323,89 @@ async function confirmDialog() {
   }
 }
 
+/* The workspace is a CLIENT-SIDE view of existing read-only routes. No aggregate
+ * endpoint was added, and no order route is involved. */
+async function loadPaperSnapshot() {
+  const settled = await Promise.allSettled([
+    api(ROUTES.paperStatus), api(ROUTES.paperAccount), api(ROUTES.paperPositions),
+    api(ROUTES.paperOrders), api(ROUTES.paperTrades), api(ROUTES.localHaltState),
+  ]);
+  const value = (index, fallback) => (settled[index].status === "fulfilled" ? settled[index].value : fallback);
+  const failure = settled.find((entry) => entry.status === "rejected");
+  const status = value(0, null);
+  const account = value(1, null);
+  const positions = value(2, { positions: [] });
+  const orders = value(3, { orders: [] });
+  const trades = value(4, { trades: [] });
+  const halt = value(5, {});
+  if (status === null || account === null) {
+    // Paper state is the console's core view: refuse to render a half-workspace.
+    throw failure?.reason || new ApiError("Local paper state is unavailable", 0, false);
+  }
+  const paperState = String(status.state || "STOPPED");
+  const currency = account.currency || "";
+  return {
+    /* Only fields the current routes genuinely provide are filled. Anything the
+     * server cannot supply stays null and is labelled in the UI (UNAVAILABLE_DATA). */
+    status: {
+      mode: "AXIOM_PAPER",
+      engine_state: paperState,
+      emergency_stop: Boolean(halt.emergency_stop),
+      emergency_reason: halt.emergency_reason || null,
+      live_trading: false,
+      paper_mode: true,
+    },
+    paper_session: {
+      state: paperState,
+      provider: status.provider || null,
+      feed_kind: status.feed_kind || null,
+      strategy: status.strategy || null,
+      automation_enabled: status.automation_enabled === true,
+      review_policy: status.review_policy || null,
+      stop_reason: status.stop_reason || null,
+      current_run: status.current_run || null,
+      last_run: status.last_run || null,
+      symbols: status.symbols || [],
+      connection: status.connection || null,
+      processed_bars: status.processed_bars ?? null,
+    },
+    account: {
+      currency, cash: account.cash, equity: account.equity,
+      margin_free: account.cash, realized_pnl: account.realized_pnl,
+      unrealized_pnl: account.unrealized_pnl, daily_pnl: account.daily_pnl,
+      drawdown: account.drawdown, fees: account.fees,
+    },
+    account_currency: currency,
+    positions: positions.positions || [],
+    orders: orders.orders || [],
+    deals: trades.trades || [],
+    pnl: {
+      unrealized: account.unrealized_pnl,
+      realized_visible_history: account.realized_pnl,
+    },
+    intents: null,             // not exposed by this server build
+    intents_available: false,
+    quotes: {},                // no bulk quote route; panel explains the gap
+    reconciled_at: null,       // no reconciliation timestamp on this build
+    broker_state_available: true,
+  };
+}
 async function loadWorkspace({ background = false } = {}) {
   if (state.refreshing) return state.workspace;
   state.refreshing = true;
   try {
-    const workspace = await api("/api/trading/workspace");
+    const workspace = await loadPaperSnapshot();
     const previousMode = state.mode;
     state.workspace = workspace; state.mode = "AXIOM_PAPER"; state.lastError = null;
     if (previousMode && previousMode !== state.mode) resetModeLocalState();
     if (state.submissionUncertain) {
-      const unresolved = (workspace.intents || []).some((item) => UNRESOLVED.has(item.status));
-      if (!unresolved && workspace.broker_state_available !== false) state.submissionUncertain = false;
+      // Fail closed: without an intent feed the console cannot prove resolution,
+      // so an uncertain outcome stays flagged until the operator locks/reloads.
+      const intents = workspace.intents;
+      if (Array.isArray(intents)) {
+        const unresolved = intents.some((item) => UNRESOLVED.has(item.status));
+        if (!unresolved && workspace.broker_state_available !== false) state.submissionUncertain = false;
+      }
     }
     renderAll();
     return workspace;
@@ -280,30 +417,52 @@ async function loadWorkspace({ background = false } = {}) {
 }
 async function loadActivity() {
   try {
-    const result = await api("/api/trading/activity?limit=300");
-    state.activity = result.events || [];
+    // Hash-chained local paper audit (read-only). Mapped, not reshaped, server-side.
+    const result = await api(ROUTES.auditEvents);
+    state.activity = (result.events || []).map((event) => ({
+      event_type: event.event_kind || event.event_type || "AUDIT",
+      timestamp: event.created_at || event.timestamp || null,
+      environment: event.market ? `LOCAL PAPER · ${event.market}` : "LOCAL PAPER",
+      payload: event.payload || {},
+      seq: event.seq,
+      entry_hash: event.entry_hash,
+    }));
     renderActivity(); renderOverviewActivity();
   } catch (error) { toast("Activity refresh failed", error.message, "err"); }
   await loadStructuredPaperLogs();
 }
 async function loadConnectionInfo() {
-  try { state.connectionInfo = await api("/api/trading/connection"); renderConnections(); }
-  catch (error) { state.connectionInfo = { secret_store: "unavailable" }; renderConnections(); }
+  // Presence + storage backend only. The response never carries a secret.
+  try {
+    const store = await api(ROUTES.credentialStore);
+    const backend = String(store?.backend || "unavailable");
+    state.connectionInfo = {
+      secret_store: backend === "windows-dpapi" ? "Windows DPAPI protected store"
+        : backend === "owner-0600-file" ? "Owner-only file store (0600)"
+          : "Protected store unavailable",
+      secret_store_available: backend === "windows-dpapi" || backend === "owner-0600-file",
+      backend,
+      data_credential_present: Boolean(store?.present ?? store?.credential_present),
+    };
+  } catch (error) {
+    state.connectionInfo = { secret_store: "Protected store unavailable", secret_store_available: false, backend: "unavailable" };
+  }
+  renderConnections();
 }
 async function loadPerformance() {
-  try { state.performance.backend = await api("/api/trading/performance"); }
+  try { state.performance.backend = await api(ROUTES.performance); }
   catch (error) { state.performance.backend = { error: error.message, metrics: {} }; }
   renderPerformance();
 }
 async function loadListedAssets() {
-  try { state.listedAssets = await api("/api/listed-assets/status"); }
+  try { state.listedAssets = await api(ROUTES.listings); }
   catch (error) { state.listedAssets = { error: error.message, execution_supported: false }; }
   renderListedAssets();
 }
 
 async function loadBrokerDestination() {
   // Broker path is optional; absence must never break the console.
-  try { state.alpacaBroker = await api("/api/alpaca-broker/status"); }
+  try { state.alpacaBroker = await api(ROUTES.alpacaBrokerStatus); }
   catch (error) { state.alpacaBroker = null; }
   renderMode();
 }
@@ -454,23 +613,25 @@ function renderOverview() {
     ["NSE (INR ₹)", `Upstox · ${nseConn}`],
     ["NASDAQ (USD $)", `Alpaca · ${usConn}`],
     ["Alpaca Broker", alpacaGate],
-    ["Reconciled", timeText(workspace.reconciled_at)],
+    ["Reconciled", workspace.reconciled_at ? timeText(workspace.reconciled_at) : `Not reported — ${UNAVAILABLE_DATA.reconciled}`],
     ["Detail", "Local paper + NSE/NASDAQ read-only market data"],
   ];
   $("overview-connection").innerHTML = connectionRows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
-  const unresolved = (workspace.intents || []).filter((item) => UNRESOLVED.has(item.status)).length;
+  const intentsKnown = Array.isArray(workspace.intents);
+  const unresolved = intentsKnown ? workspace.intents.filter((item) => UNRESOLVED.has(item.status)).length : null;
   const session = workspace.paper_session || {};
   const guardLabel = status.emergency_stop ? "Durable emergency stop is SET"
     : `${session.state || "STOPPED"} · ${session.automation_enabled ? `${session.strategy} automation ON` : session.review_policy === "MANUAL_ORDER_REVIEW" ? "manual-only · automation OFF" : "no active strategy"}`;
   $("overview-risk").innerHTML = `
     <div class="inline-status ${status.emergency_stop ? "err" : "warn"}">${escapeHtml(guardLabel)}</div>
-    <dl class="detail-list"><dt>NSE &amp; NASDAQ risk bounds</dt><dd>Per-market INR &amp; USD caps</dd><dt>Unresolved intents</dt><dd>${unresolved}</dd><dt>Live placement</dt><dd>${state.alpacaBroker?.gate?.state === "ACTIVE" ? "Alpaca active" : "Blocked by default"}</dd></dl>`;
+    <dl class="detail-list"><dt>NSE &amp; NASDAQ risk bounds</dt><dd>Per-market INR &amp; USD caps</dd><dt>Unresolved intents</dt><dd>${intentsKnown ? unresolved : escapeHtml("Unavailable — " + UNAVAILABLE_DATA.intents)}</dd><dt>Live placement</dt><dd>${state.alpacaBroker?.gate?.state === "ACTIVE" ? "Alpaca active" : "Blocked by default"}</dd></dl>`;
   const quotes = workspace.quotes || {};
   const quoteEntries = Object.entries(quotes);
+  if (!quoteEntries.length) state.lastQuoteNote = UNAVAILABLE_DATA.quotes;
   $("overview-quotes").innerHTML = quoteEntries.length ? quoteEntries.map(([symbol, quote]) => {
     const age = ageSeconds(quote.timestamp);
     return `<div class="quote-row"><div><strong>${escapeHtml(symbol)}</strong><small>${escapeHtml(timeText(quote.timestamp))}</small></div><div><strong>${fmt(quote.bid)} / ${fmt(quote.ask)}</strong><small>${Number.isFinite(age) ? `${age.toFixed(1)}s old` : "freshness unknown"}</small></div></div>`;
-  }).join("") : `<p class="empty-state">Open Supercharts or Watchlists to inspect NSE (Upstox), NASDAQ (Alpaca), or local paper bars.</p>`;
+  }).join("") : `<p class="empty-state">${escapeHtml(UNAVAILABLE_DATA.quotes)}</p>`;
   const checks = operatorChecklist();
   $("overview-checklist").innerHTML = checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   renderPaperRun(); renderOverviewActivity();
@@ -576,9 +737,14 @@ function renderRisk() {
 
 function renderConnections() {
   if (!$("secret-store-status")) return;
-  const info = state.connectionInfo; const secretStatus = String(info?.secret_store || "Checking protected storage…");
-  $("secret-store-status").textContent = secretStatus.startsWith("Windows") ? "DPAPI PROTECTED" : "PROTECTED STORE UNAVAILABLE";
-  $("secret-store-status").className = `status-pill ${secretStatus.startsWith("Windows") ? "ok" : "err"}`;
+  const info = state.connectionInfo;
+  if (!info) { $("secret-store-status").textContent = "STORE —"; $("secret-store-status").className = "status-pill"; return; }
+  const available = info.secret_store_available === true;
+  $("secret-store-status").textContent = available
+    ? (info.backend === "windows-dpapi" ? "DPAPI PROTECTED" : "PROTECTED FILE STORE")
+    : "PROTECTED STORE UNAVAILABLE";
+  $("secret-store-status").className = `status-pill ${available ? "ok" : "err"}`;
+  $("secret-store-status").title = `${info.secret_store || "unavailable"} · presence reported only, no secret is ever returned to this page`;
 }
 
 function renderPerformance() {
@@ -1135,11 +1301,23 @@ function emergencyStop() {
     title: "Set durable emergency stop",
     body: `<p><strong>This halts LOCAL PAPER${state.mm.available ? " plus NSE & NASDAQ Live-Market Paper, Upstox Autonomy, and Alpaca Broker" : ""}, and persists across restart.</strong></p><p>The local paper strategy stops and working simulated orders are cancelled. Protective SL/TP on open positions are preserved. New entries stay blocked until explicit clear.</p>`,
     confirmLabel: "Set emergency stop", onConfirm: async () => {
-      const result = await api("/api/trading/emergency", { body: {} });
-      if (state.mm.available) await api("/api/markets/emergency-stop", { body: { reason: "operator emergency stop" } }).catch(() => {});
+      // Both targets already exist and are authenticated: the legacy local halt
+      // (persisted flag + simulator pause) and the atomic multi-subsystem stop.
+      const results = [];
+      try { results.push(await api(ROUTES.engineStop, { body: {} })); }
+      catch (error) { results.push({ ok: false, detail: `local halt: ${error.message}` }); }
+      try { results.push(await api(ROUTES.emergencyStop, { body: { reason: "operator emergency stop" } })); }
+      catch (error) { results.push({ ok: false, detail: `multi-market stop: ${error.message}` }); }
       closeDialog(); await loadWorkspace(); await loadActivity();
-      if (state.mm.available) await loadMultiMarketOverview();
-      toast("Durable emergency stop SET", result.note || "New entries blocked across sessions. Protective exits preserved.", "err", 12000);
+      await loadMultiMarketOverview().catch(() => {});
+      const failed = results.filter((item) => item && item.ok === false);
+      toast(
+        failed.length ? "Emergency stop partially applied" : "Durable emergency stop SET",
+        failed.length
+          ? `Review each subsystem before continuing: ${failed.map((item) => item.detail).join("; ")}`
+          : "New entries are blocked. Protective exits and live gates are untouched; LIVE remains OFF.",
+        failed.length ? "warn" : "err", 12000,
+      );
     },
   });
 }
@@ -1149,11 +1327,19 @@ function clearEmergency() {
     body: "<p>Clearing does not connect, Arm, Activate, resume a strategy, or submit an order. Live execution remains OFF and disarmed.</p>",
     confirmLabel: "Clear stop — remain disarmed", confirmClass: "warning", phrase: "CLEAR EMERGENCY STOP",
     onConfirm: async () => {
-      await api("/api/trading/emergency/clear", { body: { phrase: "CLEAR EMERGENCY STOP" } });
-      if (state.mm.available) await api("/api/markets/emergency-stop/reset", { body: { confirm_phrase: "CLEAR EMERGENCY STOP" } }).catch(() => {});
+      // The typed phrase is the server-side precondition on the reset route.
+      const failures = [];
+      try { await api(ROUTES.emergencyReset, { body: { confirm_phrase: "CLEAR EMERGENCY STOP" } }); }
+      catch (error) { failures.push(`global reset: ${error.message}`); }
+      try { await api(ROUTES.engineResume, { body: {} }); }
+      catch (error) { failures.push(`local halt: ${error.message}`); }
       closeDialog(); await loadWorkspace();
-      if (state.mm.available) await loadMultiMarketOverview();
-      toast("Emergency stop cleared", "Still disarmed and LIVE OFF. No session or strategy was automatically resumed.", "ok");
+      await loadMultiMarketOverview().catch(() => {});
+      toast(
+        failures.length ? "Emergency stop not fully cleared" : "Emergency stop cleared",
+        failures.length ? failures.join("; ") : "Still disarmed and LIVE OFF. No session or strategy was automatically resumed.",
+        failures.length ? "warn" : "ok",
+      );
     },
   });
 }
@@ -1292,9 +1478,14 @@ function bindEvents() {
   $("token-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const candidate = $("settings-token").value;
     try {
-      await api("/api/trading/status", { token: candidate, keepAuth: true }); state.token = candidate; storageSet("axiom-api-token", candidate); $("settings-token").value = "";
-      toast("Local token updated for this tab", "The server configuration and stored Upstox / Alpaca credentials were not changed.", "ok");
-    } catch (error) { $("settings-token").value = ""; toast("Token rejected", error.message, "err"); }
+      await api(ROUTES.authProbe, { token: candidate, keepAuth: true });
+      state.token = candidate; storageSet("axiom-api-token", candidate); $("settings-token").value = "";
+      toast("Local token updated for this tab", "Held in this tab's session storage only. The server configuration and stored Upstox / Alpaca credentials were not changed.", "ok");
+    } catch (error) {
+      $("settings-token").value = "";
+      const failure = authFailure(error);
+      toast(failure.kind === "wrong_token" ? "Token rejected" : "Token could not be verified", failure.message, "err", 12000);
+    }
   });
   $("lock-app").addEventListener("click", () => { clearInterval(state.refreshTimer); state.workspace = null; showAuth("Tab locked. Broker/session state was not activated or changed."); });
   $("refresh-interval").addEventListener("change", configureRefresh);
@@ -1326,7 +1517,7 @@ function connStatePillClass(st) {
 
 async function loadMultiMarketOverview() {
   try {
-    const ov = await api("/api/markets/overview", { keepAuth: true });
+    const ov = await api(ROUTES.multiMarketOverview, { keepAuth: true });
     state.mm.available = true;
     state.mm.overview = ov;
     renderMultiMarketDesk();

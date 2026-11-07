@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
+import { consoleReadRoutes, consoleWriteRoutes } from "./console_routes.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const html = readFileSync(resolve(root, "app/static/terminal/index.html"), "utf8");
@@ -169,6 +170,14 @@ async function fetchFake(rawUrl, options = {}) {
     text: async () => JSON.stringify(payload),
     json: async () => payload,
   });
+
+  const projected = consoleReadRoutes(url.pathname, makeLegacyWorkspace(), { events: [{ seq: 1, market: "NSE", event_kind: "FAKE_AUDIT", payload: { safe: true }, created_at: now(), entry_hash: "fake-hash" }] });
+  if (projected !== undefined) return json(projected);
+  const emergency = consoleWriteRoutes(url.pathname, method, body, {
+    halt: () => { emergencyStopped = true; },
+    clear: () => { emergencyStopped = false; },
+  });
+  if (emergency !== undefined) return json(emergency);
 
   if (url.pathname === "/api/trading/workspace") return json(makeLegacyWorkspace());
   if (url.pathname === "/api/trading/status") return json(makeLegacyWorkspace().status);
@@ -388,6 +397,7 @@ const assertLedgerShows = (element, prefix, amount, label, rowLabel = "Equity") 
       from = at + 1;
     }
   };
+
   assert(
     forms.some(isExactMatch),
     `${label}: expected the "${rowLabel}" row to show ${prefix}${Number(amount).toLocaleString("en-US")} `
