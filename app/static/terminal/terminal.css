@@ -1231,3 +1231,76 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Scan Capacity & Quotas (read-only market data · no order submission)
+   Status is always carried by text as well as colour: each pill prints the
+   exact server status word, so nothing depends on hue alone.
+   --------------------------------------------------------------------------- */
+.scan-panel .scan-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 12px;
+}
+.scan-card { display: grid; gap: 10px; }
+.scan-card h4 { margin: 2px 0 0; color: var(--text-bright); font-size: 13px; }
+.scan-card .contract-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.scan-ok { color: #2be0c2; }
+.scan-bad { color: #ff858f; }
+.scan-zero { color: var(--text-bright); font-family: var(--mono); font-weight: 800; }
+
+.scan-windows { display: grid; gap: 8px; }
+.scan-window-category {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--inset);
+}
+.scan-window-category .eyebrow { margin: 0 0 5px; }
+.scan-window-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 10px;
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(42, 46, 57, 0.7);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+.scan-window-row:last-of-type { border-bottom: 0; }
+.scan-window-row.blocked { color: #fcd34d; }
+.scan-window-meta { color: var(--faint); font-size: 10.5px; }
+.scan-window-note { margin-top: 5px; color: var(--faint); font-size: 10.5px; }
+
+.scan-reasons { margin: 6px 0 0; padding-left: 18px; font-size: 11.5px; }
+.scan-reasons li { padding: 2px 0; overflow-wrap: anywhere; }
+.scan-caveat { margin: 6px 0 0; color: var(--faint); font-size: 10.5px; line-height: 1.4; }
+
+.scan-estimate .eyebrow { margin: 8px 0 0; }
+.scan-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.scan-metrics > div {
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--inset);
+}
+.scan-metrics span { display: block; color: var(--faint); font-size: 10.5px; }
+.scan-metrics strong { display: block; margin-top: 2px; color: var(--text-bright); font-family: var(--mono); font-size: 12px; }
+
+@media (max-width: 1180px) {
+  .scan-panel .scan-cards { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .scan-card .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .scan-window-row { flex-direction: column; align-items: flex-start; }
+}
+
+.scan-panel .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }

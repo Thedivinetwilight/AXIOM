@@ -1088,6 +1088,19 @@ delivers 21 of 120 scheduled cycles; the honest statement is 100 symbols per
 
 ### 16.6 Tests added
 
+* `tests/test_scan_capacity_quotas.py` (`26`): cadence math per documented window
+  (`90 s` on Upstox standard, `60 s` on Alpaca Basic), endpoint-category separation
+  (`2` pools for Upstox, `1` shared pool for Alpaca), per-second pacing vs
+  rolling-window deferral, the `100`-symbol cap, `NO CREDENTIAL` /
+  `PLAN UNVERIFIED` states, service refusal paths that send nothing, a started scan
+  that is read-only (`execute_in_paper=False`, `persist_decisions=False`,
+  `orders = 0`), API bearer enforcement, and no secret in any response.
+* `tests/js/scan_capacity_smoke.mjs`: headless DOM proof that the panel renders from
+  server data, prints readable windows and text statuses, disables Start when the
+  plan is blocked, previews offline, starts one read-only cycle, keeps
+  ANALYZED / RISK-APPROVED CANDIDATES / ORDERS (`0`) separate, and contacts no order
+  endpoint.
+
 * `tests/test_fetch_gate_quotas.py` (`15`): documented numbers transcribed
   exactly (50/500/2,000 and 200/10,000) with source/date present; per-minute and
   30-minute windows bind independently of the per-second budget; quote and candle
@@ -1107,6 +1120,36 @@ inferred from here, which is why the Alpaca plan is an explicit setting and the
 Upstox default uses the published standard-API figures. Live execution stayed
 disabled and no order endpoint was contacted.
 
+### 16.8 Operator surface for the same quotas (read-only)
+
+Workspace **12 · Ensemble & Allocation** now opens with **Scan Capacity & Quotas**
+(`#ens-scan-panel`), placed before the ensemble result panels:
+
+* permanent badge `READ-ONLY MARKET DATA · NO ORDER SUBMISSION` and the line
+  *"Scanning a symbol does not mean it will be traded."*;
+* per-market cards (`NSE · Upstox`, `NASDAQ · Alpaca`) showing selected symbols,
+  quota profile, verification state, credential **presence** only, requested vs
+  server-computed cadence, scan status, and every documented window readably
+  (e.g. `0 / 500 requests this 1 minute`, `0 / 2,000 requests this 30 minute`);
+* text statuses `READY`, `SLOWER CADENCE REQUIRED`, `QUOTA DEFERRED`,
+  `NO CREDENTIAL`, `PLAN UNVERIFIED`, `PROVIDER ERROR` (text always accompanies
+  colour);
+* controls limited to watchlist selection (1–100), requested cadence with the
+  server-computed minimum, offline **Preview capacity**, and **Start read-only
+  scan** (disabled unless the plan fits, a credential is present and no cycle is
+  running). No "trade all", no live activation, no order control;
+* results and a compact history table separating **ANALYZED**,
+  **RISK-APPROVED CANDIDATES** and **ORDERS** (always `0`), plus current
+  position/exposure/order limits shown info-only;
+* routes `GET /api/ensemble/scan/capacity`, `POST /api/ensemble/scan/preview`,
+  `POST /api/ensemble/scan/start`, `GET /api/ensemble/scan/history` — all behind
+  `authenticate`, returning no secret and no write capability. `start` calls the
+  existing `evaluate_watchlist_cycle(..., execute_in_paper=False,
+  persist_decisions=False)`; it is not a second scanner and not a second execution
+  boundary.
+
+Operator reference: `docs/SCAN_CAPACITY_AND_QUOTAS.md`.
+
 **Validation** (Linux, CPython 3.11, branch `arena/8d3d005e-axiom`).
 
 | Check | Command | Result |
@@ -1114,5 +1157,8 @@ disabled and no order endpoint was contacted.
 | Quota suite | `pytest -q tests/test_fetch_gate_quotas.py` | `15 passed` |
 | Capacity suite | `pytest -q tests/test_market_scan_capacity.py` | `14 passed` |
 | Paper / ensemble / allocator suites | `pytest -q tests/test_live_market_paper_and_unified_api.py tests/test_parallel_ensemble_and_allocator.py tests/test_concurrent_multimarket_paper.py tests/test_us_equities_paper.py tests/test_kronos_paper_lifecycle_and_logs.py tests/test_source_first_and_live_paper_audit.py` | `46 passed` |
-| Full suite | `python -m pytest -q` | **1484 passed, 5 skipped** |
+| Scan-capacity suite | `pytest -q tests/test_scan_capacity_quotas.py` | `26 passed` |
+| Scan panel (headless DOM) | `node tests/js/scan_capacity_smoke.mjs` | pass, `0` order endpoints, one simulated read-only cycle |
+| Operator console suites | `npm test` | `11` harnesses pass (including the new scan panel) |
+| Full suite | `python -m pytest -q` | **1510 passed, 5 skipped** |
 | Capacity benchmark | `python scripts/benchmark_market_scan.py --symbols 100 --json docs/market_scan_capacity_100.json` | six arms + six schedules, exit `0`, `0` network calls, `0` broker calls |

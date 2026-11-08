@@ -314,6 +314,29 @@ behaviour. Real latency, real entitlements and any provider-side burst behaviour
 depend on the owner's plan, region and credentials. Live execution stayed
 disabled and no order endpoint was contacted.
 
+### 3.1.6 Operator console: Scan Capacity & Quotas (read-only)
+
+The numbers above are now reachable before any request is made. Workspace
+**12 · Ensemble & Allocation** opens with a **Scan Capacity & Quotas** panel that
+prints, per market, the documented windows, the server's live rolling usage, the
+computed sustainable cadence, the exact per-cycle cost and the verdict
+(`READY`, `SLOWER CADENCE REQUIRED`, `QUOTA DEFERRED`, `NO CREDENTIAL`,
+`PLAN UNVERIFIED`, `PROVIDER ERROR`).
+
+* Planning is pure arithmetic over the same `QuotaPolicy` objects the gate
+  enforces (`app/markets/scan_capacity.py`), so the promise cannot drift from the
+  gate's behaviour.
+* **Preview** is offline: no provider request, no quota consumed, no cycle.
+* **Start** runs exactly one cycle through `evaluate_watchlist_cycle` with
+  `execute_in_paper=False`, so the path cannot submit a paper or broker order;
+  history rows always report `orders = 0`.
+* The panel never hard-codes a quota figure: route
+  `/api/ensemble/scan/capacity` returns the profile, windows, usage and plan.
+* Cadence floors shown here are `MODELED OFFLINE` quota arithmetic, not a latency,
+  timing or fill claim.
+
+Operator reference: **`docs/SCAN_CAPACITY_AND_QUOTAS.md`**.
+
 ## 4. Owner Step-by-Step Guide (`LIVE-MARKET PAPER` Validation First)
 
 1. **Verify Read-Only Market Connections (`02 · Connections` / `01 · Overview`)**:

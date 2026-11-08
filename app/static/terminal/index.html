@@ -1640,6 +1640,56 @@
           <strong>PAPER ROLLOUT &amp; MULTIPLE-TESTING DISCLOSURE:</strong> Strategy evaluations, walk-forward ablations, and Kronos forecasts are strictly isolated from live execution authorization (LIVE remains OFF by default). Raw model scores are never treated as probabilities; insufficient OOS sample size or calibrated confidence produces <strong>NO_TRADE</strong>. Synthetic fixtures never establish profitability or Kronos edge.
         </div>
 
+        <!-- SCAN CAPACITY & QUOTAS: quota-aware read-only 100-symbol scan (no order path) -->
+        <article class="panel scan-panel" id="ens-scan-panel" aria-labelledby="ens-scan-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">DOCUMENTED PROVIDER QUOTAS · CADENCE PLANNING · ONE CYCLE PER START</p>
+              <h3 id="ens-scan-title">Scan Capacity &amp; Quotas</h3>
+            </div>
+            <span class="status-pill info" id="ens-scan-badge">READ-ONLY MARKET DATA · NO ORDER SUBMISSION</span>
+          </div>
+
+          <div class="inline-status" id="ens-scan-notice" role="note">
+            <strong>Scanning a symbol does not mean it will be traded.</strong> This panel plans and runs a read-only market-data scan of up to 100 selected symbols per cycle.
+            A symbol that is analysed is not a position and not an order: open-position, exposure, daily-order and activation limits are unchanged, and this path never submits an order.
+          </div>
+          <div class="inline-status warn" id="ens-scan-basis" role="status" aria-live="polite">
+            <strong>MODELED OFFLINE:</strong> capacity is computed from the documented provider quota windows and the server's live rolling usage. Previewing consumes no provider quota; only <strong>Start read-only scan</strong> requests market data.
+          </div>
+
+          <div class="scan-cards" id="ens-scan-cards">
+            <p class="empty-state">Loading scan capacity from the server…</p>
+          </div>
+
+          <div class="panel inset-panel top-space">
+            <div class="panel-head">
+              <div><p class="eyebrow">MOST RECENT READ-ONLY CYCLES (NEWEST FIRST)</p><h4>Recent scan cycles</h4></div>
+              <span class="status-pill info" id="ens-scan-history-pill">0 CYCLES</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Started (UTC)</th>
+                    <th>Market</th>
+                    <th>State</th>
+                    <th>Selected / Analyzed</th>
+                    <th>Stale / Failed / Deferred</th>
+                    <th>Risk-approved candidates</th>
+                    <th>Orders</th>
+                    <th>Calls by endpoint</th>
+                    <th>Elapsed / cadence</th>
+                  </tr>
+                </thead>
+                <tbody id="ens-scan-history-rows">
+                  <tr><td colspan="9" class="empty-state">No read-only scans have run in this process yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
         <div class="content-grid two">
           <article class="panel">
             <div class="panel-head">

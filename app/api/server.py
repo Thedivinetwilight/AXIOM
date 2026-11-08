@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+import dataclasses as _dataclasses
 import logging
 import os
 from pathlib import Path
 from threading import Lock
+from typing import Any
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +22,7 @@ from app.paper_trading.simulator import PaperSimulator
 from app.api.routes import (
     dashboard, health, market, strategies, backtests, paper, v2, market_events, chart, terminal,
     market_data, listed_assets, connections, alpaca_broker, markets, model_lab, ensemble,
-    performance as performance_routes,
+    performance as performance_routes, scan_capacity,
 )
 # NOTE: ``app.api.routes.vantage`` (the legacy ``/api/trading`` MT5 order API) is
 # deliberately NOT imported or mounted. It was never documented in the product
@@ -421,6 +423,85 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
                 nasdaq_fetch_gate=_fetch_gates["NASDAQ"],
             )
             app.state.live_paper_engine.ensemble_service = app.state.ensemble_service
+
+            # --- Quota-aware read-only scan capacity -----------------------
+            # Planning only: reads the SAME documented quota policies the gates
+            # enforce plus credential PRESENCE (never the value). The single
+            # start path calls evaluate_watchlist_cycle with execute_in_paper
+            # forced off, so no paper or broker order can be created here.
+            from app.markets.scan_capacity import ScanCapacityService
+
+            def _scan_credential_present(market: str) -> bool:
+                try:
+                    if str(market).upper() == "NSE":
+                        token, _source = resolve_token(getattr(app.state, "upstox_token", None))
+                        return bool(token)
+                    creds, _src = resolve_alpaca_data_credentials(
+                        getattr(app.state, "alpaca_data_store", None), settings
+                    )
+                    return bool(creds.get("api_key") and creds.get("api_secret"))
+                except (RuntimeError, ValueError, OSError, AttributeError):
+                    return False
+
+            def _scan_limits(market: str) -> dict[str, Any]:
+                out: dict[str, Any] = {}
+                try:
+                    alloc = app.state.ensemble_service.allocators[market].config.to_dict()
+                except (KeyError, AttributeError):
+                    alloc = {}
+                try:
+                    _asdict = _dataclasses.asdict(app.state.live_paper_engine.configs[market])
+                except (KeyError, AttributeError):
+                    _asdict = {}
+                out["ensemble_allocator"] = alloc
+                out["paper_risk_gate"] = _asdict
+                out["note"] = (
+                    "Unchanged by scanning: a 100-symbol scan cannot open more "
+                    "positions, exceed exposure, or place extra orders."
+                )
+                return out
+
+            def _scan_watchlist(market: str) -> list[str]:
+                try:
+                    rows = app.state.live_paper_engine.list_watchlists().get(market) or []
+                except (KeyError, AttributeError, OSError):
+                    return []
+                return [str(row.get("symbol", "")).upper() for row in rows if row.get("symbol")]
+
+            def _scan_evaluate(market: str, **kwargs: Any) -> dict[str, Any]:
+                kwargs["execute_in_paper"] = False
+                kwargs["persist_decisions"] = False
+                return app.state.ensemble_service.evaluate_watchlist_cycle(market, **kwargs)
+
+            _nse_profile = "upstox_standard" if _quota_on else "off"
+            _nasdaq_profile = f"alpaca_{_alpaca_plan}" if _quota_on else "off"
+            _nasdaq_plan_detail = (
+                "Basic (free) market-data profile assumed (200 requests/min). No paid Alpaca plan "
+                "is inferred, and the subscription entitlement is not verified by this app."
+                if _alpaca_plan == "basic"
+                else f"Operator-declared plan {_alpaca_plan.upper()!r} sets the limits below; the "
+                "entitlement is NOT verified against the Alpaca account."
+            )
+            app.state.scan_capacity_service = ScanCapacityService(
+                gates=_fetch_gates,
+                policies={
+                    "NSE": upstox_standard_policies() if _quota_on else (),
+                    "NASDAQ": alpaca_market_data_policies(_alpaca_plan) if _quota_on else (),
+                },
+                profiles={"NSE": _nse_profile, "NASDAQ": _nasdaq_profile},
+                plan_states={
+                    "NSE": (
+                        "verified",
+                        "Upstox standard API windows: 50/s, 500/min, 2,000/30 min per endpoint "
+                        "category (per-API, per-user).",
+                    ),
+                    "NASDAQ": ("unverified", _nasdaq_plan_detail),
+                },
+                credential_present=_scan_credential_present,
+                evaluate=_scan_evaluate,
+                limits=_scan_limits,
+                watchlist=_scan_watchlist,
+            )
             # Live execution is a SEPARATE path from local paper. It starts fully
             # disarmed: gates are in-memory, per market, and require explicit
             # mode=LIVE + readiness + Arm + phrase-confirmed Activate.
@@ -642,7 +723,7 @@ def create_app(settings: Settings | None = None, data_dir: Path | None = None):
     for module in (
         market, strategies, backtests, paper, v2, market_events,
         market_data, listed_assets, connections, alpaca_broker, markets, model_lab, ensemble,
-        performance_routes,
+        performance_routes, scan_capacity,
     ):
         app.include_router(module.router, dependencies=[Depends(authenticate)])
     # Static assets for the chart terminal. Local files only: no CDN, no

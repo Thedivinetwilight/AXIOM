@@ -35,7 +35,7 @@ const state = {
   },
   ml: { available: false, overview: null, selectedRunId: "" },
   tm: { page: 1, pageSize: 50, summary: null, selected: null, chartPayload: null, hitBoxes: [], selectedMarkerId: "" },
-  ens: { overview: null, selectedDecisionIdx: 0, latestAblation: null, latestBenchmark: null },
+  ens: { overview: null, selectedDecisionIdx: 0, latestAblation: null, latestBenchmark: null, scan: { data: null, cards: {}, loading: false, pollTimer: null } },
   dialog: null, dialogReturnFocus: null, refreshing: false, refreshTimer: null,
   submissionUncertain: false, lastError: null,
 };
@@ -1375,7 +1375,7 @@ async function goPage(page) {
   if (page === "activity") await loadActivity();
   if (page === "modellab") await loadModelLabOverview();
   if (page === "monitor") await loadTradeMonitor();
-  if (page === "ensemble") await loadEnsembleOverview();
+  if (page === "ensemble") { await loadEnsembleOverview(); await loadScanCapacity(); }
   renderAll();
 }
 
@@ -4887,6 +4887,7 @@ async function loadEnsembleOverview() {
   try {
     state.ens.overview = await api("/api/ensemble/overview");
     renderEnsemble();
+    await loadScanCapacity();
   } catch (err) {
     if ($("ens-eval-summary")) $("ens-eval-summary").textContent = `Ensemble overview unavailable: ${err.message}`;
   }
@@ -5199,8 +5200,431 @@ function bindEnsembleEvents() {
   });
 }
 
+/* ---------------------------------------------------------------------------
+ * Scan Capacity & Quotas (quota-aware read-only 100-symbol scan)
+ * Every number here comes from the server: documented quota windows, live
+ * rolling usage and the computed plan. Nothing is hard-coded client-side and
+ * no provider request is made by rendering or previewing.
+ * ------------------------------------------------------------------------- */
+const SCAN_MARKETS = [
+  { key: "NSE", label: "NSE · Upstox", provider: "UPSTOX STANDARD APIs · READ-ONLY MARKET DATA" },
+  { key: "NASDAQ", label: "NASDAQ · Alpaca", provider: "ALPACA MARKET DATA · READ-ONLY MARKET DATA" },
+];
+const SCAN_STATUS_CLASS = {
+  READY: "ok",
+  "SLOWER CADENCE REQUIRED": "warn",
+  "QUOTA DEFERRED": "warn",
+  "PLAN UNVERIFIED": "info",
+  "SCAN IN PROGRESS": "info",
+  SCANNING: "info",
+  "NO CREDENTIAL": "err",
+  "PROVIDER ERROR": "err",
+  "CONFIG REQUIRED": "err",
+  LOADING: "info",
+  IDLE: "info",
+};
+
+function scanCardState(market) {
+  if (!state.ens.scan) state.ens.scan = { data: null, cards: {}, loading: false, pollTimer: null };
+  if (!state.ens.scan.cards[market]) {
+    state.ens.scan.cards[market] = {
+      snapshot: null, plan: null, quota: null, limits: null, dispatch: [], dirty: false,
+      previewing: false, starting: false, error: false, lastRun: null, message: "",
+    };
+  }
+  return state.ens.scan.cards[market];
+}
+
+function scanCard(market) {
+  return document.querySelector(`#ens-scan-cards [data-scan-market="${market}"]`);
+}
+
+function scanEl(market, role) {
+  return scanCard(market)?.querySelector(`[data-scan-role="${role}"]`) || null;
+}
+
+function scanStatusPill(el, status) {
+  if (!el) return;
+  const text = String(status || "LOADING");
+  el.textContent = text;
+  el.className = `status-pill ${SCAN_STATUS_CLASS[text] || "info"}`;
+}
+
+function scanCardTemplate(market) {
+  const meta = SCAN_MARKETS.find((m) => m.key === market) || { label: market, provider: "MARKET DATA" };
+  const k = market.toLowerCase();
+  return `
+    <div class="panel inset-panel scan-card" data-scan-market="${escapeHtml(market)}" role="group" aria-labelledby="ens-scan-${k}-title">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(meta.provider)}</p>
+          <h4 id="ens-scan-${k}-title">${escapeHtml(meta.label)}</h4>
+        </div>
+        <span class="status-pill info" data-scan-role="status" aria-live="polite">LOADING</span>
+      </div>
+      <div class="contract-grid" data-scan-role="facts">
+        <div><span>Selected symbols</span><strong>—</strong></div>
+      </div>
+      <div class="scan-windows" data-scan-role="windows">
+        <p class="small muted">Loading documented quota windows…</p>
+      </div>
+      <form data-scan-role="form" autocomplete="off">
+        <div class="form-grid">
+          <div class="field">
+            <label for="ens-scan-${k}-symbols">Selected symbols per cycle (1–100)</label>
+            <input id="ens-scan-${k}-symbols" data-scan-role="symbols" type="number" min="1" max="100" step="1" value="100">
+          </div>
+          <div class="field">
+            <label for="ens-scan-${k}-cadence">Requested cadence (seconds, min 1)</label>
+            <input id="ens-scan-${k}-cadence" data-scan-role="cadence" type="number" min="1" max="3600" step="1" value="60">
+          </div>
+          <div class="field">
+            <label for="ens-scan-${k}-min">Server-computed minimum cadence (s)</label>
+            <input id="ens-scan-${k}-min" data-scan-role="min" type="text" readonly aria-readonly="true">
+          </div>
+          <div class="field">
+            <label for="ens-scan-${k}-watchlist">Watchlist source</label>
+            <select id="ens-scan-${k}-watchlist" data-scan-role="watchlist">
+              <option value="saved">Saved ${escapeHtml(market)} watchlist</option>
+              <option value="explicit">Explicit symbol list below</option>
+            </select>
+          </div>
+        </div>
+        <div class="field top-space">
+          <label for="ens-scan-${k}-list">Explicit symbols (comma separated, optional · max 100)</label>
+          <input id="ens-scan-${k}-list" data-scan-role="list" type="text" placeholder="e.g. ${market === "NSE" ? "RELIANCE, TCS, INFY" : "AAPL, MSFT, NVDA"}">
+        </div>
+        <div class="button-row top-space">
+          <button type="button" class="button secondary xs" data-scan-role="preview">Preview capacity (offline)</button>
+          <button type="button" class="button primary xs" data-scan-role="start" disabled>Start read-only scan</button>
+        </div>
+      </form>
+      <div class="inline-status top-space" data-scan-role="verdict" role="status" aria-live="polite">
+        Preview capacity to see what this market can sustain. No provider request is made by previewing.
+      </div>
+      <div class="scan-estimate" data-scan-role="estimate"></div>
+      <div class="scan-results" data-scan-role="results"></div>
+    </div>`;
+}
+
+function ensureScanCards() {
+  const host = $("ens-scan-cards");
+  if (!host) return false;
+  if (host.querySelectorAll("[data-scan-market]").length === SCAN_MARKETS.length) return true;
+  host.innerHTML = SCAN_MARKETS.map((m) => scanCardTemplate(m.key)).join("");
+  return true;
+}
+
+function scanSymbolList(market) {
+  const source = scanEl(market, "watchlist")?.value || "saved";
+  const raw = (scanEl(market, "list")?.value || "").trim();
+  if (source !== "explicit" || !raw) return null;
+  const list = raw.split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+  return list.length ? list : null;
+}
+
+function scanRequested(market) {
+  const symbols = scanSymbolList(market);
+  const rawCount = Number(scanEl(market, "symbols")?.value || 0);
+  const cadence = Number(scanEl(market, "cadence")?.value || 0);
+  return {
+    symbols,
+    symbol_count: symbols ? symbols.length : (Number.isFinite(rawCount) && rawCount > 0 ? Math.min(100, Math.round(rawCount)) : 100),
+    cadence_s: Number.isFinite(cadence) && cadence >= 1 ? cadence : 60,
+  };
+}
+
+async function loadScanCapacity(options = {}) {
+  if (!ensureScanCards()) return;
+  const scan = state.ens.scan || (state.ens.scan = { data: null, cards: {}, loading: false, pollTimer: null });
+  if (scan.loading) return;
+  scan.loading = true;
+  try {
+    const data = await api("/api/ensemble/scan/capacity");
+    scan.data = data;
+    for (const meta of SCAN_MARKETS) {
+      const card = scanCardState(meta.key);
+      const snap = (data.markets || {})[meta.key];
+      if (!snap) { card.error = true; continue; }
+      card.snapshot = snap;
+      card.quota = snap.quota;
+      card.limits = snap.limits;
+      card.error = false;
+      if (!card.plan || options.reset) card.plan = snap.plan;
+      card.history = snap.history || [];
+      card.lastRun = (snap.history || [])[0] || card.lastRun;
+      if (!card.dirty || options.reset) {
+        const countInput = scanEl(meta.key, "symbols");
+        if (countInput) countInput.value = String(snap.plan?.symbols ?? 100);
+        const cadenceInput = scanEl(meta.key, "cadence");
+        if (cadenceInput) cadenceInput.value = String(Math.round(snap.plan?.cadence_requested_seconds ?? 60));
+      }
+    }
+    renderScanHistory();
+  } catch (err) {
+    for (const meta of SCAN_MARKETS) {
+      const card = scanCardState(meta.key);
+      card.error = true;
+      card.message = err.message;
+    }
+  } finally {
+    scan.loading = false;
+    renderScanAll();
+  }
+  if (scan.data?.scan_status?.running && Object.keys(scan.data.scan_status.running).length) scheduleScanPoll();
+}
+
+function scheduleScanPoll() {
+  const scan = state.ens.scan;
+  if (!scan || scan.pollTimer) return;
+  scan.pollTimer = setTimeout(async () => {
+    scan.pollTimer = null;
+    await loadScanCapacity();
+  }, 3500);
+}
+
+function renderScanAll() {
+  if (!ensureScanCards()) return;
+  for (const meta of SCAN_MARKETS) renderScanCard(meta.key);
+}
+
+function renderScanCard(market) {
+  const card = scanCardState(market);
+  const plan = card.plan || {};
+  const quota = card.quota || {};
+  const snapshot = card.snapshot || {};
+  const pill = scanEl(market, "status");
+  if (card.error) scanStatusPill(pill, "PROVIDER ERROR");
+  else scanStatusPill(pill, plan.status || "LOADING");
+
+  const facts = scanEl(market, "facts");
+  if (facts) {
+    const allocator = (card.limits || {}).ensemble_allocator || {};
+    const paper = (card.limits || {}).paper_risk_gate || {};
+    const cred = quota.credential_present
+      ? '<strong class="scan-ok">PRESENT (value never shown)</strong>'
+      : '<strong class="scan-bad">NOT CONFIGURED</strong>';
+    facts.innerHTML = `
+      <div><span>Selected symbols this cycle</span><strong>${escapeHtml(plan.symbols ?? "—")} of 100 max</strong></div>
+      <div><span>Quota profile</span><strong>${escapeHtml(quota.profile || "—")}</strong></div>
+      <div><span>Plan / verification</span><strong>${escapeHtml(quota.verification || "—")} · ${escapeHtml(quota.plan_state || "—")}</strong></div>
+      <div><span>Market-data credential</span>${cred}</div>
+      <div><span>Requested cadence</span><strong>every ${escapeHtml(plan.cadence_requested_seconds ?? "—")} s</strong></div>
+      <div><span>Computed sustainable cadence</span><strong>every ${escapeHtml(plan.cadence_sustainable_seconds ?? "—")} s</strong></div>
+      <div><span>Max symbols at requested cadence</span><strong>${escapeHtml(plan.max_symbols_at_requested_cadence ?? "—")}</strong></div>
+      <div><span>Requests per cycle</span><strong>${escapeHtml(plan.total_requests_per_cycle ?? "—")}</strong></div>
+      <div><span>Expected dispatch pacing</span><strong>${escapeHtml(plan.expected_dispatch_seconds ?? "—")} s at documented rate</strong></div>
+      <div><span>Max open positions (unchanged)</span><strong>${escapeHtml(allocator.max_open_positions ?? paper.max_open_positions ?? "—")}</strong></div>
+      <div><span>Max symbol / total exposure</span><strong>${allocator.max_symbol_exposure_pct !== undefined ? `${Math.round(Number(allocator.max_symbol_exposure_pct) * 100)}% / ${Math.round(Number(allocator.max_total_exposure_pct) * 100)}%` : "—"}</strong></div>
+      <div><span>Max orders per day (unchanged)</span><strong>${escapeHtml(paper.max_daily_orders ?? "—")}</strong></div>`;
+  }
+
+  const windows = scanEl(market, "windows");
+  if (windows) {
+    const rows = Object.entries(plan.window_usage || {});
+    if (!rows.length) {
+      windows.innerHTML = '<p class="small muted">No documented quota windows are active for this market; the server will not plan a scan.</p>';
+    } else {
+      windows.innerHTML = rows.map(([category, list]) => {
+        const label = (quota.policies || []).find((p) => p.category === category)?.label || category;
+        const body = (list || []).map((w) => `
+          <div class="scan-window-row ${w.blocks ? "blocked" : ""}">
+            <span>${escapeHtml(w.readable || "")}</span>
+            <span class="scan-window-meta">limit ${escapeHtml(w.limit)}${w.paced ? " · paced by the gate" : ""}${w.blocks ? ` · defer ≈${escapeHtml(w.wait_seconds)} s` : ""}</span>
+          </div>`).join("");
+        return `<div class="scan-window-category">
+          <p class="eyebrow">${escapeHtml(label)}</p>
+          ${body}
+          <div class="scan-window-note">This cycle needs ${escapeHtml((plan.requests_per_cycle || {})[category] ?? "—")} request(s) in this category.</div>
+        </div>`;
+      }).join("");
+    }
+  }
+
+  const minInput = scanEl(market, "min");
+  if (minInput && plan.cadence_sustainable_seconds !== undefined) {
+    minInput.value = `${plan.cadence_sustainable_seconds} s (server-computed)`;
+  }
+
+  const startBtn = scanEl(market, "start");
+  if (startBtn) {
+    const running = card.starting || Boolean(snapshot.scan_running);
+    startBtn.disabled = running || !plan.can_start;
+    startBtn.textContent = running ? "Scan in progress…" : "Start read-only scan";
+  }
+
+  const verdict = scanEl(market, "verdict");
+  if (verdict) {
+    if (card.error) {
+      verdict.className = "inline-status err top-space";
+      verdict.innerHTML = `<strong>PROVIDER ERROR:</strong> scan capacity unavailable — ${escapeHtml(card.message || "server rejected the request")}`;
+    } else {
+      const tone = SCAN_STATUS_CLASS[plan.status] === "ok" ? "ok" : SCAN_STATUS_CLASS[plan.status] === "err" ? "err" : "warn";
+      const reasons = (plan.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("");
+      verdict.className = `inline-status ${tone} top-space`;
+      verdict.innerHTML = `
+        <strong>${escapeHtml(plan.status || "LOADING")}</strong>
+        ${plan.can_start ? "— this market can run one read-only cycle at the requested cadence." : "— a read-only scan cannot start as configured."}
+        ${reasons ? `<ul class="scan-reasons">${reasons}</ul>` : ""}
+        <p class="scan-caveat">Cadence floors come from the documented provider quota windows. They are not production latency, fill, or timing guarantees.</p>`;
+    }
+  }
+
+  const estimate = scanEl(market, "estimate");
+  if (estimate) {
+    const lines = card.dispatch || [];
+    estimate.innerHTML = lines.length
+      ? `<p class="eyebrow">EXACT EXPECTED DISPATCH (SERVER-COMPUTED)</p><ul class="scan-reasons">${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`
+      : "";
+  }
+
+  renderScanResults(market);
+}
+
+function renderScanResults(market) {
+  const card = scanCardState(market);
+  const host = scanEl(market, "results");
+  if (!host) return;
+  const run = card.lastRun;
+  if (!run) {
+    host.innerHTML = `<div class="inline-status top-space">No cycle has run for ${escapeHtml(market)} in this process yet. A scan analyzes symbols; it does not open positions.</div>`;
+    return;
+  }
+  const tone = run.state === "COMPLETED" ? "ok" : run.state === "PROVIDER ERROR" ? "err" : "warn";
+  const calls = Object.entries(run.calls_by_category || {}).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(v)}`).join(" · ") || "—";
+  host.innerHTML = `
+    <div class="inline-status ${tone} top-space">
+      <strong>${escapeHtml(run.state)}</strong> · ${escapeHtml(run.market)} · run ${escapeHtml(run.run_id)}
+      ${run.error ? `<br><strong>Error:</strong> ${escapeHtml(run.error)}` : ""}
+    </div>
+    <div class="scan-metrics">
+      <div><span>Analysed</span><strong>${escapeHtml(run.symbols_analyzed)}</strong></div>
+      <div><span>Fetched / stale</span><strong>${escapeHtml(run.symbols_selected)} / ${escapeHtml(run.symbols_stale)}</strong></div>
+      <div><span>Failed / deferred</span><strong>${escapeHtml(run.symbols_failed)} / ${escapeHtml(run.symbols_deferred)}</strong></div>
+      <div><span>Risk-approved candidates</span><strong>${escapeHtml(run.candidates_risk_approved)}</strong></div>
+      <div><span>Orders</span><strong class="scan-zero">0</strong></div>
+      <div><span>Elapsed vs cadence</span><strong>${escapeHtml((run.elapsed_ms / 1000).toFixed(2))} s / ${escapeHtml(run.cadence_requested_seconds)} s${run.cadence_met ? " · MET" : " · OVER"}</strong></div>
+    </div>
+    <p class="scan-caveat">ANALYZED = symbols with a completed decision. RISK-APPROVED CANDIDATES = decisions the shared allocator would allow; they are not orders. ORDERS stays 0 on this path.
+    Calls by endpoint category: ${calls}.</p>`;
+}
+
+function renderScanHistory() {
+  const rows = $("ens-scan-history-rows");
+  const pill = $("ens-scan-history-pill");
+  if (!rows) return;
+  const all = [];
+  for (const meta of SCAN_MARKETS) {
+    const card = scanCardState(meta.key);
+    for (const run of card.history || []) all.push(run);
+  }
+  all.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
+  if (pill) pill.textContent = `${all.length} CYCLE${all.length === 1 ? "" : "S"}`;
+  if (!all.length) {
+    rows.innerHTML = '<tr><td colspan="9" class="empty-state">No read-only scans have run in this process yet.</td></tr>';
+    return;
+  }
+  rows.innerHTML = all.slice(0, 20).map((run) => {
+    const calls = Object.entries(run.calls_by_category || {}).map(([k, v]) => `${k} ${v}`).join("<br>") || "—";
+    const stateClass = run.state === "COMPLETED" ? "ok" : run.state === "PROVIDER ERROR" ? "err" : "warn";
+    return `<tr>
+      <td class="mono">${escapeHtml(String(run.started_at || "").replace("T", " ").slice(0, 19))}</td>
+      <td>${escapeHtml(run.market)}</td>
+      <td><span class="status-pill ${stateClass}">${escapeHtml(run.state)}</span><div class="small mono">${escapeHtml(run.run_id)}</div></td>
+      <td>${escapeHtml(run.symbols_selected)} / ${escapeHtml(run.symbols_analyzed)}</td>
+      <td>${escapeHtml(run.symbols_stale)} / ${escapeHtml(run.symbols_failed)} / ${escapeHtml(run.symbols_deferred)}</td>
+      <td>${escapeHtml(run.candidates_risk_approved)}</td>
+      <td><span class="scan-zero">0</span></td>
+      <td class="small">${calls}</td>
+      <td>${escapeHtml((Number(run.elapsed_ms || 0) / 1000).toFixed(2))} s · ${run.cadence_met ? "MET" : "OVER"} ${escapeHtml(run.cadence_requested_seconds)} s</td>
+    </tr>`;
+  }).join("");
+}
+
+async function previewScanCapacity(market) {
+  const card = scanCardState(market);
+  if (card.previewing) return;
+  card.previewing = true;
+  const btn = scanEl(market, "preview");
+  if (btn) { btn.disabled = true; btn.textContent = "Previewing…"; }
+  const req = scanRequested(market);
+  try {
+    const res = await api("/api/ensemble/scan/preview", {
+      body: { market, symbol_count: req.symbol_count, symbols: req.symbols, cadence_s: req.cadence_s },
+    });
+    card.plan = res.plan;
+    card.quota = res.quota;
+    card.limits = res.limits;
+    card.dispatch = res.dispatch_plan || [];
+    card.error = false;
+  } catch (err) {
+    card.error = true;
+    card.message = err.message;
+    toast("Capacity preview failed", err.message, "err");
+  } finally {
+    card.previewing = false;
+    if (btn) { btn.disabled = false; btn.textContent = "Preview capacity (offline)"; }
+    renderScanCard(market);
+  }
+}
+
+async function startReadOnlyScan(market) {
+  const card = scanCardState(market);
+  if (card.starting) return;
+  const req = scanRequested(market);
+  card.starting = true;
+  renderScanCard(market);
+  try {
+    const res = await api("/api/ensemble/scan/start", {
+      body: { market, symbol_count: req.symbol_count, symbols: req.symbols, cadence_s: req.cadence_s },
+    });
+    if (res.started) {
+      toast(`${market} read-only scan started`, `${res.requested_symbols} symbols · 0 orders · 0 broker calls`, "ok");
+      card.dispatch = res.dispatch_plan || card.dispatch;
+    } else {
+      card.plan = res.plan || card.plan;
+      toast(`${market} scan not started`, res.detail || res.status || "Refused by the server", "warn");
+    }
+  } catch (err) {
+    toast(`${market} scan failed`, err.message, "err");
+  } finally {
+    card.starting = false;
+    await loadScanCapacity();
+    renderScanCard(market);
+    const running = state.ens.scan?.data?.scan_status?.running;
+    if (running && Object.keys(running).length) scheduleScanPoll();
+  }
+}
+
+function bindScanEvents() {
+  ensureScanCards();
+  const host = $("ens-scan-cards");
+  if (!host) return;
+  host.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-scan-role]");
+    if (!button) return;
+    const card = button.closest("[data-scan-market]");
+    const market = card?.dataset.scanMarket;
+    if (!market) return;
+    if (button.dataset.scanRole === "preview") previewScanCapacity(market);
+    if (button.dataset.scanRole === "start") startReadOnlyScan(market);
+  });
+  let timer = null;
+  const onEdit = (event) => {
+    const field = event.target.closest("[data-scan-role]");
+    const card = event.target.closest("[data-scan-market]");
+    if (!field || !card) return;
+    if (!["symbols", "cadence", "list", "watchlist"].includes(field.dataset.scanRole)) return;
+    scanCardState(card.dataset.scanMarket).dirty = true;
+    clearTimeout(timer);
+    timer = setTimeout(() => previewScanCapacity(card.dataset.scanMarket), 450);
+  };
+  host.addEventListener("input", onEdit);
+  host.addEventListener("change", onEdit);
+}
+
 function init() {
-  bindEvents(); bindModelLabEvents(); bindTradeMonitorEvents(); bindEnsembleEvents();
+  bindEvents(); bindModelLabEvents(); bindTradeMonitorEvents(); bindEnsembleEvents(); bindScanEvents();
   $("refresh-interval").value = "10000"; renderActivity();
   const saved = storageGet("axiom-api-token");
   if (saved) unlock(saved); else showAuth();
