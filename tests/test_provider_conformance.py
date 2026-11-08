@@ -480,3 +480,82 @@ def test_cli_live_without_credentials_reports_unverified_without_network():
     assert payload["broker_order_api_calls"] == 0
     for entry in payload["providers"].values():
         assert "nothing was contacted" in entry["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# File-handle discipline (Windows acceptance blocker)
+# --------------------------------------------------------------------------- #
+# A plain `with sqlite3.connect(...) as conn:` commits but never closes, so
+# every engine call used to leak a handle. POSIX tolerates it; Windows fails
+# TemporaryDirectory cleanup with WinError 32 and keeps the database plus its
+# WAL sidecars locked, which is what broke the Windows build gate. These tests
+# fail on Linux too, by checking for the handle rather than for the symptom.
+def _open_fds_under(path: Path) -> list[str]:
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.exists():  # not Linux: nothing to inspect here
+        pytest.skip("no /proc/self/fd on this platform")
+    found = []
+    for entry in fd_dir.iterdir():
+        try:
+            target = entry.resolve()
+        except OSError:
+            continue
+        if str(target).startswith(str(path)):
+            found.append(str(target))
+    return found
+
+
+def test_engine_releases_its_database_handle_on_close(tmp_path: Path):
+    from app.markets.live_paper import LiveMarketPaperEngine
+
+    db = tmp_path / "handles.sqlite3"
+    engine = LiveMarketPaperEngine(db)
+    try:
+        engine.list_watchlists()
+        engine.market_snapshot("NSE")
+        engine.market_snapshot("NASDAQ")
+        # No handle may be held between calls, not just after close.
+        assert _open_fds_under(tmp_path) == [], "a handle leaked between engine calls"
+    finally:
+        engine.close()
+    assert _open_fds_under(tmp_path) == [], "a handle survived engine.close()"
+
+
+def test_conformance_run_leaves_no_handle_on_its_workdir(tmp_path: Path):
+    """The run must be able to delete its own temporary directory."""
+    import tempfile
+
+    workdir = Path(tempfile.mkdtemp(prefix="axiom-handle-check-", dir=tmp_path))
+    try:
+        report = run_conformance()
+        assert report["status"] == "PASS"
+        assert _open_fds_under(workdir) == []
+    finally:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
+    assert not workdir.exists(), "the work directory could not be removed"
+
+
+def test_connection_commit_and_rollback_semantics_are_unchanged(tmp_path: Path):
+    """Closing the handle must not have replaced commit/rollback."""
+    from app.markets.live_paper import LiveMarketPaperEngine
+
+    db = tmp_path / "txn.sqlite3"
+    engine = LiveMarketPaperEngine(db)
+    try:
+        before = engine.market_snapshot("NSE")["account"]["cash"]
+        # A committed write survives a fresh connection.
+        with engine._lock, engine._connect() as conn:
+            conn.execute("UPDATE live_paper_accounts SET cash = cash - 1 WHERE market = 'NSE'")
+        assert engine.market_snapshot("NSE")["account"]["cash"] == pytest.approx(before - 1)
+
+        # A raised exception rolls back and still releases the handle.
+        with pytest.raises(RuntimeError):
+            with engine._lock, engine._connect() as conn:
+                conn.execute("UPDATE live_paper_accounts SET cash = cash - 10 WHERE market = 'NSE'")
+                raise RuntimeError("boom")
+        assert engine.market_snapshot("NSE")["account"]["cash"] == pytest.approx(before - 1)
+        assert _open_fds_under(tmp_path) == []
+    finally:
+        engine.close()

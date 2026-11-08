@@ -15,6 +15,8 @@ Hard structural safety guarantees:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import asyncio
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -31,7 +33,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 import uuid
 
 from app.data.models import Candle, parse_timestamp
@@ -428,14 +430,37 @@ class LiveMarketPaperEngine:
         with self._lock, self._connect() as conn:
             self._append_audit_conn(conn, mkt, str(ev.get("event_type") or "KRONOS_EVENT"), payload)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection whose handle is always released.
+
+        ``with sqlite3.connect(...) as conn`` commits or rolls back but does NOT
+        close the connection, so every call to a plain factory leaked a file
+        handle. POSIX tolerates that; Windows does not — ``TemporaryDirectory``
+        cleanup then fails with ``WinError 32`` and a long-lived engine keeps
+        both the database and its WAL sidecars locked. Closing here is a
+        resource fix only: commit/rollback semantics are unchanged, and the
+        in-memory connection is handed back unclosed so the engine can reuse it.
+        """
         if self._mem_conn is not None:
-            return self._mem_conn
+            yield self._mem_conn
+            return
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            # Reproduce sqlite3.Connection.__enter__/__exit__ exactly: commit on
+            # success, roll back on an exception. Only the handle release is new.
+            try:
+                yield conn
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
