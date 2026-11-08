@@ -32,6 +32,8 @@ Honesty rules enforced here (and asserted by tests):
 
 from __future__ import annotations
 
+import math
+
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
@@ -69,6 +71,19 @@ BOUNDED_CAP_FIELDS: tuple[str, ...] = (
     "max_daily_loss",
     "max_daily_orders",
     "max_quote_age_seconds",
+)
+
+#: Caps that must be whole numbers of things (positions, orders), not fractions.
+INTEGER_CAP_FIELDS: tuple[str, ...] = ("max_open_positions", "max_daily_orders")
+
+#: Cost *rates* are not caps: zero is a legitimate value and must not be
+#: reported as an unset limit. They are never part of the completeness gate.
+COST_RATE_FIELDS: tuple[str, ...] = (
+    "brokerage_bps",
+    "slippage_bps",
+    "spread_bps",
+    "stt_bps",
+    "gst_bps",
 )
 
 #: Strategies that can act without a per-order prompt once a session is running.
@@ -137,6 +152,61 @@ def _symbol_rows(watchlist: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _validate_risk_limits(limits: dict[str, Any]) -> dict[str, Any]:
+    """Decide whether *every* mandatory cap is present and valid.
+
+    Reporting "configured" from a subset of caps is the failure this guards
+    against: a market with a max order value but no daily-loss cap would
+    otherwise look bounded. Each field must be a finite, strictly positive
+    number; count limits must additionally be whole numbers; booleans, strings,
+    NaN and infinity are all rejected. Cost *rates* are checked separately and
+    may legitimately be zero.
+    """
+    problems: list[str] = []
+    checked: list[str] = []
+
+    for field_name in BOUNDED_CAP_FIELDS:
+        if field_name not in limits:
+            problems.append(f"{field_name} is not set")
+            continue
+        raw = limits[field_name]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            problems.append(f"{field_name} must be a number, got {type(raw).__name__}")
+            continue
+        value = float(raw)
+        if not math.isfinite(value):
+            problems.append(f"{field_name} must be finite, got {raw!r}")
+            continue
+        if value <= 0:
+            problems.append(f"{field_name} must be greater than zero, got {raw!r}")
+            continue
+        if field_name in INTEGER_CAP_FIELDS and value != int(value):
+            problems.append(f"{field_name} must be a whole number, got {raw!r}")
+            continue
+        checked.append(field_name)
+
+    rate_problems: list[str] = []
+    for field_name in COST_RATE_FIELDS:
+        if field_name not in limits:
+            continue
+        raw = limits[field_name]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            rate_problems.append(f"{field_name} must be a number, got {type(raw).__name__}")
+            continue
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            rate_problems.append(f"{field_name} must be finite and non-negative, got {raw!r}")
+
+    return {
+        "configured": not problems,
+        "problems": problems,
+        "checked_fields": checked,
+        "missing_fields": [f for f in BOUNDED_CAP_FIELDS if f not in limits],
+        "cost_rate_problems": rate_problems,
+        "cost_rates": {f: limits[f] for f in COST_RATE_FIELDS if f in limits},
+    }
+
+
 def _credential_matrix(
     market: str,
     *,
@@ -157,6 +227,7 @@ def _credential_matrix(
     rows = [
         {
             "slot": f"{BROKER_BY_MARKET[market].upper()} MARKET DATA",
+            "role": "market_data",
             "scope": "read-only prices and bars",
             "present": bool(data_present),
             "detail": (f"configured via {data_source}" if data_present
@@ -169,6 +240,7 @@ def _credential_matrix(
             [
                 {
                     "slot": "ALPACA BROKER PAPER",
+                    "role": "paper_broker",
                     "scope": "broker paper sandbox orders",
                     "present": bool(broker_paper_present),
                     "detail": ("separate paper-environment key pair"
@@ -177,6 +249,7 @@ def _credential_matrix(
                 },
                 {
                     "slot": "ALPACA BROKER LIVE",
+                    "role": "live_execution",
                     "scope": "real money · order writes",
                     "present": bool(broker_live_present),
                     "detail": ("separate live-environment key pair"
@@ -189,6 +262,7 @@ def _credential_matrix(
         rows.append(
             {
                 "slot": "UPSTOX LIVE ACCESS TOKEN",
+                "role": "live_execution",
                 "scope": "real money · order writes",
                 "present": bool(broker_live_present),
                 "detail": ("separate live token slot" if broker_live_present
@@ -196,9 +270,11 @@ def _credential_matrix(
                 "affects_execution": True,
             }
         )
+    roles = _credential_roles(rows, market)
     return {
         "rows": rows,
-        "requirements": _mode_credential_requirements(market, rows),
+        "roles": roles,
+        "requirements": _mode_credential_requirements(market, rows, roles),
         "secret_returned": False,
     }
 
@@ -223,28 +299,120 @@ def _credential_matrix(
 # never satisfied by market data alone. Getting this wrong in either direction
 # would either block a valid paper start or imply a live route is ready when the
 # order credential is missing.
-def _mode_credential_requirements(market: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Required credential slots per mode, for one market, in route order.
+CREDENTIAL_ROLES = ("market_data", "paper_broker", "live_execution")
 
-    The live execution slot is taken from the matrix row flagged
-    ``affects_execution`` rather than spelled out again here, so a requirement
-    can never name a slot the matrix does not report.
+
+def _credential_roles(rows: list[dict[str, Any]], market: str) -> dict[str, Any]:
+    """Resolve one slot per role, or report the assignment as inconsistent.
+
+    Roles are explicit on each matrix row; nothing is chosen by position or by
+    reading a label. A role that appears twice, a row with an unknown role, or
+    an expected role that is missing all make the assignment untrustworthy —
+    and an untrustworthy assignment must never satisfy a requirement.
     """
-    market_data = [str(r["slot"]) for r in rows if not r.get("affects_execution")]
-    execution = [str(r["slot"]) for r in rows if r.get("affects_execution")]
-    paper_slots = market_data[:1]
-    live_slots = paper_slots + execution
+    problems: list[str] = []
+    by_role: dict[str, list[str]] = {}
+    seen_slots: dict[str, int] = {}
+    for row in rows:
+        slot = row.get("slot")
+        role = row.get("role")
+        if not isinstance(slot, str) or not slot.strip():
+            problems.append("a credential row has no usable slot name")
+            continue
+        name = slot.strip()
+        seen_slots[name] = seen_slots.get(name, 0) + 1
+        if not isinstance(role, str) or role not in CREDENTIAL_ROLES:
+            problems.append(f"{name} has an unknown credential role {role!r}")
+            continue
+        by_role.setdefault(role, []).append(name)
+
+    for name, count in seen_slots.items():
+        if count > 1:
+            problems.append(f"slot {name} appears {count} times in the matrix")
+
+    resolved: dict[str, str | None] = {}
+    for role in CREDENTIAL_ROLES:
+        names = by_role.get(role, [])
+        if len(names) == 1:
+            resolved[role] = names[0]
+        elif not names:
+            resolved[role] = None
+        else:
+            resolved[role] = None
+            problems.append(f"role {role} is assigned to {len(names)} slots ({', '.join(sorted(names))})")
+
+    # Which roles each supported market must be able to resolve. NASDAQ routes
+    # broker-paper orders through its own key pair; NSE has no broker-paper
+    # environment, so that role is neither expected nor reported there.
+    expected = {
+        "NSE": ("market_data", "live_execution"),
+        "NASDAQ": ("market_data", "paper_broker", "live_execution"),
+    }.get(market, ("market_data",))
+    for role in expected:
+        if resolved.get(role) is None and not any(role in p for p in problems):
+            problems.append(f"{market} has no single {role} credential slot")
+
+    return {
+        "resolved": resolved,
+        "problems": problems,
+        "consistent": not problems,
+    }
+
+
+def _mode_credential_requirements(
+    market: str,
+    rows: list[dict[str, Any]],
+    roles: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Required credential slots per mode, resolved by role.
+
+    PAPER    -> the local paper-session route reads quotes with the market-data
+                credential and fills in the local ledger. It reads no order
+                credential, so it requires the market_data role only. The
+                NASDAQ broker-paper key is *not* required: it belongs to the
+                separate broker-paper path, not to a local paper session.
+    LIVE     -> per-market readiness requires market data plus the separate
+                real-money execution credential.
+
+    When the role assignment is inconsistent the requirement lists are empty and
+    ``consistent`` is False: the caller must treat that as UNKNOWN rather than
+    as "nothing required".
+    """
+    assignment = roles if roles is not None else _credential_roles(rows, market)
+    resolved = assignment["resolved"]
+    consistent = bool(assignment["consistent"])
+
+    market_data = resolved.get("market_data")
+    live_execution = resolved.get("live_execution")
+    paper_slots = [market_data] if (consistent and market_data) else []
+    live_slots = [s for s in (market_data, live_execution) if consistent and s]
+    if consistent and market_data and live_execution:
+        live_ok = True
+    else:
+        live_ok = False
+
+    base = {
+        "consistent": consistent,
+        "problems": list(assignment["problems"]),
+    }
     return {
         "PAPER": {
+            **base,
             "required_slots": paper_slots,
+            "available": paper_slots != [],
+            "roles": ["market_data"],
             "source": "POST /api/markets/paper/session/start",
             "note": (
                 "A local paper session reads quotes and bars with the market-data credential "
-                "and fills in the local ledger. It never reads a broker order credential."
+                "and fills in the local ledger. It never reads a broker order credential, so "
+                "the broker-paper key pair is not required here."
             ),
         },
         "LIVE": {
+            **base,
             "required_slots": live_slots,
+            "available": live_ok,
+            "roles": ["market_data", "live_execution"],
             "source": "per-market live readiness and execution gate",
             "note": (
                 "A LIVE session needs market data to validate quotes plus the separate "
@@ -336,6 +504,7 @@ def _autopilot_view(
     live: dict[str, Any],
     quota: dict[str, Any],
     facts: dict[str, Any],
+    readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate — never enable — Autopilot for one market.
 
@@ -418,13 +587,52 @@ def _autopilot_view(
         seen.add(text)
         blockers.append({"code": "LIVE_READINESS", "blocks": ["LIVE"], "text": text})
 
+    # Readiness reports failing *checks* separately from missing dependencies,
+    # so a projection that only read the dependency list would call a market
+    # ready while a named check is failing. Both are folded in, de-duplicated.
+    readiness = readiness or {}
+    failed_checks = [str(c) for c in (readiness.get("failed_checks") or ()) if str(c).strip()]
+    for name in failed_checks:
+        text = f"Readiness check failed: {name}"
+        if text in seen:
+            continue
+        seen.add(text)
+        blockers.append({"code": "LIVE_READINESS_CHECK_FAILED", "blocks": ["LIVE"], "text": text})
+
     def gaps(mode: str) -> list[dict[str, Any]]:
         return [b for b in blockers if mode in (b.get("blocks") or ())]
 
     paper_gaps = gaps("PAPER")
     live_gaps = gaps("LIVE")
     paper_ok = not paper_gaps
-    live_ok = not live_gaps and live_gate == "ACTIVE"
+
+    # LIVE Autopilot needs positive evidence of readiness: the coordinator said
+    # ok, the gate is ACTIVE, nothing is blocking LIVE, no readiness check is
+    # failing, and the readiness state is actually present. An absent readiness
+    # payload is not "fine" — it is unknown, and unknown is not available.
+    readiness_reported = isinstance(readiness, dict) and "ready" in readiness
+    readiness_ok = readiness_reported and readiness.get("ready") is True
+    live_ok = (
+        bool(live_gaps) is False
+        and live_gate == "ACTIVE"
+        and readiness_ok
+        and not failed_checks
+    )
+    if not readiness_reported:
+        blockers.append({
+            "code": "READINESS_UNAVAILABLE",
+            "blocks": ["LIVE"],
+            "text": "The server did not report readiness for this market, so LIVE automation "
+                    "cannot be shown to be available.",
+        })
+    elif not readiness_ok:
+        blockers.append({
+            "code": "LIVE_NOT_READY",
+            "blocks": ["LIVE"],
+            "text": "Readiness has not passed for this market, so LIVE automation stays "
+                    "unavailable even if the gate is ACTIVE.",
+        })
+    live_gaps = gaps("LIVE")
 
     return {
         "paper": {
@@ -530,21 +738,13 @@ def build_launchpad(
                 plan = None
 
         limits = dict((snapshot.get("risk_limits") or {}))
-        # A limit counts only if the server actually enforces it. Cost *rates*
-        # (brokerage/slippage/spread bps) may legitimately be zero and are not
-        # caps, so testing "every number is positive" would invent a blocker.
-        enforced_caps = [k for k in BOUNDED_CAP_FIELDS if k in limits]
+        # Every mandatory cap must be present and valid. A subset is not enough:
+        # a market with an order-value cap but no daily-loss cap is unbounded in
+        # a way that matters. Cost rates are validated separately and may be 0.
+        limit_report = _validate_risk_limits(limits)
         facts = {
             "credential_present": data_present,
-            "limits": {
-                "configured": bool(enforced_caps) and all(
-                    isinstance(limits[k], (int, float))
-                    and not isinstance(limits[k], bool)
-                    and float(limits[k]) > 0
-                    for k in enforced_caps
-                ),
-                "checked_fields": enforced_caps,
-            },
+            "limits": limit_report,
             "blocked": blocked,
             "blocked_detail": live_status.get("blocked_detail"),
             "kill_engaged": kill_engaged,
@@ -597,7 +797,10 @@ def build_launchpad(
                           or (live_status.get("exit_route")),
             "available": coordinator is not None,
         }
-        autopilot = _autopilot_view(market, paper=paper_block, live=live_block, quota=quota, facts=facts)
+        autopilot = _autopilot_view(
+                    market, paper=paper_block, live=live_block, quota=quota, facts=facts,
+                    readiness=live_block,
+                )
 
         markets[market] = {
             "market": market,

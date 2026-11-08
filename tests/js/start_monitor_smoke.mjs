@@ -98,7 +98,7 @@ function autopilotBlock(market) {
 function marketPayload(market) {
   const live = liveState[market];
   const isNse = market === "NSE";
-  return {
+  const built = {
     market,
     venue_label: isNse ? "NSE · Upstox (INR)" : "NASDAQ · Alpaca (USD)",
     broker: isNse ? "Upstox" : "Alpaca",
@@ -136,26 +136,28 @@ function marketPayload(market) {
     },
     credentials: {
       rows: [
-        { slot: isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA", scope: "read-only prices",
+        { slot: isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA", role: "market_data", scope: "read-only prices",
           get present() { return live.credential; }, detail: "presence only", affects_execution: false },
         ...(isNse
-          ? [{ slot: "UPSTOX LIVE ACCESS TOKEN", scope: "real money · order writes",
+          ? [{ slot: "UPSTOX LIVE ACCESS TOKEN", role: "live_execution", scope: "real money · order writes",
                get present() { return live.liveCredential; },
                detail: "presence only", affects_execution: true }]
           : [
-            { slot: "ALPACA BROKER PAPER", scope: "broker paper orders",
+            { slot: "ALPACA BROKER PAPER", role: "paper_broker", scope: "broker paper orders",
               get present() { return live.paperBrokerCredential; },
               detail: "presence only", affects_execution: false },
-            { slot: "ALPACA BROKER LIVE", scope: "real money · order writes",
+            { slot: "ALPACA BROKER LIVE", role: "live_execution", scope: "real money · order writes",
               get present() { return live.liveCredential; },
               detail: "presence only", affects_execution: true },
           ]),
       ],
       // Mirrors app/markets/start_monitor.py _mode_credential_requirements():
       // PAPER needs market data only; LIVE adds the real-money slot.
+      roles: { consistent: true, problems: [], resolved: {} },
       requirements: {
         PAPER: {
           required_slots: [isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA"],
+          consistent: true, available: true, roles: ["market_data"],
           source: "POST /api/markets/paper/session/start",
           note: "paper reads quotes, fills locally, never reads an order credential",
         },
@@ -163,6 +165,7 @@ function marketPayload(market) {
           required_slots: isNse
             ? ["UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN"]
             : ["ALPACA MARKET DATA", "ALPACA BROKER LIVE"],
+          consistent: true, available: true, roles: ["market_data", "live_execution"],
           source: "per-market live readiness and execution gate",
           note: "LIVE needs market data plus the separate real-money credential",
         },
@@ -194,6 +197,10 @@ function marketPayload(market) {
     cycle_missed: { behavior: "A cycle that cannot get quota before its deadline is deferred, not sent." },
     stale_policy: { max_quote_age_seconds: 90, behavior: "Quotes older than 90s are refused fail-closed." },
   };
+  // A test may replace the credential contract to exercise malformed shapes.
+  if (live.overrideRequirements) built.credentials.requirements = live.overrideRequirements;
+  if (live.overrideRows) built.credentials.rows = live.overrideRows;
+  return built;
 }
 
 function launchpadPayload() {
@@ -662,7 +669,8 @@ try {
   refreshCredentialRows();
   await reloadStart();
   assert.equal(stepDone(3), false, "an unknown credential status leaves step 3 incomplete");
-  assert.match(text("start-setup-notes"), /Credential state is unknown/);
+  assert.match(text("start-setup-notes"), /Credential status cannot be confirmed/,
+    "an unknown status explains itself rather than silently passing");
 
   // (i) No market ticked -> both steps incomplete and explained.
   $("start-select-NSE").checked = false;
@@ -674,24 +682,132 @@ try {
   assert.equal(stepDone(4), false, "no ticked market means no strategy step");
   assert.match(text("start-setup-notes"), /Tick at least one market card/);
 
-  // (j) A failed server read must not leave anything ticked from a stale payload.
+  // (j) A failed server read must clear every payload-derived indicator.
+  //     This test asserts its own precondition so it cannot silently pass by
+  //     skipping: steps 3 and 4 must genuinely be complete first.
   $("start-select-NSE").checked = true;
   $("start-select-NSE").dispatchEvent(new window.Event("change", { bubbles: true }));
-  await flush();
-  const staleOk = stepDone(3) || stepDone(4);
+  $("start-select-NASDAQ").checked = true;
+  $("start-select-NASDAQ").dispatchEvent(new window.Event("change", { bubbles: true }));
+  liveState.NSE.credential = true;
+  liveState.NSE.liveCredential = true;
+  liveState.NASDAQ.credential = true;
+  liveState.NASDAQ.liveCredential = true;
+  refreshCredentialRows();
+  pickMode("PAPER");
+  await reloadStart();
+  // Preconditions, asserted — not assumed.
+  assert.equal(stepDone(3), true, "PRECONDITION: step 3 must be complete before the failure");
+  assert.equal(stepDone(4), true, "PRECONDITION: step 4 must be complete before the failure");
+
   const savedFetch = window.fetch;
   window.fetch = (url, opts) => (String(url).includes("/api/markets/start-monitor")
     ? Promise.reject(new Error("network down")) : savedFetch(url, opts));
   $("refresh-all").dispatchEvent(new window.Event("click", { bubbles: true }));
   await flush(40);
   window.fetch = savedFetch;
-  if (staleOk) {
-    assert.equal(stepDone(3), false, "a failed reload drops step 3 rather than keeping it ticked");
-    assert.equal(stepDone(4), false, "a failed reload drops step 4 rather than keeping it ticked");
-  }
-  await reloadStart();
+
+  assert.equal(stepDone(3), false, "a failed reload must clear step 3");
+  assert.equal(stepDone(4), false, "a failed reload must clear step 4");
+  assert.equal(stepDoneCount(), 0, "no step may remain complete after the payload is gone");
+  assert.match(text("start-setup-notes"), /Server status unavailable/,
+    "and the panel says why, instead of showing stale completion");
+
+  // Restore the fixture baseline the remaining sections assume.
   resetSetup();
   refreshCredentialRows();
+  await reloadStart();
+
+  /* (l) Fail-closed credential contract. Each malformed shape must leave step 3
+   * incomplete with an explanation — never satisfied. */
+  const pullSelection = (keep) => {
+    for (const market of ["NSE", "NASDAQ"]) {
+      $(`start-select-${market}`).checked = market === keep;
+      $(`start-select-${market}`).dispatchEvent(new window.Event("change", { bubbles: true }));
+    }
+  };
+  const contractCase = async (name, requirement, expectation) => {
+    liveState.NSE.overrideRequirements = requirement;
+    liveState.NSE.credential = true;
+    pullSelection("NSE");
+    await reloadStart();
+    assert.equal(stepDone(3), false, `${name}: step 3 must stay incomplete`);
+    assert.match(text("start-setup-notes"), expectation, `${name}: must explain why`);
+  };
+  // Only NSE is ticked for these cases, so the contract under test is isolated.
+  liveState.NSE.credentialRowsOk = true;
+  pickMode("PAPER");
+
+  // A well-formed base contract; each case breaks exactly one rule of it.
+  const PAPER_OK = {
+    PAPER: {
+      required_slots: ["UPSTOX MARKET DATA"], consistent: true, available: true,
+      roles: ["market_data"], source: "POST /api/markets/paper/session/start", note: "",
+    },
+    LIVE: {
+      required_slots: ["UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN"],
+      consistent: true, available: true, roles: ["market_data", "live_execution"],
+      source: "gate", note: "",
+    },
+  };
+  const withPaper = (over) => ({ ...PAPER_OK, PAPER: { ...PAPER_OK.PAPER, ...over } });
+
+  await contractCase("empty array",
+    withPaper({ required_slots: [] }), /not a non-empty array/);
+  await contractCase("wrong type (string)",
+    withPaper({ required_slots: "UPSTOX MARKET DATA" }), /not a non-empty array/);
+  await contractCase("blank string",
+    withPaper({ required_slots: ["   "] }), /non-string or blank entry/);
+  await contractCase("non-string entry",
+    withPaper({ required_slots: [42] }), /non-string or blank entry/);
+  await contractCase("duplicate requirement",
+    withPaper({ required_slots: ["UPSTOX MARKET DATA", "UPSTOX MARKET DATA"] }), /duplicate slot/);
+  await contractCase("unknown slot",
+    withPaper({ required_slots: ["NOT IN THE MATRIX"] }), /is not in the credential matrix/);
+  await contractCase("inconsistent role assignment",
+    withPaper({ consistent: false }), /inconsistent credential role assignment/);
+  await contractCase("unresolvable slot",
+    withPaper({ available: false }), /could not resolve the required credential slot/);
+  await contractCase("missing requirements object",
+    { ...(PAPER_OK || {}), PAPER: undefined }, /did not report credential requirements/);
+
+  // Duplicate matrix rows must not silently pass.
+  liveState.NSE.overrideRequirements = null;
+  liveState.NSE.overrideRows = [
+    { slot: "UPSTOX MARKET DATA", role: "market_data", present: true },
+    { slot: "UPSTOX MARKET DATA", role: "market_data", present: true },
+  ];
+  pullSelection("NSE");
+  await reloadStart();
+  assert.equal(stepDone(3), false, "a duplicated matrix row must not satisfy step 3");
+  assert.match(text("start-setup-notes"), /appears more than once|not in the credential matrix/);
+
+  // A non-boolean presence must not be read as present.
+  liveState.NSE.overrideRows = [{ slot: "UPSTOX MARKET DATA", role: "market_data", present: "yes" }];
+  await reloadStart();
+  assert.equal(stepDone(3), false, "a non-boolean presence must not satisfy step 3");
+  assert.match(text("start-setup-notes"), /no boolean presence/);
+
+  // Reordering the matrix rows must not change the outcome: slots are matched
+  // by identity, not position.
+  liveState.NSE.overrideRows = null;
+  pullSelection("NSE");
+  liveState.NSE.credential = true;
+  await reloadStart();
+  liveState.NSE.credentialRowsSnapshot = [
+    { slot: "UPSTOX LIVE ACCESS TOKEN", role: "live_execution", present: true },
+    { slot: "UPSTOX MARKET DATA", role: "market_data", present: true },
+  ];
+  const orderedOk = stepDone(3);
+  assert.equal(orderedOk, true, "baseline: step 3 completes for a well-formed contract");
+  const reversed = liveState.NSE.credentialRowsSnapshot;
+  liveState.NSE.overrideRows = reversed;
+  await reloadStart();
+  assert.equal(stepDone(3), true, "reversing the credential rows must not change the result");
+  liveState.NSE.overrideRows = null;
+  liveState.NSE.overrideRequirements = null;
+  pullSelection("NSE");
+  resetSetup();
   await reloadStart();
 
   // (k) Presence-only: no credential *value* is ever rendered.

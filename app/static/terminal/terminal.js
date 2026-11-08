@@ -5757,10 +5757,17 @@ async function loadStartMonitor({ background = false } = {}) {
     await Promise.all([loadStartSearch("NSE", ""), loadStartSearch("NASDAQ", "")]);
   } catch (error) {
     st.error = error.message || "start & monitor overview unavailable";
-    // A failed read must not leave steps ticked from an earlier payload.
+    // A failed read must not leave anything on screen that came from the
+    // previous payload. Drop the payload, then the preview and monitor rows
+    // that were derived from it, and recompute the progress strip so no
+    // "done" class from the earlier render survives.
     st.data = null;
+    st.preview = null;
+    st.monitor = [];
+    st.monitorError = "";
     renderStart();
-    renderStartSetupNotes();
+    startRefreshSetup();
+    if ($("start-monitor-rows")) renderStartMonitorRows();
   } finally {
     st.loading = false;
   }
@@ -5852,22 +5859,71 @@ function renderStartMode() {
  * it: no slot list is hard-coded here, so the page cannot drift from the
  * backend. Presence is the only thing consulted — never a value.
  */
+/* Which credential slots does the *route* a mode uses actually require?
+ *
+ * The server sends this per market as credentials.requirements[<mode>], derived
+ * from the route each mode runs and resolved by an explicit role
+ * (market_data / paper_broker / live_execution) — never by label text and never
+ * by list position. This function validates that contract and returns
+ * { ok: true, slots } or { ok: false, why }. Anything that is not a clean,
+ * self-consistent contract is treated as UNKNOWN, never as satisfied:
+ * a missing/empty/malformed list, a non-string or blank entry, duplicates, a
+ * non-boolean "available"/"consistent" flag, or a slot that does not resolve to
+ * exactly one matrix row with a boolean presence.
+ */
 function startRequiredSlots(market, mode) {
-  const reqs = startMarketData(market)?.credentials?.requirements;
-  const perMode = reqs?.[mode];
-  const slots = perMode?.required_slots;
-  return Array.isArray(slots) ? slots : null;
+  const creds = startMarketData(market)?.credentials;
+  const perMode = creds?.requirements?.[mode];
+  const unknown = (why) => ({ ok: false, why: `${market} ${mode}: ${why}` });
+
+  if (!perMode || typeof perMode !== "object" || Array.isArray(perMode)) {
+    return unknown("the server did not report credential requirements");
+  }
+  if (perMode.consistent !== true) {
+    return unknown("the server reported an inconsistent credential role assignment");
+  }
+  if (perMode.available !== true) {
+    return unknown("the server could not resolve the required credential slot");
+  }
+  const slots = perMode.required_slots;
+  if (!Array.isArray(slots) || slots.length === 0) {
+    return unknown("required_slots is not a non-empty array");
+  }
+  const normalised = [];
+  for (const entry of slots) {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      return unknown("required_slots contains a non-string or blank entry");
+    }
+    normalised.push(entry.trim());
+  }
+  const folded = normalised.map((s) => s.toUpperCase());
+  if (new Set(folded).size !== folded.length) {
+    return unknown("required_slots contains a duplicate slot");
+  }
+
+  // Every required slot must resolve to exactly one matrix row. Two rows with
+  // the same name is an ambiguous matrix, not a satisfied requirement.
+  const rows = creds.rows;
+  if (!Array.isArray(rows)) return unknown("the credential matrix is missing");
+  for (const slot of normalised) {
+    const matches = rows.filter((r) => String(r?.slot ?? "").trim().toUpperCase() === slot.toUpperCase());
+    if (matches.length === 0) return unknown(`required slot ${slot} is not in the credential matrix`);
+    if (matches.length > 1) return unknown(`required slot ${slot} appears more than once in the matrix`);
+    if (typeof matches[0].present !== "boolean") {
+      return unknown(`required slot ${slot} has no boolean presence`);
+    }
+  }
+  return { ok: true, slots: normalised };
 }
 
-/* Presence of one required slot, or null when the answer is simply unknown
- * (no payload, no row, or a non-boolean value). Unknown must never read as
- * satisfied — that is exactly how a step would claim more than it knows. */
+/* Presence of one required slot. Callers must already have validated the
+ * contract; this returns null rather than guessing when it cannot tell. */
 function startSlotPresence(market, slot) {
   const rows = startMarketData(market)?.credentials?.rows;
   if (!Array.isArray(rows)) return null;
-  const row = rows.find((r) => String(r?.slot || "").trim().toUpperCase() === slot.toUpperCase());
-  if (!row || typeof row.present !== "boolean") return null;
-  return row.present;
+  const matches = rows.filter((r) => String(r?.slot ?? "").trim().toUpperCase() === slot.toUpperCase());
+  if (matches.length !== 1) return null;
+  return typeof matches[0].present === "boolean" ? matches[0].present : null;
 }
 
 /* Evaluate step 3 (credentials) and step 4 (strategy & Autopilot) together,
@@ -5879,7 +5935,7 @@ function startSetupStep(mode, step) {
   const label = mode === "LIVE" ? "LIVE" : "PAPER";
 
   if (!st.data || !st.data.markets) {
-    return { satisfied: false, reason: "Server state has not loaded yet.", missing: [] };
+    return { satisfied: false, reason: "Server status unavailable: nothing can be confirmed.", missing: [] };
   }
   if (!ticked.length) {
     return {
@@ -5907,7 +5963,7 @@ function startSetupStep(mode, step) {
     return { satisfied: true, reason: `Review mode and strategy chosen for ${ticked.join(" and ")}.`, missing: [] };
   }
 
-  // Step 3: credentials, for the mode actually selected.
+  // Step 3: credentials, for the mode actually selected, fail-closed.
   const missing = [];
   const unknown = [];
   for (const market of ticked) {
@@ -5915,12 +5971,12 @@ function startSetupStep(mode, step) {
       unknown.push(`${market} (no symbols selected)`);
       continue;
     }
-    const slots = startRequiredSlots(market, mode);
-    if (slots === null) {
-      unknown.push(`${market} (server did not report ${label} credential requirements)`);
+    const contract = startRequiredSlots(market, mode);
+    if (!contract.ok) {
+      unknown.push(contract.why);
       continue;
     }
-    for (const slot of slots) {
+    for (const slot of contract.slots) {
       const present = startSlotPresence(market, slot);
       if (present === null) unknown.push(`${market} ${slot} (status unavailable)`);
       else if (!present) missing.push(`${market} ${slot}`);
@@ -5932,7 +5988,8 @@ function startSetupStep(mode, step) {
   if (unknown.length) {
     return {
       satisfied: false,
-      reason: `Credential state is unknown for ${unknown.join(", ")}; the step stays incomplete until the server reports it.`,
+      reason: `Credential status cannot be confirmed: ${unknown.join("; ")}. `
+        + "The step stays incomplete until the server reports a consistent contract.",
       missing: unknown,
     };
   }
@@ -5949,6 +6006,11 @@ function startSetupStep(mode, step) {
 function startCompletedSteps() {
   const st = startState();
   const done = new Set();
+  // No payload means nothing can be confirmed, so no step is claimed complete.
+  // Step 1/2 are local choices, but reporting them as progress while the server
+  // state they lead into is unreadable would imply the flow is further along
+  // than it is; the strip carries the "server status unavailable" note instead.
+  if (!st.data?.markets) return done;
   const touched = st.touched || {};
   const live = (market) => (startMarketData(market)?.paper?.session_state || "STOPPED") !== "STOPPED"
     || (startMarketData(market)?.live?.gate_state || "DISABLED") !== "DISABLED";
@@ -5970,7 +6032,15 @@ function renderStartSetupNotes() {
   const host = $("start-setup-notes");
   if (!host) return;
   const st = startState();
-  if (!st.data?.markets) { host.innerHTML = ""; return; }
+  if (!st.data?.markets) {
+    host.innerHTML = st.error
+      ? `<div class="inline-status err"><strong>Server status unavailable.</strong> `
+        + `Setup progress is cleared because ${escapeHtml(st.error)}. `
+        + `Nothing on this panel can be confirmed until the server answers again; `
+        + `no step is marked complete.</div>`
+      : "";
+    return;
+  }
   const creds = startSetupStep(st.mode, 3);
   const strat = startSetupStep(st.mode, 4);
   const lines = [];

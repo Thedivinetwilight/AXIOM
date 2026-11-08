@@ -15,6 +15,7 @@ holds, so a request count of zero provider calls is the expected outcome.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,14 @@ from app.api.server import create_app
 from app.config.settings import Settings
 from app.markets.start_monitor import (
     AUTOPILOT_MAY,
+    BOUNDED_CAP_FIELDS,
+    CREDENTIAL_ROLES,
+    INTEGER_CAP_FIELDS,
     _cadence_view,
+    _credential_matrix,
+    _credential_roles,
+    _mode_credential_requirements,
+    _validate_risk_limits,
     AUTOPILOT_MAY_NOT,
     BADGE_ERROR,
     BADGE_LIVE_ACTIVE,
@@ -142,6 +150,8 @@ class _FakeCoordinator:
         missing: list | None = None,
         blocked: str | None = None,
         unresolved: list | None = None,
+        readiness_override: dict | None = None,
+        risk_limits: dict | None = None,
     ) -> None:
         self._modes = modes or {NSE: "PAPER", NASDAQ: "PAPER"}
         self._gates = gates or {
@@ -152,6 +162,8 @@ class _FakeCoordinator:
         self._missing = missing or []
         self._blocked = blocked
         self._unresolved = unresolved or []
+        self._readiness_override = readiness_override
+        self._risk_limits = risk_limits
 
     def status(self, market: str) -> dict:
         gate = {
@@ -170,10 +182,13 @@ class _FakeCoordinator:
             "submitted_total": 0,
             "rejected_total": 0,
             "last_cycle_status": None,
-            "risk_limits": {"max_order_value": 1.0},
+            "risk_limits": (self._risk_limits if self._risk_limits is not None
+                            else {"max_order_value": 1.0}),
         }
 
     def readiness(self, market: str) -> dict:
+        if self._readiness_override is not None:
+            return {"market": market, **self._readiness_override}
         return {
             "market": market,
             "ok": self._ready,
@@ -577,3 +592,258 @@ def test_route_exposes_requirements_for_both_modes(client: TestClient):
             assert mode["required_slots"]
             assert mode["source"].strip()
             assert mode["note"].strip()
+
+
+# --- 3/6. Credential contract: roles, fail-closed validation ----------------
+
+def _matrix(market="NASDAQ", **kw):
+    args = dict(data_present=True, data_source="protected-store",
+                broker_paper_present=True, broker_live_present=True)
+    args.update(kw)
+    return _credential_matrix(market, **args)
+
+
+def test_every_row_declares_an_explicit_role():
+    for market in (NSE, NASDAQ):
+        rows = _matrix(market)["rows"]
+        assert all(row.get("role") in CREDENTIAL_ROLES for row in rows)
+        # Exactly one market_data and one live_execution row per market.
+        roles = [row["role"] for row in rows]
+        assert roles.count("market_data") == 1
+        assert roles.count("live_execution") == 1
+
+
+def test_nasdaq_paper_broker_role_is_never_a_market_data_or_live_slot():
+    matrix = _matrix(NASDAQ)
+    resolved = matrix["roles"]["resolved"]
+    assert resolved["paper_broker"] == "ALPACA BROKER PAPER"
+    assert resolved["market_data"] == "ALPACA MARKET DATA"
+    assert resolved["live_execution"] == "ALPACA BROKER LIVE"
+    # The paper broker key appears in no required-slot list.
+    for mode in ("PAPER", "LIVE"):
+        assert "ALPACA BROKER PAPER" not in matrix["requirements"][mode]["required_slots"]
+
+
+def test_requirements_are_resolved_by_role_not_by_row_order():
+    forward = _credential_matrix(
+        NASDAQ, data_present=True, data_source="s",
+        broker_paper_present=True, broker_live_present=True,
+    )
+    rows = list(forward["rows"])
+    reversed_rows = list(reversed(rows))
+    roles = _credential_roles(reversed_rows, NASDAQ)
+    assert roles["consistent"] is True
+    assert roles["resolved"] == forward["roles"]["resolved"]
+    reqs = _mode_credential_requirements(NASDAQ, reversed_rows, roles)
+    assert reqs["PAPER"]["required_slots"] == forward["requirements"]["PAPER"]["required_slots"]
+    assert reqs["LIVE"]["required_slots"] == forward["requirements"]["LIVE"]["required_slots"]
+
+
+@pytest.mark.parametrize("mutate,expect", [
+    (lambda rows: rows + [dict(rows[0])], "appears"),                       # duplicate slot
+    (lambda rows: [dict(rows[0], role="mystery")], "unknown credential role"),
+    (lambda rows: [dict(r, role="paper_broker") for r in rows], "market_data"),
+    (lambda rows: [], "market_data"),
+])
+def test_inconsistent_role_assignment_is_never_consistent(mutate, expect):
+    rows = mutate(list(_matrix(NASDAQ)["rows"]))
+    roles = _credential_roles(rows, NASDAQ)
+    assert roles["consistent"] is False
+    assert any(expect in p for p in roles["problems"])
+    reqs = _mode_credential_requirements(NASDAQ, rows, roles)
+    # An inconsistent assignment yields no usable requirement, never "nothing needed".
+    assert reqs["PAPER"]["available"] is False
+    assert reqs["PAPER"]["required_slots"] == []
+    assert reqs["LIVE"]["available"] is False
+
+
+def test_two_market_data_rows_do_not_silently_pick_one():
+    rows = list(_matrix(NASDAQ)["rows"])
+    rows.append({"slot": "EXTRA FEED", "role": "market_data", "present": True,
+                 "scope": "s", "detail": "d", "affects_execution": False})
+    roles = _credential_roles(rows, NASDAQ)
+    assert roles["consistent"] is False
+    assert roles["resolved"]["market_data"] is None
+    assert any("market_data" in p for p in roles["problems"])
+
+
+# --- 4. LIVE Autopilot requires positive readiness --------------------------
+
+def _autopilot_for(**coordinator_kwargs):
+    """NASDAQ Autopilot view with market-data credentials present.
+
+    Without them NO_MARKET_DATA_CREDENTIAL blocks both modes, which would mask
+    the readiness condition these tests are about.
+    """
+    creds = {
+        NSE: {"present": True, "source": "protected-store"},
+        NASDAQ: {"present": True, "source": "protected-store", "feed": "iex"},
+    }
+    payload = _launchpad(coordinator=_FakeCoordinator(**coordinator_kwargs),
+                         data_credentials=creds)
+    return payload["markets"][NASDAQ]["autopilot"]
+
+
+def _ready_override(**over):
+    base = {"ok": True, "checks": {"configuration_complete": True}, "failed": [],
+            "missing_dependencies": [],
+            "documented_capabilities": {"exit_route": EXIT_US}}
+    base.update(over)
+    return base
+
+
+def _active_gate():
+    return {NSE: {"state": "DISABLED", "live_available": False},
+            NASDAQ: {"state": "ACTIVE", "live_available": True}}
+
+
+def test_live_autopilot_available_only_when_ready_active_and_clean():
+    live = _autopilot_for(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"},
+        gates=_active_gate(), ready=True, readiness_override=_ready_override(),
+    )["live"]
+    assert live["available"] is True
+
+
+def test_live_autopilot_rejected_when_gate_active_but_not_ready():
+    live = _autopilot_for(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"},
+        gates=_active_gate(), ready=False,
+        readiness_override=_ready_override(ok=False, failed=["configuration_complete"]),
+    )["live"]
+    assert live["available"] is False
+    assert any(gap["code"] == "LIVE_NOT_READY" for gap in live["gaps"])
+
+
+def test_live_autopilot_rejected_when_failed_check_but_ok_true():
+    """A failing check must block even if the coordinator's own flag is True."""
+    live = _autopilot_for(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"},
+        gates=_active_gate(), ready=True,
+        readiness_override=_ready_override(failed=["calendar_session_open"]),
+    )["live"]
+    assert live["available"] is False
+    texts = " ".join(gap["text"] for gap in live["gaps"])
+    assert "calendar_session_open" in texts, "the failing check must be named in the blockers"
+
+
+def test_live_autopilot_rejected_when_readiness_state_is_absent():
+    payload = _launchpad(coordinator=_FakeCoordinator(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"}, gates=_active_gate(), ready=True,
+        readiness_override={},  # no "ok" key at all
+    ))
+    live = payload["markets"][NASDAQ]["autopilot"]["live"]
+    assert live["available"] is False
+
+
+def test_live_autopilot_rejected_with_missing_dependencies():
+    live = _autopilot_for(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"},
+        gates=_active_gate(), ready=True,
+        readiness_override=_ready_override(missing_dependencies=["ALPACA_BROKER_ENABLED"]),
+    )["live"]
+    assert live["available"] is False
+
+
+def test_failed_readiness_checks_are_listed_as_blockers():
+    payload = _launchpad(coordinator=_FakeCoordinator(
+        modes={NSE: "PAPER", NASDAQ: "LIVE"}, gates=_active_gate(), ready=True,
+        readiness_override=_ready_override(failed=["risk_limits_configured"]),
+    ))
+    codes = {b["code"] for b in payload["markets"][NASDAQ]["autopilot"]["blockers"]}
+    assert "LIVE_READINESS_CHECK_FAILED" in codes
+
+
+# --- 5. Every mandatory risk cap must be present and valid ------------------
+
+VALID_LIMITS = {
+    "max_order_value": 250000, "max_symbol_exposure": 400000, "max_total_exposure": 900000,
+    "max_open_positions": 10, "max_daily_loss": 25000, "max_daily_orders": 40,
+    "max_quote_age_seconds": 90, "brokerage_bps": 0,
+}
+
+
+def test_complete_valid_limits_report_configured():
+    report = _validate_risk_limits(dict(VALID_LIMITS))
+    assert report["configured"] is True
+    assert report["problems"] == []
+    assert set(report["checked_fields"]) == set(BOUNDED_CAP_FIELDS)
+
+
+def test_zero_cost_rate_is_preserved_and_not_a_missing_cap():
+    report = _validate_risk_limits(dict(VALID_LIMITS, brokerage_bps=0, slippage_bps=0))
+    assert report["configured"] is True
+    assert report["cost_rates"]["brokerage_bps"] == 0
+    assert report["cost_rate_problems"] == []
+
+
+@pytest.mark.parametrize("field", BOUNDED_CAP_FIELDS)
+def test_each_missing_cap_blocks_configuration(field):
+    limits = dict(VALID_LIMITS)
+    del limits[field]
+    report = _validate_risk_limits(limits)
+    assert report["configured"] is False
+    assert any(field in p for p in report["problems"]), f"missing {field} must be named"
+
+
+@pytest.mark.parametrize("value", [0, -1, -0.01, True, False, "100", float("nan"), float("inf"), None])
+def test_invalid_cap_values_are_rejected(value):
+    report = _validate_risk_limits(dict(VALID_LIMITS, max_order_value=value))
+    assert report["configured"] is False
+    assert report["problems"]
+
+
+@pytest.mark.parametrize("field", INTEGER_CAP_FIELDS)
+def test_count_limits_must_be_whole_numbers(field):
+    assert _validate_risk_limits(dict(VALID_LIMITS, **{field: 3.5}))["configured"] is False
+    assert _validate_risk_limits(dict(VALID_LIMITS, **{field: 3}))["configured"] is True
+
+
+def test_runtime_fault_reports_error_and_blocks_every_mode():
+    payload = _launchpad(coordinator=_FakeCoordinator(
+        blocked="UNRESOLVED_INTENT", risk_limits=dict(VALID_LIMITS)))
+    row = payload["markets"][NSE]
+    assert row["badge"] == BADGE_ERROR
+
+
+# --- 1. Every focused-test path referenced by a gate must exist --------------
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GATE_FILES = (
+    REPO_ROOT / ".github" / "workflows" / "paper-checks.yml",
+    REPO_ROOT / ".github" / "workflows" / "windows-release.yml",
+    REPO_ROOT / "packaging" / "windows" / "build_windows.ps1",
+)
+
+
+@pytest.mark.parametrize("gate", GATE_FILES, ids=lambda p: p.name)
+def test_every_referenced_test_path_exists(gate):
+    """A gate that names a deleted suite fails every run. Catch it statically."""
+    assert gate.exists(), f"{gate} is missing"
+    body = gate.read_text(encoding="utf-8")
+    referenced = sorted(set(re.findall(r"tests/[\w./-]+\.py", body)))
+    if not referenced:
+        # A workflow may delegate its suites to a script that is itself checked
+        # by the parametrisation above; it must not silently run none.
+        delegates = [name for name in ("build_windows.ps1", "install_test.ps1", "portable_test.ps1")
+                     if name in body]
+        assert delegates, f"{gate.name} references no test paths and delegates to no known script"
+        return
+    missing = [path for path in referenced if not (REPO_ROOT / path).exists()]
+    assert missing == [], f"{gate.name} references test paths that do not exist: {missing}"
+
+
+def test_the_removed_live_vantage_api_is_tested_as_a_removal_contract():
+    """The old live-API suite must not be reinstated; its intent lives on."""
+    assert not (REPO_ROOT / "tests" / "test_vantage_api.py").exists()
+    removal = REPO_ROOT / "tests" / "test_vantage_live_api_removal.py"
+    assert removal.exists(), "the removal contract suite must exist"
+    text = removal.read_text(encoding="utf-8")
+    assert "404" in text, "the removal contract must assert 404 on the removed routes"
+    # Both Linux and Windows gates must include it beside the connector suite.
+    for gate in GATE_FILES:
+        body = gate.read_text(encoding="utf-8")
+        if "test_vantage_connector.py" in body:
+            assert "test_vantage_live_api_removal.py" in body, (
+                f"{gate.name} runs the Vantage connector suite without the removal contract"
+            )
