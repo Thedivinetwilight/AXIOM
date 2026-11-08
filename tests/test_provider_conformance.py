@@ -490,10 +490,24 @@ def test_cli_live_without_credentials_reports_unverified_without_network():
 # TemporaryDirectory cleanup with WinError 32 and keeps the database plus its
 # WAL sidecars locked, which is what broke the Windows build gate. These tests
 # fail on Linux too, by checking for the handle rather than for the symptom.
+def _assert_deletable(path: Path) -> None:
+    """Cross-platform check of the symptom, not just the cause.
+
+    Renaming a directory needs no write access to its files but does need the
+    files to be closable, so a held handle fails this everywhere - including
+    Windows, where /proc/self/fd does not exist and an fd check would skip. The
+    handle is released again on success, so nothing is destroyed.
+    """
+    probe = path.with_name(path.name + "-deletable-probe")
+    path.rename(probe)
+    probe.rename(path)
+
+
 def _open_fds_under(path: Path) -> list[str]:
     fd_dir = Path("/proc/self/fd")
-    if not fd_dir.exists():  # not Linux: nothing to inspect here
-        pytest.skip("no /proc/self/fd on this platform")
+    if not fd_dir.exists():  # not Linux: the deletability check covers us
+        _assert_deletable(path)
+        return []
     found = []
     for entry in fd_dir.iterdir():
         try:
@@ -559,6 +573,58 @@ def test_connection_commit_and_rollback_semantics_are_unchanged(tmp_path: Path):
         assert _open_fds_under(tmp_path) == []
     finally:
         engine.close()
+
+
+def test_live_execution_journal_releases_its_handle_and_keeps_writes(tmp_path: Path):
+    """The coordinator's journal used to leak a handle (plus WAL/SHM) per call.
+
+    That leak is what made the benchmark's TemporaryDirectory cleanup raise
+    WinError 32 on Windows after a successful run, so the release acceptance
+    stages were never reached.
+    """
+    from app.markets.live_execution import LiveMarketOrderJournal
+
+    journal = LiveMarketOrderJournal(tmp_path / "journal.sqlite3")
+    try:
+        journal.save_mode("NSE", "PAPER")
+        journal.save_mode("NASDAQ", "PAPER")
+        assert journal.load_modes() == {"NSE": "PAPER", "NASDAQ": "PAPER"}, \
+            "a committed write must survive"
+        # No handle may be held between calls, not just after close.
+        assert _open_fds_under(tmp_path) == [], "the journal leaked a handle between calls"
+    finally:
+        journal.close()
+    assert _open_fds_under(tmp_path) == [], "a handle survived journal.close()"
+
+
+def test_live_execution_journal_rolls_back_and_still_releases(tmp_path: Path):
+    from app.markets.live_execution import LiveMarketOrderJournal
+
+    journal = LiveMarketOrderJournal(tmp_path / "journal.sqlite3")
+    try:
+        journal.save_mode("NSE", "PAPER")
+        with pytest.raises(RuntimeError):
+            with journal._lock, journal._connect() as conn:
+                conn.execute("UPDATE live_market_modes SET mode = 'LIVE' WHERE market = 'NSE'")
+                raise RuntimeError("boom")
+        assert journal.load_modes()["NSE"] == "PAPER", "a rolled back write must not persist"
+        assert _open_fds_under(tmp_path) == []
+    finally:
+        journal.close()
+    assert _open_fds_under(tmp_path) == []
+
+
+def test_alpaca_broker_journal_releases_its_handles(tmp_path: Path):
+    """The broker journal leaked the database plus both WAL sidecars."""
+    from app.alpaca_broker.journal import AlpacaBrokerJournal
+
+    journal = AlpacaBrokerJournal(tmp_path / "alpaca_broker.sqlite3")
+    try:
+        assert journal.load_state("PAPER") == {} or isinstance(journal.load_state("PAPER"), dict)
+        assert _open_fds_under(tmp_path) == [], "the broker journal leaked a handle between calls"
+    finally:
+        journal.close()
+    assert _open_fds_under(tmp_path) == [], "a handle survived journal.close()"
 
 
 # --------------------------------------------------------------------------- #

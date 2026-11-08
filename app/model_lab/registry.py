@@ -15,11 +15,12 @@ import hashlib
 import json
 import math
 import sqlite3
+from contextlib import contextmanager
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.data.corporate_actions import canonical_bars_sha256
 from app.model_lab.datasets import DatasetManager
@@ -110,11 +111,27 @@ class ModelLabService:
         self._init_db()
         self._recover_interrupted_runs()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that is committed, and always closed.
+
+        ``with sqlite3.connect(...) as conn`` commits or rolls back but does NOT
+        close: every call site here would leak a handle on the registry and its
+        WAL/SHM siblings, and on Windows the data directory then cannot be
+        removed (sharing violation) at shutdown or during package acceptance.
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=15.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:

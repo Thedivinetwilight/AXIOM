@@ -39,9 +39,10 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+from contextlib import contextmanager
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from app.autonomy.models import ExecutionPermit, Instrument, ProtectedOrder
@@ -335,14 +336,41 @@ class LiveMarketOrderJournal:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that is committed, and always closed.
+
+        ``with sqlite3.connect(...) as conn`` commits or rolls back but does NOT
+        close: every call site here would leak a file handle on the journal and
+        its WAL/SHM siblings. In a long-lived process that only delays the
+        problem until garbage collection; on Windows it means the data directory
+        cannot be removed at all (sharing violation), which is exactly how the
+        release acceptance run failed. The in-memory connection is owned by the
+        instance and is closed in close().
+        """
         if self._mem_conn is not None:
-            return self._mem_conn
+            with self._lock:
+                try:
+                    yield self._mem_conn
+                except BaseException:
+                    self._mem_conn.rollback()
+                    raise
+                else:
+                    self._mem_conn.commit()
+            return
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
