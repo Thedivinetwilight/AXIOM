@@ -158,13 +158,13 @@
             <span class="status-pill warn" id="start-mode-note">NO “ENABLE BOTH” SHORTCUT · ONE MODE PER MARKET</span>
           </div>
           <div class="mode-choice-row" role="radiogroup" aria-labelledby="start-mode-title">
-            <button type="button" class="mode-choice paper active" id="start-mode-paper" role="radio" aria-checked="true">
+            <button type="button" class="mode-choice paper active" id="start-mode-paper" role="radio" aria-checked="true" aria-describedby="start-mode-paper-detail">
               <strong>PAPER</strong>
-              <span>Simulated fills on read-only market data. Zero broker orders.</span>
+              <span id="start-mode-paper-detail">Simulated fills on read-only market data. Zero broker orders.</span>
             </button>
-            <button type="button" class="mode-choice live" id="start-mode-live" role="radio" aria-checked="false">
+            <button type="button" class="mode-choice live" id="start-mode-live" role="radio" aria-checked="false" aria-describedby="start-mode-live-detail">
               <strong>LIVE</strong>
-              <span>Real broker orders per market, behind readiness · Arm · typed phrase.</span>
+              <span id="start-mode-live-detail">Real broker orders per market, behind readiness · Arm · typed phrase.</span>
             </button>
           </div>
           <div class="inline-status top-space" id="start-mode-detail" role="status" aria-live="polite">

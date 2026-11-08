@@ -151,14 +151,10 @@ def _credential_matrix(
     session* to the loopback API, not a provider, and conflating the two is the
     mistake this matrix exists to prevent.
     """
+    # No AXIOM API token row here: it authenticates this browser session to the
+    # loopback API, not a provider. It is listed once, in the page's
+    # session-auth panel, so it cannot be confused with a broker credential.
     rows = [
-        {
-            "slot": "AXIOM API TOKEN",
-            "scope": "timeframe: local browser session",
-            "present": None,
-            "detail": "Unlocks this console. Never used for market data or orders.",
-            "affects_execution": False,
-        },
         {
             "slot": f"{BROKER_BY_MARKET[market].upper()} MARKET DATA",
             "scope": "read-only prices and bars",

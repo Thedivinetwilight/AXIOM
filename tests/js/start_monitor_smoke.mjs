@@ -128,8 +128,6 @@ function marketPayload(market) {
     },
     credentials: {
       rows: [
-        { slot: "AXIOM API TOKEN", scope: "local browser session", present: null,
-          detail: "Unlocks this console only.", affects_execution: false },
         { slot: isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA", scope: "read-only prices",
           present: live.credential, detail: live.credential ? "configured via protected-store" : "not configured",
           affects_execution: false },
@@ -291,6 +289,17 @@ try {
   assert.ok(doc.querySelector('#mm-quick-nav-bar [data-go="start"]'), "quick-nav exposes Start & Monitor");
   assert.equal(text("page-title"), "Start & Monitor");
 
+  // The flow strip must not tick a step the operator has not taken. At first
+  // paint nothing is done: mode and review have defaults but were never chosen.
+  // Only step 2 may be ticked, because the server already reports one symbol
+  // selected in each market's watchlist. Mode and review have defaults but were
+  // never chosen, so they must stay pending.
+  const doneSteps = [...doc.querySelectorAll("[data-start-step].done")].map((n) => n.dataset.startStep);
+  assert.deepEqual(doneSteps, ["2"],
+    "only the step backed by real server state is ticked at first paint");
+  assert.equal(doc.querySelectorAll("[data-start-step].pending").length, 6,
+    "the other six steps start pending");
+
   // 2. Values come from the server payload, not from the browser.
   assert.equal($("start-badge-NSE").textContent.trim(), "PAPER");
   assert.equal($("start-badge-NASDAQ-bar").textContent.trim(), "NASDAQ · PAPER");
@@ -305,10 +314,14 @@ try {
 
   // Credential slots stay distinct and never show a value.
   const credRows = [...doc.querySelectorAll("#start-cred-table tbody tr")].map((tr) => tr.textContent);
-  assert.equal(credRows.length, 7, "every credential slot is listed separately");
-  for (const slot of ["AXIOM API TOKEN", "UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN", "ALPACA MARKET DATA", "ALPACA BROKER PAPER", "ALPACA BROKER LIVE"]) {
+  assert.equal(credRows.length, 5, "every provider credential slot is listed separately");
+  for (const slot of ["UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN", "ALPACA MARKET DATA", "ALPACA BROKER PAPER", "ALPACA BROKER LIVE"]) {
     assert(credRows.some((row) => row.includes(slot)), `credential slot ${slot} must be listed`);
   }
+  // The loopback API token unlocks this tab; it is not a provider credential
+  // and must not sit in the provider table where it could be read as one.
+  assert(!credRows.some((row) => row.includes("AXIOM API TOKEN")),
+    "the console token is not listed as a provider credential");
   assert.doesNotMatch(text("start-cred-table"), /Bearer |AKIA|[A-Za-z0-9]{24,}/, "no secret material renders");
 
   // 3. Blocker + exit limitation are visible before anything starts.

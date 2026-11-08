@@ -776,7 +776,9 @@ function renderListedAssets() {
   panel.className = `inline-status ${info.error ? "err" : "warn"}`;
   panel.textContent = info.error
     ? `Boundary status unavailable: ${info.error}. No fallback routing is enabled.`
-    : `${info.identity_contract}. Data configured: ${info.data_configured ? "yes" : "no"}; execution supported: ${info.execution_supported ? "yes" : "no"}; CFD substitution: prohibited. ${info.note || ""}`;
+    // A field the server did not send must never render as the word
+    // "undefined": say the field is unavailable instead.
+    : `${info.identity_contract || "Identity contract not reported"}. Data configured: ${info.data_configured ? "yes" : "no"}; execution supported: ${info.execution_supported ? "yes" : "no"}; CFD substitution: prohibited. ${info.note || ""}`;
   $("listed-scope-badge").textContent = info.execution_supported ? "PROVIDER VERIFICATION REQUIRED" : "NO LISTED EXECUTION";
 }
 
@@ -5672,6 +5674,7 @@ state.start = {
   liveSteps: {},
   seeded: {},
   searchError: {},
+  touched: {},
   timer: null,
 };
 
@@ -5700,6 +5703,7 @@ function startSetSelection(market, keys) {
   renderStartCadence();
   renderStartPreview();
   renderStartControls();
+  startMarkFlowSteps();
 }
 
 function startStrategyOptions() {
@@ -5834,9 +5838,37 @@ function renderStartMode() {
       ? "LIVE selected. This changes <strong>nothing</strong> by itself: each market needs its own readiness read, Arm and typed phrase, and activating a gate never starts a strategy."
       : "PAPER selected. Fills are simulated in the local ledger from read-only market data; no broker order is ever routed.";
   }
+  startMarkFlowSteps();
+}
+
+/* The flow strip must never claim a step is done before it actually is. Each
+ * step is satisfied by observable state, not by which mode button was clicked. */
+function startCompletedSteps() {
+  const st = startState();
+  const done = new Set();
+  const touched = st.touched || {};
+  const live = (market) => (startMarketData(market)?.paper?.session_state || "STOPPED") !== "STOPPED"
+    || (startMarketData(market)?.live?.gate_state || "DISABLED") !== "DISABLED";
+  const chosen = START_MARKETS.filter((m) => startSelectionKey(m).length > 0);
+  const anySession = START_MARKETS.some(live);
+  if (touched.mode || anySession) done.add(1);
+  if (chosen.length) done.add(2);
+  // Step 3 is credentials: it can only be done once a market is actually chosen
+  // and that market reports a present read credential.
+  if (chosen.length && chosen.every((m) => startMarketData(m)?.quota?.credential_present === true)) done.add(3);
+  if (touched.review || anySession) done.add(4);
+  if (st.preview) done.add(5);
+  if (anySession) done.add(6);
+  if ((st.monitor || []).length > 0) done.add(7);
+  return done;
+}
+
+function startMarkFlowSteps() {
+  const done = startCompletedSteps();
   document.querySelectorAll("[data-start-step]").forEach((node) => {
     const step = Number(node.dataset.startStep);
-    node.classList.toggle("done", step <= (mode === "LIVE" ? 6 : 6));
+    node.classList.toggle("done", done.has(step));
+    node.classList.toggle("pending", !done.has(step));
   });
 }
 
@@ -6163,6 +6195,7 @@ async function startPreviewSession() {
   st.preview = { at: new Date().toISOString(), rows };
   renderStartPreview();
   renderStartControls();
+  startMarkFlowSteps();
   return st.preview;
 }
 
@@ -6572,6 +6605,7 @@ async function loadStartMonitorRows() {
   st.monitor = rows;
   st.monitorError = errors.join(" · ");
   renderStartMonitorRows();
+  startMarkFlowSteps();
 }
 
 function renderStartMonitorRows() {
@@ -6721,8 +6755,8 @@ function startConfirm(title, body, confirmLabel, confirmClass) {
 
 function bindStartEvents() {
   document.querySelectorAll("[data-page], [data-go]").forEach(() => {});
-  $("start-mode-paper")?.addEventListener("click", () => { startState().mode = "PAPER"; renderStartMode(); renderStartPreview(); });
-  $("start-mode-live")?.addEventListener("click", () => { startState().mode = "LIVE"; renderStartMode(); renderStartPreview(); });
+  $("start-mode-paper")?.addEventListener("click", () => { startState().mode = "PAPER"; startState().touched.mode = true; renderStartMode(); renderStartPreview(); });
+  $("start-mode-live")?.addEventListener("click", () => { startState().mode = "LIVE"; startState().touched.mode = true; renderStartMode(); renderStartPreview(); });
 
   for (const market of START_MARKETS) {
     $(`start-select-${market}`)?.addEventListener("change", () => { renderStartControls(); renderStartCard(market); });
@@ -6732,7 +6766,9 @@ function bindStartEvents() {
     });
     $(`start-strategy-${market}`)?.addEventListener("change", (event) => {
       startState().strategy[market] = event.target.value;
+      startState().touched.strategy = true;
       renderStartAutopilot(market);
+      startMarkFlowSteps();
     });
     document.querySelectorAll(`[data-start-review][data-start-market="${market}"]`).forEach((button) => {
       button.addEventListener("click", () => {
@@ -6743,6 +6779,7 @@ function bindStartEvents() {
           other.setAttribute("aria-checked", active ? "true" : "false");
         });
         renderStartAutopilot(market);
+        startMarkFlowSteps();
       });
     });
     document.querySelectorAll(`[data-start-symbol-market="${market}"][data-start-symbol]`).forEach(() => {});

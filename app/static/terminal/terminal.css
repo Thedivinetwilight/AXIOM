@@ -1319,10 +1319,14 @@ textarea {
 }
 
 /* Sticky session controls: directly under the topbar, never below logs. */
+/* Sits under the 52px sticky topbar; the topbar itself wraps on narrow
+ * viewports, so the offset is overridden in the breakpoints below. */
 .start-control-bar {
   position: sticky;
   top: 52px;
   z-index: 25;
+  max-width: 100vw;
+  overflow-x: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1494,7 +1498,9 @@ textarea {
   .start-cred-forms,
   .start-strategy-grid,
   .mode-choice-row { grid-template-columns: minmax(0, 1fr); }
-  .start-control-bar { top: 0; position: sticky; }
+  /* The topbar wraps to two rows here; pin the bar to the viewport top so it
+   * is never hidden behind it. */
+  .start-control-bar { top: 0; }
   .start-control-actions { margin-left: 0; }
 }
 

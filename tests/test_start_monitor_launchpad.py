@@ -335,7 +335,9 @@ def test_autopilot_promise_is_bounded_and_never_claims_unrestricted():
 def test_credential_matrix_keeps_every_slot_distinct():
     payload = _launchpad()
     slots = {cred["slot"] for cred in payload["markets"][NASDAQ]["credentials"]["rows"]}
-    assert "AXIOM API TOKEN" in slots
+    # The loopback API token is *not* a provider credential and must not appear
+    # beside the broker slots, where it could be read as one.
+    assert "AXIOM API TOKEN" not in slots
     assert "ALPACA MARKET DATA" in slots
     assert "ALPACA BROKER PAPER" in slots
     assert "ALPACA BROKER LIVE" in slots
