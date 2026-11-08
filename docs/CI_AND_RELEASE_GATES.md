@@ -128,8 +128,13 @@ commit and, separately, by the owner's broker checks.
 
 * **Branch protection is not applied.** The settings above are a recommendation;
   until an owner applies them, `main` accepts direct pushes and force pushes.
-* **Windows acceptance has not been observed green** on the commit this document
-  describes. CI runs earlier failed at the focused step because of the stale
-  path; that is now fixed, but the fix itself has not been through a Windows run.
+* **Windows acceptance has been observed green once**, on commit
+  `c75f46cb32dafce82c8c1a2a8a09066b344a1550` (run `42505119536`): steps 6-10 all
+  passed — full Python suite, focused suites, exact-commit benchmarks, artifact
+  verification, installer install / upgrade / uninstall acceptance and portable
+  ZIP acceptance — and the job published no release. This is a single green run
+  on one commit, not a standing guarantee; re-verify on any later commit before
+  treating a build as releasable. Live-trading readiness is still separate and
+  unverified.
 * **No live-trading readiness, profitability, or broker-verification claim** is
   made or implied by any of the above.
