@@ -93,9 +93,109 @@ The local `API_TOKEN` protects AXIOM's loopback API. It is **not** an Upstox tok
 
 ---
 
-## 3. Operator console workspaces (`01`–`12`)
+## 3. The operator console — `00 Start & Monitor` first, workspaces `01`–`12` behind it
 
-The persistent header displays active market switchers (`NSE · INR ₹` and `NASDAQ · USD $`), quick symbol jump, IST/ET clocks, session mode status, and **Emergency stop**. Below it, the three-column execution boundary banner continuously distinguishes **Execution**, **Market Data**, and **Order Authorization**.
+Opening `/terminal` lands on **`00 Start & Monitor`**: one screen that starts, scopes, and watches both markets. Everything else in the console is still there, unchanged, one click away in the sidebar and in quick navigation.
+
+A **sticky control bar** sits directly under the header and stays in view while you scroll, however far down the monitoring table you are. It holds the selected mode, a per-market gate badge, and the five actions: **Preview session**, **Start PAPER**, **Start LIVE** (one button per market, never a combined one), **Stop session**, and **Emergency stop**. Nothing about the sticky bar is a summary of browser-side guesses: it is redrawn from `GET /api/markets/start-monitor` after every action.
+
+### 3.1 Reading the badges
+
+| Badge | Means |
+|---|---|
+| `PAPER` | That market is in PAPER. Any fill on it is **SIMULATED** — local SQLite, or the Alpaca *paper* sandbox when broker-paper credentials exist. Neither is a real-money trade. |
+| `LIVE · DISABLED` | LIVE is selected but the execution gate is closed. No broker order can leave. |
+| `LIVE · ARMED` | The gate is armed and every readiness check passed, but activation is not complete. Still no orders. |
+| `LIVE · ACTIVE` | The gate is live. Broker orders *may* now be routed by the execution boundary — not a claim that any order was filled, or that the strategy is profitable. |
+| `ERROR` | A runtime fault, engaged kill switch, or an ambiguous order outcome is reported for that market. Treat it as "stop and reconcile", not "retry". |
+
+Badges are text, not colour, so they read the same for a colour-blind operator and in a screenshot.
+
+### 3.2 The start panel
+
+Choose **PAPER** or **LIVE** for the markets you have ticked. There is deliberately **no "both markets" shortcut** and no single control that turns LIVE on for NSE and NASDAQ together: each market is armed, activated, and stopped on its own, because the gates, the credentials, and the risk limits are per market.
+
+Selecting LIVE in the start panel changes **nothing** on the server. It only tells the page which actions to offer.
+
+### 3.3 Market cards
+
+Each market gets a card — `NSE · Upstox (INR ₹)` and `NASDAQ · Alpaca (USD $)` — listing, from the server on every refresh:
+
+* credential presence for that market's market-data read and its order credential (present / not configured — never the value);
+* connection and preflight state, and whether the owner has verified the broker connection;
+* selected-symbol count against the visible cap (100);
+* supported scan cadence: the cadence you asked for, the cadence the provider quota can actually sustain, and the requests each cycle spends;
+* quota plan profile and whether that plan is verified or merely declared;
+* gate state and whether the readiness checks pass;
+* position count against the open-position cap, plus the daily-order count against its cap;
+* every configured risk limit — per-order value, per-symbol exposure, total exposure, daily orders, daily loss, quote age;
+* blockers, each with its machine-readable code, the modes it blocks (`PAPER`, `LIVE`, or both), and a plain-language explanation.
+
+NSE always shows **`NO ROUTED EXIT`**: AXIOM cannot close an NSE position. The card also shows the documented closing paths (protected GTT legs placed with the entry) and the operator fallback — close the position manually in the Upstox app, then run **Reconcile**. This blocks NSE LIVE automation that relies on an AXIOM-routed exit. It does not affect a PAPER session, which closes positions inside the local simulator.
+
+### 3.4 Symbol picker
+
+Search the market's own catalog, tick eligible instruments, or press **Select all eligible**. The button selects *all currently eligible* instruments — never an unsupported, watch-only, index, derivative, or suspended series — and the note under it says so. Selected count, the cap, and **Clear selection** are always visible.
+
+Scanning 100 symbols every 15 seconds is **not** supported on Upstox's standard APIs, and the page says so instead of pretending otherwise. The cadence figures come from `GET /api/ensemble/scan/capacity`; the page copies no number into JavaScript.
+
+### 3.5 Credentials
+
+Every credential slot is listed separately and labelled with its own scope, because conflating them is how a market-data key ends up being used for orders:
+
+* `API_TOKEN` — unlocks this console in this browser tab only;
+* Upstox market data — read-only NSE prices;
+* Upstox live access token — real-money order writes;
+* Alpaca market data — read-only NASDAQ prices, with `iex` / `sip` / `delayed_sip` feed selection (`delayed_sip` is blocked for entries);
+* Alpaca broker **paper** — the broker sandbox;
+* Alpaca broker **live** — real-money order writes.
+
+Saving goes through the existing server-side secure store (Windows DPAPI). The console shows **presence only**, never the value; the field clears on submit; nothing is written to browser storage, diagnostics, or logs, and the response never echoes the secret.
+
+### 3.6 Strategy and Autopilot
+
+Choose a strategy and either **manual review** (every order needs an explicit ticket) or **Autopilot**, per market and per session. The page states what automation may and may not do, in the server's own words:
+
+* **may** analyse the selected symbols on completed bars and act inside the risk limits you have configured;
+* **may not** raise any limit, skip a gate, or turn a 100-symbol scan into 100 orders.
+
+Autopilot is disabled — visibly, with the reason — whenever any of these is missing: market-data credentials, an order credential, entitlements, plan verification, provider connectivity, Windows acceptance, complete risk limits, or reconciliation evidence. On NSE it also stays disabled for any strategy that needs an AXIOM-routed exit. Autopilot never acts without a per-order prompt unless you started that session yourself and every server-side gate passed.
+
+On stale data, a provider throttle, a missed cadence, or an ambiguous order outcome, the existing gates apply: stale quotes are refused, a cycle that cannot get quota before its deadline is deferred rather than sent, and an ambiguous outcome blocks the affected actions and sends you to reconcile — never a blind retry. The kill switch stops everything and has to be explicitly reset.
+
+### 3.7 Preview before starting
+
+**Preview session** calls the offline capacity endpoint with zero provider requests and zero order calls. It shows, for each selected market: mode, broker, selected symbols, strategy, manual/autopilot, the cadence you requested against the cadence the provider can sustain, provider quota windows, current open positions, and every configured risk limit. Nothing is started by a preview.
+
+Starting a session is a separate, explicit action, and each PAPER and each LIVE start asks for confirmation first.
+
+### 3.8 Monitoring
+
+One table, filtered by market and by mode, with distinct labels so a simulated order is never mistaken for a live trade:
+
+* **`PAPER · SIMULATED`** / **`PAPER · SIMULATED FILL`** — created by the local simulator (or the Alpaca paper sandbox).
+* **`LIVE · BROKER`** — submitted by AXIOM to a broker; the row shows the order state, fill quantity, average fill price, fees, and any error or reconciliation state.
+
+Each row carries timestamp, market, symbol, side, quantity, order state, fill quantity and price, fees, and error/reconciliation state. Headers and secrets are redacted. The table is read-only: it never cancels, modifies, or places anything.
+
+### 3.9 LIVE: the four steps, per market
+
+Starting LIVE walks the *existing* server sequence and nothing more. Each step is a separate button and a separate call; none can be combined, skipped, or auto-acknowledged, and the page disables a step until the previous one has actually happened:
+
+1. **Read readiness** — a GET. Readiness is evaluated separately for each market.
+2. **Set mode LIVE** — the gate stays **DISARMED**.
+3. **Arm** — the server re-checks every readiness item before arming.
+4. **Activate** — requires an explicit risk acknowledgement *plus* the exact phrase `ACTIVATE LIVE REAL-MONEY TRADING`.
+
+A failed readiness check disables that market's **Start LIVE** and shows the exact machine-readable blocker with its explanation. Activating the gate does **not** start or resume a strategy: starting the session is a further, explicit action. Nothing survives a restart — a live session is never persisted, so a restart begins disarmed.
+
+### 3.10 Stopping
+
+**Stop session** disarms a LIVE market and stops the running session, and it asks first. **Emergency stop** sits in the sticky bar, never below the logs; it confirms, then halts every reachable subsystem and leaves live execution off. Clearing an emergency stop requires the exact phrase `CLEAR EMERGENCY STOP`.
+
+### 3.11 Workspaces behind the start screen
+
+The header shows active market switchers (`NSE · INR ₹`, `NASDAQ · USD $`), quick symbol jump, IST/ET clocks, session mode status, and **Emergency stop**. The three-column execution boundary banner keeps **Execution**, **Market Data**, and **Order Authorization** distinct. Below the start screen:
 
 | Workspace | Purpose |
 |---|---|
@@ -112,7 +212,7 @@ The persistent header displays active market switchers (`NSE · INR ₹` and `NA
 | **`11 Live Trade Monitor`** | Strictly **read-only** real-time candlestick & 8-shape trade event monitor (`PAPER` vs `LIVE` badged, `"NOT TRADING"` when stopped/paused/disarmed/scanning, zero order-mutation buttons). |
 | **`12 Ensemble & Allocation`** | Up to `1,024+` parallel technical/mean-reversion/volatility/volume strategy variants, OOS empirical probability calibrator, advisory Kronos status, `PortfolioRiskAllocator` sizing inspector, ablation runner, and scaling benchmark. |
 
----
+The start screen is a *view* of the same gates those workspaces expose. It never weakens one: it reads `/api/markets/start-monitor`, and its controls call the same readiness, mode, arm, activate, disarm, session, and emergency-stop routes documented in §4.3.
 
 ## 4. Upstox (NSE `INR ₹`) & Alpaca (NASDAQ `USD $`) setup
 
@@ -223,6 +323,7 @@ The `/terminal` console is an authenticated HTML page and calls only routes this
 - **Token storage:** the token is held in this browser tab's `sessionStorage` only. It is never written to `localStorage`, the DOM by an API response, a log, or an export.
 - **State the console reads:** `/paper/status`, `/paper/account`, `/paper/positions`, `/paper/orders`, `/paper/trades` (local paper ledger, composed client-side — no aggregate endpoint was added), `/dashboard/data` (durable halt flag), `/api/markets/paper/audit/events` (hash-chained audit), `/api/performance`, `/api/connections/alpaca/credentials` (presence/back-end only), `/api/markets/overview`, `/api/listed-assets/status`, `/api/alpaca-broker/status`, `/chart/*`.
 - **Emergency controls:** *Set* posts `/engine/stop` (persisted local halt + simulator pause) and `/api/markets/emergency-stop` (atomic multi-subsystem stop); *Clear* requires the typed phrase `CLEAR EMERGENCY STOP` for `/api/markets/emergency-stop/reset` plus `/engine/resume`. Clearing never arms, activates or resumes a session.
+- **Start & Monitor screen:** `GET /api/markets/start-monitor` (read-only projection of the same engine, coordinator, scan-capacity and readiness state used by the workspaces). Its actions reuse the routes above plus `/api/markets/live/{market}/{readiness,mode,arm,activate,disarm}`, `/api/markets/paper/session/{start,transition}`, `/api/markets/paper/{market}`, `/api/markets/live/audit`, `/api/ensemble/scan/{capacity,preview,start,history}`, `/api/markets/search`, and the credential stores. It adds **no** new execution path, no new order route, and no aggregate that could disagree with a gate.
 - **Unavailable in this build, and labelled as such:** unresolved order-intent feed (no endpoint), bulk quote map (use Supercharts/Watchlists), and a reconciliation timestamp. These render as *unavailable* with the reason — never as `0`, blank, or a fresh-looking value. Because intents cannot be read, an uncertain order outcome stays flagged until the tab is locked or reloaded rather than being auto-cleared.
 
 **Readiness report and documented capabilities.** `GET /api/markets/live/readiness` (or `python -m app live-readiness [--json]`) returns one report for both markets: the broker, mode, gate state, every failed check by name, the required credentials **by name only**, account permissions, offline platform checks, the numbered acceptance steps and the documented capability record for that broker. It also states the open-order policy of the kill switch and labels its own coverage (`mock_or_fake_transport_only`, `live_verified: false`, `windows_acceptance: NOT_RUN`). The report never contacts a broker and never prints a secret. Full detail, including what each broker documents and what AXIOM refuses to send, is in `docs/LIVE_EXECUTION_READINESS.md`.

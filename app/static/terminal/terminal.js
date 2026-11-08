@@ -7,6 +7,7 @@ const MODE_LABELS = {
   AXIOM_PAPER: "LOCAL PAPER",
 };
 const PAGE_TITLES = {
+  start: ["PRIMARY OPERATOR SCREEN", "Start & Monitor"],
   overview: ["WORKSPACE", "Overview"], instruments: ["MULTI-MARKET UNIVERSE", "Watchlists & search"],
   charts: ["SUPERCHARTS & TICKET", "Supercharts & ticket"], orders: ["LEDGER & BROKER STATE", "Orders & positions"],
   strategies: ["MODES & STRATEGIES", "Strategies & modes"],
@@ -22,7 +23,7 @@ const UNRESOLVED = new Set([
 ]);
 const state = {
   token: "", workspace: null, activity: [], connectionInfo: null,
-  page: "overview", mode: "AXIOM_PAPER", side: "BUY",
+  page: "start", mode: "AXIOM_PAPER", side: "BUY",
   contracts: {}, chart: { mode: "AXIOM_PAPER", feed: "legacy", symbol: "", timeframe: "1m", bars: [], quote: null, payload: null },
   chartView: { visible: 160, endOffset: 0, crosshair: true, drawings: {}, pending: null, geometry: null, pointer: null, drag: null, frame: null },
   chartSymbolsLoaded: false, chartRequest: 0,
@@ -266,6 +267,7 @@ async function unlock(token) {
     storageSet("axiom-api-token", token);   // this browser tab's sessionStorage only
     $("auth-token").value = ""; $("auth-error").textContent = "";
     $("auth-gate").hidden = true; $("app").hidden = false;
+    applyPageChrome(state.page);
     await refreshAll();
     configureRefresh();
   } catch (error) {
@@ -470,7 +472,8 @@ async function loadBrokerDestination() {
 }
 async function refreshAll() {
   await loadWorkspace();
-  await Promise.all([loadActivity(), loadConnectionInfo(), loadPerformance(), loadListedAssets(), loadBrokerDestination(), loadMultiMarketOverview(), loadModelLabOverview()]);
+  await Promise.all([loadActivity(), loadConnectionInfo(), loadPerformance(), loadListedAssets(), loadBrokerDestination(), loadMultiMarketOverview(), loadModelLabOverview(), loadStartMonitor({ background: true })]);
+  if (state.page === "start") await loadStartMonitorRows();
   if (state.page === "instruments" && state.mm.available) await searchMultiMarketCatalog();
   if (state.page === "charts") {
     if (state.mm.chartFeed !== "SESSION" && state.mm.available) await loadMultiMarketChart();
@@ -1354,9 +1357,8 @@ function renderActivity() {
   $("activity-rows").innerHTML = events.map((event) => `<tr><td>${escapeHtml(timeText(eventTime(event)))}</td><td>${escapeHtml(event.environment || "AXIOM_PAPER")}</td><td>${escapeHtml(eventName(event))}</td><td><small>${escapeHtml(JSON.stringify(event.payload || {}))}</small></td></tr>`).join("");
 }
 
-async function goPage(page) {
+function applyPageChrome(page) {
   if (!PAGE_TITLES[page]) return;
-  state.page = page;
   document.querySelectorAll(".page").forEach((element) => { element.hidden = element.id !== `page-${page}`; });
   document.querySelectorAll(".nav-item").forEach((element) => {
     const active = element.dataset.page === page;
@@ -1365,7 +1367,13 @@ async function goPage(page) {
   });
   $("page-eyebrow").textContent = PAGE_TITLES[page][0]; $("page-title").textContent = PAGE_TITLES[page][1];
   document.title = `${PAGE_TITLES[page][1]} · AXIOM Operator`;
+}
+async function goPage(page) {
+  if (!PAGE_TITLES[page]) return;
+  state.page = page;
+  applyPageChrome(page);
   $("sidebar").classList.remove("open"); $("mobile-menu").setAttribute("aria-expanded", "false");
+  if (page === "start") { await loadStartMonitor(); await loadStartMonitorRows(); }
   if (page === "instruments" && state.mm.available) await searchMultiMarketCatalog();
   if (page === "charts") {
     if (state.mm.chartFeed !== "SESSION" && state.mm.available) await loadMultiMarketChart();
@@ -5623,8 +5631,1171 @@ function bindScanEvents() {
   host.addEventListener("change", onEdit);
 }
 
+/* =========================================================================
+ * 00 · START & MONITOR — the primary operator screen
+ *
+ * One page for: mode -> markets + symbols -> credentials -> strategy and
+ * Autopilot -> preview -> start -> monitor.
+ *
+ * Deliberate constraints, enforced below and asserted by tests:
+ *  - every figure comes from a server payload (no hard-coded quota, cadence,
+ *    risk limit or readiness conclusion);
+ *  - selecting symbols never raises a position cap and never turns a scan into
+ *    orders;
+ *  - LIVE is only ever started through the existing sequence
+ *    (mode -> fresh readiness -> arm -> acknowledge + exact phrase -> activate),
+ *    and activating never starts a strategy;
+ *  - starting a session is always a fresh server call: nothing about an active
+ *    live session survives a restart;
+ *  - secrets are posted in a body, cleared immediately, and never stored in
+ *    browser storage or rendered back.
+ * ====================================================================== */
+const START_MARKETS = ["NSE", "NASDAQ"];
+const START_LIVE_PHRASE_FALLBACK = "ACTIVATE LIVE REAL-MONEY TRADING";
+const START_CLEAR_PHRASE = "CLEAR EMERGENCY STOP";
+
+state.start = {
+  data: null,
+  loading: false,
+  error: "",
+  mode: "PAPER",
+  selected: { NSE: [], NASDAQ: [] },
+  strategy: { NSE: "manual_only", NASDAQ: "manual_only" },
+  review: { NSE: "manual", NASDAQ: "manual" },
+  search: { NSE: [], NASDAQ: [] },
+  eligible: { NSE: 0, NASDAQ: 0 },
+  preview: null,
+  cadence: { NSE: null, NASDAQ: null },
+  monitor: null,
+  monitorError: "",
+  busy: {},
+  liveSteps: {},
+  seeded: {},
+  searchError: {},
+  timer: null,
+};
+
+const START_CADENCE_OPTIONS = [15, 30, 60, 90, 120, 300];
+
+function startState() { return state.start; }
+
+function startMarketData(market) {
+  return (startState().data?.markets || {})[market] || null;
+}
+
+function startSelectionKey(market) {
+  return startState().selected[market] || [];
+}
+
+function startIsSelected(market, key) {
+  return startSelectionKey(market).includes(key);
+}
+
+function startSetSelection(market, keys) {
+  const cap = Math.min(100, Number(startState().data?.max_symbols_per_scan || 100));
+  const unique = [...new Set(keys)].slice(0, cap);
+  startState().selected[market] = unique;
+  startState().preview = null;
+  renderStartSymbols(market);
+  renderStartCadence();
+  renderStartPreview();
+  renderStartControls();
+}
+
+function startStrategyOptions() {
+  const rows = startState().data?.strategies || [];
+  const autopilot = new Set(startState().data?.autopilot_strategies || []);
+  return rows.map((row) => ({
+    name: String(row.name),
+    label: autopilot.has(String(row.name))
+      ? `${row.name} · can act without a prompt once started`
+      : `${row.name} · manual tickets only`,
+    autopilotCapable: autopilot.has(String(row.name)),
+  }));
+}
+
+function startRenderStrategySelects() {
+  const options = startStrategyOptions();
+  for (const market of START_MARKETS) {
+    const select = $(`start-strategy-${market}`);
+    if (!select) continue;
+    const current = startState().strategy[market];
+    select.innerHTML = options.map((row) =>
+      `<option value="${escapeHtml(row.name)}"${row.name === current ? " selected" : ""}>${escapeHtml(row.label)}</option>`).join("");
+    if (!options.some((row) => row.name === current) && options.length) {
+      startState().strategy[market] = options[0].name;
+      select.value = options[0].name;
+    }
+  }
+}
+
+/* ---------------- load + render ---------------- */
+async function loadStartMonitor({ background = false } = {}) {
+  const st = startState();
+  if (st.loading) return;
+  st.loading = true;
+  if (!background) renderStart();
+  try {
+    st.data = await api("/api/markets/start-monitor");
+    st.error = "";
+    // A saved session's symbols seed the picker only once, so the operator can
+    // deselect without the panel re-selecting on every refresh.
+    for (const market of START_MARKETS) {
+      if (st.seeded?.[market]) continue;
+      st.seeded = { ...(st.seeded || {}), [market]: true };
+      const saved = startMarketData(market)?.session_symbols || [];
+      if (saved.length && !startSelectionKey(market).length) {
+        st.selected[market] = saved.slice(0, 100);
+      }
+    }
+    startRenderStrategySelects();
+    renderStart();
+    await Promise.all([loadStartSearch("NSE", ""), loadStartSearch("NASDAQ", "")]);
+  } catch (error) {
+    st.error = error.message || "start & monitor overview unavailable";
+    renderStart();
+  } finally {
+    st.loading = false;
+  }
+}
+
+function startFmtTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function startPillKind(badge) {
+  if (badge === "PAPER") return "ok";
+  if (badge === "LIVE · ACTIVE") return "err";
+  if (badge === "LIVE · ARMED") return "warn";
+  if (badge === "ERROR") return "err";
+  return "info";
+}
+
+function renderStart() {
+  const st = startState();
+  const data = st.data;
+  if (!data) {
+    if (st.error) {
+      const host = $("start-preview-body");
+      if (host) host.innerHTML = `<div class="inline-status err">Start &amp; Monitor could not read the server: ${escapeHtml(st.error)}</div>`;
+    }
+    return;
+  }
+  renderStartHeader();
+  renderStartMode();
+  for (const market of START_MARKETS) {
+    renderStartCard(market);
+    renderStartSymbols(market);
+    renderStartCredentials(market);
+    renderStartAutopilot(market);
+  }
+  renderStartCadence();
+  renderStartPreview();
+  renderStartControls();
+}
+
+function renderStartHeader() {
+  const data = startState().data;
+  const pill = $("start-evidence-pill");
+  if (pill && data) {
+    pill.textContent = data.evidence?.real_money_enabled
+      ? "LIVE GATE ACTIVE ON AT LEAST ONE MARKET · REAL MONEY"
+      : "READ-ONLY VIEW · 0 BROKER ORDERS FROM THIS PAGE";
+    pill.className = `status-pill ${data.evidence?.real_money_enabled ? "err" : "info"}`;
+  }
+  for (const market of START_MARKETS) {
+    const row = startMarketData(market);
+    const badge = row?.badge || "ERROR";
+    const card = $(`start-badge-${market}`);
+    if (card) { card.textContent = badge; card.className = `status-pill ${startPillKind(badge)}`; }
+    const bar = $(`start-badge-${market}-bar`);
+    if (bar) { bar.textContent = `${market} · ${badge}`; bar.className = `status-pill ${startPillKind(badge)}`; }
+  }
+}
+
+function renderStartMode() {
+  const st = startState();
+  const mode = st.mode;
+  for (const [id, value] of [["start-mode-paper", "PAPER"], ["start-mode-live", "LIVE"]]) {
+    const button = $(id);
+    if (!button) continue;
+    const active = mode === value;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", active ? "true" : "false");
+  }
+  const badge = $("start-mode-badge");
+  if (badge) { badge.textContent = mode; badge.className = `status-pill ${mode === "LIVE" ? "err" : "ok"}`; }
+  const detail = $("start-mode-detail");
+  if (detail) {
+    detail.className = `inline-status top-space ${mode === "LIVE" ? "warn" : ""}`;
+    detail.innerHTML = mode === "LIVE"
+      ? "LIVE selected. This changes <strong>nothing</strong> by itself: each market needs its own readiness read, Arm and typed phrase, and activating a gate never starts a strategy."
+      : "PAPER selected. Fills are simulated in the local ledger from read-only market data; no broker order is ever routed.";
+  }
+  document.querySelectorAll("[data-start-step]").forEach((node) => {
+    const step = Number(node.dataset.startStep);
+    node.classList.toggle("done", step <= (mode === "LIVE" ? 6 : 6));
+  });
+}
+
+function renderStartCard(market) {
+  const row = startMarketData(market);
+  const facts = $(`start-facts-${market}`);
+  const blockers = $(`start-blockers-${market}`);
+  const exitNote = $(`start-exit-${market}`);
+  if (!facts) return;
+  if (!row) {
+    facts.innerHTML = `<p class="empty-state">Server state unavailable for ${escapeHtml(market)}.</p>`;
+    if (blockers) blockers.innerHTML = "";
+    return;
+  }
+  const creds = row.credentials?.rows || [];
+  const dataCred = creds.find((c) => c.slot.includes("MARKET DATA"));
+  const limits = row.limits || {};
+  const quoteCap = limits.max_quote_age_seconds;
+  facts.innerHTML = `
+    <dl class="detail-list start-detail">
+      <dt>Include in session</dt>
+      <dd>${startIsSelected(market) ? "YES · selected below" : "NO · not started"}</dd>
+      <dt>Market-data credential</dt>
+      <dd>${dataCred?.present ? `PRESENT · ${escapeHtml(dataCred.detail)}` : "NOT CONFIGURED"}</dd>
+      <dt>Connection / preflight</dt>
+      <dd>${escapeHtml(row.readiness?.overall_status || "UNKNOWN")}${row.readiness?.owner_connection_verified ? " · owner-verified" : " · not owner-verified"}</dd>
+      <dt>Selected symbols</dt>
+      <dd>${fmt(row.selected_symbol_count || 0, 0)} of ${fmt(row.symbol_cap, 0)} cap</dd>
+      <dt>Supported scan cadence</dt>
+      <dd class="${row.cadence?.supportable ? "" : "start-warn-text"}">${escapeHtml(row.cadence?.label || "Cadence unavailable: no quota plan for this market.")}</dd>
+      <dt>Quota plan</dt>
+      <dd>${escapeHtml(row.quota?.profile || "none")} · ${escapeHtml(row.quota?.verification || "UNKNOWN")}</dd>
+      <dt>Execution gate</dt>
+      <dd>${escapeHtml(row.live?.mode || "PAPER")} · ${escapeHtml(row.live?.gate_state || "DISABLED")}${row.live?.kill_engaged ? " · KILL SWITCH ENGAGED" : ""}</dd>
+      <dt>Position count / cap</dt>
+      <dd>${fmt(row.paper?.positions ?? 0, 0)} open / ${fmt(row.position_cap ?? "—", 0)} cap</dd>
+      <dt>Daily orders</dt>
+      <dd>${fmt(row.paper?.working_orders ?? 0, 0)} working · ${fmt(row.daily_order_cap ?? "—", 0)} per day cap</dd>
+      <dt>Quote age cap</dt>
+      <dd>${quoteCap ? `${fmt(quoteCap, 0)} s · stale quotes are refused` : "not reported"}</dd>
+      <dt>Session state</dt>
+      <dd>${escapeHtml(row.paper?.session_state || "UNAVAILABLE")} · ${escapeHtml(row.paper?.strategy || "no strategy")}</dd>
+    </dl>`;
+  if (blockers) {
+    const list = [];
+    // The server sends the union once, tagged with the modes each fact blocks.
+    for (const gap of (row.autopilot?.blockers || [])) {
+      const scope = (gap.blocks || []).join(" / ");
+      list.push(`<li><code>${escapeHtml(gap.code)}</code>${scope ? ` <span class="small muted">(${escapeHtml(scope)})</span>` : ""} — ${escapeHtml(gap.text)}</li>`);
+    }
+    for (const caution of (row.autopilot?.cautions || [])) {
+      list.push(`<li><code>${escapeHtml(caution.code)}</code> <span class="small muted">(CAUTION)</span> — ${escapeHtml(caution.text)}</li>`);
+    }
+    for (const item of (row.readiness?.blockers || [])) {
+      list.push(`<li><code>READINESS</code> — ${escapeHtml(String(item))}</li>`);
+    }
+    blockers.innerHTML = list.length
+      ? `<p class="eyebrow top-space">${startIsSelected(market) ? "BLOCKERS" : "BLOCKERS (WHEN THIS MARKET IS SELECTED)"}</p><ul class="switch-blockers">${list.join("")}</ul>`
+      : `<p class="small muted top-space">No blocking requirement reported for this market.</p>`;
+  }
+  if (exitNote) {
+    const route = row.live?.exit_route || {};
+    exitNote.innerHTML = route.routed
+      ? `<strong>Exit route:</strong> ${escapeHtml(route.summary || "routed")}`
+      : `<strong>NO ROUTED EXIT — AXIOM cannot close an ${escapeHtml(market)} position.</strong>
+         ${escapeHtml(route.summary || "")}
+         Closing path: ${escapeHtml((route.closing_paths || []).join(" · ") || "none documented")}
+         Operator fallback: ${escapeHtml(route.operator_fallback || "close manually, then reconcile")}`;
+  }
+}
+
+function renderStartCredentials() {
+  const host = $("start-cred-table");
+  if (!host) return;
+  const rows = [];
+  for (const market of START_MARKETS) {
+    const row = startMarketData(market);
+    for (const cred of (row?.credentials?.rows || [])) {
+      rows.push({ ...cred, market });
+    }
+  }
+  if (!rows.length) { host.innerHTML = `<p class="empty-state">No credential slots reported.</p>`; return; }
+  host.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Market</th><th>Slot</th><th>Scope</th><th>Local state</th><th>Detail</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.market)}</td>
+              <td><strong>${escapeHtml(row.slot)}</strong></td>
+              <td class="small muted">${escapeHtml(row.scope)}</td>
+              <td>${row.present === null
+                ? `<span class="status-pill info">THIS TAB ONLY</span>`
+                : row.present
+                  ? `<span class="status-pill ok">PRESENT</span>`
+                  : `<span class="status-pill warn">NOT CONFIGURED</span>`}</td>
+              <td class="small">${escapeHtml(row.detail)}${row.affects_execution ? ` <strong>· order credential</strong>` : ""}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderStartAutopilot(market) {
+  const row = startMarketData(market);
+  const note = $(`start-autopilot-${market}`);
+  if (!note || !row) return;
+  const review = startState().review[market];
+  const ok = Boolean(row.autopilot?.paper?.available);
+  const liveOk = Boolean(row.autopilot?.live?.available);
+  // The server sends one blocker union plus per-mode gap lists. Read the PAPER
+  // list, never a top-level "gaps" key that does not exist: an absent list must
+  // not be read as "no blockers".
+  const gaps = row.autopilot?.paper?.gaps || [];
+  note.className = `small ${review === "autopilot" && (gaps.length || !ok) ? "start-warn-text" : "muted"}`;
+  note.innerHTML = review === "autopilot"
+    ? (!ok
+      ? `<strong>Autopilot unavailable on ${escapeHtml(market)}:</strong> ${gaps.length ? gaps.map((g) => escapeHtml(g.code)).join(", ") : "the server reports no usable automation state"}. Manual review stays available.`
+      : `Autopilot available for PAPER on ${escapeHtml(market)}; LIVE Autopilot ${liveOk ? "is available while the gate is ACTIVE" : "remains disabled"}.`)
+    : "Manual review: every simulated order needs an explicit ticket. No automation runs.";
+  const may = $("start-autopilot-may");
+  if (may && row.autopilot?.may) may.innerHTML = row.autopilot.may.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+  const mayNot = $("start-autopilot-may-not");
+  if (mayNot && row.autopilot?.may_not) mayNot.innerHTML = row.autopilot.may_not.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+  const pill = $("start-autopilot-pill");
+  if (pill) {
+    const anyAuto = START_MARKETS.some((m) => startState().review[m] === "autopilot");
+    const running = START_MARKETS.some((m) => (startMarketData(m)?.paper?.session_state || "STOPPED") !== "STOPPED");
+    pill.textContent = anyAuto
+      ? (running ? "AUTOPILOT SELECTED · SESSION STATE BELOW" : "AUTOPILOT SELECTED · NOTHING RUNNING")
+      : "MANUAL REVIEW ON BOTH MARKETS";
+    pill.className = `status-pill ${anyAuto ? "warn" : "info"}`;
+  }
+  const exceptions = $("start-autopilot-exceptions");
+  if (exceptions) {
+    const cycle = row.cycle_missed || {};
+    const stale = row.stale_policy || {};
+    exceptions.innerHTML = `
+      <strong>When it stops instead of improvising:</strong>
+      <ul class="scan-reasons">
+        <li>Stale quote — ${escapeHtml(stale.behavior || "quotes older than the server cap are refused")}</li>
+        <li>Cadence missed — ${escapeHtml(cycle.behavior || "deferred, never sent late")}</li>
+        <li>Provider throttle — the gate cools down and lowers its per-second budget; it never rotates keys or endpoints.</li>
+        <li>Ambiguous order outcome — the market is blocked and must be reconciled; nothing retries blindly.</li>
+        <li>Kill switch — engaged markets stop entering and report <code>ERROR</code> in the header badge.</li>
+      </ul>`;
+  }
+}
+
+/* ---------------- symbols ---------------- */
+async function loadStartSearch(market, query) {
+  const st = startState();
+  try {
+    const params = new URLSearchParams(
+      market === "NSE"
+        ? { market: "NSE", query, limit: "30", include_indices: "false" }
+        : { market: "NASDAQ", query, limit: "30" });
+    const payload = await api(`/api/markets/search?${params.toString()}`);
+    st.search[market] = (payload.items || []).filter((item) => startEligible(market, item));
+    st.eligible[market] = Number(
+      (market === "NSE" ? payload.nse?.total_matches : payload.nasdaq?.total_matches) || 0);
+    st.searchError = st.searchError || {};
+    st.searchError[market] = "";
+  } catch (error) {
+    st.search[market] = [];
+    st.searchError = { ...(st.searchError || {}), [market]: error.message };
+  }
+  renderStartSymbols(market);
+  renderStartEligibility(market);
+}
+
+function startEligible(market, item) {
+  // "Select all eligible" must never quietly include a watch-only instrument:
+  // indices, derivatives and suspended symbols are filtered out here, and the
+  // selection is re-validated by the server when the session starts.
+  if (!item) return false;
+  if (market === "NSE") {
+    if (String(item.segment || "").toUpperCase() !== "NSE_EQ") return false;
+    if (String(item.asset_category || "CASH_EQUITY_OR_ETF") !== "CASH_EQUITY_OR_ETF") return false;
+    if (!String(item.instrument_key || "").startsWith("NSE_EQ|")) return false;
+    return item.tradable !== false;
+  }
+  if (String(item.asset_class || "us_equity").toLowerCase() !== "us_equity") return false;
+  if (String(item.status || "active").toLowerCase() !== "active") return false;
+  if (item.tradable === false) return false;
+  return Boolean(String(item.symbol || "").trim());
+}
+
+function startSymbolKey(market, item) {
+  return market === "NSE"
+    ? String(item.instrument_key || item.trading_symbol || item.symbol || "")
+    : String(item.symbol || "");
+}
+
+function startSymbolLabel(market, item) {
+  return market === "NSE"
+    ? String(item.trading_symbol || item.display_symbol || item.symbol || "")
+    : String(item.symbol || "");
+}
+
+function renderStartSymbols(market) {
+  const st = startState();
+  const results = $(`start-search-results-${market}`);
+  const chips = $(`start-chips-${market}`);
+  const count = $(`start-symbol-count-${market}`);
+  const selected = startSelectionKey(market);
+  if (count) count.textContent = `${selected.length} SELECTED`;
+  if (results) {
+    const items = st.search[market] || [];
+    const error = (st.searchError || {})[market];
+    results.innerHTML = error
+      ? `<div class="inline-status err">Catalog search failed: ${escapeHtml(error)}</div>`
+      : items.length
+        ? `<div class="start-result-list">${items.map((item) => {
+          const key = startSymbolKey(market, item);
+          const checked = selected.includes(key);
+          return `<label class="start-result">
+            <input type="checkbox" data-start-symbol="${escapeHtml(key)}" data-start-symbol-market="${market}" ${checked ? "checked" : ""}>
+            <span><strong>${escapeHtml(startSymbolLabel(market, item))}</strong>
+              <small>${escapeHtml(item.name || "")} · ${escapeHtml(item.asset_subclass || item.instrument_type || "")}</small></span>
+          </label>`;
+        }).join("")}</div>`
+        : `<p class="empty-state">No eligible ${escapeHtml(market)} instruments matched. Search the catalog or add symbols on 02 Watchlists.</p>`;
+  }
+  if (chips) {
+    chips.innerHTML = selected.length
+      ? selected.map((key) => `<span class="start-chip" role="listitem">${escapeHtml(key)}<button type="button" class="text-button" data-start-remove="${escapeHtml(key)}" data-start-remove-market="${market}" aria-label="Remove ${escapeHtml(key)}">×</button></span>`).join("")
+      : `<p class="small muted">No symbols selected yet.</p>`;
+  }
+}
+
+function renderStartEligibility(market) {
+  const note = $(`start-eligible-note-${market}`);
+  const button = $(`start-select-all-${market}`);
+  const eligible = startState().eligible[market] || 0;
+  if (note) {
+    note.textContent = market === "NSE"
+      ? `Eligible = NSE cash equities/ETFs with a resolved instrument key (${fmt(eligible, 0)} catalog matches). Indices, derivatives and suspended series are never included.`
+      : `Eligible = active, tradable US equities/ETFs (${fmt(eligible, 0)} catalog matches). Nothing unsupported is silently added.`;
+  }
+  if (button) {
+    button.textContent = `Select all eligible (${fmt(eligible, 0)})`;
+    button.disabled = !eligible;
+  }
+}
+
+async function startSelectAllEligible(market) {
+  // One bounded catalog read, filtered by exactly the same eligibility rule the
+  // picker uses, truncated at the scan cap. Never grows a position cap, never
+  // includes a watch-only instrument, and adds nothing the server would reject.
+  const cap = Math.min(100, Number(startState().data?.max_symbols_per_scan || 100));
+  const params = new URLSearchParams(market === "NSE"
+    ? { market: "NSE", query: "", limit: String(Math.min(200, cap * 2)), include_indices: "false" }
+    : { market: "NASDAQ", query: "", limit: String(Math.min(200, cap * 2)) });
+  let payload;
+  try { payload = await api(`/api/markets/search?${params.toString()}`); }
+  catch (error) { toast("Select all failed", error.message, "err"); return; }
+  const collected = [];
+  for (const item of (payload.items || [])) {
+    if (!startEligible(market, item)) continue;
+    const key = startSymbolKey(market, item);
+    if (key && !collected.includes(key)) collected.push(key);
+    if (collected.length >= cap) break;
+  }
+  startSetSelection(market, collected);
+  const note = collected.length >= cap
+    ? `Stopped at the ${cap}-symbol scan cap; the catalog has more eligible symbols.`
+    : `Every eligible symbol in the returned catalog page was selected.`;
+  toast("Select all eligible", `${collected.length} ${market} symbols selected. ${note} Selection never changes a position cap.`, "ok");
+}
+
+/* ---------------- cadence ---------------- */
+function renderStartCadence() {
+  const host = $("start-cadence-line");
+  if (!host) return;
+  const parts = [];
+  for (const market of START_MARKETS) {
+    const row = startMarketData(market);
+    const count = startSelectionKey(market).length;
+    if (!row) continue;
+    const plan = row.cadence || {};
+    parts.push(`<strong>${escapeHtml(market)}</strong>: ${fmt(count, 0)} selected · ` +
+      `${escapeHtml(plan.label || "cadence unavailable: no quota plan")} · ` +
+      `${plan.requests_per_cycle && Object.keys(plan.requests_per_cycle).length
+        ? Object.entries(plan.requests_per_cycle).map(([k, v]) => `${escapeHtml(k)} ${fmt(v, 0)}`).join(", ")
+        : "requests not computed"}`);
+  }
+  host.className = "inline-status top-space";
+  host.innerHTML = parts.length
+    ? `${parts.join(" &nbsp;|&nbsp; ")}<br><span class="small muted">These are server-computed from documented provider quota windows (MODELED OFFLINE). A scan buys market data; it does not buy a trade.</span>`
+    : "Sustainable cadence appears here from the server's quota plan for the selected count.";
+}
+
+function startCadenceFor(market) {
+  const row = startMarketData(market);
+  const min = Number(row?.cadence?.sustainable_seconds || 0);
+  const options = START_CADENCE_OPTIONS.filter((value) => value >= Math.max(1, Math.ceil(min)));
+  return options.length ? options : [Math.max(1, Math.ceil(min || 60))];
+}
+
+/* ---------------- preview + start ---------------- */
+async function startPreviewSession() {
+  const st = startState();
+  const selected = START_MARKETS.filter((m) => startSelectionKey(m).length);
+  const host = $("start-preview-body");
+  if (!selected.length) {
+    if (host) host.innerHTML = `<div class="inline-status warn">Select at least one market and one symbol before previewing.</div>`;
+    return null;
+  }
+  const rows = [];
+  for (const market of selected) {
+    const row = startMarketData(market);
+    const count = startSelectionKey(market).length;
+    let preview = null;
+    let error = "";
+    try {
+      preview = await api("/api/ensemble/scan/preview", {
+        body: { market, symbol_count: count, cadence_s: startCadenceFor(market)[0] },
+      });
+    } catch (err) { error = err.message; }
+    rows.push({ market, row, count, preview, error, strategy: st.strategy[market], review: st.review[market] });
+  }
+  st.preview = { at: new Date().toISOString(), rows };
+  renderStartPreview();
+  renderStartControls();
+  return st.preview;
+}
+
+/* One comparison of two numbers the capacity service returned. No arithmetic
+ * that could imply a cadence the provider does not support. */
+function startCadenceVerdict(plan) {
+  const requested = Number(plan?.cadence_requested_seconds);
+  const sustainable = Number(plan?.cadence_sustainable_seconds);
+  if (!Number.isFinite(requested) || !Number.isFinite(sustainable)) {
+    return "Cadence not computed by the capacity service.";
+  }
+  return sustainable > requested
+    ? `${fmt(requested, 0)} s requested · NOT SUPPORTED for this selection: the provider quota needs ${fmt(sustainable, 1)} s per cycle.`
+    : `${fmt(requested, 0)} s requested · the provider quota needs ${fmt(sustainable, 1)} s per cycle.`;
+}
+
+function renderStartPreview() {
+  const host = $("start-preview-body");
+  const pill = $("start-preview-pill");
+  const preview = startState().preview;
+  if (!host) return;
+  if (!preview) {
+    host.innerHTML = `<p class="empty-state">Select a market, symbols, strategy and review mode, then press Preview session. Preview is offline: it consumes no provider quota.</p>`;
+    if (pill) { pill.textContent = "NOT PREVIEWED"; pill.className = "status-pill info"; }
+    return;
+  }
+  const blocks = preview.rows.map(({ market, row, count, preview: payload, error, strategy, review }) => {
+    if (error) return `<div class="inline-status err"><strong>${escapeHtml(market)}</strong> preview failed: ${escapeHtml(error)}</div>`;
+    const plan = payload?.plan || {};
+    const windows = Object.entries(plan.window_usage || {});
+    const limits = row?.limits || {};
+    const setup = preview?.setup || payload?.summary || {};
+    return `
+      <div class="start-preview-card inset-panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">PREVIEW · ${escapeHtml(market)} · OFFLINE · 0 PROVIDER REQUESTS</p>
+            <h4>${escapeHtml(row?.venue_label || market)}</h4></div>
+          <span class="status-pill ${plan.can_start ? "ok" : "warn"}">${escapeHtml(plan.status || "UNKNOWN")}</span>
+        </div>
+        <dl class="detail-list start-detail">
+          <dt>Mode</dt><dd>${escapeHtml(startState().mode)} · ${review === "autopilot" ? "AUTOPILOT" : "MANUAL REVIEW"}</dd>
+          <dt>Broker</dt><dd>${escapeHtml(row?.broker || market)}</dd>
+          <dt>Symbols</dt><dd>${fmt(count, 0)} selected of ${fmt(row?.symbol_cap ?? 100, 0)} cap</dd>
+          <dt>Strategy</dt><dd>${escapeHtml(strategy)}</dd>
+          <dt>Scan cadence</dt><dd>${escapeHtml(startCadenceVerdict(plan))}</dd>
+          <dt>Provider quota</dt><dd>${escapeHtml(row?.quota?.profile || "none")} · ${escapeHtml(row?.quota?.verification || "UNKNOWN")} · ${fmt(plan.total_requests_per_cycle ?? 0, 0)} requests / cycle</dd>
+          <dt>Open positions</dt><dd>${fmt(row?.paper?.positions ?? 0, 0)} now · ${fmt(row?.position_cap ?? "—", 0)} cap (unchanged)</dd>
+          <dt>Order / exposure caps</dt><dd>${fmt(limits.max_order_value ?? "—", 0)} per order · ${fmt(limits.max_symbol_exposure ?? "—", 0)} per symbol · ${fmt(limits.max_total_exposure ?? "—", 0)} total · ${fmt(limits.max_daily_orders ?? "—", 0)} orders/day</dd>
+          <dt>Daily loss cap</dt><dd>${fmt(limits.max_daily_loss ?? "—", 0)}</dd>
+          <dt>Quote age cap</dt><dd>${fmt(limits.max_quote_age_seconds ?? "—", 0)} s</dd>
+          <dt>Orders from this preview</dt><dd><strong>0</strong></dd>
+        </dl>
+        ${setupsSummary(setup)}
+        ${windows.length ? `<p class="eyebrow top-space">QUOTA WINDOWS</p><ul class="scan-reasons">${windows.map(([category, usage]) => {
+          const rows = Array.isArray(usage) ? usage : [];
+          return rows.map((w) => `<li>${escapeHtml(category)} · ${escapeHtml(w.readable || `${w.current} / ${w.limit}`)}${w.blocks ? " · BLOCKS" : ""}</li>`).join("");
+        }).join("")}</ul>` : ""}
+        ${(plan.reasons || []).length ? `<ul class="scan-reasons top-space">${plan.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}
+      </div>`;
+  });
+  host.innerHTML = blocks.join("");
+  if (pill) {
+    const anyBlocked = preview.rows.some((row) => !(row.preview?.plan?.can_start));
+    pill.textContent = anyBlocked ? "PREVIEWED · AT LEAST ONE MARKET BLOCKED" : "PREVIEWED · OFFLINE · NO QUOTA USED";
+    pill.className = `status-pill ${anyBlocked ? "warn" : "ok"}`;
+  }
+}
+
+function setupsSummary(setup) {
+  if (!setup || !Object.keys(setup).length) return "";
+  return `<p class="small muted top-space">Server preview summary: ${escapeHtml(JSON.stringify(setup).slice(0, 600))}</p>`;
+}
+
+function startOnMarket(market) {
+  return Boolean($(`start-select-${market}`)?.checked);
+}
+
+function renderStartControls() {
+  const st = startState();
+  const data = st.data;
+  const selected = START_MARKETS.filter(startOnMarket);
+  const busy = Boolean(st.busy.paper || st.busy.live);
+  const paperButton = $("start-paper-btn");
+  if (paperButton) {
+    const anySymbols = selected.some((m) => startSelectionKey(m).length);
+    paperButton.disabled = busy || !selected.length || !anySymbols;
+    paperButton.title = !selected.length ? "Select at least one market card"
+      : !anySymbols ? "Select at least one symbol for a selected market" : "";
+  }
+  for (const market of START_MARKETS) {
+    const button = $(`start-live-${market}-btn`);
+    if (!button) continue;
+    const row = startMarketData(market);
+    const mode = String(row?.live?.mode || "PAPER").toUpperCase();
+    const ready = Boolean(row?.live?.ready);
+    // LIVE Start is only reachable through the guided sequence; this button
+    // opens it. It is never enabled by merely selecting LIVE above.
+    const hasSymbols = startSelectionKey(market).length > 0;
+    button.disabled = busy || !startOnMarket(market) || !hasSymbols;
+    button.textContent = mode === "LIVE"
+      ? `LIVE ${market} · ${row?.live?.gate_state || "DISABLED"}`
+      : `Start LIVE · ${market}`;
+    button.title = !startOnMarket(market) ? `Tick the ${market} card first` : (ready ? "" : "Opens the guided LIVE sequence; readiness gates stay server-side");
+  }
+  const stop = $("start-stop-btn");
+  if (stop) stop.disabled = busy || !data;
+  const note = $("start-control-note");
+  if (note && data) {
+    const running = START_MARKETS.filter((m) => (startMarketData(m)?.paper?.session_state || "STOPPED") !== "STOPPED");
+    const live = START_MARKETS.filter((m) => startMarketData(m)?.live?.gate_state === "ACTIVE");
+    note.textContent = [
+      running.length ? `PAPER running: ${running.join(", ")}` : "No PAPER session running",
+      live.length ? `LIVE gate ACTIVE: ${live.join(", ")}` : "no LIVE gate active",
+      selected.length ? `selected: ${selected.join(", ")}` : "no market selected",
+    ].join(" · ");
+  }
+  const previewButton = $("start-preview-btn");
+  if (previewButton) previewButton.disabled = busy || !selected.length;
+}
+
+async function startPaperSession() {
+  const st = startState();
+  const markets = START_MARKETS.filter(startOnMarket).filter((m) => startSelectionKey(m).length);
+  if (!markets.length) { toast("Nothing to start", "Select a market and at least one symbol.", "warn"); return; }
+  const confirm = await startConfirm(
+    "Start PAPER session",
+    `<p>Start a <strong>simulated</strong> PAPER session for <strong>${escapeHtml(markets.join(", "))}</strong>?</p>
+     <ul class="checklist">
+       <li>Fills are simulated in the local ledger. No broker order is routed.</li>
+       <li>Automation runs only for strategies marked capable, and only inside the server's caps.</li>
+       <li>The session stops on Stop, Emergency Stop, or restart.</li>
+     </ul>`,
+    "Start PAPER", "bull");
+  if (!confirm) return;
+  st.busy.paper = true; renderStartControls();
+  const results = [];
+  try {
+    for (const market of markets) {
+      const symbols = startSelectionKey(market);
+      const autopilot = st.review[market] === "autopilot";
+      const payload = {
+        market,
+        strategy: autopilot ? st.strategy[market] : "manual_only",
+        timeframe: "5m",
+        symbols,
+      };
+      try {
+        const out = await api("/api/markets/paper/session/start", { body: payload });
+        results.push(`${market}: ${out.session_state || out.state || "STARTED"}`);
+      } catch (error) {
+        results.push(`${market}: FAILED — ${error.message}`);
+      }
+    }
+    toast("PAPER session", results.join(" · "), "ok");
+  } finally {
+    st.busy.paper = false;
+    await loadStartMonitor({ background: true });
+    loadStartMonitorRows();
+  }
+}
+
+async function startStopSession() {
+  const st = startState();
+  const running = START_MARKETS.filter((m) => (startMarketData(m)?.paper?.session_state || "STOPPED") !== "STOPPED");
+  const confirm = await startConfirm(
+    "Stop session",
+    `<p>Stop the local paper session for <strong>${escapeHtml(running.join(", ") || "no market")}</strong> and disarm any LIVE gate?</p>
+     <p class="small muted">Stopping never cancels broker orders by itself and leaves no live session running.</p>`,
+    "Stop session", "danger");
+  if (!confirm) return;
+  st.busy.stop = true; renderStartControls();
+  const out = [];
+  try {
+    for (const market of START_MARKETS) {
+      const row = startMarketData(market);
+      if ((row?.paper?.session_state || "STOPPED") !== "STOPPED") {
+        try {
+          await api("/api/markets/paper/session/transition", { body: { market, action: "stop", reason: "operator stop from Start & Monitor" } });
+          out.push(`${market} paper stopped`);
+        } catch (error) { out.push(`${market} paper: ${error.message}`); }
+      }
+      if ((row?.live?.mode || "") === "LIVE") {
+        try {
+          await api(`/api/markets/live/${market}/disarm`, { body: { reason: "operator stop from Start & Monitor" } });
+          out.push(`${market} live disarmed`);
+        } catch (error) { out.push(`${market} live: ${error.message}`); }
+      }
+    }
+    toast("Stop session", out.join(" · ") || "Nothing was running.", "warn");
+  } finally {
+    st.busy.stop = false;
+    await loadStartMonitor({ background: true });
+  }
+}
+
+async function startEmergencyStop() {
+  const confirm = await startConfirm(
+    "EMERGENCY STOP",
+    `<p><strong>This halts every subsystem AXIOM can halt.</strong> It engages the local paper halt, stops Kronos sessions, stops any Upstox autonomy session, and stops the Alpaca broker path.</p>
+     <ul class="checklist">
+       <li>It does not silently cancel broker orders unless a subsystem implements that.</li>
+       <li>Clearing it needs a separate typed confirmation (<code>${escapeHtml(START_CLEAR_PHRASE)}</code>).</li>
+     </ul>`,
+    "Engage emergency stop", "danger");
+  if (!confirm) return;
+  try {
+    await api(ROUTES.emergencyStop, { body: { reason: "operator emergency stop from Start & Monitor" } });
+    toast("Emergency stop engaged", "Every reachable subsystem was told to halt. Live execution stays off.", "err");
+  } catch (error) {
+    toast("Emergency stop failed", error.message, "err");
+  }
+  await loadStartMonitor({ background: true });
+}
+
+/* ---------------- LIVE: the existing sequence, step by step ---------------- */
+async function startOpenLiveSequence(market) {
+  const st = startState();
+  const row = startMarketData(market);
+  const phrase = row?.live?.confirmation_phrase || START_LIVE_PHRASE_FALLBACK;
+  const body = `
+    <p>The server gates this market through the existing four steps. Each one is a separate call; none is combined, skipped or auto-acknowledged.</p>
+    <ol class="checklist">
+      <li><strong>Read readiness</strong> — GET only, no broker order.</li>
+      <li><strong>Set mode LIVE</strong> — the gate stays DISARMED.</li>
+      <li><strong>Arm</strong> — the server re-checks everything first.</li>
+      <li><strong>Activate</strong> — requires an explicit risk acknowledgement plus the exact phrase.</li>
+    </ol>
+    <p class="small muted">Activating a gate does <strong>not</strong> start or resume a strategy. Starting the session is a separate, explicit action, and nothing survives a restart.</p>
+    <div id="start-live-steps" class="start-live-steps"></div>`;
+  openDialog({
+    title: `LIVE sequence · ${market}`,
+    body,
+    confirmLabel: "Close",
+    confirmClass: "secondary",
+    onConfirm: async () => { closeDialog(); return true; },
+  });
+  renderStartLiveSteps(market, phrase);
+}
+
+function renderStartLiveSteps(market, phrase) {
+  const host = $("start-live-steps");
+  if (!host) return;
+  const st = startState();
+  const row = startMarketData(market);
+  const mode = String(row?.live?.mode || "PAPER").toUpperCase();
+  const gate = String(row?.live?.gate_state || "DISABLED").toUpperCase();
+  const ready = Boolean(row?.live?.ready);
+  const failed = row?.live?.failed_checks || [];
+  const step = st.liveSteps[market] || {};
+  const busy = Boolean(st.busy.live);
+  host.innerHTML = `
+    <div class="switch-step ${row ? "done" : "pending"}">
+      <span class="step-index">1</span>
+      <span class="step-text"><b>Read readiness</b> — ${ready ? "no blocking check" : `${failed.length} failing check(s)`}</span>
+      <button type="button" class="button secondary xs" data-start-live-step="readiness" data-start-market="${market}" ${busy ? "disabled" : ""}>Read readiness (GET)</button>
+    </div>
+    ${failed.length ? `<ul class="switch-blockers">${failed.map((name) => `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(startBlockerText(name))}</li>`).join("")}</ul>` : ""}
+    <div class="switch-step ${mode === "LIVE" ? "done" : "pending"}">
+      <span class="step-index">2</span>
+      <span class="step-text"><b>Set mode LIVE</b> — currently ${escapeHtml(mode)}</span>
+      <button type="button" class="button warning xs" data-start-live-step="mode" data-start-market="${market}" ${busy || mode === "LIVE" || !ready ? "disabled" : ""}>2. Set mode LIVE</button>
+    </div>
+    <div class="switch-step ${gate === "ARMED" || gate === "ACTIVE" ? "done" : "pending"}">
+      <span class="step-index">3</span>
+      <span class="step-text"><b>Arm</b> — currently ${escapeHtml(gate)}</span>
+      <button type="button" class="button warning xs" data-start-live-step="arm" data-start-market="${market}" ${busy || mode !== "LIVE" || gate === "ARMED" || gate === "ACTIVE" ? "disabled" : ""}>3. Arm</button>
+    </div>
+    <div class="switch-step ${gate === "ACTIVE" ? "done" : "pending"}">
+      <span class="step-index">4</span>
+      <span class="step-text"><b>Activate</b> — needs the risk acknowledgement and the exact phrase</span>
+      <button type="button" class="button danger xs" data-start-live-step="activate" data-start-market="${market}" ${busy || gate !== "ARMED" ? "disabled" : ""}>4. Activate LIVE</button>
+    </div>
+    <div class="field top-space">
+      <label for="start-live-phrase"><input type="checkbox" id="start-live-ack" data-start-market="${market}" ${step.ack ? "checked" : ""}> I acknowledge that LIVE orders use real money and that AXIOM routes no exit for NSE positions.</label>
+      <label for="start-live-phrase-input">Type exactly: <code>${escapeHtml(phrase)}</code></label>
+      <input id="start-live-phrase-input" autocomplete="off" value="${escapeHtml(step.phrase || "")}">
+    </div>
+    <p class="small muted" id="start-live-status">${escapeHtml(step.status || "Waiting for step 1.")}</p>`;
+  const ack = $("start-live-ack");
+  if (ack) ack.addEventListener("change", () => { step.ack = ack.checked; });
+  const phraseInput = $("start-live-phrase-input");
+  if (phraseInput) phraseInput.addEventListener("input", () => { step.phrase = phraseInput.value; });
+  st.liveSteps[market] = step;
+}
+
+function startBlockerText(name) {
+  const map = {
+    configuration_complete: "A required dependency or credential is missing for this market.",
+    mode_is_live: "The market is not routed LIVE yet (that is step 2).",
+    no_unresolved_intents: "An earlier order outcome is ambiguous: reconcile before any new action.",
+    not_blocked: "The runtime has blocked this market after a fault.",
+    kill_switch_not_engaged: "The kill switch is engaged and must be reset.",
+    risk_limits_configured: "Every live risk limit must be a positive number first.",
+    calendar_session_open: "The exchange session is closed, so the broker refuses new orders.",
+    environment_is_live: "The broker is configured for the paper environment, not live.",
+  };
+  return map[name] || "The server reported this check as failing; fix it before LIVE.";
+}
+
+async function startLiveStep(market, step) {
+  const st = startState();
+  st.busy.live = true;
+  const record = (msg) => {
+    st.liveSteps[market] = { ...(st.liveSteps[market] || {}), status: msg };
+    renderStartLiveSteps(market, startMarketData(market)?.live?.confirmation_phrase || START_LIVE_PHRASE_FALLBACK);
+  };
+  try {
+    if (step === "readiness") {
+      await api(`/api/markets/live/${market}/readiness`);
+      record("Readiness re-read from the server. Nothing was armed.");
+    } else if (step === "mode") {
+      await api(`/api/markets/live/${market}/mode`, { body: { mode: "LIVE" } });
+      record("Mode set to LIVE. The gate is still DISARMED.");
+    } else if (step === "arm") {
+      await api(`/api/markets/live/${market}/arm`);
+      record("Armed. The server re-checked every readiness item before arming.");
+    } else if (step === "activate") {
+      const phrase = $(`start-live-phrase-input`)?.value || "";
+      const ack = Boolean($(`start-live-ack`)?.checked);
+      if (!ack) { record("Activation refused: the risk acknowledgement is required."); return; }
+      await api(`/api/markets/live/${market}/activate`, {
+        body: { acknowledge_risk: true, confirm_live_trading: phrase },
+      });
+      record("Gate is ACTIVE. No strategy was started; start the session explicitly when ready.");
+    }
+    await loadStartMonitor({ background: true });
+    toast(`LIVE ${market}`, `${step} completed`, step === "activate" ? "warn" : "ok");
+  } catch (error) {
+    record(`${step} failed: ${error.message}`);
+    toast(`LIVE ${market} ${step} failed`, error.message, "err");
+  } finally {
+    st.busy.live = false;
+    if ($("start-live-steps")) renderStartLiveSteps(market, startMarketData(market)?.live?.confirmation_phrase || START_LIVE_PHRASE_FALLBACK);
+    renderStartControls();
+  }
+}
+
+/* ---------------- monitor ---------------- */
+async function loadStartMonitorRows() {
+  const st = startState();
+  const market = $("start-monitor-market")?.value || "ALL";
+  const mode = $("start-monitor-mode")?.value || "ALL";
+  const rows = [];
+  const errors = [];
+  for (const mkt of (market === "ALL" ? START_MARKETS : [market])) {
+    const row = startMarketData(mkt);
+    const wantPaper = mode === "ALL" || mode === "LIVE_MARKET_PAPER";
+    const wantLive = mode === "ALL" || mode === "LIVE_MARKET_LIVE";
+    if (wantPaper && (row?.live?.mode || "PAPER") !== "LIVE") {
+      try {
+        const payload = await api(`/api/markets/paper/${mkt}`);
+        for (const order of (payload.orders || [])) {
+          rows.push({
+            time: order.updated_at || order.created_at,
+            market: mkt,
+            mode: "PAPER · SIMULATED",
+            symbol: order.symbol,
+            side: order.side,
+            qty: order.qty,
+            state: order.status,
+            filled: order.filled_qty,
+            price: order.avg_fill_price,
+            fees: order.fees_total,
+            error: order.reject_reason || "",
+          });
+        }
+        for (const fill of (payload.fills || [])) {
+          rows.push({
+            time: fill.created_at,
+            market: mkt,
+            mode: "PAPER · SIMULATED FILL",
+            symbol: fill.symbol,
+            side: fill.side,
+            qty: fill.fill_qty,
+            state: "FILLED",
+            filled: fill.fill_qty,
+            price: fill.fill_price,
+            fees: fill.fees_total,
+            error: "",
+          });
+        }
+      } catch (error) { errors.push(`${mkt} paper: ${error.message}`); }
+    }
+    if (wantLive && (row?.live?.mode || "") === "LIVE") {
+      try {
+        const payload = await api(`/api/markets/live/audit?market=${mkt}&limit=100`);
+        for (const event of (payload.events || [])) {
+          const p = event.payload || {};
+          rows.push({
+            time: event.created_at,
+            market: mkt,
+            mode: "LIVE · BROKER",
+            symbol: p.symbol || "—",
+            side: p.side || "—",
+            qty: p.qty ?? "—",
+            state: event.event_kind,
+            filled: p.filled_qty ?? "—",
+            price: p.avg_fill_price ?? "—",
+            fees: p.fees ?? "—",
+            error: p.reason || (p.unresolved ? "UNRESOLVED" : ""),
+          });
+        }
+      } catch (error) { errors.push(`${mkt} live: ${error.message}`); }
+    }
+  }
+  rows.sort((a, b) => String(b.time || "").localeCompare(String(a.time || "")));
+  st.monitor = rows;
+  st.monitorError = errors.join(" · ");
+  renderStartMonitorRows();
+}
+
+function renderStartMonitorRows() {
+  const st = startState();
+  const body = $("start-monitor-rows");
+  const pill = $("start-monitor-pill");
+  if (!body) return;
+  const rows = st.monitor || [];
+  if (pill) {
+    pill.textContent = rows.length ? `${rows.length} EVENT${rows.length === 1 ? "" : "S"}` : "0 EVENTS";
+    pill.className = `status-pill ${st.monitorError ? "err" : "info"}`;
+  }
+  if (st.monitorError) {
+    body.innerHTML = `<tr><td colspan="11" class="empty-state">Monitor read failed: ${escapeHtml(st.monitorError)}</td></tr>`;
+    return;
+  }
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="11" class="empty-state">No paper or broker events yet. Start a session, or refresh after it runs a cycle.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.slice(0, 200).map((row) => {
+    const live = String(row.mode).startsWith("LIVE");
+    const unresolved = /UNRESOLVED|AMBIGUOUS/i.test(String(row.error || ""));
+    return `<tr class="${unresolved ? "start-row-error" : ""}">
+      <td class="small">${escapeHtml(startFmtTime(row.time))}</td>
+      <td>${escapeHtml(row.market)}</td>
+      <td><span class="status-pill ${live ? "err" : "ok"}">${escapeHtml(row.mode)}</span></td>
+      <td><strong>${escapeHtml(String(row.symbol))}</strong></td>
+      <td>${escapeHtml(String(row.side))}</td>
+      <td>${escapeHtml(String(row.qty))}</td>
+      <td>${escapeHtml(String(row.state))}</td>
+      <td>${escapeHtml(String(row.filled))}</td>
+      <td>${escapeHtml(String(row.price))}</td>
+      <td>${escapeHtml(String(row.fees))}</td>
+      <td class="${unresolved ? "start-warn-text" : "small"}">${escapeHtml(String(row.error || "—"))}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* ---------------- credentials ---------------- */
+async function startSaveUpstoxToken(event) {
+  event.preventDefault();
+  const input = $("start-upstox-token");
+  const value = input?.value?.trim();
+  if (!value) { toast("Upstox token", "Paste a token first.", "warn"); return; }
+  try {
+    await api("/api/autonomy/upstox-token", { body: { access_token: value } });
+    input.value = "";
+    toast("Upstox token saved", "Stored in the protected local store. Not returned to this page.", "ok");
+  } catch (error) {
+    input.value = "";
+    toast("Upstox token not saved", error.message, "err");
+  }
+  await loadStartMonitor({ background: true });
+}
+
+async function startSaveAlpacaData(event) {
+  event.preventDefault();
+  const key = $("start-alpaca-key");
+  const secret = $("start-alpaca-secret");
+  const feed = $("start-alpaca-feed")?.value || "iex";
+  if (!key?.value?.trim() || !secret?.value?.trim()) {
+    toast("Alpaca data keys", "Both the Key ID and the Secret are required.", "warn"); return;
+  }
+  try {
+    await api("/api/connections/alpaca/credentials", {
+      body: { api_key: key.value.trim(), api_secret: secret.value.trim(), feed },
+    });
+    toast("Alpaca data keys saved", `Feed ${feed}. Separate from broker keys.`, "ok");
+  } catch (error) {
+    toast("Alpaca data keys not saved", error.message, "err");
+  } finally {
+    key.value = ""; secret.value = "";
+  }
+  await loadStartMonitor({ background: true });
+}
+
+async function startSaveBrokerKeys(event) {
+  event.preventDefault();
+  const env = $("start-broker-env")?.value || "paper";
+  const key = $("start-broker-key");
+  const secret = $("start-broker-secret");
+  if (!key?.value?.trim() || !secret?.value?.trim()) {
+    toast("Broker keys", "Both values are required.", "warn"); return;
+  }
+  try {
+    await api(`/api/alpaca-broker/credentials/${env}`, {
+      body: { api_key: key.value.trim(), api_secret: secret.value.trim() },
+    });
+    toast("Broker keys saved", `${env} slot stored. Nothing was armed or activated.`, "ok");
+  } catch (error) {
+    toast("Broker keys not saved", error.message, "err");
+  } finally {
+    key.value = ""; secret.value = "";
+  }
+  await loadStartMonitor({ background: true });
+}
+
+async function startSaveUpstoxLiveToken(event) {
+  event.preventDefault();
+  const input = $("start-upstox-live-token");
+  const value = input?.value?.trim();
+  if (!value) { toast("Upstox live token", "Paste the live token first.", "warn"); return; }
+  try {
+    await api("/api/autonomy/upstox-live-token", { body: { access_token: value } });
+    toast("Upstox live token saved", "Separate real-money slot. Nothing was armed or activated.", "ok");
+  } catch (error) {
+    toast("Upstox live token not saved", error.message, "err");
+  } finally {
+    if (input) input.value = "";
+  }
+  await loadStartMonitor({ background: true });
+}
+
+async function startVerifyReadOnly(market) {
+  try {
+    if (market === "NSE") {
+      const out = await api("/api/connections/upstox/verify-quote", { body: {} });
+      toast("NSE read-only verify", out.connection_state || out.detail || "read-only quote probe returned", out.authenticated ? "ok" : "warn");
+    } else {
+      const out = await api("/api/connections/alpaca/verify-quote", { body: {} });
+      toast("NASDAQ read-only verify", out.connection_state || out.detail || "read-only snapshot probe returned", out.authenticated ? "ok" : "warn");
+    }
+  } catch (error) {
+    toast("Read-only verification failed", error.message, "err");
+  }
+  await loadStartMonitor({ background: true });
+}
+
+/* ---------------- dialog + binding ---------------- */
+function startConfirm(title, body, confirmLabel, confirmClass) {
+  return new Promise((resolve) => {
+    openDialog({
+      title,
+      body,
+      confirmLabel,
+      confirmClass,
+      onConfirm: async () => { closeDialog(); resolve(true); return true; },
+    });
+    const cancel = $("modal-cancel");
+    const close = $("modal-close");
+    const done = () => resolve(false);
+    cancel?.addEventListener("click", done, { once: true });
+    close?.addEventListener("click", done, { once: true });
+  });
+}
+
+function bindStartEvents() {
+  document.querySelectorAll("[data-page], [data-go]").forEach(() => {});
+  $("start-mode-paper")?.addEventListener("click", () => { startState().mode = "PAPER"; renderStartMode(); renderStartPreview(); });
+  $("start-mode-live")?.addEventListener("click", () => { startState().mode = "LIVE"; renderStartMode(); renderStartPreview(); });
+
+  for (const market of START_MARKETS) {
+    $(`start-select-${market}`)?.addEventListener("change", () => { renderStartControls(); renderStartCard(market); });
+    $(`start-search-form-${market}`)?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await loadStartSearch(market, $(`start-search-${market}`)?.value?.trim() || "");
+    });
+    $(`start-strategy-${market}`)?.addEventListener("change", (event) => {
+      startState().strategy[market] = event.target.value;
+      renderStartAutopilot(market);
+    });
+    document.querySelectorAll(`[data-start-review][data-start-market="${market}"]`).forEach((button) => {
+      button.addEventListener("click", () => {
+        startState().review[market] = button.dataset.startReview;
+        document.querySelectorAll(`[data-start-review][data-start-market="${market}"]`).forEach((other) => {
+          const active = other.dataset.startReview === button.dataset.startReview;
+          other.classList.toggle("active", active);
+          other.setAttribute("aria-checked", active ? "true" : "false");
+        });
+        renderStartAutopilot(market);
+      });
+    });
+    document.querySelectorAll(`[data-start-symbol-market="${market}"][data-start-symbol]`).forEach(() => {});
+  }
+
+  document.addEventListener("change", (event) => {
+    const box = event.target.closest("[data-start-symbol]");
+    if (!box) return;
+    const market = box.dataset.startSymbolMarket;
+    const key = box.dataset.startSymbol;
+    const current = new Set(startSelectionKey(market));
+    if (box.checked) current.add(key); else current.delete(key);
+    startSetSelection(market, [...current]);
+  });
+
+  document.addEventListener("click", async (event) => {
+    const remove = event.target.closest("[data-start-remove]");
+    if (remove) {
+      const market = remove.dataset.startRemoveMarket;
+      startSetSelection(market, startSelectionKey(market).filter((k) => k !== remove.dataset.startRemove));
+      return;
+    }
+    const action = event.target.closest("[data-start-action]");
+    if (action) {
+      const market = action.dataset.startMarket;
+      if (action.dataset.startAction === "select-all") await startSelectAllEligible(market);
+      if (action.dataset.startAction === "clear") startSetSelection(market, []);
+      if (action.dataset.startAction === "verify-upstox") await startVerifyReadOnly("NSE");
+      if (action.dataset.startAction === "verify-alpaca") await startVerifyReadOnly("NASDAQ");
+      return;
+    }
+    const liveStep = event.target.closest("[data-start-live-step]");
+    if (liveStep) { await startLiveStep(liveStep.dataset.startMarket, liveStep.dataset.startLiveStep); return; }
+    const liveStart = event.target.closest("[data-start-live]");
+    if (liveStart) { await startOpenLiveSequence(liveStart.dataset.startLive); return; }
+  });
+
+  $("start-preview-btn")?.addEventListener("click", () => startPreviewSession().catch((e) => toast("Preview failed", e.message, "err")));
+  $("start-paper-btn")?.addEventListener("click", () => startPaperSession().catch((e) => toast("Start failed", e.message, "err")));
+  $("start-stop-btn")?.addEventListener("click", () => startStopSession().catch((e) => toast("Stop failed", e.message, "err")));
+  $("start-emergency-btn")?.addEventListener("click", () => startEmergencyStop().catch((e) => toast("Emergency stop failed", e.message, "err")));
+  $("start-monitor-refresh")?.addEventListener("click", () => loadStartMonitorRows());
+  $("start-monitor-market")?.addEventListener("change", () => loadStartMonitorRows());
+  $("start-monitor-mode")?.addEventListener("change", () => loadStartMonitorRows());
+  $("start-upstox-form")?.addEventListener("submit", startSaveUpstoxToken);
+  $("start-alpaca-data-form")?.addEventListener("submit", startSaveAlpacaData);
+  $("start-alpaca-broker-form")?.addEventListener("submit", startSaveBrokerKeys);
+  $("start-upstox-live-form")?.addEventListener("submit", startSaveUpstoxLiveToken);
+}
+
 function init() {
   bindEvents(); bindModelLabEvents(); bindTradeMonitorEvents(); bindEnsembleEvents(); bindScanEvents();
+  bindStartEvents();
   $("refresh-interval").value = "10000"; renderActivity();
   const saved = storageGet("axiom-api-token");
   if (saved) unlock(saved); else showAuth();

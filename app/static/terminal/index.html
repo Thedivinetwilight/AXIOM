@@ -33,7 +33,8 @@
       <span id="broker-destination" class="broker-destination">ALPACA BROKER · disabled</span>
     </div>
     <nav class="nav-list" aria-label="Workspace pages">
-      <button type="button" class="nav-item active" data-page="overview"><span>01</span>Overview</button>
+      <button type="button" class="nav-item active" data-page="start"><span>00</span>Start &amp; Monitor</button>
+      <button type="button" class="nav-item" data-page="overview"><span>01</span>Overview</button>
       <button type="button" class="nav-item" data-page="instruments"><span>02</span>Watchlists &amp; search</button>
       <button type="button" class="nav-item" data-page="charts"><span>03</span>Supercharts &amp; ticket</button>
       <button type="button" class="nav-item" data-page="orders"><span>04</span>Orders &amp; positions</button>
@@ -98,6 +99,7 @@
 
     <nav class="quick-nav-strip" id="mm-quick-nav-bar" aria-label="Direct workspace shortcuts">
       <span class="quick-nav-label">DIRECT ACCESS:</span>
+      <button type="button" class="button primary xs" data-go="start">Start &amp; Monitor</button>
       <button type="button" class="button secondary xs" data-go="connections">Connections</button>
       <button type="button" class="button secondary xs" data-go="charts">Charts &amp; Ticket</button>
       <button type="button" class="button secondary xs" data-go="orders">Orders &amp; Positions</button>
@@ -109,6 +111,23 @@
       <button type="button" class="button secondary xs" data-go="modellab">AI &amp; Model Lab</button>
     </nav>
 
+    <div class="start-control-bar" id="start-control-bar" role="region" aria-label="Session controls">
+      <div class="start-control-state">
+        <span class="status-pill info" id="start-mode-badge">PAPER</span>
+        <span class="status-pill" id="start-badge-NSE-bar">NSE · PAPER</span>
+        <span class="status-pill" id="start-badge-NASDAQ-bar">NASDAQ · PAPER</span>
+        <span class="small muted" id="start-control-note">No session started from this page yet.</span>
+      </div>
+      <div class="button-row start-control-actions">
+        <button type="button" class="button secondary" id="start-preview-btn">Preview session</button>
+        <button type="button" class="button bull" id="start-paper-btn">Start PAPER</button>
+        <button type="button" class="button warning" id="start-live-NSE-btn" data-start-live="NSE" disabled>Start LIVE · NSE</button>
+        <button type="button" class="button warning" id="start-live-NASDAQ-btn" data-start-live="NASDAQ" disabled>Start LIVE · NASDAQ</button>
+        <button type="button" class="button secondary" id="start-stop-btn">Stop session</button>
+        <button type="button" class="button danger" id="start-emergency-btn">EMERGENCY STOP</button>
+      </div>
+    </div>
+
     <main id="main-content" tabindex="-1">
       <section class="execution-boundary" id="execution-boundary" aria-label="Execution, market-data and authorization boundaries">
         <div><span>EXECUTION SESSION</span><strong id="boundary-execution">LOCAL PAPER</strong><small id="boundary-execution-note">Simulated fills only</small></div>
@@ -118,7 +137,330 @@
       </section>
 
       <!-- 01 OVERVIEW -->
-      <section class="page active" id="page-overview" aria-labelledby="overview-title">
+      <!-- 00 START & MONITOR (primary operator experience) -->
+      <section class="page active" id="page-start" aria-labelledby="start-title">
+        <div class="page-intro">
+          <div>
+            <p class="eyebrow">START &amp; MONITOR · NSE · UPSTOX (INR) · NASDAQ · ALPACA (USD)</p>
+            <h2 id="start-title">One screen to choose a mode, pick markets and symbols, and watch what happened.</h2>
+            <p>Start PAPER or LIVE per market, select symbols, check readiness, quota and risk caps, then monitor
+            paper fills next to broker orders — kept visibly separate. Nothing on this page opens a position by itself.</p>
+          </div>
+          <span class="status-pill info" id="start-evidence-pill">READ-ONLY VIEW · 0 BROKER ORDERS FROM THIS PAGE</span>
+        </div>
+
+        <article class="panel" id="start-mode-panel" aria-labelledby="start-mode-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 1 · EXECUTION MODE APPLIES TO THE MARKET CARDS YOU SELECT</p>
+              <h3 id="start-mode-title">PAPER or LIVE</h3>
+            </div>
+            <span class="status-pill warn" id="start-mode-note">NO “ENABLE BOTH” SHORTCUT · ONE MODE PER MARKET</span>
+          </div>
+          <div class="mode-choice-row" role="radiogroup" aria-labelledby="start-mode-title">
+            <button type="button" class="mode-choice paper active" id="start-mode-paper" role="radio" aria-checked="true">
+              <strong>PAPER</strong>
+              <span>Simulated fills on read-only market data. Zero broker orders.</span>
+            </button>
+            <button type="button" class="mode-choice live" id="start-mode-live" role="radio" aria-checked="false">
+              <strong>LIVE</strong>
+              <span>Real broker orders per market, behind readiness · Arm · typed phrase.</span>
+            </button>
+          </div>
+          <div class="inline-status top-space" id="start-mode-detail" role="status" aria-live="polite">
+            PAPER is selected. LIVE always needs its own per-market sequence, even after you select it here.
+          </div>
+          <div class="start-flow" aria-label="Session flow">
+            <span class="flow-step" data-start-step="1">1 · MODE</span>
+            <span class="flow-step" data-start-step="2">2 · MARKETS &amp; SYMBOLS</span>
+            <span class="flow-step" data-start-step="3">3 · CREDENTIALS</span>
+            <span class="flow-step" data-start-step="4">4 · STRATEGY &amp; AUTOPILOT</span>
+            <span class="flow-step" data-start-step="5">5 · PREVIEW</span>
+            <span class="flow-step" data-start-step="6">6 · START</span>
+            <span class="flow-step" data-start-step="7">7 · MONITOR</span>
+          </div>
+        </article>
+
+        <div class="content-grid two" id="start-market-cards">
+          <article class="panel accent-nse start-market-card" id="start-card-NSE" data-start-market="NSE" aria-labelledby="start-card-title-NSE">
+            <div class="panel-head">
+              <div><p class="eyebrow">NSE · UPSTOX · INR (₹)</p><h3 id="start-card-title-NSE">NSE market session</h3></div>
+              <span class="status-pill" id="start-badge-NSE" data-start-role="badge">PAPER</span>
+            </div>
+            <label class="checkbox-inline" for="start-select-NSE">
+              <input type="checkbox" id="start-select-NSE" data-start-role="market-select" data-start-market="NSE">
+              <span>Include <strong>NSE</strong> in this session</span>
+            </label>
+            <div class="start-facts" data-start-role="facts" id="start-facts-NSE">
+              <p class="empty-state">Reading server state…</p>
+            </div>
+            <div class="start-blockers" data-start-role="blockers" id="start-blockers-NSE"></div>
+            <p class="scan-caveat" data-start-role="exit-note" id="start-exit-NSE"></p>
+          </article>
+
+          <article class="panel accent-nasdaq start-market-card" id="start-card-NASDAQ" data-start-market="NASDAQ" aria-labelledby="start-card-title-NASDAQ">
+            <div class="panel-head">
+              <div><p class="eyebrow">NASDAQ · ALPACA · USD ($)</p><h3 id="start-card-title-NASDAQ">NASDAQ market session</h3></div>
+              <span class="status-pill" id="start-badge-NASDAQ" data-start-role="badge">PAPER</span>
+            </div>
+            <label class="checkbox-inline" for="start-select-NASDAQ">
+              <input type="checkbox" id="start-select-NASDAQ" data-start-role="market-select" data-start-market="NASDAQ">
+              <span>Include <strong>NASDAQ</strong> in this session</span>
+            </label>
+            <div class="start-facts" data-start-role="facts" id="start-facts-NASDAQ">
+              <p class="empty-state">Reading server state…</p>
+            </div>
+            <div class="start-blockers" data-start-role="blockers" id="start-blockers-NASDAQ"></div>
+            <p class="scan-caveat" data-start-role="exit-note" id="start-exit-NASDAQ"></p>
+          </article>
+        </div>
+
+        <article class="panel" id="start-symbol-panel" aria-labelledby="start-symbol-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 2 · MARKET-SPECIFIC SEARCH · CAP 100 SYMBOLS PER MARKET</p>
+              <h3 id="start-symbol-title">Symbols</h3>
+            </div>
+            <span class="status-pill info" id="start-symbol-cap">CAP 100 / MARKET</span>
+          </div>
+          <div class="start-symbol-columns">
+            <div class="start-symbol-col" data-start-symbol-market="NSE">
+              <div class="panel-head">
+                <h4>NSE · Upstox</h4>
+                <span class="status-pill" id="start-symbol-count-NSE">0 SELECTED</span>
+              </div>
+              <form class="start-search" id="start-search-form-NSE" role="search">
+                <label class="sr-only" for="start-search-NSE">Search NSE instruments</label>
+                <input id="start-search-NSE" data-start-search="NSE" type="search" placeholder="RELIANCE, TCS, INFY…">
+                <button type="submit" class="button secondary xs">Search catalog</button>
+              </form>
+              <div class="button-row">
+                <button type="button" class="button secondary xs" data-start-action="select-all" data-start-market="NSE" id="start-select-all-NSE">Select all eligible (0)</button>
+                <button type="button" class="button secondary xs" data-start-action="clear" data-start-market="NSE" id="start-clear-NSE">Clear selection</button>
+              </div>
+              <p class="small muted" id="start-eligible-note-NSE">Eligible = NSE cash equities/ETFs with a resolved instrument key. Indices and derivatives are never selected.</p>
+              <div class="start-results" id="start-search-results-NSE" role="region" aria-live="polite"></div>
+              <div class="start-chips" id="start-chips-NSE" role="list"></div>
+            </div>
+
+            <div class="start-symbol-col" data-start-symbol-market="NASDAQ">
+              <div class="panel-head">
+                <h4>NASDAQ · Alpaca</h4>
+                <span class="status-pill" id="start-symbol-count-NASDAQ">0 SELECTED</span>
+              </div>
+              <form class="start-search" id="start-search-form-NASDAQ" role="search">
+                <label class="sr-only" for="start-search-NASDAQ">Search NASDAQ symbols</label>
+                <input id="start-search-NASDAQ" data-start-search="NASDAQ" type="search" placeholder="AAPL, MSFT, QQQ…">
+                <button type="submit" class="button secondary xs">Search catalog</button>
+              </form>
+              <div class="button-row">
+                <button type="button" class="button secondary xs" data-start-action="select-all" data-start-market="NASDAQ" id="start-select-all-NASDAQ">Select all eligible (0)</button>
+                <button type="button" class="button secondary xs" data-start-action="clear" data-start-market="NASDAQ" id="start-clear-NASDAQ">Clear selection</button>
+              </div>
+              <p class="small muted" id="start-eligible-note-NASDAQ">Eligible = active, tradable US equities/ETFs. Nothing unsupported is silently added.</p>
+              <div class="start-results" id="start-search-results-NASDAQ" role="region" aria-live="polite"></div>
+              <div class="start-chips" id="start-chips-NASDAQ" role="list"></div>
+            </div>
+          </div>
+          <div class="inline-status top-space" id="start-cadence-line" role="status" aria-live="polite">
+            Sustainable cadence appears here from the server's quota plan for the selected count.
+          </div>
+        </article>
+
+        <article class="panel" id="start-credentials-panel" aria-labelledby="start-credentials-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 3 · LOCAL, SEPARATE CREDENTIAL SLOTS · PRESENCE ONLY</p>
+              <h3 id="start-credentials-title">Credentials</h3>
+            </div>
+            <span class="status-pill warn" id="start-credential-backend">SECRET VALUES ARE NEVER RETURNED TO THIS PAGE</span>
+          </div>
+          <div class="start-cred-table" id="start-cred-table"></div>
+          <div class="start-cred-forms">
+            <form class="start-cred-form" id="start-upstox-form">
+              <h4>Upstox read-only market-data token (NSE)</h4>
+              <label for="start-upstox-token">Daily access token</label>
+              <input id="start-upstox-token" type="password" autocomplete="off" placeholder="paste token — cleared on save">
+              <div class="button-row">
+                <button type="submit" class="button primary xs">Save Upstox token</button>
+                <button type="button" class="button secondary xs" data-start-action="verify-upstox">Verify NSE quote</button>
+              </div>
+              <p class="small muted" id="start-upstox-note">Stored encrypted (Windows DPAPI; owner-only file on Linux). Read-only market data only.</p>
+            </form>
+            <form class="start-cred-form" id="start-alpaca-data-form">
+              <h4>Alpaca market-data keys (NASDAQ)</h4>
+              <label for="start-alpaca-key">Key ID</label>
+              <input id="start-alpaca-key" autocomplete="off" placeholder="AK…">
+              <label for="start-alpaca-secret">Secret</label>
+              <input id="start-alpaca-secret" type="password" autocomplete="off" placeholder="never redisplayed">
+              <label for="start-alpaca-feed">Feed</label>
+              <select id="start-alpaca-feed">
+                <option value="iex">iex · free, single venue</option>
+                <option value="sip">sip · paid consolidated tape</option>
+                <option value="delayed_sip">delayed_sip · chart only</option>
+              </select>
+              <div class="button-row">
+                <button type="submit" class="button primary xs">Save Alpaca data keys</button>
+                <button type="button" class="button secondary xs" data-start-action="verify-alpaca">Verify NASDAQ quote</button>
+              </div>
+              <p class="small muted" id="start-alpaca-note">Separate from broker keys. Never used for order routing.</p>
+            </form>
+            <form class="start-cred-form" id="start-alpaca-broker-form">
+              <h4>Alpaca broker keys (PAPER and LIVE are different slots)</h4>
+              <label for="start-broker-env">Environment</label>
+              <select id="start-broker-env">
+                <option value="paper">paper · broker paper sandbox</option>
+                <option value="live">live · real money</option>
+              </select>
+              <label for="start-broker-key">Key ID</label>
+              <input id="start-broker-key" autocomplete="off">
+              <label for="start-broker-secret">Secret</label>
+              <input id="start-broker-secret" type="password" autocomplete="off">
+              <button type="submit" class="button primary xs">Save broker keys</button>
+              <p class="small muted" id="start-broker-note">Saving keys never arms or activates anything.</p>
+            </form>
+            <form class="start-cred-form" id="start-upstox-live-form">
+              <h4>Upstox LIVE order token (real money)</h4>
+              <label for="start-upstox-live-token">Separate live token — the read-only token is never reused</label>
+              <input id="start-upstox-live-token" type="password" autocomplete="off">
+              <button type="submit" class="button warning xs">Save Upstox live token</button>
+              <p class="small muted" id="start-upstox-live-note">Storing this does not arm, activate or place anything.</p>
+            </form>
+          </div>
+        </article>
+
+        <article class="panel" id="start-strategy-panel" aria-labelledby="start-strategy-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 4 · PER MARKET AND PER SESSION · BOUNDED BY SERVER LIMITS</p>
+              <h3 id="start-strategy-title">Strategy &amp; Autopilot</h3>
+            </div>
+            <span class="status-pill info" id="start-autopilot-pill">AUTOPILOT: NOTHING RUNNING</span>
+          </div>
+          <div class="start-strategy-grid">
+            <div data-start-strategy-market="NSE">
+              <h4>NSE</h4>
+              <label for="start-strategy-NSE">Strategy</label>
+              <select id="start-strategy-NSE" data-start-role="strategy" data-start-market="NSE"></select>
+              <div class="segmented start-review" role="radiogroup" aria-label="NSE review mode">
+                <button type="button" class="active" data-start-review="manual" data-start-market="NSE" role="radio" aria-checked="true">Manual review</button>
+                <button type="button" data-start-review="autopilot" data-start-market="NSE" role="radio" aria-checked="false">Autopilot</button>
+              </div>
+              <p class="small muted" data-start-role="autopilot-note" id="start-autopilot-NSE"></p>
+            </div>
+            <div data-start-strategy-market="NASDAQ">
+              <h4>NASDAQ</h4>
+              <label for="start-strategy-NASDAQ">Strategy</label>
+              <select id="start-strategy-NASDAQ" data-start-role="strategy" data-start-market="NASDAQ"></select>
+              <div class="segmented start-review" role="radiogroup" aria-label="NASDAQ review mode">
+                <button type="button" class="active" data-start-review="manual" data-start-market="NASDAQ" role="radio" aria-checked="true">Manual review</button>
+                <button type="button" data-start-review="autopilot" data-start-market="NASDAQ" role="radio" aria-checked="false">Autopilot</button>
+              </div>
+              <p class="small muted" data-start-role="autopilot-note" id="start-autopilot-NASDAQ"></p>
+            </div>
+          </div>
+          <div class="content-grid two top-space">
+            <div class="inset-panel">
+              <p class="eyebrow">WHAT AUTOPILOT MAY DO (SERVER-ENFORCED)</p>
+              <ul class="checklist" id="start-autopilot-may"></ul>
+            </div>
+            <div class="inset-panel">
+              <p class="eyebrow">WHAT AUTOPILOT MAY NEVER DO</p>
+              <ul class="checklist" id="start-autopilot-may-not"></ul>
+            </div>
+          </div>
+          <div class="inline-status warn top-space" id="start-autopilot-exceptions">
+            Stale data, provider throttling, missed cadence, ambiguous order outcomes and the kill switch all stop automation rather than work around it.
+          </div>
+        </article>
+
+        <article class="panel" id="start-preview-panel" aria-labelledby="start-preview-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 5 · OFFLINE · NO PROVIDER REQUEST</p>
+              <h3 id="start-preview-title">Preview session</h3>
+            </div>
+            <span class="status-pill info" id="start-preview-pill">NOT PREVIEWED</span>
+          </div>
+          <div id="start-preview-body" class="start-preview-body">
+            <p class="empty-state">Select a market, symbols, strategy and review mode, then press Preview session.</p>
+          </div>
+        </article>
+
+        <article class="panel" id="start-monitor-panel" aria-labelledby="start-monitor-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">STEP 7 · SIMULATED AND BROKER CONFIRMED ARE NEVER MIXED</p>
+              <h3 id="start-monitor-title">Monitoring</h3>
+            </div>
+            <span class="status-pill info" id="start-monitor-pill">0 EVENTS</span>
+          </div>
+          <div class="button-row start-monitor-filters">
+            <label class="field grow" for="start-monitor-market">Market
+              <select id="start-monitor-market">
+                <option value="ALL">All markets</option>
+                <option value="NSE">NSE</option>
+                <option value="NASDAQ">NASDAQ</option>
+              </select>
+            </label>
+            <label class="field grow" for="start-monitor-mode">Mode
+              <select id="start-monitor-mode">
+                <option value="ALL">All modes</option>
+                <option value="LIVE_MARKET_PAPER">PAPER · SIMULATED</option>
+                <option value="LIVE_MARKET_LIVE">LIVE · BROKER</option>
+              </select>
+            </label>
+            <button type="button" class="button secondary xs" id="start-monitor-refresh">Refresh monitor</button>
+          </div>
+          <div class="table-wrap tall">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Market</th>
+                  <th>Mode</th>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Qty</th>
+                  <th>Order state</th>
+                  <th>Filled</th>
+                  <th>Fill px</th>
+                  <th>Fees</th>
+                  <th>Error / reconciliation</th>
+                </tr>
+              </thead>
+              <tbody id="start-monitor-rows">
+                <tr><td colspan="11" class="empty-state">No paper or broker events loaded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="small muted top-space" id="start-monitor-legend">
+            <strong>PAPER · SIMULATED</strong> rows come from the local SQLite ledger and are not broker fills.
+            <strong>LIVE · BROKER</strong> rows come from the broker journal. Secrets and request headers are redacted here.
+          </p>
+        </article>
+
+        <article class="panel inset-panel" id="start-secondary-panel" aria-labelledby="start-secondary-title">
+          <div class="panel-head">
+            <div><p class="eyebrow">SECONDARY · RESEARCH, DIAGNOSTICS &amp; AUDIT</p><h3 id="start-secondary-title">Everything else is still here</h3></div>
+          </div>
+          <div class="button-row">
+            <button type="button" class="button secondary xs" data-go="instruments">02 Watchlists &amp; search</button>
+            <button type="button" class="button secondary xs" data-go="charts">03 Supercharts &amp; ticket</button>
+            <button type="button" class="button secondary xs" data-go="orders">04 Orders &amp; positions</button>
+            <button type="button" class="button secondary xs" data-go="risk">06 Risk &amp; live gates</button>
+            <button type="button" class="button secondary xs" data-go="connections">07 Connections</button>
+            <button type="button" class="button secondary xs" data-go="activity">08 Activity &amp; audit</button>
+            <button type="button" class="button secondary xs" data-go="settings">09 Settings &amp; manuals</button>
+            <button type="button" class="button secondary xs" data-go="modellab">10 AI &amp; Model Lab</button>
+            <button type="button" class="button secondary xs" data-go="monitor">11 Live Trade Monitor</button>
+            <button type="button" class="button secondary xs" data-go="ensemble">12 Ensemble &amp; Allocation</button>
+          </div>
+          <p class="small muted top-space">The advanced workspaces were not removed. This page is a faster entry point, not a replacement for audit, research or diagnostics.</p>
+        </article>
+      </section>
+
+      <section class="page" id="page-overview" aria-labelledby="overview-title" hidden>
         <div class="page-intro">
           <div>
             <p class="eyebrow">MULTI-MARKET COMMAND DESK</p>

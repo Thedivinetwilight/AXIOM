@@ -1753,6 +1753,71 @@ def global_emergency_stop_reset(body: GlobalResetBody, request: Request):
 # ---------------------------------------------------------------------------
 
 
+@router.get("/start-monitor")
+def start_monitor_overview(request: Request):
+    """One read-only projection for the single-page Start & Monitor screen.
+
+    Composes state that already exists (paper engine, live coordinator, scan
+    capacity, credential presence, readiness receipts). It cannot place, modify
+    or cancel anything: the only writes the screen performs go through the
+    existing per-market session and live-gate routes.
+    """
+    from app.markets.start_monitor import build_launchpad
+
+    eng = getattr(request.app.state, "live_paper_engine", None)
+    coord = getattr(request.app.state, "live_execution", None)
+    scan = getattr(request.app.state, "scan_capacity_service", None)
+
+    watchlists: dict[str, list[dict[str, Any]]] = {"NSE": [], "NASDAQ": []}
+    if eng is not None:
+        try:
+            watchlists = {**watchlists, **(eng.list_watchlists() or {})}
+        except (KeyError, ValueError, OSError):
+            watchlists = {"NSE": [], "NASDAQ": []}
+
+    data_credentials: dict[str, dict[str, Any]] = {}
+    upstox_tok, upstox_src = _upstox_readonly_token(request)
+    data_credentials["NSE"] = {"present": bool(upstox_tok), "source": upstox_src}
+    alpaca_creds, alpaca_src = _alpaca_readonly_creds(request)
+    data_credentials["NASDAQ"] = {
+        "present": bool(alpaca_creds.get("api_key") and alpaca_creds.get("api_secret")),
+        "source": alpaca_src,
+        "feed": alpaca_creds.get("feed"),
+    }
+
+    broker_rt = getattr(request.app.state, "alpaca_broker_runtime", None)
+    try:
+        broker_credentials = broker_rt.credential_status() if broker_rt is not None else None
+    except (RuntimeError, ValueError, KeyError):
+        broker_credentials = None
+    if broker_credentials is not None:
+        # Presence only: drop anything that is not a boolean/slot label.
+        broker_credentials = {
+            "paper": {"present": bool((broker_credentials.get("paper") or {}).get("present"))},
+            "live": {"present": bool((broker_credentials.get("live") or {}).get("present"))},
+        }
+    live_tok, _live_src = resolve_live_token(getattr(request.app.state, "upstox_live_token", None))
+
+    try:
+        readiness = _build_readiness_matrix(request)
+    except (KeyError, ValueError, RuntimeError):
+        readiness = None
+
+    from app.strategies import catalog as strategy_catalog
+
+    return build_launchpad(
+        engine=eng,
+        coordinator=coord,
+        scan_service=scan,
+        watchlists=watchlists,
+        data_credentials=data_credentials,
+        broker_credentials=broker_credentials,
+        upstox_live_token_present=bool(live_tok),
+        readiness_matrix=readiness,
+        strategies=strategy_catalog(),
+    )
+
+
 @router.get("/trade-monitor")
 def get_trade_monitor(
     request: Request,
