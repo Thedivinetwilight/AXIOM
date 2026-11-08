@@ -162,13 +162,13 @@ if ($FullExit -ne 0) {
 }
 Write-Host "full suite passed ($FullSummary)"
 
-Step '3c. Exact-commit fake-provider performance benchmarks (hard gate)'
+Step '3c. Exact-commit read-only performance benchmarks (hard gate)'
 $BenchmarkOutput = Join-Path $Kit 'TERMINAL_BENCHMARK.json'
 $UiBenchmarkOutput = Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json'
 & python scripts/benchmark_terminal.py --output $BenchmarkOutput 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'benchmark-python.log')
 if ($LASTEXITCODE -ne 0) {
     $benchTail = ((Get-Content (Join-Path $Kit 'benchmark-python.log') -Tail 12 -ErrorAction SilentlyContinue) -join ' || ')
-    Fail "fake-provider backend benchmark failed on Windows :: $benchTail"
+    Fail "read-only backend benchmark failed on Windows :: $benchTail"
 }
 $env:AXIOM_UI_BENCHMARK_OUTPUT = $UiBenchmarkOutput
 & node tests/js/terminal_smoke.mjs 2>&1 | Tee-Object -FilePath (Join-Path $Kit 'js-terminal-benchmark.log')
@@ -180,7 +180,9 @@ $UiBenchmark = Get-Content (Join-Path $Kit 'TERMINAL_UI_BENCHMARK.json') -Raw | 
 if ($Benchmark.commit -ne $Head -or $UiBenchmark.commit -ne $Head) { Fail 'benchmark source commit does not match the requested build' }
 if ($Benchmark.working_tree_dirty_at_measurement -or $UiBenchmark.working_tree_dirty_at_measurement) { Fail 'benchmarks must run from the exact clean source tree' }
 if ($Benchmark.assertions.order_send_calls -ne $Benchmark.assertions.expected_order_send_calls) { Fail 'benchmark order_send count mismatch' }
-Write-Host 'exact-commit fake-only backend and UI benchmarks passed; no real DEMO/LIVE latency measured'
+if ($Benchmark.assertions.order_send_calls -ne 0) { Fail 'the read-only benchmark must report zero order sends' }
+if (-not $Benchmark.assertions.removed_live_api_returns_404) { Fail 'the removed live API must stay unreachable in the benchmarked build' }
+Write-Host 'exact-commit read-only backend and UI benchmarks passed; no broker, DEMO or LIVE latency measured'
 
 Step '3d. Explicit DEMO source payload allowlist (hard gate)'
 & python $PayloadGuard source $RepoRoot
@@ -650,7 +652,7 @@ $Meta = [ordered]@{
         fake_mt5        = 'connector/service/API tests passed; no broker account contacted'
         read_only_mt5   = 'fake read-only market-data provider, fail-closed and no-order-reachability tests passed'
         research_candidates = 'chronological warmup, positive walk-forward, zero-PF scoring, finite router, robustness and per-instrument CLI regressions passed on local/synthetic fixtures; no real-market profitability or execution evidence'
-        performance     = 'exact-commit Windows fake-provider backend + fake-canvas UI benchmarks passed; see TERMINAL_BENCHMARK.json and TERMINAL_UI_BENCHMARK.json; no real DEMO/LIVE latency measured'
+        performance     = 'exact-commit Windows read-only backend + fake-canvas UI benchmarks passed; see TERMINAL_BENCHMARK.json and TERMINAL_UI_BENCHMARK.json; no broker, DEMO or LIVE latency measured'
         listed_assets   = 'authenticated listed identity/policy tests passed; no listed execution provider and no MT5/CFD substitution'
         app_control_workaround = 'loaderless installer and onedir ZIPs built; portable ZIP acceptance runs in the workflow; enforced on-device Smart App Control remains unverified'
         vantage_demo    = 'NOT TESTED - no Vantage demo account available to CI'

@@ -35,7 +35,7 @@ AXIOM-Chart.exe                                           # legacy onefile compa
 BUILD_METADATA.json
 installer-test-log.txt
 portable-test-log.txt
-TERMINAL_BENCHMARK.json         # exact-commit fake-provider Windows measurements
+TERMINAL_BENCHMARK.json         # exact-commit read-only (no broker) Windows measurements
 TERMINAL_UI_BENCHMARK.json      # exact-commit fake-canvas measurements
 kronos-status.json              # installed-app pinned setup + real CPU inference evidence
 kronos-small.json               # authoritative artifact pins

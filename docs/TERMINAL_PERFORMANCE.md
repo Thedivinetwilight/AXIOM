@@ -27,7 +27,7 @@ Empty means **not measured**, never zero. Invalid durations are ignored and
 metrics never participate in an order decision. No payload, symbol, credential,
 full account login, or API token is accepted by the latency registry.
 
-## Reproduce the local fake-provider load test
+## Reproduce the local read-only load test
 
 Use the pinned environment from `requirements-lock.txt` and run from the
 repository root:
@@ -38,14 +38,29 @@ npm install --no-save --no-package-lock jsdom@27.0.0
 AXIOM_UI_BENCHMARK_OUTPUT=docs/TERMINAL_UI_BENCHMARK.json node tests/js/terminal_smoke.mjs
 ```
 
-Defaults are 4 read workers × 60 requests per worker (240 reads: 120 chart and
-120 quote), 12 sequential reviewed fake-DEMO submissions, and 6 explicit
-reconciliations. Setup and warm-up observations are cleared before measurement.
-The UI run performs the complete functional workflow plus 120 additional chart
-renders. Both scripts assert expected order-call counts and use no external
-network, real terminal, real DEMO account, or LIVE account.
+The benchmark drives **only the supported paper-only surface**. It never calls
+`/api/trading/*`: before measuring, it asserts that every removed route in its
+probe list answers `404`, and it records `removed_live_api_returns_404` in the
+report. Defaults are 4 read workers × 60 requests per worker (240 reads: 120
+`/api/markets/overview` and 120 `/api/markets/start-monitor`), then 12 sequential
+read-only `start-monitor` / `paper status` requests. Setup and warm-up
+observations are cleared before measurement.
 
-## Development run — 2026-10-25
+The report (`schema: axiom-terminal-benchmark-v2`) asserts zero order sends,
+`live_account_or_orders: false`, no network, and `live_trading: false` on the
+paper status payload. There is no order, review or reconciliation route left on
+this build, so none of those latencies are measured. The UI run is a
+fully-mocked-`fetch` harness performing the complete functional workflow plus 120
+additional chart renders; it contacts no server. Both scripts assert their
+expected order-call counts and use no external network, real terminal, real DEMO
+account, or LIVE account.
+
+## Historical development run — 2026-10-25
+
+> **Historical.** This table was produced by the earlier benchmark that drove the
+> now-removed fake-DEMO `/api/trading/*` routes. It is kept as a record of that
+> run only; the current script cannot reproduce it. See
+> `TERMINAL_BENCHMARK.json` for current figures.
 
 These are actual measurements from the checked-in JSON reports, not targets.
 They were made at development commit
@@ -58,7 +73,8 @@ assets and `BUILD_METADATA.json` instead of this development table for that buil
 
 Linux x86_64, Python 3.11.2, two logical Intel Xeon CPUs, in-memory SQLite,
 `FakeMT5Gateway`, four concurrent read workers, sequential reviewed writes. The
-fake gateway adds no broker, network, terminal, or market delay.
+fake gateway adds no broker, network, terminal, or market delay. The Vantage
+order rows below belong to that retired harness.
 
 | HTTP observation | n | p50 ms | p95 ms | p99 ms | max ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -107,8 +123,11 @@ presentation latency.
 
 - Percentiles describe only the stated run and recent sample windows. They are
   not universal values, zero-latency claims, or service-level objectives.
-- Read concurrency and sequential reviewed writes do not model every operator,
-  terminal, account, market, or network condition.
+- Read concurrency and sequential read-only requests do not model every
+  operator, terminal, account, market, or network condition.
+- No broker, DEMO or LIVE latency is measured by the current benchmark: the
+  removed `/api/trading/*` surface is asserted unreachable and the paper routes
+  are explicitly simulated.
 - Real DEMO verification must be run separately by the owner on Windows with an
   actual terminal/account. LIVE remains unverified unless the owner performs
   and documents the separate local readiness process.

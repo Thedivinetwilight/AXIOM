@@ -559,3 +559,92 @@ def test_connection_commit_and_rollback_semantics_are_unchanged(tmp_path: Path):
         assert _open_fds_under(tmp_path) == []
     finally:
         engine.close()
+
+
+# --------------------------------------------------------------------------- #
+# The exact-commit benchmark must not drive the removed live API
+# --------------------------------------------------------------------------- #
+def test_benchmark_script_targets_supported_routes_only():
+    """This script is a hard Windows gate; it used to call /api/trading/*.
+
+    Those routes are gone, so every Windows run failed with a 404 and the
+    install/portable acceptance stages were never reached. The intent — measure
+    the operator's read paths on the exact commit — is kept, on supported
+    routes, with the removal asserted rather than assumed.
+    """
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "benchmark_terminal.py")
+    source = script.read_text(encoding="utf-8")
+
+    # No /api/trading path may be passed to an HTTP call except the deliberate
+    # 404 probe. Rather than text-matching (comments and limitation strings also
+    # mention the surface), inspect the calls in the module's syntax tree.
+    import ast
+
+    tree = ast.parse(source)
+    # Map each node to its parent so a comparison like
+    # client.post(...).status_code != 404 can be recognised: the 404 check wraps
+    # the call rather than living inside it.
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    offending: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+            continue
+        if func.value.id != "client":
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and arg.value.startswith("/api/trading")):
+                # Walk up a few levels looking for the expected-404 comparison.
+                context = node
+                segment = ""
+                for _ in range(4):
+                    context = parents.get(context, context)
+                    segment += ast.get_source_segment(source, context) or ""
+                    if "status_code != 404" in segment:
+                        break
+                if "status_code != 404" not in segment:
+                    offending.append(arg.value)
+    assert offending == [], f"/api/trading is called outside the 404 probe: {sorted(set(offending))}"
+    assert 'removed = (' in source, "the removed paths must be collected in one probe list"
+    assert "for path in removed:" in source, "each removed path must be probed"
+
+    # It must not submit anything and must not import the fake MT5 gateway.
+    assert "orders/submit" in source
+    assert "from tests.mt5_fake" not in source, "the benchmark no longer needs a fake broker gateway"
+    assert "MemorySecretStore" not in source, "no credential store participates in a read-only benchmark"
+    assert "order_send_calls" in source
+    assert '"schema": "axiom-terminal-benchmark-v2"' in source
+
+
+def test_benchmark_reports_zero_orders_and_keeps_the_removal_assertion():
+    """Run it for real (small) and check the safety invariants it publishes."""
+    import json
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    target = repo / "docs" / "_benchmark_test_output.json"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "scripts/benchmark_terminal.py",
+             "--iterations", "4", "--submit-iterations", "1", "--workers", "1",
+             "--output", str(target)],
+            capture_output=True, text=True, cwd=str(repo), timeout=600, check=False,
+        )
+        assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        assert payload["assertions"]["order_send_calls"] == 0
+        assert payload["assertions"]["expected_order_send_calls"] == 0
+        assert payload["assertions"]["removed_live_api_returns_404"] is True
+        assert payload["conditions"]["live_account_or_orders"] is False
+        assert payload["conditions"]["network"] == "none"
+        assert payload["conditions"]["removed_live_api_reachable"] is False
+    finally:
+        target.unlink(missing_ok=True)
