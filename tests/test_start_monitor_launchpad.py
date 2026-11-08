@@ -847,3 +847,34 @@ def test_the_removed_live_vantage_api_is_tested_as_a_removal_contract():
             assert "test_vantage_live_api_removal.py" in body, (
                 f"{gate.name} runs the Vantage connector suite without the removal contract"
             )
+
+
+# --- 7. Release gates: a branch push must never publish ---------------------
+
+def test_a_branch_push_cannot_publish_a_release():
+    """The publish step must require an event AND an explicit input."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+    lines = [ln for ln in workflow.splitlines() if "gh release create" in ln]
+    assert lines, "the publish step was not found"
+    # Find the step guard immediately preceding the publish run block.
+    publish_idx = workflow.index("gh release create")
+    guard = workflow[:publish_idx]
+    step_start = guard.rindex("- name: Publish")
+    step_guard = guard[step_start:publish_idx]
+    assert "github.event_name == 'workflow_dispatch'" in step_guard, (
+        "publication must be gated on an explicit dispatch, not a push"
+    )
+    assert "inputs.publish" in step_guard, "publication must be gated on the publish input"
+    # And the build script itself must not publish anything.
+    build = (REPO_ROOT / "packaging" / "windows" / "build_windows.ps1").read_text(encoding="utf-8")
+    for forbidden in ("gh release create", "gh release upload", "git tag", "git push"):
+        assert forbidden not in build, f"build_windows.ps1 must not run {forbidden!r}"
+
+
+def test_push_triggers_are_limited_to_development_branches():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+    head = workflow[:workflow.index("permissions:")]
+    branches = re.findall(r"^\s+- (arena/[\w.-]+)$", head, re.MULTILINE)
+    assert branches, "the push trigger lists no branches"
+    assert "main" not in branches, "a push to main must not start a build/publish workflow"
+    assert all(b.startswith("arena/") for b in branches)

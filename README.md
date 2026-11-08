@@ -110,6 +110,7 @@ Optional Windows frozen packaging (`packaging/windows/build_windows.ps1`, retain
 - **Ensemble & strategy audit evidence:** [`docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md`](docs/ENSEMBLE_PROFITABILITY_EVIDENCE_AND_BENCHMARKS.md)
 - **Legacy Vantage/MT5 removal & isolation audit (the `/api/trading` live API is no longer mounted):** [`docs/VANTAGE_MT5_ISOLATION_AUDIT.md`](docs/VANTAGE_MT5_ISOLATION_AUDIT.md)
 - **Paper-release audit (changes, exact test results, remaining limitations):** [`docs/PAPER_RELEASE_AUDIT.md`](docs/PAPER_RELEASE_AUDIT.md)
+- **CI and release gates (what each workflow enforces, why a branch push cannot publish, the branch-protection settings an owner must apply):** [`docs/CI_AND_RELEASE_GATES.md`](docs/CI_AND_RELEASE_GATES.md)
 - **Corporate actions (splits + cash dividends, scope and limits):** [`docs/CORPORATE_ACTIONS.md`](docs/CORPORATE_ACTIONS.md)
 - **Daily Upstox autonomy:** [`docs/AUTONOMY.md`](docs/AUTONOMY.md)
 - **AI & Model Lab manual:** [`docs/AI_MODEL_LAB_MANUAL.md`](docs/AI_MODEL_LAB_MANUAL.md)
