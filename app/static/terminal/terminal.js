@@ -5703,7 +5703,7 @@ function startSetSelection(market, keys) {
   renderStartCadence();
   renderStartPreview();
   renderStartControls();
-  startMarkFlowSteps();
+  startRefreshSetup();
 }
 
 function startStrategyOptions() {
@@ -5757,7 +5757,10 @@ async function loadStartMonitor({ background = false } = {}) {
     await Promise.all([loadStartSearch("NSE", ""), loadStartSearch("NASDAQ", "")]);
   } catch (error) {
     st.error = error.message || "start & monitor overview unavailable";
+    // A failed read must not leave steps ticked from an earlier payload.
+    st.data = null;
     renderStart();
+    renderStartSetupNotes();
   } finally {
     st.loading = false;
   }
@@ -5798,6 +5801,7 @@ function renderStart() {
   renderStartCadence();
   renderStartPreview();
   renderStartControls();
+  startRefreshSetup();
 }
 
 function renderStartHeader() {
@@ -5841,8 +5845,107 @@ function renderStartMode() {
   startMarkFlowSteps();
 }
 
+/* Which credential slots does the *route* a mode uses actually require?
+ *
+ * The server sends this per market as credentials.requirements (derived from
+ * the paper-session route and the live gate, not from the labels). We only read
+ * it: no slot list is hard-coded here, so the page cannot drift from the
+ * backend. Presence is the only thing consulted — never a value.
+ */
+function startRequiredSlots(market, mode) {
+  const reqs = startMarketData(market)?.credentials?.requirements;
+  const perMode = reqs?.[mode];
+  const slots = perMode?.required_slots;
+  return Array.isArray(slots) ? slots : null;
+}
+
+/* Presence of one required slot, or null when the answer is simply unknown
+ * (no payload, no row, or a non-boolean value). Unknown must never read as
+ * satisfied — that is exactly how a step would claim more than it knows. */
+function startSlotPresence(market, slot) {
+  const rows = startMarketData(market)?.credentials?.rows;
+  if (!Array.isArray(rows)) return null;
+  const row = rows.find((r) => String(r?.slot || "").trim().toUpperCase() === slot.toUpperCase());
+  if (!row || typeof row.present !== "boolean") return null;
+  return row.present;
+}
+
+/* Evaluate step 3 (credentials) and step 4 (strategy & Autopilot) together,
+ * because both depend on which markets are ticked and which mode is selected.
+ * Returns { satisfied: boolean, reason: string, missing: string[] }. */
+function startSetupStep(mode, step) {
+  const st = startState();
+  const ticked = START_MARKETS.filter(startOnMarket);
+  const label = mode === "LIVE" ? "LIVE" : "PAPER";
+
+  if (!st.data || !st.data.markets) {
+    return { satisfied: false, reason: "Server state has not loaded yet.", missing: [] };
+  }
+  if (!ticked.length) {
+    return {
+      satisfied: false,
+      reason: `Tick at least one market card. ${mode} step ${step} cannot be evaluated without a market.`,
+      missing: [],
+    };
+  }
+
+  if (step === 4) {
+    const reviewChosen = st.touched?.reviewMarkets || {};
+    const strategyChosen = st.touched?.strategyMarkets || {};
+    const needsReview = ticked.filter((m) => !reviewChosen[m]);
+    const needsStrategy = ticked.filter((m) => !strategyChosen[m]);
+    if (needsReview.length || needsStrategy.length) {
+      const parts = [];
+      if (needsReview.length) parts.push(`choose manual review or Autopilot for ${needsReview.join(" and ")}`);
+      if (needsStrategy.length) parts.push(`choose a strategy for ${needsStrategy.join(" and ")}`);
+      return {
+        satisfied: false,
+        reason: `Still to ${parts.join(", and ")}. Nothing is assumed on your behalf.`,
+        missing: [...new Set([...needsReview, ...needsStrategy])],
+      };
+    }
+    return { satisfied: true, reason: `Review mode and strategy chosen for ${ticked.join(" and ")}.`, missing: [] };
+  }
+
+  // Step 3: credentials, for the mode actually selected.
+  const missing = [];
+  const unknown = [];
+  for (const market of ticked) {
+    if (startSelectionKey(market).length === 0) {
+      unknown.push(`${market} (no symbols selected)`);
+      continue;
+    }
+    const slots = startRequiredSlots(market, mode);
+    if (slots === null) {
+      unknown.push(`${market} (server did not report ${label} credential requirements)`);
+      continue;
+    }
+    for (const slot of slots) {
+      const present = startSlotPresence(market, slot);
+      if (present === null) unknown.push(`${market} ${slot} (status unavailable)`);
+      else if (!present) missing.push(`${market} ${slot}`);
+    }
+  }
+  if (missing.length) {
+    return { satisfied: false, reason: `${label} needs ${missing.join(", ")}.`, missing };
+  }
+  if (unknown.length) {
+    return {
+      satisfied: false,
+      reason: `Credential state is unknown for ${unknown.join(", ")}; the step stays incomplete until the server reports it.`,
+      missing: unknown,
+    };
+  }
+  return {
+    satisfied: true,
+    reason: `${label} credentials present for ${ticked.join(" and ")}. Values are never read back.`,
+    missing: [],
+  };
+}
+
 /* The flow strip must never claim a step is done before it actually is. Each
- * step is satisfied by observable state, not by which mode button was clicked. */
+ * step is satisfied by observable state or an explicit operator action, never
+ * by the fact that a control happens to have a default value. */
 function startCompletedSteps() {
   const st = startState();
   const done = new Set();
@@ -5853,14 +5956,37 @@ function startCompletedSteps() {
   const anySession = START_MARKETS.some(live);
   if (touched.mode || anySession) done.add(1);
   if (chosen.length) done.add(2);
-  // Step 3 is credentials: it can only be done once a market is actually chosen
-  // and that market reports a present read credential.
-  if (chosen.length && chosen.every((m) => startMarketData(m)?.quota?.credential_present === true)) done.add(3);
-  if (touched.review || anySession) done.add(4);
+  if (startSetupStep(st.mode, 3).satisfied) done.add(3);
+  if (startSetupStep(st.mode, 4).satisfied) done.add(4);
   if (st.preview) done.add(5);
   if (anySession) done.add(6);
   if ((st.monitor || []).length > 0) done.add(7);
   return done;
+}
+
+/* Print why a step is or is not complete, so an incomplete step is never a
+ * silent grey chip. */
+function renderStartSetupNotes() {
+  const host = $("start-setup-notes");
+  if (!host) return;
+  const st = startState();
+  if (!st.data?.markets) { host.innerHTML = ""; return; }
+  const creds = startSetupStep(st.mode, 3);
+  const strat = startSetupStep(st.mode, 4);
+  const lines = [];
+  if (!creds.satisfied) lines.push(`<li><strong>3 · CREDENTIALS</strong> — ${escapeHtml(creds.reason)}</li>`);
+  if (!strat.satisfied) lines.push(`<li><strong>4 · STRATEGY &amp; AUTOPILOT</strong> — ${escapeHtml(strat.reason)}</li>`);
+  host.innerHTML = lines.length
+    ? `<p class="eyebrow">BEFORE YOU START</p><ul class="small">${lines.join("")}</ul>`
+    : "";
+}
+
+/* Single recompute entry point. Called on every input that can change steps 3
+ * or 4: mode, market ticks, symbol selection, review mode, strategy, and every
+ * server reload. Stale state must never leave a step marked complete. */
+function startRefreshSetup() {
+  startMarkFlowSteps();
+  renderStartSetupNotes();
 }
 
 function startMarkFlowSteps() {
@@ -5870,6 +5996,7 @@ function startMarkFlowSteps() {
     node.classList.toggle("done", done.has(step));
     node.classList.toggle("pending", !done.has(step));
   });
+  renderStartSetupNotes();
 }
 
 function renderStartCard(market) {
@@ -6195,7 +6322,7 @@ async function startPreviewSession() {
   st.preview = { at: new Date().toISOString(), rows };
   renderStartPreview();
   renderStartControls();
-  startMarkFlowSteps();
+  startRefreshSetup();
   return st.preview;
 }
 
@@ -6605,7 +6732,7 @@ async function loadStartMonitorRows() {
   st.monitor = rows;
   st.monitorError = errors.join(" · ");
   renderStartMonitorRows();
-  startMarkFlowSteps();
+  startRefreshSetup();
 }
 
 function renderStartMonitorRows() {
@@ -6755,31 +6882,50 @@ function startConfirm(title, body, confirmLabel, confirmClass) {
 
 function bindStartEvents() {
   document.querySelectorAll("[data-page], [data-go]").forEach(() => {});
-  $("start-mode-paper")?.addEventListener("click", () => { startState().mode = "PAPER"; startState().touched.mode = true; renderStartMode(); renderStartPreview(); });
-  $("start-mode-live")?.addEventListener("click", () => { startState().mode = "LIVE"; startState().touched.mode = true; renderStartMode(); renderStartPreview(); });
+  $("start-mode-paper")?.addEventListener("click", () => {
+    startState().mode = "PAPER"; startState().touched.mode = true;
+    renderStartMode(); renderStartPreview(); startRefreshSetup();
+  });
+  $("start-mode-live")?.addEventListener("click", () => {
+    startState().mode = "LIVE"; startState().touched.mode = true;
+    renderStartMode(); renderStartPreview(); startRefreshSetup();
+  });
 
   for (const market of START_MARKETS) {
-    $(`start-select-${market}`)?.addEventListener("change", () => { renderStartControls(); renderStartCard(market); });
+    $(`start-select-${market}`)?.addEventListener("change", () => {
+      renderStartControls();
+      renderStartCard(market);
+      startRefreshSetup();
+    });
     $(`start-search-form-${market}`)?.addEventListener("submit", async (event) => {
       event.preventDefault();
       await loadStartSearch(market, $(`start-search-${market}`)?.value?.trim() || "");
     });
     $(`start-strategy-${market}`)?.addEventListener("change", (event) => {
-      startState().strategy[market] = event.target.value;
-      startState().touched.strategy = true;
+      const st = startState();
+      st.strategy[market] = event.target.value;
+      st.touched.strategy = true;
+      st.touched.strategyMarkets = { ...(st.touched.strategyMarkets || {}), [market]: true };
       renderStartAutopilot(market);
-      startMarkFlowSteps();
+      startRefreshSetup();
     });
     document.querySelectorAll(`[data-start-review][data-start-market="${market}"]`).forEach((button) => {
       button.addEventListener("click", () => {
-        startState().review[market] = button.dataset.startReview;
+        const st = startState();
+        st.review[market] = button.dataset.startReview;
+        // Bug 1: the click must record the choice. Step 4 needs an explicit
+        // review choice *and* an explicit strategy choice for each ticked
+        // market; a presence-of-default is not a choice. Both flags are kept
+        // separately so the note can say which one is still missing.
+        st.touched.review = true;
+        st.touched.reviewMarkets = { ...(st.touched.reviewMarkets || {}), [market]: true };
         document.querySelectorAll(`[data-start-review][data-start-market="${market}"]`).forEach((other) => {
           const active = other.dataset.startReview === button.dataset.startReview;
           other.classList.toggle("active", active);
           other.setAttribute("aria-checked", active ? "true" : "false");
         });
         renderStartAutopilot(market);
-        startMarkFlowSteps();
+        startRefreshSetup();
       });
     });
     document.querySelectorAll(`[data-start-symbol-market="${market}"][data-start-symbol]`).forEach(() => {});

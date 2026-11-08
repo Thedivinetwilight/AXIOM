@@ -152,9 +152,22 @@ Every credential slot is listed separately and labelled with its own scope, beca
 
 Saving goes through the existing server-side secure store (Windows DPAPI). The console shows **presence only**, never the value; the field clears on submit; nothing is written to browser storage, diagnostics, or logs, and the response never echoes the secret.
 
+**Which of these a session actually needs depends on the mode.** The console's step `3 · CREDENTIALS` reads the requirement from the server, which derives it from the route each mode uses rather than from the slot labels:
+
+| Mode | Route that runs | Credentials required |
+|---|---|---|
+| **PAPER** | `POST /api/markets/paper/session/start` → local engine → quote fetch | **market data only**. Paper fills are written to the local SQLite ledger, so no broker order credential is ever read. Missing market data blocks the session. |
+| **LIVE** | per-market readiness and execution gate | **market data *and* the separate real-money execution credential** (`UPSTOX_LIVE_ACCESS_TOKEN` for NSE, `ALPACA_BROKER_LIVE` for NASDAQ). Market data alone is never enough. |
+
+The Alpaca **broker paper** key pair is never a requirement of either mode here: it is used by the separate broker-paper path in `05 Strategies & automation`, not by a local paper session.
+
+A step is marked complete only when every ticked market reports a **present** credential for the mode you selected. If a ticked market has no symbols, if the server did not report the requirement, or if a status is missing or non-boolean, the step stays incomplete and the page prints why — an unknown is never treated as satisfied. Switching PAPER ↔ LIVE, ticking or unticking a market, changing the selection, or a failed server read all re-evaluate both this step and step 4 immediately, so a stale tick cannot survive.
+
 ### 3.6 Strategy and Autopilot
 
-Choose a strategy and either **manual review** (every order needs an explicit ticket) or **Autopilot**, per market and per session. The page states what automation may and may not do, in the server's own words:
+Choose a strategy and either **manual review** (every order needs an explicit ticket) or **Autopilot**, per market and per session. Step `4 · STRATEGY & AUTOPILOT` reflects a choice you actually made: each ticked market needs both an explicit review mode *and* an explicit strategy. The defaults shown in the controls are not counted as choices, so the step stays incomplete — with the outstanding market named on screen — until you pick. Switching either control afterwards keeps it complete.
+
+The page states what automation may and may not do, in the server's own words:
 
 * **may** analyse the selected symbols on completed bars and act inside the risk limits you have configured;
 * **may not** raise any limit, skip a gate, or turn a 100-symbol scan into 100 orders.

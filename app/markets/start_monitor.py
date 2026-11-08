@@ -196,7 +196,62 @@ def _credential_matrix(
                 "affects_execution": True,
             }
         )
-    return {"rows": rows, "secret_returned": False}
+    return {
+        "rows": rows,
+        "requirements": _mode_credential_requirements(market, rows),
+        "secret_returned": False,
+    }
+
+
+# --- Which credential does each mode actually use? ---------------------------
+# Derived by reading the routes, not by reading the labels:
+#
+#   PAPER  -> POST /paper/session/start -> _ensure_paper_routing (a mode-separation
+#             check, not a key) -> LivePaperEngine.start_session ->
+#             _fetch_live_quote, which raises "quote provider is not configured"
+#             unless the market-data credential resolves. Paper orders fill in the
+#             local SQLite ledger, so no broker order credential is ever read.
+#             => market data only.
+#
+#   LIVE   -> the per-market coordinator. Its readiness requires the market-data
+#             credential *and* the separate real-money execution credential
+#             (UPSTOX_LIVE_ACCESS_TOKEN for NSE, ALPACA_BROKER_LIVE for NASDAQ);
+#             the read-only token is never reused for orders.
+#             => market data + live execution.
+#
+# A PAPER session therefore does not need the live token, and a LIVE session is
+# never satisfied by market data alone. Getting this wrong in either direction
+# would either block a valid paper start or imply a live route is ready when the
+# order credential is missing.
+def _mode_credential_requirements(market: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Required credential slots per mode, for one market, in route order.
+
+    The live execution slot is taken from the matrix row flagged
+    ``affects_execution`` rather than spelled out again here, so a requirement
+    can never name a slot the matrix does not report.
+    """
+    market_data = [str(r["slot"]) for r in rows if not r.get("affects_execution")]
+    execution = [str(r["slot"]) for r in rows if r.get("affects_execution")]
+    paper_slots = market_data[:1]
+    live_slots = paper_slots + execution
+    return {
+        "PAPER": {
+            "required_slots": paper_slots,
+            "source": "POST /api/markets/paper/session/start",
+            "note": (
+                "A local paper session reads quotes and bars with the market-data credential "
+                "and fills in the local ledger. It never reads a broker order credential."
+            ),
+        },
+        "LIVE": {
+            "required_slots": live_slots,
+            "source": "per-market live readiness and execution gate",
+            "note": (
+                "A LIVE session needs market data to validate quotes plus the separate "
+                "real-money execution credential. The read-only token is never reused for orders."
+            ),
+        },
+    }
 
 
 def _cadence_view(

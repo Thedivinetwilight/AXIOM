@@ -46,10 +46,18 @@ const US_EXIT = { routed: true, summary: "close-only exits documented", closing_
 
 let liveState = {
   NSE: { mode: "PAPER", gate: "DISABLED", ready: false, failed: ["configuration_complete"],
-         missing: ["Save a separate UPSTOX_LIVE_ACCESS_TOKEN"], credential: false },
+         missing: ["Save a separate UPSTOX_LIVE_ACCESS_TOKEN"], credential: false,
+         liveCredential: false },
   NASDAQ: { mode: "PAPER", gate: "DISABLED", ready: false, failed: [],
-            missing: [], credential: true },
+            missing: [], credential: true, liveCredential: false },
 };
+
+/* Rebuild credential presence from the fixture flags, so a test can toggle a
+ * slot and re-read the server without restarting the harness. */
+function refreshCredentialRows() {
+  // Presence is read lazily from liveState by the row getters above, so nothing
+  // has to be rewritten here: flipping a flag is enough for the next payload.
+}
 let paperOrders = [];
 let liveEvents = [];
 
@@ -129,18 +137,36 @@ function marketPayload(market) {
     credentials: {
       rows: [
         { slot: isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA", scope: "read-only prices",
-          present: live.credential, detail: live.credential ? "configured via protected-store" : "not configured",
-          affects_execution: false },
+          get present() { return live.credential; }, detail: "presence only", affects_execution: false },
         ...(isNse
-          ? [{ slot: "UPSTOX LIVE ACCESS TOKEN", scope: "real money · order writes", present: false,
-               detail: "not configured", affects_execution: true }]
+          ? [{ slot: "UPSTOX LIVE ACCESS TOKEN", scope: "real money · order writes",
+               get present() { return live.liveCredential; },
+               detail: "presence only", affects_execution: true }]
           : [
-            { slot: "ALPACA BROKER PAPER", scope: "broker paper orders", present: false,
-              detail: "not configured", affects_execution: false },
-            { slot: "ALPACA BROKER LIVE", scope: "real money · order writes", present: false,
-              detail: "not configured", affects_execution: true },
+            { slot: "ALPACA BROKER PAPER", scope: "broker paper orders",
+              get present() { return live.paperBrokerCredential; },
+              detail: "presence only", affects_execution: false },
+            { slot: "ALPACA BROKER LIVE", scope: "real money · order writes",
+              get present() { return live.liveCredential; },
+              detail: "presence only", affects_execution: true },
           ]),
       ],
+      // Mirrors app/markets/start_monitor.py _mode_credential_requirements():
+      // PAPER needs market data only; LIVE adds the real-money slot.
+      requirements: {
+        PAPER: {
+          required_slots: [isNse ? "UPSTOX MARKET DATA" : "ALPACA MARKET DATA"],
+          source: "POST /api/markets/paper/session/start",
+          note: "paper reads quotes, fills locally, never reads an order credential",
+        },
+        LIVE: {
+          required_slots: isNse
+            ? ["UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN"]
+            : ["ALPACA MARKET DATA", "ALPACA BROKER LIVE"],
+          source: "per-market live readiness and execution gate",
+          note: "LIVE needs market data plus the separate real-money credential",
+        },
+      },
     },
     paper: {
       session_state: "STOPPED", strategy: "manual_only", positions: 0, working_orders: 0, fills: 0,
@@ -274,6 +300,8 @@ window.eval(code);
 const doc = window.document;
 const $ = (id) => doc.getElementById(id);
 const text = (id) => ($(id)?.textContent || "").replace(/\s+/g, " ").trim();
+const stepDone = (n) => Boolean(doc.querySelector(`[data-start-step="${n}"]`)?.classList.contains("done"));
+const stepDoneCount = () => [...doc.querySelectorAll("[data-start-step].done")].length;
 
 try {
   doc.getElementById("auth-token").value = TOKEN;
@@ -495,6 +523,181 @@ try {
   assert.equal(window.sessionStorage.getItem(tokenValue), null, "the provider secret never reaches tab storage");
   const storage = Object.keys(window.sessionStorage).map((k) => window.sessionStorage.getItem(k)).join("|");
   assert.doesNotMatch(storage, new RegExp(tokenValue), "no provider secret is written to sessionStorage");
+
+  /* ------------------------------------------------------------------
+   * Setup-progress regressions (audit findings 1 and 2).
+   * ---------------------------------------------------------------- */
+  $("start-stop-btn").dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush(15);
+  $("modal-confirm").dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush(20);
+
+  const resetSetup = () => {
+    liveState.NSE.credential = false;
+    liveState.NSE.liveCredential = false;
+    liveState.NASDAQ.credential = true;
+    liveState.NASDAQ.liveCredential = false;
+    refreshCredentialRows();
+  };
+  const pickMode = (mode) => {
+    $(mode === "LIVE" ? "start-mode-live" : "start-mode-paper")
+      .dispatchEvent(new window.Event("click", { bubbles: true }));
+  };
+  // Re-read server state through the real control the operator would use.
+  const reloadStart = async () => {
+    $("refresh-all").dispatchEvent(new window.Event("click", { bubbles: true }));
+    await flush(40);
+  };
+  resetSetup();
+  pickMode("PAPER");
+  $("start-select-NSE").checked = true;
+  $("start-select-NSE").dispatchEvent(new window.Event("change", { bubbles: true }));
+  $("start-select-NASDAQ").checked = false;
+  $("start-select-NASDAQ").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await reloadStart();
+
+  // (a) Regression 1: step 4 stays incomplete until the operator chooses, for
+  //     EVERY ticked market — a default in state is not a choice.
+  assert.equal(stepDone(4), false, "step 4 must not be complete before any review-mode choice");
+  assert.match(text("start-setup-notes"), /4 · STRATEGY &amp; AUTOPILOT|4 · STRATEGY & AUTOPILOT/,
+    "an incomplete step 4 explains itself instead of a silent grey chip");
+  assert.match(text("start-setup-notes"), /choose manual review or Autopilot for NSE/,
+    "and names the market that still needs a review choice");
+
+  doc.querySelector('[data-start-review="manual"][data-start-market="NSE"]')
+    .dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), false,
+    "a review choice alone is not enough: the strategy must be chosen too");
+  assert.match(text("start-setup-notes"), /choose a strategy for NSE/,
+    "the note names the choice still outstanding");
+
+  const strategySelect = $("start-strategy-NSE");
+  strategySelect.value = strategySelect.options[1]?.value || "parallel_ensemble";
+  strategySelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), true, "review mode plus strategy completes step 4");
+
+  // Re-choosing either one keeps it complete (no regression to grey).
+  doc.querySelector('[data-start-review="autopilot"][data-start-market="NSE"]')
+    .dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), true, "switching review mode keeps step 4 complete for that market");
+
+  // (b) A newly ticked market without a choice makes step 4 incomplete again.
+  $("start-select-NASDAQ").checked = true;
+  $("start-select-NASDAQ").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), false, "ticking another market re-opens step 4 for that market");
+  assert.match(text("start-setup-notes"), /manual review or Autopilot for NASDAQ/);
+  doc.querySelector('[data-start-review="manual"][data-start-market="NASDAQ"]')
+    .dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), false, "NASDAQ still needs its strategy choice");
+  const nasdaqStrategy = $("start-strategy-NASDAQ");
+  nasdaqStrategy.value = nasdaqStrategy.options[1]?.value || "parallel_ensemble";
+  nasdaqStrategy.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(4), true, "both markets chosen completes step 4 again");
+
+  // (c) Regression 2: PAPER needs only the market-data credential, read from the
+  //     server's route-derived requirement list. Both ticked markets have one;
+  //     neither has a live execution credential.
+  liveState.NSE.credential = true;
+  liveState.NSE.liveCredential = false;
+  liveState.NASDAQ.credential = true;
+  liveState.NASDAQ.liveCredential = false;
+  refreshCredentialRows();
+  await reloadStart();
+  assert.equal(stepDone(3), true,
+    "PAPER completes step 3 with market data alone — it never reads an order credential");
+
+  // (d) Missing market data leaves PAPER step 3 incomplete, with the reason.
+  liveState.NASDAQ.credential = false;
+  refreshCredentialRows();
+  await reloadStart();
+  assert.equal(stepDone(3), false, "PAPER stays incomplete without the market-data credential");
+  assert.match(text("start-setup-notes"), /PAPER needs NASDAQ ALPACA MARKET DATA/);
+
+  // (e) LIVE with market data present but the live execution credential missing
+  //     must NOT complete: this is the audit's second bug.
+  liveState.NASDAQ.credential = true;
+  liveState.NASDAQ.liveCredential = false;
+  refreshCredentialRows();
+  pickMode("LIVE");
+  await reloadStart();
+  assert.equal(stepDone(3), false, "LIVE must not complete with market data alone");
+  assert.match(text("start-setup-notes"),
+    /LIVE needs NSE UPSTOX LIVE ACCESS TOKEN, NASDAQ ALPACA BROKER LIVE/,
+    "and reports every market's missing live credential, not just the first");
+
+  // (f) LIVE completes only when every ticked market has its live credential.
+  liveState.NASDAQ.liveCredential = true;
+  liveState.NSE.credential = true;
+  liveState.NSE.liveCredential = true;
+  refreshCredentialRows();
+  await reloadStart();
+  assert.equal(stepDone(3), true, "LIVE completes when each selected market has its live credential");
+
+  // (g) Switching PAPER <-> LIVE recalculates rather than trusting a stale tick.
+  pickMode("PAPER");
+  await flush();
+  liveState.NASDAQ.liveCredential = false;
+  liveState.NASDAQ.credential = true;
+  refreshCredentialRows();
+  await reloadStart();
+  pickMode("PAPER");
+  await flush();
+  assert.equal(stepDone(3), true, "PAPER ignores a missing live credential");
+  pickMode("LIVE");
+  await flush();
+  assert.equal(stepDone(3), false, "switching to LIVE re-checks and drops the step immediately");
+
+  // (h) Unknown credential status never reads as satisfied. Isolate it: only
+  //     the market-data presence is unknown, so nothing else is missing.
+  pickMode("PAPER");
+  liveState.NSE.credential = true;
+  liveState.NASDAQ.credential = null;   // present === null, not false
+  liveState.NASDAQ.liveCredential = false;
+  refreshCredentialRows();
+  await reloadStart();
+  assert.equal(stepDone(3), false, "an unknown credential status leaves step 3 incomplete");
+  assert.match(text("start-setup-notes"), /Credential state is unknown/);
+
+  // (i) No market ticked -> both steps incomplete and explained.
+  $("start-select-NSE").checked = false;
+  $("start-select-NSE").dispatchEvent(new window.Event("change", { bubbles: true }));
+  $("start-select-NASDAQ").checked = false;
+  $("start-select-NASDAQ").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await flush();
+  assert.equal(stepDone(3), false, "no ticked market means no credential step");
+  assert.equal(stepDone(4), false, "no ticked market means no strategy step");
+  assert.match(text("start-setup-notes"), /Tick at least one market card/);
+
+  // (j) A failed server read must not leave anything ticked from a stale payload.
+  $("start-select-NSE").checked = true;
+  $("start-select-NSE").dispatchEvent(new window.Event("change", { bubbles: true }));
+  await flush();
+  const staleOk = stepDone(3) || stepDone(4);
+  const savedFetch = window.fetch;
+  window.fetch = (url, opts) => (String(url).includes("/api/markets/start-monitor")
+    ? Promise.reject(new Error("network down")) : savedFetch(url, opts));
+  $("refresh-all").dispatchEvent(new window.Event("click", { bubbles: true }));
+  await flush(40);
+  window.fetch = savedFetch;
+  if (staleOk) {
+    assert.equal(stepDone(3), false, "a failed reload drops step 3 rather than keeping it ticked");
+    assert.equal(stepDone(4), false, "a failed reload drops step 4 rather than keeping it ticked");
+  }
+  await reloadStart();
+  resetSetup();
+  refreshCredentialRows();
+  await reloadStart();
+
+  // (k) Presence-only: no credential *value* is ever rendered.
+  const pageText = doc.body.textContent;
+  assert(!pageText.includes("api_secret"), "no credential field name is rendered");
+  assert(!pageText.includes("super-secret"), "the submitted token never comes back");
 
   // 12. Autopilot cannot be enabled where the server reports a blocker, and the
   //     page explains what automation may and may not do.

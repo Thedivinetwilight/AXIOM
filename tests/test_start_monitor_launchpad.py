@@ -507,3 +507,73 @@ def test_every_market_exposes_the_same_cadence_contract(client: TestClient):
         }
         assert isinstance(cadence["supportable"], bool)
         assert cadence["label"].strip()
+
+
+# --- Mode credential requirements --------------------------------------------
+# These pin the *route* each mode actually uses, so step 3 in the console cannot
+# drift into "market data is enough for LIVE" or "PAPER needs an order key".
+
+
+def test_paper_requires_market_data_only():
+    """PAPER reads quotes and fills locally; it never reads an order credential.
+
+    Route evidence: POST /api/markets/paper/session/start -> _ensure_paper_routing
+    (mode separation, no key) -> LivePaperEngine.start_session ->
+    _fetch_live_quote, which raises unless the market-data credential resolves.
+    """
+    payload = _launchpad()
+    for market, slot in (("NSE", "UPSTOX MARKET DATA"), ("NASDAQ", "ALPACA MARKET DATA")):
+        req = payload["markets"][market]["credentials"]["requirements"]["PAPER"]
+        assert req["required_slots"] == [slot]
+        assert "market-data" in req["note"]
+        assert "order credential" in req["note"]
+
+
+def test_live_requires_market_data_and_the_separate_execution_credential():
+    payload = _launchpad()
+    nse = payload["markets"]["NSE"]["credentials"]["requirements"]["LIVE"]
+    nasdaq = payload["markets"]["NASDAQ"]["credentials"]["requirements"]["LIVE"]
+    assert nse["required_slots"] == ["UPSTOX MARKET DATA", "UPSTOX LIVE ACCESS TOKEN"]
+    assert nasdaq["required_slots"] == ["ALPACA MARKET DATA", "ALPACA BROKER LIVE"]
+    # The broker-paper sandbox key is never a live requirement.
+    assert "ALPACA BROKER PAPER" not in nasdaq["required_slots"]
+
+
+def test_live_requirements_are_a_strict_superset_of_paper():
+    payload = _launchpad()
+    for market in ("NSE", "NASDAQ"):
+        reqs = payload["markets"][market]["credentials"]["requirements"]
+        assert set(reqs["PAPER"]["required_slots"]) < set(reqs["LIVE"]["required_slots"])
+
+
+def test_every_required_slot_names_a_slot_the_matrix_actually_reports():
+    """A requirement the UI cannot look up would read as unknown forever."""
+    payload = _launchpad()
+    for market in ("NSE", "NASDAQ"):
+        rows = payload["markets"][market]["credentials"]
+        reported = {row["slot"] for row in rows["rows"]}
+        for mode in ("PAPER", "LIVE"):
+            for slot in rows["requirements"][mode]["required_slots"]:
+                assert slot in reported, f"{market} {mode} requires an unreported slot {slot}"
+
+
+def test_requirements_payload_carries_no_secret_material():
+    payload = _launchpad()
+    blob = json.dumps(payload["markets"], sort_keys=True)
+    for forbidden in ("access_token", "api_secret", "api_key", "ciphertext", "password"):
+        assert forbidden not in blob
+    for market in ("NSE", "NASDAQ"):
+        assert payload["markets"][market]["credentials"]["secret_returned"] is False
+
+
+def test_route_exposes_requirements_for_both_modes(client: TestClient):
+    payload = client.get(
+        "/api/markets/start-monitor", headers={"Authorization": "Bearer start-secret"}
+    ).json()
+    for market in ("NSE", "NASDAQ"):
+        reqs = payload["markets"][market]["credentials"]["requirements"]
+        assert set(reqs) == {"PAPER", "LIVE"}
+        for mode in reqs.values():
+            assert mode["required_slots"]
+            assert mode["source"].strip()
+            assert mode["note"].strip()
